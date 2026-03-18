@@ -36,14 +36,17 @@ from qgis.core import (
 from qgis.gui import QgsMapToolEmitPoint, QgsRubberBand, QgsSnapIndicator, QgsMapCanvasAnnotationItem
 from qgis.PyQt.QtGui import QTextDocument
 
+from .config import get_output_group_name
 from .utils import (
     cleanup_files,
     is_metric_crs,
     log_message,
     new_run_id,
+    open_gdal_dataset_from_qgis_source,
     push_message,
     restore_ui_focus,
     set_archtoolkit_layer_metadata,
+    split_qgis_source_path as shared_split_qgis_source_path,
     transform_point,
 )
 from .live_log_dialog import ensure_live_log_dialog
@@ -337,9 +340,9 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         except Exception:
             pass
     
-    def transform_point(self, point, source_crs, dest_crs):
+    def transform_point(self, point, source_crs, dest_crs, *, strict=False):
         """Wrapper method to call the utility transform_point function"""
-        return transform_point(point, source_crs, dest_crs)
+        return transform_point(point, source_crs, dest_crs, strict=strict)
 
     def _identify_polygon_feature_at_canvas_point(self, canvas_point):
         """Identify a polygon feature under a canvas click.
@@ -354,11 +357,11 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                 return None
 
             try:
-                tol = float(self.canvas.mapUnitsPerPixel()) * 5.0
+                tol_canvas = float(self.canvas.mapUnitsPerPixel()) * 5.0
             except Exception:
-                tol = 0.0
-            if tol <= 0.0:
-                tol = 1.0
+                tol_canvas = 0.0
+            if tol_canvas <= 0.0:
+                tol_canvas = 1.0
 
             for layer in reversed(layers):  # top-most first
                 if not isinstance(layer, QgsVectorLayer) or not layer.isValid():
@@ -367,15 +370,49 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                     continue
 
                 try:
-                    pt_layer = self.transform_point(canvas_point, canvas_crs, layer.crs())
+                    pt_layer = self.transform_point(canvas_point, canvas_crs, layer.crs(), strict=True)
                 except Exception:
                     continue
+                if pt_layer is None:
+                    continue
+
+                tol_x = tol_canvas
+                tol_y = tol_canvas
+                if layer.crs() != canvas_crs:
+                    try:
+                        pt_layer_dx = self.transform_point(
+                            QgsPointXY(canvas_point.x() + tol_canvas, canvas_point.y()),
+                            canvas_crs,
+                            layer.crs(),
+                            strict=True,
+                        )
+                        if pt_layer_dx is None:
+                            raise ValueError("x tolerance transform failed")
+                        tol_x = abs(float(pt_layer_dx.x()) - float(pt_layer.x()))
+                    except Exception:
+                        tol_x = tol_canvas
+                    try:
+                        pt_layer_dy = self.transform_point(
+                            QgsPointXY(canvas_point.x(), canvas_point.y() + tol_canvas),
+                            canvas_crs,
+                            layer.crs(),
+                            strict=True,
+                        )
+                        if pt_layer_dy is None:
+                            raise ValueError("y tolerance transform failed")
+                        tol_y = abs(float(pt_layer_dy.y()) - float(pt_layer.y()))
+                    except Exception:
+                        tol_y = tol_canvas
+                if tol_x <= 0.0:
+                    tol_x = tol_canvas
+                if tol_y <= 0.0:
+                    tol_y = tol_canvas
 
                 rect = QgsRectangle(
-                    pt_layer.x() - tol,
-                    pt_layer.y() - tol,
-                    pt_layer.x() + tol,
-                    pt_layer.y() + tol,
+                    pt_layer.x() - tol_x,
+                    pt_layer.y() - tol_y,
+                    pt_layer.x() + tol_x,
+                    pt_layer.y() + tol_y,
                 )
                 request = QgsFeatureRequest().setFilterRect(rect).setLimit(10)
                 click_geom = QgsGeometry.fromPointXY(pt_layer)
@@ -1564,13 +1601,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         return layer
 
     def _split_qgis_source_path(self, source: str) -> str:
-        try:
-            s = str(source or "").strip()
-        except Exception:
-            return ""
-        if not s:
-            return ""
-        return (s.split("|", 1)[0] or "").strip()
+        return shared_split_qgis_source_path(source)
 
     def _inv_geotransform(self, gt):
         inv = gdal.InvGeoTransform(gt)
@@ -1893,13 +1924,15 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         final_output = os.path.join(tempfile.gettempdir(), f'archt_vs_final_{run_id}.tif')
         
         # Transform point to DEM CRS
-        point_dem = self.transform_point(point, src_crs, dem_layer.crs())
+        point_dem = self.transform_point(point, src_crs, dem_layer.crs(), strict=True)
+        if point_dem is None:
+            raise RuntimeError("관측점을 DEM 좌표계로 변환하지 못했습니다.")
 
         extra = self._build_gdal_viewshed_extra(curvature, refraction, refraction_coeff)
         
         # Build params
         params = {
-            'INPUT': dem_layer.source(),
+            'INPUT': dem_layer,
             'BAND': 1,
             'OBSERVER': f"{point_dem.x()},{point_dem.y()}",
             'OBSERVER_HEIGHT': obs_height,
@@ -2039,11 +2072,13 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         raw_output = os.path.join(tempfile.gettempdir(), f"archt_vs_raw_{run_id}.tif")
         final_output = os.path.join(tempfile.gettempdir(), f"archt_vs_final_{run_id}.tif")
 
-        point_dem = self.transform_point(point, src_crs, dem_layer.crs())
+        point_dem = self.transform_point(point, src_crs, dem_layer.crs(), strict=True)
+        if point_dem is None:
+            raise RuntimeError("관측점을 DEM 좌표계로 변환하지 못했습니다.")
         extra = self._build_gdal_viewshed_extra(curvature, refraction, refraction_coeff)
 
         params = {
-            "INPUT": dem_layer.source(),
+            "INPUT": dem_layer,
             "BAND": 1,
             "OBSERVER": f"{point_dem.x()},{point_dem.y()}",
             "OBSERVER_HEIGHT": float(obs_height),
@@ -2483,12 +2518,15 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                 QtWidgets.QApplication.processEvents()
 
                 output_raw = os.path.join(tempfile.gettempdir(), f"archt_rvs_raw_{i}_{uuid.uuid4().hex[:8]}.tif")
-                pt_dem = self.transform_point(point, p_crs, dem_layer.crs())
+                pt_dem = self.transform_point(point, p_crs, dem_layer.crs(), strict=True)
+                if pt_dem is None:
+                    log_message(f"reverse viewshed skipped point #{i}: CRS transform failed", level=Qgis.Warning)
+                    continue
                 try:
                     processing.run(
                         "gdal:viewshed",
                         {
-                            "INPUT": dem_layer.source(),
+                            "INPUT": dem_layer,
                             "BAND": 1,
                             "OBSERVER": f"{pt_dem.x()},{pt_dem.y()}",
                             "OBSERVER_HEIGHT": obs_height,
@@ -3004,8 +3042,12 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
 
         # Transform points to DEM CRS for sampling and output layers
         canvas_crs = self.canvas.mapSettings().destinationCrs()
-        observer_dem = self.transform_point(observer, canvas_crs, dem_layer.crs())
-        target_dem = self.transform_point(target, canvas_crs, dem_layer.crs())
+        observer_dem = self.transform_point(observer, canvas_crs, dem_layer.crs(), strict=True)
+        target_dem = self.transform_point(target, canvas_crs, dem_layer.crs(), strict=True)
+        if observer_dem is None or target_dem is None:
+            push_message(self.iface, "오류", "LOS 점을 DEM 좌표계로 변환하지 못했습니다.", level=2)
+            restore_ui_focus(self)
+            return
 
         # Calculate distance in DEM units (meters expected)
         dx = target_dem.x() - observer_dem.x()
@@ -3282,7 +3324,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         # Add result layers under a group (to reduce clutter)
         project = QgsProject.instance()
         root = project.layerTreeRoot()
-        los_root_group_name = "ArchToolkit - 가시선"
+        los_root_group_name = get_output_group_name("viewshed_los", "ArchToolkit - 가시선")
 
         insert_index = 0
         try:
@@ -3510,7 +3552,9 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             dem_xres = grid_info['res']
             dem_yres = grid_info['res']
             
-            dem_ds = gdal.Open(dem_layer.source(), gdal.GA_ReadOnly)
+            dem_ds, _opened_dem_source = open_gdal_dataset_from_qgis_source(dem_layer.source(), access=gdal.GA_ReadOnly)
+            if dem_ds is None:
+                raise RuntimeError("DEM을 GDAL로 열 수 없습니다.")
             dem_proj = dem_ds.GetProjection()
             dem_ds = None
             
@@ -3838,11 +3882,14 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             QtWidgets.QApplication.processEvents()
             
             output_raw = os.path.join(tempfile.gettempdir(), f'archt_vs_raw_{i}_{uuid.uuid4().hex[:8]}.tif')
-            pt_dem = self.transform_point(point, p_crs, dem_layer.crs())
+            pt_dem = self.transform_point(point, p_crs, dem_layer.crs(), strict=True)
+            if pt_dem is None:
+                log_message(f"cumulative viewshed skipped point #{i}: CRS transform failed", level=Qgis.Warning)
+                continue
              
             try:
                 processing.run("gdal:viewshed", {
-                    'INPUT': dem_layer.source(), 'BAND': 1, 'OBSERVER': f"{pt_dem.x()},{pt_dem.y()}",
+                    'INPUT': dem_layer, 'BAND': 1, 'OBSERVER': f"{pt_dem.x()},{pt_dem.y()}",
                     'OBSERVER_HEIGHT': obs_height, 'TARGET_HEIGHT': tgt_height, 'MAX_DISTANCE': max_dist,
                     'EXTRA': extra, 'OUTPUT': output_raw
                 })
@@ -4326,7 +4373,9 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         - 255: far view (2.5km~)
         """
         # Observer point must be in DEM CRS to compute metric distance per pixel.
-        observer_dem = self.transform_point(observer_point, observer_crs, dem_layer.crs())
+        observer_dem = self.transform_point(observer_point, observer_crs, dem_layer.crs(), strict=True)
+        if observer_dem is None:
+            raise RuntimeError("관측점을 DEM 좌표계로 변환하지 못했습니다.")
         ox = float(observer_dem.x())
         oy = float(observer_dem.y())
 

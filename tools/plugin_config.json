@@ -1,0 +1,143 @@
+{
+  "plugin": {
+    "output_groups": {
+      "ahp": "ArchToolkit - AHP",
+      "cadastral": "ArchToolkit - Cadastral",
+      "cost_network": "ArchToolkit - 최소비용 네트워크 (Least-cost Network)",
+      "cost_surface": "ArchToolkit - 비용표면/최소비용경로 (Cost Surface / LCP)",
+      "geochem": "ArchToolkit - GeoChem",
+      "geology": "ArchToolkit - Geology",
+      "spatial_network": "ArchToolkit - Networks (PPA/Visibility)",
+      "slope_aspect_drafting": "ArchToolkit - 도면화(경사도/사면방향) (Slope/Aspect Drafting)",
+      "terrain_profile": "ArchToolkit - Terrain Profile",
+      "viewshed_los": "ArchToolkit - 가시선"
+    },
+    "output_group_prefixes": [
+      "ArchToolkit -"
+    ],
+    "ui": {
+      "help_dialog": {
+        "min_width": 760,
+        "min_height": 560,
+        "search_placeholder": "도움말 검색...",
+        "hint_text": "이 도움말은 검색하고 복사할 수 있습니다. 입력 전에 한 번 훑어보면 실수를 줄일 수 있어요."
+      }
+    }
+  },
+  "ai": {
+    "gemini": {
+      "default_model": "gemini-3.1-pro-preview",
+      "known_models_verified_at": "2026-03-15",
+      "known_models_stale_after_days": 14,
+      "known_models": [
+        "gemini-3.1-pro-preview",
+        "gemini-3-flash-preview",
+        "gemini-3.1-flash-lite-preview",
+        "gemini-2.5-pro",
+        "gemini-2.5-flash"
+      ]
+    }
+  },
+  "contour_extractor": {
+    "dxf_filter_field_candidates": [
+      "Layer",
+      "LAYER",
+      "layer"
+    ],
+    "code_presets": [
+      {
+        "code": "F0017110",
+        "label": "주곡선",
+        "default_checked": true
+      },
+      {
+        "code": "F0017111",
+        "label": "계곡선",
+        "default_checked": true
+      },
+      {
+        "code": "F0017112",
+        "label": "간곡선",
+        "default_checked": true
+      },
+      {
+        "code": "F0017113",
+        "label": "조곡선",
+        "default_checked": false
+      }
+    ]
+  },
+  "geology_zip": {
+    "extract_root_name": "ArchToolkit_KIGAM_Extract",
+    "extract_cleanup_days": 14,
+    "provider_encoding": "cp949",
+    "candidate_encodings": [
+      "CP949",
+      "EUC-KR",
+      null,
+      "UTF-8"
+    ],
+    "encoding_preference": {
+      "CP949": 4,
+      "EUC-KR": 3,
+      "default": 2,
+      "UTF-8": 1
+    },
+    "qml_write_encoding": "UTF-8",
+    "ui": {
+      "font_size_min": 5,
+      "font_size_max": 50,
+      "font_size_default": 10,
+      "pixel_size_min": 0.1,
+      "pixel_size_max": 10000.0,
+      "pixel_size_default": 10.0,
+      "nodata_min": -9999999.0,
+      "nodata_max": 9999999.0,
+      "nodata_decimals": 2,
+      "nodata_default": -9999.0
+    },
+    "symbology": {
+      "point_marker_size": 6.0,
+      "polygon_fill_width": 10.0,
+      "symbol_priority_fields": [
+        "LITHOIDX",
+        "TYPE",
+        "ASGN_CODE",
+        "SIGN",
+        "CODE",
+        "AGEIDX"
+      ],
+      "label_field_candidates": [
+        "LITHOIDX",
+        "LITHONAME"
+      ],
+      "frame_layer_keywords": [
+        "frame"
+      ],
+      "reference_hide_keywords": [
+        "frame",
+        "crosssection",
+        "crosssectionline"
+      ],
+      "litho_layer_keyword": "litho"
+    },
+    "raster": {
+      "field_priority": [
+        "LITHOIDX",
+        "AGEIDX",
+        "LITHONAME",
+        "TYPE",
+        "ASGN_CODE",
+        "SIGN",
+        "CODE"
+      ],
+      "name_field_candidates": [
+        "LITHONAME",
+        "AGENAME",
+        "NAME",
+        "KOR_NAME",
+        "ENG_NAME"
+      ]
+    }
+  }
+}

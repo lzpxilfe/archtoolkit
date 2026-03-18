@@ -52,6 +52,7 @@ from qgis.core import (
 )
 from qgis.gui import QgsMapLayerComboBox  # noqa: F401 (needed for .ui custom widget loading)
 
+from .config import get_output_group_name
 from .utils import (
     is_metric_crs,
     log_message,
@@ -2210,7 +2211,7 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
     ):
         project = QgsProject.instance()
         root = project.layerTreeRoot()
-        parent_name = "ArchToolkit - Networks (PPA/Visibility)"
+        parent_name = get_output_group_name("spatial_network", "ArchToolkit - Networks (PPA/Visibility)")
         parent_group = root.findGroup(parent_name)
         if parent_group is None:
             parent_group = root.insertGroup(0, parent_name)

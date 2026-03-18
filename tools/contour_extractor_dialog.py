@@ -23,9 +23,11 @@ from qgis.PyQt import QtWidgets
 from qgis.PyQt.QtCore import Qt
 from qgis.core import QgsProject, QgsVectorLayer, QgsMapLayerProxyModel
 import processing
+from .config import get_contour_code_presets, get_contour_filter_field_candidates
 from .utils import push_message, set_archtoolkit_layer_metadata
 from .live_log_dialog import ensure_live_log_dialog
 from .help_dialog import show_help_dialog
+from .ui_helpers import create_hint_label, insert_help_button, set_plugin_window_icon
 
 # Load the UI file
 FORM_CLASS, _ = uic.loadUiType(os.path.join(
@@ -33,21 +35,20 @@ FORM_CLASS, _ = uic.loadUiType(os.path.join(
 
 
 class ContourExtractorDialog(QtWidgets.QDialog, FORM_CLASS):
-    # Contour layer codes
-    CONTOUR_CODES = {
-        'F0017110': '주곡선',
-        'F0017111': '계곡선',
-        'F0017112': '간곡선',
-        'F0017113': '조곡선'
-    }
-    
     def __init__(self, iface, parent=None):
         super(ContourExtractorDialog, self).__init__(parent)
         self.setupUi(self)
         self.iface = iface
+        self._contour_checkboxes = [self.chkContour1, self.chkContour2, self.chkContour3, self.chkContour4]
+        self._contour_presets = list(get_contour_code_presets())
+        self._contour_field_candidates = list(get_contour_filter_field_candidates() or ["Layer"])
         
         # Store original filters for undo
         self.original_filters = {}
+
+        set_plugin_window_icon(self, ("contour_icon.png", "icon.png"))
+        self._apply_contour_presets()
+        self._inject_mode_hints()
         
         # Setup layer filters for DEM mode
         self.cmbDemLayer.setFilters(QgsMapLayerProxyModel.RasterLayer)
@@ -66,42 +67,79 @@ class ContourExtractorDialog(QtWidgets.QDialog, FORM_CLASS):
 
     def _setup_help_button(self):
         try:
-            self.btnHelp = QtWidgets.QPushButton("도움말", self)
-            self.btnHelp.clicked.connect(self._on_help)
+            self.btnHelp = insert_help_button(
+                dialog=self,
+                callback=self._on_help,
+                close_button=self.btnClose,
+                text="도움말",
+            )
+        except Exception:
+            pass
 
-            layout = self.layout()
-            if layout is None:
-                return
-            idx = -1
-            try:
-                idx = int(layout.indexOf(self.btnClose))
-            except Exception:
-                idx = -1
-            if idx >= 0:
-                layout.insertWidget(idx, self.btnHelp)
+    def _apply_contour_presets(self):
+        presets = list(self._contour_presets or [])
+        for idx, checkbox in enumerate(self._contour_checkboxes):
+            if idx < len(presets):
+                preset = presets[idx]
+                checkbox.setVisible(True)
+                checkbox.setText(str(preset.get("label") or preset.get("code") or "등고선"))
+                checkbox.setChecked(bool(preset.get("default_checked", True)))
+                checkbox.setProperty("contour_code", str(preset.get("code") or ""))
+                checkbox.setToolTip(f"DXF 코드: {str(preset.get('code') or '')}")
             else:
-                layout.addWidget(self.btnHelp)
+                checkbox.setVisible(False)
+                checkbox.setChecked(False)
+                checkbox.setProperty("contour_code", "")
+
+    def _inject_mode_hints(self):
+        try:
+            dxf_layout = self.groupDxf.layout()
+            if dxf_layout is not None:
+                dxf_hint = create_hint_label(
+                    "DXF 모드에서는 `Layer/LAYER/layer` 필드를 자동으로 찾아 체크한 등고선 유형만 필터링합니다.",
+                    tone="info",
+                    parent=self.groupDxf,
+                )
+                if hasattr(dxf_layout, "insertWidget"):
+                    dxf_layout.insertWidget(0, dxf_hint)
+                else:
+                    dxf_layout.addWidget(dxf_hint)
+        except Exception:
+            pass
+        try:
+            dem_layout = self.groupDem.layout()
+            if dem_layout is not None:
+                dem_hint = create_hint_label(
+                    "DEM 모드에서는 간격(m)만 정하면 새 등고선 레이어를 만들어 프로젝트에 바로 추가합니다.",
+                    tone="tip",
+                    parent=self.groupDem,
+                )
+                if hasattr(dem_layout, "insertWidget"):
+                    dem_layout.insertWidget(0, dem_hint)
+                else:
+                    dem_layout.addWidget(dem_hint)
         except Exception:
             pass
 
     def _on_help(self):
         try:
-            plugin_dir = os.path.dirname(os.path.dirname(__file__))
             html = (
                 "<h2>등고선 추출 (Extract Contours)</h2>"
                 "<p>DXF 레이어에서 등고선(코드)만 필터링하거나, DEM 래스터에서 등고선을 생성합니다.</p>"
                 "<h3>모드</h3>"
                 "<ul>"
-                "<li><b>DXF 필터</b>: 선택한 DXF 레이어에 subsetString 필터를 적용합니다. 필요하면 <b>필터 초기화</b>로 되돌릴 수 있습니다.</li>"
+                "<li><b>DXF 필터</b>: 선택한 DXF 레이어에 subsetString 필터를 적용합니다. "
+                "필드명은 <code>Layer/LAYER/layer</code>를 자동으로 찾아보고, 필요하면 <b>필터 초기화</b>로 되돌릴 수 있습니다.</li>"
                 "<li><b>DEM에서 생성</b>: GDAL <code>gdal:contour</code>로 등고선 벡터를 생성합니다.</li>"
                 "</ul>"
                 "<h3>팁</h3>"
                 "<ul>"
+                "<li>체크박스 라벨과 DXF 코드는 설정 파일에서 바꿀 수 있어, 기관별 코드 체계에도 맞추기 쉽습니다.</li>"
                 "<li>DEM 모드의 등고선 간격은 DEM의 높이 단위(보통 m)를 기준으로 합니다.</li>"
                 "<li>출처/레퍼런스는 <code>REFERENCES.md</code>를 참고하세요.</li>"
                 "</ul>"
             )
-            show_help_dialog(parent=self, title="등고선 추출 도움말", html=html, plugin_dir=plugin_dir)
+            show_help_dialog(parent=self, title="등고선 추출 도움말", html=html)
         except Exception:
             try:
                 QtWidgets.QMessageBox.information(self, "도움말", "README.md를 참고하세요.")
@@ -127,15 +165,26 @@ class ContourExtractorDialog(QtWidgets.QDialog, FORM_CLASS):
     def get_selected_contour_codes(self):
         """Get list of selected contour codes"""
         codes = []
-        if self.chkContour1.isChecked():
-            codes.append('F0017110')
-        if self.chkContour2.isChecked():
-            codes.append('F0017111')
-        if self.chkContour3.isChecked():
-            codes.append('F0017112')
-        if self.chkContour4.isChecked():
-            codes.append('F0017113')
+        for checkbox in self._contour_checkboxes:
+            try:
+                if checkbox.isVisible() and checkbox.isChecked():
+                    code = str(checkbox.property("contour_code") or "").strip()
+                    if code:
+                        codes.append(code)
+            except Exception:
+                continue
         return codes
+
+    def _find_filter_field_name(self, layer: QgsVectorLayer):
+        try:
+            field_names = {str(field.name() or "").strip().lower(): str(field.name() or "").strip() for field in layer.fields()}
+        except Exception:
+            field_names = {}
+        for candidate in self._contour_field_candidates:
+            key = str(candidate or "").strip().lower()
+            if key and key in field_names:
+                return field_names[key]
+        return None
     
     def get_selected_layers(self):
         """Get list of selected vector layers"""
@@ -169,11 +218,16 @@ class ContourExtractorDialog(QtWidgets.QDialog, FORM_CLASS):
             return
         
         try:
-            # Build query
-            query = '"Layer" IN (' + ','.join([f"'{c}'" for c in codes]) + ')'
-            
             filtered_count = 0
+            skipped_layers = []
             for layer in layers:
+                field_name = self._find_filter_field_name(layer)
+                if not field_name:
+                    skipped_layers.append(layer.name())
+                    continue
+
+                query = f'"{field_name}" IN (' + ",".join([f"'{c}'" for c in codes]) + ")"
+
                 # Store original filter for undo
                 if layer.id() not in self.original_filters:
                     self.original_filters[layer.id()] = layer.subsetString()
@@ -181,12 +235,32 @@ class ContourExtractorDialog(QtWidgets.QDialog, FORM_CLASS):
                 # Apply filter
                 layer.setSubsetString(query)
                 filtered_count += 1
+
+            if filtered_count <= 0:
+                field_preview = ", ".join(self._contour_field_candidates)
+                push_message(
+                    self.iface,
+                    "오류",
+                    f"선택한 레이어에서 등고선 코드 필드({field_preview})를 찾지 못했습니다.",
+                    level=2,
+                )
+                return
             
             push_message(
                 self.iface, "완료", 
                 f"{filtered_count}개 레이어에 등고선 필터 적용 완료 ({len(codes)}개 유형)", 
                 level=0
             )
+            if skipped_layers:
+                skipped_preview = ", ".join(skipped_layers[:3])
+                if len(skipped_layers) > 3:
+                    skipped_preview += " ..."
+                push_message(
+                    self.iface,
+                    "안내",
+                    f"코드 필드를 찾지 못해 건너뜬 레이어: {skipped_preview}",
+                    level=1,
+                )
             self.accept()
             
         except Exception as e:

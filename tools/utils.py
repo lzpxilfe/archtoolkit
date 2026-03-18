@@ -20,12 +20,15 @@ _ui_log_queue = queue.Queue(maxsize=_UI_LOG_QUEUE_MAX)
 _ui_log_timer = None
 _ui_log_listeners = set()
 
-def transform_point(point, src_crs, dest_crs):
+
+def transform_point(point, src_crs, dest_crs, *, strict=False):
     """Transform point from source CRS to destination CRS (best-effort).
 
     This helper is used in multiple tools. Coordinate transform errors should not
-    crash the plugin UI; in that case we return the original point and log a
-    warning.
+    crash the plugin UI. By default we return the original point on failure to
+    preserve legacy behavior; callers can opt into `strict=True` when a failed
+    transform should stop downstream analysis instead of silently continuing with
+    a wrong coordinate.
     """
     if point is None:
         return None
@@ -39,7 +42,97 @@ def transform_point(point, src_crs, dest_crs):
             log_message(f"CRS transform failed (fallback to original point): {e}", level=Qgis.Warning)
         except Exception:
             pass
+        if strict:
+            return None
         return point
+
+
+def split_qgis_source_path(source: str) -> str:
+    """Strip common QGIS URI options (e.g. `|layername=...`) from a source string."""
+    try:
+        s = str(source or "").strip()
+    except Exception:
+        return ""
+    if not s:
+        return ""
+    return (s.split("|", 1)[0] or "").strip()
+
+
+def qgis_raster_source_to_gdal(source: str) -> str:
+    """Best-effort conversion from a QGIS raster source URI to a GDAL-openable source."""
+    try:
+        s = str(source or "").strip()
+    except Exception:
+        return ""
+    if not s:
+        return ""
+
+    # Already a GDAL-style dataset string.
+    upper = s.upper()
+    if upper.startswith(("GPKG:", "NETCDF:", "HDF4:", "HDF5:", "WMS:", "WCS:", "WMTS:", "PG:")):
+        return s
+
+    dataset_path = split_qgis_source_path(s)
+    if not dataset_path:
+        return ""
+
+    layer_name = ""
+    try:
+        for part in s.split("|")[1:]:
+            if "=" not in part:
+                continue
+            key, value = part.split("=", 1)
+            if str(key or "").strip().lower() == "layername":
+                layer_name = str(value or "").strip()
+                break
+    except Exception:
+        layer_name = ""
+
+    if layer_name and dataset_path.lower().endswith(".gpkg"):
+        return f"GPKG:{dataset_path}:{layer_name}"
+
+    return dataset_path
+
+
+def open_gdal_dataset_from_qgis_source(source: str, *, access=None):
+    """Open a raster dataset from a QGIS source string, returning `(dataset, opened_source)`."""
+    try:
+        from osgeo import gdal
+    except Exception as e:
+        try:
+            log_message(f"GDAL import failed while opening raster source: {e}", level=Qgis.Warning)
+        except Exception:
+            pass
+        return None, ""
+
+    if access is None:
+        try:
+            access = gdal.GA_ReadOnly
+        except Exception:
+            access = 0
+
+    source0 = ""
+    try:
+        source0 = str(source or "").strip()
+    except Exception:
+        source0 = ""
+
+    candidates = []
+    normalized = qgis_raster_source_to_gdal(source0)
+    if normalized:
+        candidates.append(normalized)
+    if source0 and source0 not in candidates:
+        candidates.append(source0)
+
+    for candidate in candidates:
+        try:
+            ds = gdal.Open(candidate, access)
+        except Exception:
+            ds = None
+        if ds is not None:
+            return ds, candidate
+
+    return None, (normalized or source0)
 
 def cleanup_files(file_paths):
     """Safely remove a list of file paths"""

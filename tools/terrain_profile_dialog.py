@@ -35,6 +35,7 @@ from qgis.core import (
     QgsLineSymbol, QgsSingleSymbolRenderer, QgsSymbolLayer, QgsProperty, Qgis, QgsDistanceArea, QgsCoordinateTransform
 )
 from qgis.gui import QgsMapLayerComboBox, QgsMapToolEmitPoint, QgsRubberBand
+from .config import get_output_group_name
 from .utils import (
     log_message,
     new_run_id,
@@ -47,7 +48,7 @@ from .live_log_dialog import ensure_live_log_dialog
 from .help_dialog import show_help_dialog
 
 PROFILE_LAYER_NAME = "Terrain Profile Lines"
-PROFILE_GROUP_NAME = "ArchToolkit - Terrain Profile"
+PROFILE_GROUP_NAME = get_output_group_name("terrain_profile", "ArchToolkit - Terrain Profile")
 PROFILE_SINGLE_SUBGROUP_NAME = "단면선 (개별 레이어)"
 PROFILE_KIND_PROP = "ArchToolkit/profile_kind"
 PROFILE_KIND_SINGLE = "terrain_profile_single"

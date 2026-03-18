@@ -59,6 +59,7 @@ from qgis.core import (
 )
 from qgis.gui import QgsMapLayerComboBox
 
+from .config import get_output_group_name
 from .utils import (
     is_metric_crs,
     log_exception,
@@ -71,7 +72,7 @@ from .live_log_dialog import ensure_live_log_dialog
 from .help_dialog import show_help_dialog
 
 
-PARENT_GROUP_NAME = "ArchToolkit - GeoChem"
+PARENT_GROUP_NAME = get_output_group_name("geochem", "ArchToolkit - GeoChem")
 
 
 @dataclass(frozen=True)

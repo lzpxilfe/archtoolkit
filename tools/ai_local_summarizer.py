@@ -119,9 +119,31 @@ def _layer_stats_lines(layer: Dict[str, Any]) -> List[str]:
     return lines
 
 
+def _layer_interpretation_lines(layer: Dict[str, Any]) -> List[str]:
+    interp = layer.get("archtoolkit_interpretation") or {}
+    if not isinstance(interp, dict) or not interp:
+        return []
+
+    lines: List[str] = []
+    summary = str(interp.get("summary") or "").strip()
+    if summary:
+        lines.append(f"- 해석: {summary}")
+
+    notes = [str(x).strip() for x in (interp.get("notes") or []) if str(x).strip()]
+    if notes:
+        lines.append(f"- 설정/맥락: {'; '.join(notes[:4])}")
+
+    metrics = [str(x).strip() for x in (interp.get("key_metrics") or []) if str(x).strip()]
+    if metrics:
+        lines.append(f"- 핵심 지표: {'; '.join(metrics[:4])}")
+
+    return lines
+
+
 def generate_report(ctx: Dict[str, Any]) -> str:
     aoi = ctx.get("aoi") or {}
     layers = ctx.get("layers") or []
+    runs = ctx.get("archtoolkit_runs") or []
     options = ctx.get("options") or {}
 
     aoi_name = str(aoi.get("layer_name") or "").strip()
@@ -165,8 +187,26 @@ def generate_report(ctx: Dict[str, Any]) -> str:
     out.append(f"- 반경: {_fmt_float(radius_m, digits=0)} m")
     out.append(f"- 버퍼 면적(반경 내): {_fmt_float(buf_area, digits=1)} ㎡")
     out.append(f"- 요약 레이어 수: {_fmt_int(len(layers))} {header_notes}".rstrip())
+    if runs:
+        out.append(f"- ArchToolkit 실행 묶음: {_fmt_int(len(runs))}")
     if isinstance(options.get("max_layers"), (int, float)) and len(layers) >= int(options.get("max_layers") or 0):
         out.append("- 참고: 레이어 수가 많아 일부만 요약되었을 수 있습니다.")
+    out.append("")
+
+    # 1.5) Run summaries
+    out.append("## 1-1) ArchToolkit 실행 묶음")
+    if not runs:
+        out.append("- (해당 없음)")
+    else:
+        for run in runs[:10]:
+            summary = str(run.get("summary") or "").strip() or "ArchToolkit 실행 묶음"
+            layer_names = [str(x).strip() for x in (run.get("layer_names") or []) if str(x).strip()]
+            metrics = [str(x).strip() for x in (run.get("key_metrics") or []) if str(x).strip()]
+            out.append(f"- {summary}: 레이어 {len(layer_names)}개")
+            if layer_names:
+                out.append(f"  - 포함 레이어: {', '.join(layer_names[:4])}")
+            if metrics:
+                out.append(f"  - 대표 지표: {'; '.join(metrics[:3])}")
     out.append("")
 
     # 2) Layer summaries
@@ -210,12 +250,26 @@ def generate_report(ctx: Dict[str, Any]) -> str:
                 if created_at:
                     meta2.append(f"created_at={created_at}")
                 out.append(f"- ArchToolkit 메타: {', '.join(meta2)}")
+            out.extend(_layer_interpretation_lines(lyr))
             out.extend(_layer_stats_lines(lyr))
             out.append("")
 
     # 3) Key observations (heuristic)
     out.append("## 3) 핵심 관찰(로컬 자동 요약)")
     observations: List[str] = []
+    try:
+        for run in runs[:6]:
+            summary = str(run.get("summary") or "").strip()
+            if not summary:
+                continue
+            metrics = [str(x).strip() for x in (run.get("key_metrics") or []) if str(x).strip()]
+            if metrics:
+                observations.append(f"- {summary}: {'; '.join(metrics[:2])}")
+            else:
+                observations.append(f"- {summary}")
+    except Exception:
+        pass
+
     try:
         # Find the biggest vector layer by feature count
         vec = []

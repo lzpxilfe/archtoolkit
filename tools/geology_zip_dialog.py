@@ -8,9 +8,12 @@ import os
 import re
 import shutil
 import tempfile
+import time
 import zipfile
 import csv
 import math
+import unicodedata
+import xml.etree.ElementTree as ET
 from typing import Dict, List, Optional, Tuple
 
 import processing
@@ -39,6 +42,7 @@ from qgis.core import (
     QgsWkbTypes,
 )
 
+from .config import get_output_group_name, get_plugin_config_value
 from .help_dialog import show_help_dialog
 from .live_log_dialog import ensure_live_log_dialog
 from .utils import (
@@ -50,7 +54,140 @@ from .utils import (
 )
 
 
-PARENT_GROUP_NAME = "ArchToolkit - Geology"
+PARENT_GROUP_NAME = get_output_group_name("geology", "ArchToolkit - Geology")
+GEOLOGY_EXTRACT_ROOT_NAME = str(
+    get_plugin_config_value("geology_zip", "extract_root_name", default="ArchToolkit_KIGAM_Extract") or ""
+).strip() or "ArchToolkit_KIGAM_Extract"
+GEOLOGY_EXTRACT_CLEANUP_DAYS = int(
+    get_plugin_config_value("geology_zip", "extract_cleanup_days", default=14) or 14
+)
+GEOLOGY_PROVIDER_ENCODING = str(
+    get_plugin_config_value("geology_zip", "provider_encoding", default="cp949") or ""
+).strip() or "cp949"
+GEOLOGY_CANDIDATE_ENCODINGS = [
+    (None if value is None else str(value).strip())
+    for value in (get_plugin_config_value("geology_zip", "candidate_encodings", default=["CP949", "EUC-KR", None, "UTF-8"]) or [])
+    if value is None or str(value).strip()
+]
+GEOLOGY_ENCODING_PREFERENCE = get_plugin_config_value(
+    "geology_zip",
+    "encoding_preference",
+    default={"CP949": 4, "EUC-KR": 3, "default": 2, "UTF-8": 1},
+) or {"CP949": 4, "EUC-KR": 3, "default": 2, "UTF-8": 1}
+GEOLOGY_QML_WRITE_ENCODING = str(
+    get_plugin_config_value("geology_zip", "qml_write_encoding", default="UTF-8") or ""
+).strip() or "UTF-8"
+GEOLOGY_POINT_MARKER_SIZE = float(
+    get_plugin_config_value("geology_zip", "symbology", "point_marker_size", default=6.0) or 6.0
+)
+GEOLOGY_FILL_SYMBOL_WIDTH = float(
+    get_plugin_config_value("geology_zip", "symbology", "polygon_fill_width", default=10.0) or 10.0
+)
+GEOLOGY_SYMBOL_PRIORITY_FIELDS = [
+    str(v).strip()
+    for v in (
+        get_plugin_config_value(
+            "geology_zip",
+            "symbology",
+            "symbol_priority_fields",
+            default=["LITHOIDX", "TYPE", "ASGN_CODE", "SIGN", "CODE", "AGEIDX"],
+        )
+        or []
+    )
+    if str(v or "").strip()
+]
+GEOLOGY_LABEL_FIELD_CANDIDATES = [
+    str(v).strip()
+    for v in (
+        get_plugin_config_value(
+            "geology_zip",
+            "symbology",
+            "label_field_candidates",
+            default=["LITHOIDX", "LITHONAME"],
+        )
+        or []
+    )
+    if str(v or "").strip()
+]
+GEOLOGY_FRAME_LAYER_KEYWORDS = [
+    str(v).strip().lower()
+    for v in (
+        get_plugin_config_value(
+            "geology_zip",
+            "symbology",
+            "frame_layer_keywords",
+            default=["frame"],
+        )
+        or []
+    )
+    if str(v or "").strip()
+]
+GEOLOGY_REFERENCE_HIDE_KEYWORDS = [
+    str(v).strip().lower()
+    for v in (
+        get_plugin_config_value(
+            "geology_zip",
+            "symbology",
+            "reference_hide_keywords",
+            default=["frame", "crosssection"],
+        )
+        or []
+    )
+    if str(v or "").strip()
+]
+GEOLOGY_LITHO_LAYER_KEYWORD = str(
+    get_plugin_config_value("geology_zip", "symbology", "litho_layer_keyword", default="litho") or ""
+).strip().lower()
+GEOLOGY_RASTER_FIELD_PRIORITY = [
+    str(v).strip()
+    for v in (
+        get_plugin_config_value(
+            "geology_zip",
+            "raster",
+            "field_priority",
+            default=["LITHOIDX", "AGEIDX", "LITHONAME", "TYPE", "ASGN_CODE", "SIGN", "CODE"],
+        )
+        or []
+    )
+    if str(v or "").strip()
+]
+GEOLOGY_NAME_FIELD_CANDIDATES = [
+    str(v).strip()
+    for v in (
+        get_plugin_config_value(
+            "geology_zip",
+            "raster",
+            "name_field_candidates",
+            default=["LITHONAME", "AGENAME", "NAME", "KOR_NAME", "ENG_NAME"],
+        )
+        or []
+    )
+    if str(v or "").strip()
+]
+GEOLOGY_UI_FONT_SIZE_MIN = int(get_plugin_config_value("geology_zip", "ui", "font_size_min", default=5) or 5)
+GEOLOGY_UI_FONT_SIZE_MAX = int(get_plugin_config_value("geology_zip", "ui", "font_size_max", default=50) or 50)
+GEOLOGY_UI_FONT_SIZE_DEFAULT = int(
+    get_plugin_config_value("geology_zip", "ui", "font_size_default", default=10) or 10
+)
+GEOLOGY_UI_PIXEL_MIN = float(get_plugin_config_value("geology_zip", "ui", "pixel_size_min", default=0.1) or 0.1)
+GEOLOGY_UI_PIXEL_MAX = float(
+    get_plugin_config_value("geology_zip", "ui", "pixel_size_max", default=10000.0) or 10000.0
+)
+GEOLOGY_UI_PIXEL_DEFAULT = float(
+    get_plugin_config_value("geology_zip", "ui", "pixel_size_default", default=10.0) or 10.0
+)
+GEOLOGY_UI_NODATA_MIN = float(
+    get_plugin_config_value("geology_zip", "ui", "nodata_min", default=-9999999.0) or -9999999.0
+)
+GEOLOGY_UI_NODATA_MAX = float(
+    get_plugin_config_value("geology_zip", "ui", "nodata_max", default=9999999.0) or 9999999.0
+)
+GEOLOGY_UI_NODATA_DECIMALS = int(
+    get_plugin_config_value("geology_zip", "ui", "nodata_decimals", default=2) or 2
+)
+GEOLOGY_UI_NODATA_DEFAULT = float(
+    get_plugin_config_value("geology_zip", "ui", "nodata_default", default=-9999.0) or -9999.0
+)
 
 
 def _safe_name(name: str) -> str:
@@ -115,11 +252,393 @@ def _meters_to_degrees(pixel_m: float, lat_deg: float) -> Tuple[float, float]:
 
 class KigamZipProcessor:
     def __init__(self):
-        self.extract_root = os.path.join(tempfile.gettempdir(), "ArchToolkit_KIGAM_Extract")
+        self.extract_root = os.path.join(tempfile.gettempdir(), GEOLOGY_EXTRACT_ROOT_NAME)
         try:
             os.makedirs(self.extract_root, exist_ok=True)
         except Exception:
             pass
+        self._cleanup_stale_extract_dirs()
+
+    def _cleanup_stale_extract_dirs(self) -> None:
+        if GEOLOGY_EXTRACT_CLEANUP_DAYS <= 0:
+            return
+        try:
+            cutoff_ts = time.time() - (float(GEOLOGY_EXTRACT_CLEANUP_DAYS) * 86400.0)
+            with os.scandir(self.extract_root) as entries:
+                for entry in entries:
+                    if not entry.is_dir():
+                        continue
+                    try:
+                        if entry.stat().st_mtime >= cutoff_ts:
+                            continue
+                    except Exception:
+                        continue
+                    try:
+                        shutil.rmtree(entry.path)
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+
+    def _build_extract_dir(self, zip_path: str, run_id: str) -> str:
+        zip_basename = _safe_name(os.path.splitext(os.path.basename(zip_path))[0])
+        run_token = _safe_name(run_id) or new_run_id("kigam")
+        return os.path.join(self.extract_root, f"{zip_basename}_{run_token}")
+
+    def _normalize_token(self, text: str) -> str:
+        value = str(text or "").strip()
+        if not value:
+            return ""
+        value = unicodedata.normalize("NFKC", value).upper()
+        return re.sub(r"[\s_\-]+", "", value)
+
+    def _redecode_variants(self, text: str) -> List[str]:
+        value = str(text or "")
+        variants: List[str] = []
+        seen = set()
+
+        def _append(candidate: str) -> None:
+            item = str(candidate or "")
+            if item in seen:
+                return
+            seen.add(item)
+            variants.append(item)
+
+        _append(value)
+        for src_enc in ("latin1", "cp1252"):
+            for dst_enc in ("cp949", "euc-kr"):
+                try:
+                    _append(value.encode(src_enc).decode(dst_enc))
+                except Exception:
+                    continue
+        return variants
+
+    def _value_candidates(self, value) -> List[str]:
+        out: List[str] = []
+        seen = set()
+        for variant in self._redecode_variants(str(value or "")):
+            text = str(variant or "").strip()
+            if text and text not in seen:
+                seen.add(text)
+                out.append(text)
+            normalized = self._normalize_token(text)
+            if normalized and normalized not in seen:
+                seen.add(normalized)
+                out.append(normalized)
+        return out
+
+    def _build_symbol_index(self, sym_path: Optional[str]) -> Tuple[Dict[str, str], Dict[str, str]]:
+        raw_sym_files: Dict[str, str] = {}
+        lookup_sym_files: Dict[str, str] = {}
+        if not sym_path or not os.path.isdir(sym_path):
+            return raw_sym_files, lookup_sym_files
+
+        for fname in os.listdir(sym_path):
+            if not fname.lower().endswith(".png"):
+                continue
+            key = os.path.splitext(fname)[0]
+            path = os.path.join(sym_path, fname)
+            raw_sym_files.setdefault(key, path)
+            for candidate in self._value_candidates(key):
+                lookup_sym_files.setdefault(candidate, path)
+        return raw_sym_files, lookup_sym_files
+
+    def _resolve_symbol_path(
+        self,
+        value,
+        raw_sym_files: Dict[str, str],
+        lookup_sym_files: Dict[str, str],
+    ) -> Optional[str]:
+        for candidate in self._value_candidates(value):
+            path = lookup_sym_files.get(candidate)
+            if path:
+                return path
+        return None
+
+    def _find_sidecar_qml(self, folder_path: str, layer_name: str) -> Optional[str]:
+        direct = os.path.join(folder_path, f"{layer_name}.qml")
+        if os.path.exists(direct):
+            return direct
+        try:
+            wanted = layer_name.lower()
+            for fname in os.listdir(folder_path):
+                if not fname.lower().endswith(".qml"):
+                    continue
+                if os.path.splitext(fname)[0].lower() == wanted:
+                    return os.path.join(folder_path, fname)
+        except Exception:
+            return None
+        return None
+
+    def _parse_qml_mapping(
+        self,
+        qml_path: Optional[str],
+    ) -> Tuple[Optional[str], Dict[str, str], Dict[str, str]]:
+        if not qml_path or not os.path.exists(qml_path):
+            return None, {}, {}
+
+        qml_field = None
+        qml_value_to_image: Dict[str, str] = {}
+        qml_lookup_map: Dict[str, str] = {}
+        try:
+            tree = ET.parse(qml_path)
+            root = tree.getroot()
+        except Exception:
+            return None, {}, {}
+
+        renderer = root.find(".//renderer-v2")
+        if renderer is not None:
+            qml_field = (renderer.get("attr") or renderer.get("classAttribute") or "").strip() or None
+
+        symbol_images: Dict[str, str] = {}
+        for symbol_node in root.findall(".//renderer-v2/symbols/symbol"):
+            symbol_name = str(symbol_node.get("name") or "").strip()
+            image_ref = ""
+            for prop in symbol_node.findall(".//layer/prop"):
+                value = str(prop.get("v") or "").strip()
+                if value.lower().endswith(".png"):
+                    image_ref = value
+                    break
+            if symbol_name and image_ref:
+                symbol_images[symbol_name] = image_ref
+
+        for category_node in root.findall(".//renderer-v2/categories/category"):
+            value = str(category_node.get("value") or "").strip()
+            symbol_ref = str(category_node.get("symbol") or "").strip()
+            image_ref = symbol_images.get(symbol_ref) or symbol_images.get(value)
+            if not value or not image_ref:
+                continue
+            qml_value_to_image[value] = image_ref
+            for candidate in self._value_candidates(value):
+                qml_lookup_map.setdefault(candidate, image_ref)
+
+        return qml_field, qml_value_to_image, qml_lookup_map
+
+    def _resolve_symbol_with_qml_map(
+        self,
+        value,
+        raw_sym_files: Dict[str, str],
+        lookup_sym_files: Dict[str, str],
+        qml_lookup_map: Dict[str, str],
+    ) -> Optional[str]:
+        for candidate in self._value_candidates(value):
+            image_ref = qml_lookup_map.get(candidate)
+            if not image_ref:
+                continue
+            qml_symbol_name = os.path.splitext(os.path.basename(image_ref))[0]
+            path = self._resolve_symbol_path(qml_symbol_name, raw_sym_files, lookup_sym_files)
+            if path:
+                return path
+            if os.path.exists(image_ref):
+                return image_ref
+        return self._resolve_symbol_path(value, raw_sym_files, lookup_sym_files)
+
+    def _find_best_matching_field(
+        self,
+        layer: QgsVectorLayer,
+        raw_sym_files: Dict[str, str],
+        lookup_sym_files: Dict[str, str],
+        qml_field: Optional[str],
+        qml_lookup_map: Dict[str, str],
+    ) -> Tuple[Optional[str], int, int]:
+        best_field = None
+        best_matches = -1
+        best_total_values = -1
+        all_fields = [f.name() for f in layer.fields()]
+
+        ordered_fields: List[str] = []
+        for field_name in ([qml_field] if qml_field else []) + GEOLOGY_SYMBOL_PRIORITY_FIELDS + all_fields:
+            if field_name and field_name in all_fields and field_name not in ordered_fields:
+                ordered_fields.append(field_name)
+
+        for field_name in ordered_fields:
+            idx = layer.fields().indexOf(field_name)
+            if idx < 0:
+                continue
+            try:
+                unique_values = list(layer.uniqueValues(idx))
+            except Exception:
+                unique_values = []
+
+            matches = 0
+            total_values = len(unique_values)
+            for value in unique_values:
+                if self._resolve_symbol_with_qml_map(value, raw_sym_files, lookup_sym_files, qml_lookup_map):
+                    matches += 1
+
+            score = (matches, total_values)
+            if score > (best_matches, best_total_values):
+                best_field = field_name
+                best_matches = matches
+                best_total_values = total_values
+
+        return best_field, max(best_matches, 0), max(best_total_values, 0)
+
+    def _encoding_preference_rank(self, encoding: Optional[str]) -> int:
+        pref_map = {}
+        if isinstance(GEOLOGY_ENCODING_PREFERENCE, dict):
+            for key, value in GEOLOGY_ENCODING_PREFERENCE.items():
+                try:
+                    pref_map[str(key or "").strip().upper()] = int(value)
+                except Exception:
+                    continue
+        key = str(encoding or "").strip().upper() or "DEFAULT"
+        return pref_map.get(key, pref_map.get("DEFAULT", 0))
+
+    def _load_layer_with_best_encoding(
+        self,
+        shp_path: str,
+        layer_name: str,
+        *,
+        sym_path: Optional[str],
+        qml_path: Optional[str],
+    ) -> Tuple[Optional[QgsVectorLayer], Optional[str], Optional[str], int]:
+        raw_sym_files, lookup_sym_files = self._build_symbol_index(sym_path)
+        qml_field, _, qml_lookup_map = self._parse_qml_mapping(qml_path)
+
+        encodings = GEOLOGY_CANDIDATE_ENCODINGS or [GEOLOGY_PROVIDER_ENCODING]
+        seen = set()
+        best_layer = None
+        best_encoding = None
+        best_field = None
+        best_matches = -1
+        best_total_values = -1
+        best_pref = -1
+
+        for encoding in encodings:
+            enc_key = str(encoding or "__default__").upper()
+            if enc_key in seen:
+                continue
+            seen.add(enc_key)
+
+            uri = shp_path if not encoding else f"{shp_path}|encoding={encoding}"
+            layer = QgsVectorLayer(uri, layer_name, "ogr")
+            if not layer.isValid():
+                continue
+            if encoding:
+                try:
+                    layer.setProviderEncoding(str(encoding))
+                except Exception:
+                    pass
+
+            field_name, matches, total_values = self._find_best_matching_field(
+                layer,
+                raw_sym_files,
+                lookup_sym_files,
+                qml_field,
+                qml_lookup_map,
+            )
+            pref_rank = self._encoding_preference_rank(encoding)
+            score = (matches, pref_rank, total_values)
+            if score > (best_matches, best_pref, best_total_values):
+                best_layer = layer
+                best_encoding = str(encoding).strip() if encoding else None
+                best_field = field_name
+                best_matches = matches
+                best_total_values = total_values
+                best_pref = pref_rank
+
+        return best_layer, best_encoding, best_field, max(best_matches, 0)
+
+    def _build_relinked_qml(
+        self,
+        qml_path: Optional[str],
+        raw_sym_files: Dict[str, str],
+        lookup_sym_files: Dict[str, str],
+    ) -> Tuple[Optional[str], int, int]:
+        if not qml_path or not os.path.exists(qml_path):
+            return None, 0, 0
+
+        try:
+            tree = ET.parse(qml_path)
+            root = tree.getroot()
+        except Exception:
+            return None, 0, 0
+
+        relinked = 0
+        total_images = 0
+        for prop in root.findall(".//layer/prop"):
+            value = str(prop.get("v") or "").strip()
+            if not value.lower().endswith(".png"):
+                continue
+            total_images += 1
+            symbol_name = os.path.splitext(os.path.basename(value))[0]
+            resolved = self._resolve_symbol_path(symbol_name, raw_sym_files, lookup_sym_files)
+            if not resolved:
+                continue
+            prop.set("v", resolved)
+            relinked += 1
+
+        if relinked <= 0:
+            return None, 0, total_images
+
+        out_path = os.path.join(
+            os.path.dirname(qml_path),
+            f"{os.path.splitext(os.path.basename(qml_path))[0]}_archtoolkit.qml",
+        )
+        try:
+            tree.write(out_path, encoding=GEOLOGY_QML_WRITE_ENCODING, xml_declaration=True)
+        except Exception:
+            return None, 0, total_images
+        return out_path, relinked, total_images
+
+    def _load_named_style(self, layer: QgsVectorLayer, style_path: str) -> bool:
+        try:
+            result = layer.loadNamedStyle(style_path)
+        except Exception:
+            return False
+
+        ok = False
+        if isinstance(result, tuple):
+            ok = bool(result[1]) if len(result) > 1 else bool(result[0])
+        else:
+            ok = bool(result)
+        if ok:
+            layer.triggerRepaint()
+        return ok
+
+    def apply_qml_style(self, layer: QgsVectorLayer, qml_path: Optional[str], sym_path: Optional[str]) -> bool:
+        if not qml_path or not os.path.exists(qml_path):
+            return False
+
+        raw_sym_files, lookup_sym_files = self._build_symbol_index(sym_path)
+        style_path, relinked_count, total_images = self._build_relinked_qml(
+            qml_path,
+            raw_sym_files,
+            lookup_sym_files,
+        )
+        target_style = style_path or qml_path
+        ok = self._load_named_style(layer, target_style)
+        if not ok:
+            return False
+
+        if style_path:
+            log_message(
+                f"KIGAM QML 스타일 적용: {layer.name()} ({relinked_count}/{total_images} symbols relinked)",
+                level=Qgis.Info,
+            )
+        else:
+            log_message(f"KIGAM QML 스타일 적용: {layer.name()}", level=Qgis.Info)
+        return True
+
+    def _build_unique_group_name(self, parent: QgsLayerTreeGroup, base_name: str) -> str:
+        existing = set()
+        try:
+            for child in parent.children():
+                try:
+                    existing.add(str(child.name() or "").strip())
+                except Exception:
+                    continue
+        except Exception:
+            existing = set()
+
+        if base_name not in existing:
+            return base_name
+
+        index = 2
+        while f"{base_name}_{index}" in existing:
+            index += 1
+        return f"{base_name}_{index}"
 
     def process_zip(
         self,
@@ -132,14 +651,13 @@ class KigamZipProcessor:
         run_id: str,
     ) -> List[QgsVectorLayer]:
         zip_basename = os.path.splitext(os.path.basename(zip_path))[0]
-        extract_dir = os.path.join(self.extract_root, zip_basename)
+        extract_dir = self._build_extract_dir(zip_path, run_id)
 
         try:
-            if os.path.exists(extract_dir):
-                shutil.rmtree(extract_dir)
-            os.makedirs(extract_dir, exist_ok=True)
+            os.makedirs(extract_dir, exist_ok=False)
         except Exception:
-            pass
+            log_message(f"KIGAM ZIP 임시 폴더 생성 실패: {extract_dir}", level=Qgis.Warning)
+            return []
 
         # Extract ZIP
         try:
@@ -167,25 +685,47 @@ class KigamZipProcessor:
                 shp_path = os.path.join(root, fname)
                 layer_name = os.path.splitext(fname)[0]
 
-                layer = QgsVectorLayer(shp_path, layer_name, "ogr")
-                try:
-                    layer.setProviderEncoding("cp949")
-                except Exception:
-                    pass
-                if not layer.isValid():
+                qml_path = self._find_sidecar_qml(root, layer_name)
+                layer, chosen_encoding, best_field, match_count = self._load_layer_with_best_encoding(
+                    shp_path,
+                    layer_name,
+                    sym_path=sym_path,
+                    qml_path=qml_path,
+                )
+                if layer is None or not layer.isValid():
                     log_message(f"KIGAM 레이어 로드 실패: {shp_path}", level=Qgis.Warning)
                     continue
+
+                if chosen_encoding:
+                    try:
+                        layer.setProviderEncoding(chosen_encoding)
+                    except Exception:
+                        pass
 
                 QgsProject.instance().addMapLayer(layer, False)
                 loaded_layers.append(layer)
 
-                if apply_style and sym_path:
+                if chosen_encoding or best_field:
+                    log_message(
+                        f"KIGAM layer load: {layer.name()} encoding={chosen_encoding or 'provider-default'} "
+                        f"style_field={best_field or '-'} matches={match_count}",
+                        level=Qgis.Info,
+                    )
+
+                style_loaded = False
+                if apply_style and qml_path:
                     try:
-                        self.apply_sym_styling(layer, sym_path)
+                        style_loaded = self.apply_qml_style(layer, qml_path, sym_path)
+                    except Exception as e:
+                        log_message(f"KIGAM QML ?곸슜 ?ㅽ뙣: {layer.name()} ({e})", level=Qgis.Warning)
+
+                if apply_style and sym_path and not style_loaded:
+                    try:
+                        self.apply_sym_styling(layer, sym_path, qml_path=qml_path)
                     except Exception as e:
                         log_message(f"KIGAM 스타일 적용 실패: {layer.name()} ({e})", level=Qgis.Warning)
 
-                if apply_labels and ("Litho" in layer_name or "LITHO" in layer_name):
+                if apply_labels and GEOLOGY_LITHO_LAYER_KEYWORD and GEOLOGY_LITHO_LAYER_KEYWORD in layer_name.lower():
                     try:
                         self.apply_labeling(layer, font_family, font_size)
                     except Exception:
@@ -205,37 +745,20 @@ class KigamZipProcessor:
         self.organize_layers(loaded_layers, zip_basename)
         return loaded_layers
 
-    def apply_sym_styling(self, layer: QgsVectorLayer, sym_path: str) -> None:
-        sym_files = {
-            os.path.splitext(f)[0]: os.path.join(sym_path, f)
-            for f in os.listdir(sym_path)
-            if f.lower().endswith(".png")
-        }
-        if not sym_files:
+    def apply_sym_styling(self, layer: QgsVectorLayer, sym_path: str, *, qml_path: Optional[str] = None) -> None:
+        raw_sym_files, lookup_sym_files = self._build_symbol_index(sym_path)
+        if not raw_sym_files:
             return
 
-        # Find best matching field
-        best_field = None
-        max_matches = 0
-        priority_fields = ["LITHOIDX", "TYPE", "ASGN_CODE", "SIGN", "CODE", "AGEIDX"]
-        all_fields = [f.name() for f in layer.fields()]
-        sorted_fields = [f for f in priority_fields if f in all_fields] + [f for f in all_fields if f not in priority_fields]
-
-        for field_name in sorted_fields:
-            idx = layer.fields().indexOf(field_name)
-            try:
-                unique_values = layer.uniqueValues(idx)
-            except Exception:
-                unique_values = set()
-            matches = 0
-            for val in unique_values:
-                if str(val) in sym_files:
-                    matches += 1
-            if matches > max_matches:
-                max_matches = matches
-                best_field = field_name
-
-        if not best_field:
+        qml_field, _, qml_lookup_map = self._parse_qml_mapping(qml_path)
+        best_field, max_matches, _ = self._find_best_matching_field(
+            layer,
+            raw_sym_files,
+            lookup_sym_files,
+            qml_field,
+            qml_lookup_map,
+        )
+        if not best_field or max_matches <= 0:
             return
 
         categories = []
@@ -244,17 +767,22 @@ class KigamZipProcessor:
             val_str = str(val)
             symbol = None
 
-            if val_str in sym_files:
-                png_path = sym_files[val_str]
+            png_path = self._resolve_symbol_with_qml_map(
+                val,
+                raw_sym_files,
+                lookup_sym_files,
+                qml_lookup_map,
+            )
+            if png_path:
                 if layer.geometryType() == QgsWkbTypes.PointGeometry:
                     symbol_layer = QgsRasterMarkerSymbolLayer(png_path)
-                    symbol_layer.setSize(6)
+                    symbol_layer.setSize(GEOLOGY_POINT_MARKER_SIZE)
                     symbol = QgsMarkerSymbol()
                     symbol.changeSymbolLayer(0, symbol_layer)
                 elif layer.geometryType() == QgsWkbTypes.PolygonGeometry:
                     symbol_layer = QgsRasterFillSymbolLayer()
                     symbol_layer.setImageFilePath(png_path)
-                    symbol_layer.setWidth(10.0)
+                    symbol_layer.setWidth(GEOLOGY_FILL_SYMBOL_WIDTH)
                     symbol = QgsFillSymbol()
                     symbol.changeSymbolLayer(0, symbol_layer)
 
@@ -277,7 +805,7 @@ class KigamZipProcessor:
     def apply_labeling(self, layer: QgsVectorLayer, font_family: str, font_size: int) -> None:
         settings = QgsPalLayerSettings()
         fields = [f.name() for f in layer.fields()]
-        label_field = "LITHOIDX" if "LITHOIDX" in fields else "LITHONAME" if "LITHONAME" in fields else fields[0]
+        label_field = next((name for name in GEOLOGY_LABEL_FIELD_CANDIDATES if name in fields), fields[0])
         settings.fieldName = label_field
         text_format = QgsTextFormat()
         text_format.setFont(QFont(font_family))
@@ -298,18 +826,18 @@ class KigamZipProcessor:
         parent = root.findGroup(PARENT_GROUP_NAME)
         if parent is None:
             parent = root.insertGroup(0, PARENT_GROUP_NAME)
-        run_group = parent.insertGroup(0, f"KIGAM_{group_name}")
+        run_group = parent.insertGroup(0, self._build_unique_group_name(parent, f"KIGAM_{group_name}"))
 
         def _priority(layer: QgsVectorLayer) -> int:
             name = (layer.name() or "").lower()
             geom = layer.geometryType()
 
             # Reference / sheet helpers
-            if "frame" in name:
+            if any(keyword in name for keyword in GEOLOGY_FRAME_LAYER_KEYWORDS):
                 return 0
 
             # Polygons should sit below linework so labels/lines aren't hidden by fills.
-            if "litho" in name:
+            if GEOLOGY_LITHO_LAYER_KEYWORD and GEOLOGY_LITHO_LAYER_KEYWORD in name:
                 return 30
             if geom == QgsWkbTypes.PolygonGeometry:
                 return 25
@@ -334,7 +862,7 @@ class KigamZipProcessor:
 
         def _hide_by_default(layer: QgsVectorLayer) -> bool:
             name = (layer.name() or "").lower()
-            return ("frame" in name) or ("crosssection" in name)
+            return any(keyword in name for keyword in GEOLOGY_REFERENCE_HIDE_KEYWORDS)
 
         scored: List[Tuple[int, int, QgsVectorLayer]] = []
         for i, layer in enumerate(layers):
@@ -394,8 +922,8 @@ class GeologyZipDialog(QtWidgets.QDialog):
         form_zip.addRow("라벨 글꼴:", self.cmbFont)
 
         self.spinFontSize = QtWidgets.QSpinBox()
-        self.spinFontSize.setRange(5, 50)
-        self.spinFontSize.setValue(10)
+        self.spinFontSize.setRange(GEOLOGY_UI_FONT_SIZE_MIN, GEOLOGY_UI_FONT_SIZE_MAX)
+        self.spinFontSize.setValue(GEOLOGY_UI_FONT_SIZE_DEFAULT)
         form_zip.addRow("라벨 크기:", self.spinFontSize)
 
         self.chkApplyStyle = QtWidgets.QCheckBox("표준 심볼(sym 폴더) 적용")
@@ -449,16 +977,16 @@ class GeologyZipDialog(QtWidgets.QDialog):
         form_rst.addRow("값 필드:", self.cmbField)
 
         self.spinPixel = QtWidgets.QDoubleSpinBox()
-        self.spinPixel.setRange(0.1, 10000.0)
+        self.spinPixel.setRange(GEOLOGY_UI_PIXEL_MIN, GEOLOGY_UI_PIXEL_MAX)
         self.spinPixel.setSingleStep(1.0)
-        self.spinPixel.setValue(10.0)
+        self.spinPixel.setValue(GEOLOGY_UI_PIXEL_DEFAULT)
         self.spinPixel.setSuffix(" m")
         form_rst.addRow("해상도(픽셀 크기):", self.spinPixel)
 
         self.spinNoData = QtWidgets.QDoubleSpinBox()
-        self.spinNoData.setRange(-9999999.0, 9999999.0)
-        self.spinNoData.setDecimals(2)
-        self.spinNoData.setValue(-9999.0)
+        self.spinNoData.setRange(GEOLOGY_UI_NODATA_MIN, GEOLOGY_UI_NODATA_MAX)
+        self.spinNoData.setDecimals(GEOLOGY_UI_NODATA_DECIMALS)
+        self.spinNoData.setValue(GEOLOGY_UI_NODATA_DEFAULT)
         form_rst.addRow("NoData 값:", self.spinNoData)
 
         vbox.addLayout(form_rst)
@@ -525,9 +1053,8 @@ class GeologyZipDialog(QtWidgets.QDialog):
             self.txtZip.setText(path)
 
     def _browse_out_file(self):
-        ext = self.cmbFormat.currentData() or "tif"
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self, "래스터 저장", "", f"GeoTIFF (*.tif);;ASCII Grid (*.asc)"
+            self, "래스터 저장", "", "GeoTIFF (*.tif);;ASCII Grid (*.asc)"
         )
         if path:
             self.txtOutFile.setText(path)
@@ -606,7 +1133,12 @@ class GeologyZipDialog(QtWidgets.QDialog):
                 try:
                     lname = str(layer.name() or "").lower()
                     fields_up = {str(f.name() or "").upper() for f in layer.fields()}
-                    if ("litho" not in lname) and ("LITHOIDX" not in fields_up) and ("LITHONAME" not in fields_up):
+                    candidate_fields_up = {name.upper() for name in GEOLOGY_LABEL_FIELD_CANDIDATES}
+                    if (
+                        GEOLOGY_LITHO_LAYER_KEYWORD
+                        and GEOLOGY_LITHO_LAYER_KEYWORD not in lname
+                        and not any(name in fields_up for name in candidate_fields_up)
+                    ):
                         continue
                 except Exception:
                     continue
@@ -696,8 +1228,7 @@ class GeologyZipDialog(QtWidgets.QDialog):
             common &= set(f.name() for f in lyr.fields())
         if not common:
             return None
-        priority = ["LITHOIDX", "AGEIDX", "LITHONAME", "TYPE", "ASGN_CODE", "SIGN", "CODE"]
-        for p in priority:
+        for p in GEOLOGY_RASTER_FIELD_PRIORITY:
             if p in common:
                 return p
         return sorted(common)[0]
@@ -727,7 +1258,7 @@ class GeologyZipDialog(QtWidgets.QDialog):
                 return up[cand]
 
         # Common KIGAM pairs / fallbacks
-        for cand in ("LITHONAME", "AGENAME", "NAME", "KOR_NAME", "ENG_NAME"):
+        for cand in GEOLOGY_NAME_FIELD_CANDIDATES:
             if cand in up and up[cand] != base:
                 return up[cand]
 
@@ -1126,7 +1657,7 @@ class GeologyZipDialog(QtWidgets.QDialog):
                 if field == "(자동 선택)" or lyr.fields().indexOf(field) < 0:
                     # Choose best field for this layer
                     field = None
-                    for p in ["LITHOIDX", "AGEIDX", "LITHONAME", "TYPE", "ASGN_CODE", "SIGN", "CODE"]:
+                    for p in GEOLOGY_RASTER_FIELD_PRIORITY:
                         if lyr.fields().indexOf(p) >= 0:
                             field = p
                             break
@@ -1193,7 +1724,14 @@ class GeologyZipDialog(QtWidgets.QDialog):
         )
         if layers:
             try:
-                frame_layer = next((l for l in layers if "frame" in l.name().lower()), None)
+                frame_layer = next(
+                    (
+                        layer_obj
+                        for layer_obj in layers
+                        if any(keyword in layer_obj.name().lower() for keyword in GEOLOGY_FRAME_LAYER_KEYWORDS)
+                    ),
+                    None,
+                )
                 target = frame_layer or layers[0]
                 if target and target.isValid():
                     canvas = self.iface.mapCanvas()

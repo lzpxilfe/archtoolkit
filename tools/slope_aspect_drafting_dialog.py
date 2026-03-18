@@ -66,6 +66,7 @@ from qgis.core import (
 
 import processing
 
+from .config import get_output_group_name
 from .utils import cleanup_files, push_message, restore_ui_focus, set_archtoolkit_layer_metadata
 from .live_log_dialog import ensure_live_log_dialog
 from .help_dialog import show_help_dialog
@@ -278,7 +279,10 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
             # Prepare layer tree group
             project = QgsProject.instance()
             root = project.layerTreeRoot()
-            parent_name = "ArchToolkit - 도면화(경사도/사면방향) (Slope/Aspect Drafting)"
+            parent_name = get_output_group_name(
+                "slope_aspect_drafting",
+                "ArchToolkit - 도면화(경사도/사면방향) (Slope/Aspect Drafting)",
+            )
             parent_group = root.findGroup(parent_name)
             if parent_group is None:
                 parent_group = root.insertGroup(0, parent_name)

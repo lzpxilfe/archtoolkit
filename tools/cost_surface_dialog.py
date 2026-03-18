@@ -14,6 +14,7 @@ import os
 import threading
 import tempfile
 import uuid
+import weakref
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
@@ -56,13 +57,16 @@ from qgis.core import (
 )
 from qgis.gui import QgsMapToolEmitPoint, QgsRubberBand, QgsSnapIndicator
 
+from .config import get_output_group_name
 from .utils import (
     cleanup_files,
     is_metric_crs,
     log_message,
+    open_gdal_dataset_from_qgis_source,
     push_message,
     restore_ui_focus,
     set_archtoolkit_layer_metadata,
+    split_qgis_source_path as shared_split_qgis_source_path,
     transform_point,
 )
 from .live_log_dialog import ensure_live_log_dialog
@@ -158,10 +162,7 @@ def _window_geotransform(gt, xoff, yoff):
 
 def _split_qgis_source_path(source: str) -> str:
     """Best-effort: strip QGIS URI options (e.g., `|layername=...`) for GDAL/OGR."""
-    s = (str(source or "")).strip()
-    if not s:
-        return ""
-    return (s.split("|", 1)[0] or "").strip()
+    return shared_split_qgis_source_path(source)
 
 
 def _split_qgis_ogr_uri(source: str):
@@ -1109,7 +1110,7 @@ class CostSurfaceWorker(QgsTask):
             f"CostSurface: start (model={self.model_label or self.model_key}, diagonal={self.allow_diagonal}, buffer_m={self.buffer_m})",
             level=Qgis.Info,
         )
-        ds = gdal.Open(self.dem_source, gdal.GA_ReadOnly)
+        ds, opened_dem_source = open_gdal_dataset_from_qgis_source(self.dem_source, access=gdal.GA_ReadOnly)
         if ds is None:
             return CostTaskResult(ok=False, message="DEM을 GDAL로 열 수 없습니다.")
 
@@ -1689,7 +1690,7 @@ class CostSurfaceWorker(QgsTask):
             start_xy=(float(sx), float(sy)),
             end_xy=(float(ex), float(ey)) if has_end else None,
             dem_authid=self.dem_authid,
-            dem_source=self.dem_source,
+            dem_source=str(self.dem_source or opened_dem_source or ""),
             model_key=self.model_key,
             model_params=dict(self.model_params or {}),
             model_label=self.model_label,
@@ -1961,6 +1962,8 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
 
         self._task = None
         self._task_running = False
+        self._task_generation = 0
+        self._task_accept_results = False
         self._layer_temp_outputs = {}  # layer_id -> [temporary file paths]
         self._profile_payloads = {}  # path_layer_id -> payload dict
         self._profile_dialogs = {}  # path_layer_id -> dialog
@@ -2423,12 +2426,22 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
         model_label = self.cmbModel.currentText()
 
         canvas_crs = self.canvas.mapSettings().destinationCrs()
-        start_dem = transform_point(self._start_canvas, canvas_crs, dem_layer.crs())
+        start_dem = transform_point(self._start_canvas, canvas_crs, dem_layer.crs(), strict=True)
         end_dem = (
-            transform_point(self._end_canvas, canvas_crs, dem_layer.crs())
+            transform_point(self._end_canvas, canvas_crs, dem_layer.crs(), strict=True)
             if self._end_canvas
             else None
         )
+        if start_dem is None or (self._end_canvas and end_dem is None):
+            push_message(
+                self.iface,
+                "오류",
+                "시작점/도착점을 DEM 좌표계로 변환하지 못했습니다. 프로젝트 CRS와 DEM CRS를 확인하세요.",
+                level=2,
+                duration=8,
+            )
+            restore_ui_focus(self)
+            return
 
         model_params = {
             "tobler_base_kmh": float(self.spinToblerBaseKmh.value()),
@@ -2450,13 +2463,9 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
             "pandolf_terrain_factor": float(self.spinPandolfTerrainFactor.value()),
         }
 
-        self._set_running_ui(True)
-
-        def on_done(res):
-            self._task_running = False
-            self._task = None
-            self._set_running_ui(False)
-            self._handle_task_result(res)
+        self._task_generation += 1
+        task_generation = int(self._task_generation)
+        self._task_accept_results = True
 
         task = CostSurfaceWorker(
             dem_source=dem_layer.source(),
@@ -2478,10 +2487,20 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
             friction_raster_scale=friction_raster_scale,
             friction_vector_source=(friction_vector_layer.source() if use_friction_vector and friction_vector_layer else None),
             friction_vector_multiplier=friction_vector_multiplier,
-            on_done=on_done,
+            on_done=None,
         )
+        dialog_ref = weakref.ref(self)
+
+        def on_done(res, *, _dialog_ref=dialog_ref, _task=task, _generation=task_generation):
+            dialog = _dialog_ref()
+            if dialog is None:
+                return
+            dialog._on_task_done(_task, _generation, res)
+
+        task.on_done = on_done
         self._task = task
         self._task_running = True
+        self._set_running_ui(True)
         QgsApplication.taskManager().addTask(task)
         push_message(self.iface, "비용표면/최소비용경로", "분석을 시작했습니다. (QGIS 작업 관리자 확인)", level=0, duration=6)
 
@@ -2490,6 +2509,19 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
         self.btnPickPoints.setEnabled(not running)
         self.btnClearPoints.setEnabled(not running)
         self.btnClose.setEnabled(not running)
+
+    def _on_task_done(self, task, generation: int, res: CostTaskResult):
+        if self._task is not task or int(self._task_generation) != int(generation):
+            return
+        self._task_running = False
+        self._task = None
+        try:
+            self._set_running_ui(False)
+        except Exception:
+            pass
+        if not self._task_accept_results:
+            return
+        self._handle_task_result(res)
 
     def _handle_task_result(self, res: CostTaskResult):
         if not isinstance(res, CostTaskResult) or not res.ok:
@@ -2567,7 +2599,7 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
         project = QgsProject.instance()
         root = project.layerTreeRoot()
 
-        parent_name = "ArchToolkit - 비용표면/최소비용경로 (Cost Surface / LCP)"
+        parent_name = get_output_group_name("cost_surface", "ArchToolkit - 비용표면/최소비용경로 (Cost Surface / LCP)")
         parent_group = root.findGroup(parent_name)
         if parent_group is None:
             parent_group = root.insertGroup(0, parent_name)
@@ -3189,7 +3221,7 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
         interval_m: float,
         layer_name: str,
     ):
-        if not dem_source or not os.path.exists(str(dem_source)):
+        if not dem_source:
             return None
         if not path_coords or len(path_coords) < 2:
             return None
@@ -3197,7 +3229,7 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
         if interval_m <= 0:
             return None
 
-        ds = gdal.Open(str(dem_source), gdal.GA_ReadOnly)
+        ds, _opened_dem_source = open_gdal_dataset_from_qgis_source(dem_source, access=gdal.GA_ReadOnly)
         if ds is None:
             return None
         band = ds.GetRasterBand(1)
@@ -3361,14 +3393,14 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
         model_params = payload.get("model_params") or {}
         model_label = payload.get("model_label") or ""
 
-        if not dem_source or not os.path.exists(str(dem_source)):
+        if not dem_source:
             push_message(self.iface, "오류", "프로파일을 위해 DEM 소스를 찾을 수 없습니다.", level=2, duration=6)
             return
         if not start_xy or not end_xy:
             return
 
         try:
-            ds = gdal.Open(str(dem_source), gdal.GA_ReadOnly)
+            ds, _opened_dem_source = open_gdal_dataset_from_qgis_source(dem_source, access=gdal.GA_ReadOnly)
             if ds is None:
                 raise Exception("GDAL open failed")
             band = ds.GetRasterBand(1)
@@ -3598,13 +3630,15 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
     def _cleanup_for_close(self):
         """Cleanup when the dialog closes (keep project signals for later layer/temp cleanup)."""
         try:
+            self._task_accept_results = False
             if self._task_running and self._task is not None:
                 try:
                     self._task.cancel()
                 except Exception:
                     pass
-            self._task_running = False
-            self._task = None
+            else:
+                self._task_running = False
+                self._task = None
             self._reset_preview()
 
             try:
@@ -3624,13 +3658,15 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
     def _cleanup_for_unload(self):
         """Full cleanup for plugin unload/reload (disconnect signals, release handlers, clear temp tracking)."""
         try:
+            self._task_accept_results = False
             if self._task_running and self._task is not None:
                 try:
                     self._task.cancel()
                 except Exception:
                     pass
-            self._task_running = False
-            self._task = None
+            else:
+                self._task_running = False
+                self._task = None
         except Exception:
             pass
 

@@ -1,54 +1,23 @@
 [general]
 name=ArchToolkit
 qgisMinimumVersion=3.40
-description=고고학·문화유산 연구자를 위한 QGIS 종합 분석 툴킷 (Terrain/AHP/Viewshed/LOS/Cost/LCP/Network/DEM/Kriging/Contours/Profile/Styling/GeoChem/Geology/AI)
+qgisMaximumVersion=3.99
+description=Integrated archaeology toolkit for QGIS covering terrain, visibility, cost, geology, and AOI reporting workflows.
 version=0.1.0
-author=balguljang2
-email=balguljang2@example.com
-license=GPL v3
-repository=https://github.com/lzpxilfe/ar.git
+author=balguljang2 (lzpxilfe)
+email=lzpxilfe@gmail.com
+license=GPL-3.0-or-later
+repository=https://github.com/lzpxilfe/ar
 tracker=https://github.com/lzpxilfe/ar/issues
-homepage=https://github.com/lzpxilfe/ar
-category=Analysis
-tags=archaeology,cultural-heritage,dem,kriging,geostatistics,ahp,contour,dxf,viewshed,line-of-sight,terrain-profile,terrain-analysis,slope,aspect,cost-surface,least-cost-path,least-cost-network,network,ppa,visibility,wms,geochem,geology,geological-map,kigam,cadastral,overlap,map-styling,ai,고고학,문화유산,가시권,가시선,지형,단면,비용표면,최소비용경로,최소비용네트워크,근접성,지적도,중첩,지구화학도,지질도,크리깅,AHP,지오통계
+homepage=https://github.com/lzpxilfe/ar#readme
+category=Raster
+type=plugin
+tags=archaeology,cultural-heritage,terrain-analysis,viewshed,line-of-sight,cost-surface,least-cost-path,network-analysis,kriging,geology,geochem,ahp,qgis
 icon=icon.png
-experimental=false
+experimental=true
 deprecated=false
-about=ArchToolkit은 한국 고고학·문화유산 연구 환경에 최적화된 QGIS 분석 도구 모음입니다.
-  <br>
-  <i>"지식은 전유물이 아닙니다"</i>
-  <br>
-  <b>도구</b>
-  <ul>
-    <li><b>DEM 생성</b>: 등고선·표고점 기반 DEM 생성(TIN/IDW/Kriging(Lite)), 수치지형도(DXF) 코드 프리셋, (Kriging) 분산(_variance.tif) 출력
-    <li><b>등고선 추출</b>: DXF 레이어 필터링 또는 DEM에서 GDAL <code>gdal_contour</code> 기반 생성
-    <li><b>지적도 중첩 면적표</b>: 조사지역×필지 중첩 면적/비율 계산 + 중첩(클립) 레이어 생성
-    <li><b>지형 분석</b>: 경사/사면방향/TRI/TPI/Roughness/Slope Position 분석 + 분류/스타일
-    <li><b>AHP 입지적합도</b>: 환경변수(래스터)를 AHP(쌍대비교) 가중치로 통합해 적합도 래스터 생성 (CR 제공)
-    <li><b>경사도/사면방향 도면화</b>: AOI 기준 경사 래스터 + 사면방향(방위각) 화살표 레이어 생성
-    <li><b>지형 단면</b>: 다중 프로파일 저장, 지도-차트 연동(hover), AOI/벡터 오버레이, 경사/누적상승/구간 통계, CSV/이미지 export
-    <li><b>가시권/가시선(LOS)</b>: 단일/누적/선형/역방향 가시권, (옵션) AOI 가시면적/가시비율 통계, 가중 누적/표준화(0–100%), 히구치 거리대, LOS 프로파일, 곡률·굴절 옵션
-    <li><b>비용표면/최소비용경로</b>: DEM 경사 기반 이동 시간/에너지 모델 + LCP + 회랑(Least-cost corridor) + 마찰 레이어(래스터/벡터) + 등시간선/등에너지선(옵션)
-    <li><b>최소비용 네트워크</b>: 유적 간 LCP 기반 MST/k-NN/Hub 네트워크 + (옵션) 중심성 지표
-    <li><b>근접/가시성 네트워크</b>: 근접성(PPA) 그래프 + DEM 기반 상호가시성(Visibility) 그래프
-    <li><b>도면 시각화</b>: 한국 수치지형도(DXF) 레이어 분류/집계 + 카토그래피 스타일 + QML/프리셋 내보내기 + 코드 매핑(JSON) 커스터마이즈 + DEM 배경(옵션)
-    <li><b>지구화학도 수치화</b>: WMS RGB → 범례 기반 value/class 래스터 + (옵션) 구간 폴리곤/중심점
-    <li><b>지질도 ZIP 로더</b>: KIGAM 1:50,000 도엽 ZIP을 불러와 스타일/라벨 적용 + 벡터→래스터 변환
-    <li><b>AI 조사요약</b>: 조사지역(AOI) + 반경 내 결과 요약 → 보고서 형태 문장 생성 (무료: 로컬 요약 / 옵션: Gemini API) + 통계 CSV/번들 저장
-  </ul>
-  대부분의 도구는 실행 중 <b>실시간 작업 로그</b> 창을 통해 진행 상황을 확인할 수 있습니다.
-  <br>
-  <b>요구 사항</b>
-  <ul>
-    <li>QGIS 3.40 LTR 이상
-    <li>QGIS Processing + GDAL (기본 포함)
-  </ul>
-  <b>Python 의존성</b>
-  <ul>
-    <li><code>numpy</code> (대부분의 QGIS 배포판에 기본 포함, 별도 설치 불필요)
-  </ul>
-  <b>학술적 참고</b>
-  Wang et al. (1996) viewshed, Higuchi (1975) view zones, Saaty (1980) AHP, Matheron (1963) Kriging 등. 자세한 목록: <code>REFERENCES.md</code>
-  <br>
-  버그/제안: GitHub Issues (<code>tracker</code> 링크)
-changelog=0.1.0 - 첫 공개(베타) 릴리즈 (AHP 입지적합도, AI 조사요약, Kriging(Lite) 포함)
+about=ArchToolkit is an integrated QGIS plugin for archaeological and cultural-heritage workflows.
+  It includes DEM generation, terrain analysis, viewshed and line-of-sight tools, cost surface and least-cost path/network analysis, terrain profiles, cadastral overlap, map styling, GeoChem helpers, KIGAM geology ZIP loading, and AOI reporting.
+  Requirements: QGIS 3.40+, Processing, GDAL, and NumPy in the QGIS Python environment.
+  Optional service: Gemini API access for AI AOI reporting.
+changelog=0.1.0 - Initial public beta covering terrain, visibility, cost, network, geology, GeoChem, cadastral overlap, styling, and AOI reporting workflows.

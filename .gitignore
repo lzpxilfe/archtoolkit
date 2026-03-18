@@ -1,6 +1,7 @@
 __pycache__/
 *.py[cod]
 *$py.class
+.pytest_cache/
 .env
 .venv
 env/
@@ -8,10 +9,15 @@ venv/
 ENV/
 .vscode/
 .idea/
+.git/
 .agent/backups/
+.ruff_cache/
 .DS_Store
+Thumbs.db
 *.bak
 *.tmp
+build/
+dist/
 *.tif
 *.tiff
 *.gpkg
@@ -38,4 +44,3 @@ ENV/
 !AI.png
 !tools/geochem.png
 temp_*/
-C:\Users\nuri9\.gemini\antigravity\scratch\fix_viewshed.py

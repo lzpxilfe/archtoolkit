@@ -24,7 +24,6 @@ except Exception:  # pragma: no cover
     gdal = None
     ogr = None
 
-from qgis.PyQt.QtCore import QVariant
 from qgis.core import (
     Qgis,
     QgsCoordinateTransform,
@@ -40,7 +39,8 @@ from qgis.core import (
     QgsWkbTypes,
 )
 
-from .utils import get_archtoolkit_layer_metadata, is_metric_crs, log_message
+from .config import is_archtoolkit_group_name
+from .utils import get_archtoolkit_layer_metadata, is_metric_crs, log_message, open_gdal_dataset_from_qgis_source
 
 
 _NUMERIC_FIELD_CANDIDATES = (
@@ -75,6 +75,86 @@ _NUMERIC_FIELD_CANDIDATES = (
     "in_aoi_pct",
 )
 
+_TOOL_ANALYSIS_LABELS = {
+    "dem_generate": "DEM 생성",
+    "terrain_analysis": "지형 분석",
+    "viewshed": "가시권 분석",
+    "cost_surface": "비용표면/최소비용경로",
+    "cost_network": "최소비용 네트워크",
+    "spatial_network": "근접/가시성 네트워크",
+    "terrain_profile": "지형 단면",
+    "geochem": "지구화학도 수치화",
+    "kigam_zip": "KIGAM 지질도 불러오기",
+    "kigam_raster": "KIGAM 지질 래스터화",
+    "cadastral_overlap": "지적도 중첩",
+    "map_styling": "도면 시각화",
+    "ahp_suitability": "AHP 입지적합도",
+    "slope_aspect_drafting": "경사도/사면방향 도면화",
+    "contour_extract": "등고선 추출",
+}
+
+_TOOL_KIND_LABELS = {
+    ("terrain_analysis", "slope"): "경사도 래스터",
+    ("terrain_analysis", "aspect"): "사면방향 래스터",
+    ("terrain_analysis", "tri"): "TRI 래스터",
+    ("terrain_analysis", "roughness"): "거칠기 래스터",
+    ("terrain_analysis", "tpi"): "TPI 래스터",
+    ("terrain_analysis", "slope_position"): "사면 위치 분류",
+    ("viewshed", "aoi_stats"): "AOI 가시 통계",
+    ("viewshed", "union"): "합집합 가시권",
+    ("viewshed", "count"): "누적 가시 빈도",
+    ("viewshed", "weighted"): "가중 누적 가시권",
+    ("viewshed", "observer_points"): "관측점 레이어",
+    ("viewshed", "reverse_union"): "역가시권 합집합",
+    ("viewshed", "visual_imbalance"): "시각 불균형 지표",
+    ("viewshed", "reverse_visual_imbalance_reverse"): "역방향 시각 불균형",
+    ("viewshed", "analysis_radius_ring"): "분석 반경 링",
+    ("cost_surface", "path"): "최소비용 경로",
+    ("cost_surface", "cost_raster"): "누적 비용 래스터",
+    ("cost_surface", "energy_raster"): "누적 에너지 래스터",
+    ("cost_surface", "corridor"): "비용 회랑",
+    ("cost_network", "edges"): "네트워크 간선",
+    ("cost_network", "nodes"): "네트워크 노드",
+    ("spatial_network", "edges"): "공간 네트워크 간선",
+    ("spatial_network", "nodes_metrics"): "노드 지표",
+    ("terrain_profile", "profile_single"): "개별 단면",
+    ("terrain_profile", "profile_lines"): "단면선 모음",
+    ("geochem", "value_raster"): "연속값 래스터",
+    ("geochem", "class_raster"): "등급 래스터",
+    ("geochem", "zone_polygons"): "구간 폴리곤",
+    ("geochem", "zone_centroids"): "구간 중심점",
+    ("geochem", "zonal_stats"): "구간 통계",
+    ("cadastral_overlap", "overlap"): "중첩 결과",
+    ("cadastral_overlap", "overlap_by_aoi"): "AOI별 중첩 결과",
+    ("ahp_suitability", "suitability"): "적합도 래스터",
+    ("slope_aspect_drafting", "slope_grid"): "인쇄용 경사 래스터",
+    ("slope_aspect_drafting", "aspect_arrows"): "사면방향 화살표",
+    ("contour_extract", "contours"): "등고선 레이어",
+    ("dem_generate", "dem"): "DEM",
+    ("dem_generate", "kriging_variance"): "크리깅 분산 래스터",
+    ("kigam_zip", "vector"): "불러온 지질 벡터",
+    ("kigam_raster", "raster"): "지질 범주형 래스터",
+}
+
+_PARAM_LABELS = {
+    "points_n": "관측점 수",
+    "max_dist_m": "최대 분석거리",
+    "classification": "분류 체계",
+    "network_mode": "네트워크 모드",
+    "cost_mode": "비용 기준",
+    "model_label": "이동 모델",
+    "distance_m": "거리",
+    "samples": "샘플 수",
+    "preset_label": "프리셋",
+    "field": "값 필드",
+    "pixel": "픽셀 크기",
+    "split_by_feature": "AOI별 분리",
+    "layer_name": "레이어명",
+    "title": "지표 제목",
+    "raster_name": "원본 래스터",
+    "aoi_layer": "AOI 레이어",
+}
+
 
 def _split_qgis_source_path(src: str) -> str:
     try:
@@ -82,6 +162,259 @@ def _split_qgis_source_path(src: str) -> str:
         return (s.split("|", 1)[0] or "").strip()
     except Exception:
         return str(src or "").strip()
+
+
+def _fmt_number_text(value: Any, *, digits: int = 1) -> str:
+    try:
+        if value is None:
+            return "-"
+        x = float(value)
+        if not math.isfinite(x):
+            return "-"
+        return f"{x:,.{int(digits)}f}"
+    except Exception:
+        return str(value)
+
+
+def _tool_analysis_label(tool_id: str) -> str:
+    key = str(tool_id or "").strip()
+    if not key:
+        return ""
+    return _TOOL_ANALYSIS_LABELS.get(key, key.replace("_", " ").strip())
+
+
+def _tool_result_label(tool_id: str, kind: str) -> str:
+    key = (str(tool_id or "").strip(), str(kind or "").strip())
+    if key in _TOOL_KIND_LABELS:
+        return _TOOL_KIND_LABELS[key]
+    kind0 = key[1]
+    if not kind0:
+        return "분석 결과"
+    return kind0.replace("_", " ").strip()
+
+
+def _numeric_field_mean(stats: Dict[str, Any], field_name: str) -> Optional[float]:
+    try:
+        numeric = stats.get("numeric_fields") or {}
+        field = numeric.get(field_name) or {}
+        value = field.get("mean")
+        if value is None:
+            return None
+        x = float(value)
+        return x if math.isfinite(x) else None
+    except Exception:
+        return None
+
+
+def _describe_param_value(key: str, value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    key0 = str(key or "").strip()
+    label = _PARAM_LABELS.get(key0, key0.replace("_", " ").strip())
+    if not label:
+        return None
+    try:
+        if isinstance(value, bool):
+            return f"{label}: {'예' if value else '아니오'}"
+        if isinstance(value, (int, float)) and math.isfinite(float(value)):
+            unit = ""
+            if key0.endswith("_m"):
+                unit = " m"
+            elif key0.endswith("_pct"):
+                unit = " %"
+            return f"{label}: {_fmt_number_text(value)}{unit}"
+        if isinstance(value, list):
+            if key0 == "criteria":
+                return f"기준 수: {len(value)}개"
+            preview = ", ".join(str(v) for v in value[:4])
+            if preview:
+                return f"{label}: {preview}"
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        return f"{label}: {text}"
+    except Exception:
+        return None
+
+
+def _interpret_archtoolkit_layer(item: Dict[str, Any]) -> Dict[str, Any]:
+    meta = item.get("archtoolkit") or {}
+    if not isinstance(meta, dict):
+        return {}
+
+    tool_id = str(meta.get("tool_id") or "").strip()
+    kind = str(meta.get("kind") or "").strip()
+    params = meta.get("params") or {}
+    if not isinstance(params, dict):
+        params = {}
+    stats = item.get("stats") or {}
+    if not isinstance(stats, dict):
+        stats = {}
+
+    analysis = _tool_analysis_label(tool_id)
+    result_label = _tool_result_label(tool_id, kind)
+    summary = f"{analysis}의 {result_label}입니다." if analysis else f"{result_label}입니다."
+
+    notes: List[str] = []
+    for key in (
+        "model_label",
+        "network_mode",
+        "cost_mode",
+        "classification",
+        "preset_label",
+        "field",
+        "pixel",
+        "raster_name",
+        "aoi_layer",
+        "points_n",
+        "max_dist_m",
+        "distance_m",
+        "samples",
+        "split_by_feature",
+        "title",
+    ):
+        text = _describe_param_value(key, params.get(key))
+        if text:
+            notes.append(text)
+
+    if tool_id == "ahp_suitability":
+        criteria = params.get("criteria") or []
+        if isinstance(criteria, list) and criteria:
+            notes.append(f"기준 수: {len(criteria)}개")
+        cr_value = params.get("consistency_ratio")
+        if cr_value is not None:
+            notes.append(f"일관성비율(CR): {_fmt_number_text(cr_value, digits=3)}")
+        method = params.get("suitability_method")
+        if method:
+            notes.append(f"합성 방식: {str(method).replace('_', ' ')}")
+
+    metrics: List[str] = []
+    if item.get("type") == "vector":
+        features = stats.get("features")
+        if features:
+            metrics.append(f"겹치는 피처 {int(features):,}개")
+        if "total_length_m" in stats:
+            metrics.append(f"총 길이 {_fmt_number_text(stats.get('total_length_m'))} m")
+        if "total_area_m2" in stats:
+            metrics.append(f"총 면적 {_fmt_number_text(stats.get('total_area_m2'))} ㎡")
+    elif item.get("type") == "raster":
+        if stats.get("count"):
+            metrics.append(
+                "래스터 값 min/mean/max = "
+                f"{_fmt_number_text(stats.get('min'), digits=3)} / "
+                f"{_fmt_number_text(stats.get('mean'), digits=3)} / "
+                f"{_fmt_number_text(stats.get('max'), digits=3)}"
+            )
+        if "gt_0_5_pct" in stats:
+            metrics.append(f"0.5 초과 비율 {_fmt_number_text(stats.get('gt_0_5_pct'))} %")
+
+    special_fields = (
+        ("vis_pct", "가시비율"),
+        ("vis_m2", "가시면적"),
+        ("dist_m", "거리"),
+        ("time_min", "이동시간"),
+        ("energy_kcal", "에너지"),
+        ("in_aoi_pct", "AOI 중첩비율"),
+        ("distance", "단면 거리"),
+        ("min_elev", "최저고도"),
+        ("max_elev", "최고고도"),
+    )
+    for field_name, label in special_fields:
+        mean_value = _numeric_field_mean(stats, field_name)
+        if mean_value is None:
+            continue
+        suffix = ""
+        if field_name.endswith("_pct"):
+            suffix = " %"
+        elif field_name.endswith("_m") or field_name in ("distance", "min_elev", "max_elev", "dist_m"):
+            suffix = " m"
+        elif field_name == "time_min":
+            suffix = " min"
+        elif field_name == "energy_kcal":
+            suffix = " kcal"
+        metrics.append(f"{label} 평균 {_fmt_number_text(mean_value)}{suffix}")
+
+    top_values = stats.get("top_values") or []
+    top_field = str(stats.get("top_field") or "").strip()
+    if top_field and isinstance(top_values, list) and top_values:
+        preview = ", ".join(
+            f"{str(d.get('value') or '')}={int(d.get('count') or 0):,}"
+            for d in top_values[:3]
+            if isinstance(d, dict)
+        )
+        if preview:
+            metrics.append(f"{top_field} 상위값: {preview}")
+
+    out = {
+        "analysis": analysis,
+        "result_label": result_label,
+        "summary": summary,
+        "notes": notes[:6],
+        "key_metrics": metrics[:6],
+    }
+    if tool_id:
+        out["tool_id"] = tool_id
+    if kind:
+        out["kind"] = kind
+    return out
+
+
+def _summarize_archtoolkit_runs(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    buckets: Dict[str, Dict[str, Any]] = {}
+    for item in items:
+        meta = item.get("archtoolkit") or {}
+        if not isinstance(meta, dict):
+            continue
+        run_id = str(meta.get("run_id") or "").strip()
+        tool_id = str(meta.get("tool_id") or "").strip()
+        if not run_id or not tool_id:
+            continue
+        interp = item.get("archtoolkit_interpretation") or {}
+        bucket = buckets.setdefault(
+            run_id,
+            {
+                "run_id": run_id,
+                "tool_id": tool_id,
+                "analysis": str(interp.get("analysis") or _tool_analysis_label(tool_id)),
+                "layer_names": [],
+                "result_labels": [],
+                "key_metrics": [],
+            },
+        )
+        name = str(item.get("name") or "").strip()
+        if name and name not in bucket["layer_names"]:
+            bucket["layer_names"].append(name)
+        result_label = str(interp.get("result_label") or "").strip()
+        if result_label and result_label not in bucket["result_labels"]:
+            bucket["result_labels"].append(result_label)
+        for metric in interp.get("key_metrics") or []:
+            text = str(metric or "").strip()
+            if text and text not in bucket["key_metrics"]:
+                bucket["key_metrics"].append(text)
+
+    out = []
+    for run_id, bucket in buckets.items():
+        analysis = str(bucket.get("analysis") or "").strip()
+        results = list(bucket.get("result_labels") or [])
+        layer_names = list(bucket.get("layer_names") or [])
+        summary = f"{analysis} 실행 묶음"
+        if results:
+            summary += f" ({', '.join(results[:3])})"
+        out.append(
+            {
+                "run_id": run_id,
+                "tool_id": str(bucket.get("tool_id") or ""),
+                "analysis": analysis,
+                "layer_count": len(layer_names),
+                "layer_names": layer_names,
+                "result_labels": results,
+                "summary": summary,
+                "key_metrics": list(bucket.get("key_metrics") or [])[:6],
+            }
+        )
+    out.sort(key=lambda d: (str(d.get("analysis") or ""), str(d.get("run_id") or "")))
+    return out
 
 
 def _safe_distance_area(crs) -> QgsDistanceArea:
@@ -159,13 +492,13 @@ def is_archtoolkit_layer(layer: QgsMapLayer) -> bool:
     except Exception:
         pass
     try:
-        # Many tools place outputs under an "ArchToolkit - ..." layer tree group.
+        # Fall back to configured ArchToolkit output groups when metadata is unavailable.
         root = QgsProject.instance().layerTreeRoot()
         node = root.findLayer(layer.id())
         cur = node.parent() if node is not None else None
         while cur is not None and cur != root:
             try:
-                if str(cur.name() or "").startswith("ArchToolkit -"):
+                if is_archtoolkit_group_name(str(cur.name() or "")):
                     return True
             except Exception:
                 pass
@@ -417,19 +750,19 @@ def _vector_layer_stats_in_geom(
 
 
 def _raster_stats_in_geom(
-    raster_path: str,
+    raster_source: str,
     geom: QgsGeometry,
     *,
     max_pixels: int = 4_000_000,  # cap for memory safety
 ) -> Optional[Dict[str, Any]]:
     if np is None or gdal is None or ogr is None:
         return None
-    if not raster_path or not os.path.exists(str(raster_path)):
+    if not raster_source:
         return None
     if geom is None or geom.isEmpty():
         return None
 
-    ds = gdal.Open(str(raster_path), gdal.GA_ReadOnly)
+    ds, _opened_source = open_gdal_dataset_from_qgis_source(str(raster_source))
     if ds is None:
         return None
     band = ds.GetRasterBand(1)
@@ -637,6 +970,13 @@ def build_aoi_context(
         aoi_centroid_pt = None
 
     group_prefix = str(group_path_prefix or "").strip().strip("/")
+    layer_limit = None
+    if not layer_ids:
+        try:
+            layer_limit = max(1, int(max_layers))
+        except Exception:
+            layer_limit = 40
+
     if layer_ids:
         map_layers = QgsProject.instance().mapLayers()
         ordered = []
@@ -739,16 +1079,21 @@ def build_aoi_context(
                 pass
             src_path = _split_qgis_source_path(lyr.source())
             item["source"] = os.path.basename(src_path) if src_path else ""
-            if src_path and os.path.exists(src_path):
-                try:
-                    item["stats"] = _raster_stats_in_geom(src_path, g_layer)
-                except Exception:
-                    item["stats"] = None
-            else:
+            try:
+                item["stats"] = _raster_stats_in_geom(str(lyr.source() or ""), g_layer)
+            except Exception:
                 item["stats"] = None
 
+        if meta:
+            try:
+                interp = _interpret_archtoolkit_layer(item)
+                if interp:
+                    item["archtoolkit_interpretation"] = interp
+            except Exception:
+                pass
+
         summaries.append(item)
-        if len(summaries) >= int(max_layers):
+        if layer_limit is not None and len(summaries) >= layer_limit:
             break
 
     ctx: Dict[str, Any] = {
@@ -761,6 +1106,7 @@ def build_aoi_context(
         "radius_m": float(r),
         "buffer_area_m2": buf_area,
         "layers": summaries,
+        "archtoolkit_runs": _summarize_archtoolkit_runs(summaries),
         "options": {
             "selected_only": bool(selected_only),
             "archtoolkit_only": bool(only_archtoolkit_layers),
@@ -847,6 +1193,9 @@ def export_aoi_context_csv(
             "kind",
             "units",
             "created_at",
+            "analysis_label",
+            "result_label",
+            "interpretation_summary",
             # Common vector stats
             "features",
             "scanned",
@@ -876,6 +1225,9 @@ def export_aoi_context_csv(
                 meta = lyr.get("archtoolkit") or {}
                 if not isinstance(meta, dict):
                     meta = {}
+                interp = lyr.get("archtoolkit_interpretation") or {}
+                if not isinstance(interp, dict):
+                    interp = {}
                 stats = lyr.get("stats") or {}
                 if not isinstance(stats, dict):
                     stats = {}
@@ -907,6 +1259,9 @@ def export_aoi_context_csv(
                     "kind": _as_text(meta.get("kind")),
                     "units": _as_text(meta.get("units")),
                     "created_at": _as_text(meta.get("created_at")),
+                    "analysis_label": _as_text(interp.get("analysis")),
+                    "result_label": _as_text(interp.get("result_label")),
+                    "interpretation_summary": _as_text(interp.get("summary")),
                     # vector stats
                     "features": _as_text(stats.get("features")),
                     "scanned": _as_text(stats.get("scanned")),

@@ -42,6 +42,7 @@ from qgis.core import (
 )
 from qgis.gui import QgsMapLayerComboBox
 
+from .config import get_output_group_name
 from .live_log_dialog import ensure_live_log_dialog
 from .utils import log_message, push_message, restore_ui_focus
 from .utils import set_archtoolkit_layer_metadata
@@ -322,7 +323,7 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
         # Prepare output group (lazy-create run group only when at least one layer is added)
         project = QgsProject.instance()
         root = project.layerTreeRoot()
-        parent_name = "ArchToolkit - Cadastral"
+        parent_name = get_output_group_name("cadastral", "ArchToolkit - Cadastral")
         parent_group = root.findGroup(parent_name)
         if parent_group is None:
             parent_group = root.insertGroup(0, parent_name)

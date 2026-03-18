@@ -12,11 +12,10 @@ from __future__ import annotations
 import json
 import os
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Optional, Set
 
 from qgis.PyQt import QtWidgets
 from qgis.PyQt.QtCore import QSettings, Qt
-from qgis.PyQt.QtGui import QIcon
 
 from qgis.core import QgsLayerTreeGroup, QgsMapLayerProxyModel, QgsProject, QgsRasterLayer, QgsVectorLayer
 from qgis.gui import QgsMapLayerComboBox  # noqa: F401 (needed for custom widget)
@@ -24,11 +23,25 @@ from qgis.gui import QgsMapLayerComboBox  # noqa: F401 (needed for custom widget
 from . import ai_aoi_summary
 from . import ai_gemini
 from . import ai_local_summarizer
+from .help_dialog import show_help_dialog
 from .live_log_dialog import ensure_live_log_dialog
+from .ui_helpers import apply_hint_label_style, create_hint_label, set_plugin_window_icon
 from .utils import log_message, push_message, restore_ui_focus
 
 
 _SETTINGS_PREFIX = "ArchToolkit/ai/report"
+_PROJECT_CACHE_INVALIDATION_SIGNALS = ("layersAdded", "layersRemoved", "cleared")
+_LAYER_CACHE_INVALIDATION_SIGNALS = (
+    "selectionChanged",
+    "attributeValueChanged",
+    "featureAdded",
+    "featureDeleted",
+    "updatedFields",
+    "dataChanged",
+    "styleChanged",
+    "nameChanged",
+    "layerModified",
+)
 
 
 class _LayerMultiSelectDialog(QtWidgets.QDialog):
@@ -49,6 +62,7 @@ class _LayerMultiSelectDialog(QtWidgets.QDialog):
         self._apply_filter("")
 
     def _setup_ui(self):
+        self.setMinimumSize(760, 620)
         layout = QtWidgets.QVBoxLayout(self)
 
         hint = QtWidgets.QLabel(
@@ -70,7 +84,13 @@ class _LayerMultiSelectDialog(QtWidgets.QDialog):
 
         self.listLayers = QtWidgets.QListWidget()
         self.listLayers.setAlternatingRowColors(True)
+        self.listLayers.itemChanged.connect(lambda *_args: self._update_selection_summary())
         layout.addWidget(self.listLayers, 1)
+
+        self.lblSelectionSummary = QtWidgets.QLabel("후보 레이어를 확인하는 중입니다.")
+        self.lblSelectionSummary.setWordWrap(True)
+        self.lblSelectionSummary.setStyleSheet("color:#455a64;")
+        layout.addWidget(self.lblSelectionSummary)
 
         quick = QtWidgets.QHBoxLayout()
         self.btnCheckVisible = QtWidgets.QPushButton("보이는 것 전체 선택")
@@ -114,6 +134,7 @@ class _LayerMultiSelectDialog(QtWidgets.QDialog):
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
             item.setCheckState(Qt.Checked if lyr.id() in self._preselected else Qt.Unchecked)
             self.listLayers.addItem(item)
+        self._update_selection_summary()
 
     def _apply_filter(self, text: str):
         q = str(text or "").strip().lower()
@@ -123,6 +144,7 @@ class _LayerMultiSelectDialog(QtWidgets.QDialog):
                 item.setHidden(False)
                 continue
             item.setHidden(q not in str(item.text() or "").lower())
+        self._update_selection_summary()
 
     def _set_all_checked(self, checked: bool, *, visible_only: bool):
         state = Qt.Checked if checked else Qt.Unchecked
@@ -131,6 +153,33 @@ class _LayerMultiSelectDialog(QtWidgets.QDialog):
             if visible_only and item.isHidden():
                 continue
             item.setCheckState(state)
+        self._update_selection_summary()
+
+    def _update_selection_summary(self):
+        total = int(self.listLayers.count())
+        visible = 0
+        checked = 0
+        names: List[str] = []
+        for i in range(total):
+            item = self.listLayers.item(i)
+            if item is None:
+                continue
+            if not item.isHidden():
+                visible += 1
+            if item.checkState() != Qt.Checked:
+                continue
+            checked += 1
+            if len(names) < 20:
+                text = str(item.text() or "").strip()
+                if text:
+                    names.append(text)
+        text = f"후보 {total}개 중 현재 보이는 레이어 {visible}개"
+        if checked > 0:
+            text += f" / 선택 {checked}개"
+        else:
+            text += " / 아직 선택 없음"
+        self.lblSelectionSummary.setText(text)
+        self.lblSelectionSummary.setToolTip("\n".join(names))
 
     def selected_layer_ids(self) -> List[str]:
         ids: List[str] = []
@@ -151,15 +200,117 @@ class AiAoiReportDialog(QtWidgets.QDialog):
         self._selected_layer_ids: List[str] = []
         self._last_ctx: Optional[dict] = None
         self._last_ctx_key = None
+        self._ctx_revision = 0
+        self._observed_layer_ids: Set[str] = set()
+        self._last_verified_models: List[str] = []
+        self._last_models_verified_at: str = ""
         self._last_report_text: str = ""
+        self._last_report_ctx_key = None
         self._last_provider: str = ""
         self._last_model: str = ""
         self._last_generated_at: str = ""
         self._setup_ui()
+        self._connect_cache_invalidation_signals()
         self._update_provider_ui()
         self._refresh_key_status()
         self._refresh_group_list()
         self._update_layer_scope_ui()
+
+    def _invalidate_ctx_cache(self, *_args) -> None:
+        self._last_ctx = None
+        self._last_ctx_key = None
+        self._ctx_revision += 1
+
+    def _connect_cache_invalidation_signals(self) -> None:
+        project = QgsProject.instance()
+        for signal_name in _PROJECT_CACHE_INVALIDATION_SIGNALS:
+            signal = getattr(project, signal_name, None)
+            if signal is None:
+                continue
+            try:
+                signal.connect(self._on_project_layers_changed)
+            except Exception:
+                pass
+        self._refresh_layer_observers()
+
+    def _disconnect_cache_invalidation_signals(self) -> None:
+        project = QgsProject.instance()
+        for signal_name in _PROJECT_CACHE_INVALIDATION_SIGNALS:
+            signal = getattr(project, signal_name, None)
+            if signal is None:
+                continue
+            try:
+                signal.disconnect(self._on_project_layers_changed)
+            except Exception:
+                pass
+        for layer_id in list(self._observed_layer_ids):
+            layer = project.mapLayer(layer_id)
+            if layer is None:
+                continue
+            self._disconnect_layer_signals(layer)
+        self._observed_layer_ids.clear()
+
+    def _connect_layer_signals(self, layer) -> None:
+        if layer is None:
+            return
+        for signal_name in _LAYER_CACHE_INVALIDATION_SIGNALS:
+            signal = getattr(layer, signal_name, None)
+            if signal is None:
+                continue
+            try:
+                signal.connect(self._on_observed_layer_changed)
+            except Exception:
+                pass
+
+    def _disconnect_layer_signals(self, layer) -> None:
+        if layer is None:
+            return
+        for signal_name in _LAYER_CACHE_INVALIDATION_SIGNALS:
+            signal = getattr(layer, signal_name, None)
+            if signal is None:
+                continue
+            try:
+                signal.disconnect(self._on_observed_layer_changed)
+            except Exception:
+                pass
+
+    def _refresh_layer_observers(self) -> None:
+        project = QgsProject.instance()
+        for layer_id in list(self._observed_layer_ids):
+            layer = project.mapLayer(layer_id)
+            if layer is not None:
+                self._disconnect_layer_signals(layer)
+        self._observed_layer_ids.clear()
+
+        for layer in project.mapLayers().values():
+            self._connect_layer_signals(layer)
+            try:
+                self._observed_layer_ids.add(str(layer.id() or ""))
+            except Exception:
+                continue
+
+    def _on_observed_layer_changed(self, *_args) -> None:
+        self._invalidate_ctx_cache()
+
+    def _on_project_layers_changed(self, *_args) -> None:
+        self._refresh_layer_observers()
+        self._invalidate_ctx_cache()
+        try:
+            self._refresh_group_list()
+        except Exception:
+            pass
+        try:
+            self._update_selected_layers_label()
+        except Exception:
+            pass
+        try:
+            self._refresh_scope_summary()
+        except Exception:
+            pass
+
+    def done(self, result: int) -> None:
+        self._disconnect_cache_invalidation_signals()
+        super().done(result)
 
     def _settings_get(self, key: str, default=None):
         try:
@@ -172,6 +323,57 @@ class AiAoiReportDialog(QtWidgets.QDialog):
             QSettings().setValue(f"{_SETTINGS_PREFIX}/{key}", value)
         except Exception:
             pass
+
+    def _update_model_field_hint(self) -> None:
+        default_model = ai_gemini.get_default_model_name()
+        self.txtModel.setPlaceholderText(f"예: {default_model}")
+
+        known_models = list(self._last_verified_models or ai_gemini.get_known_models())
+        verified_at = str(self._last_models_verified_at or ai_gemini.get_known_models_verified_at() or "").strip()
+        is_stale = ai_gemini.is_known_models_catalog_stale(verified_at)
+        if known_models:
+            tip = "최근 확인된 공식 Gemini 모델 ID"
+            if is_stale:
+                tip = "저장된/내장 Gemini 모델 ID"
+            if verified_at:
+                tip += f" (확인일 {verified_at})"
+            if is_stale:
+                tip += "\n이 목록은 확인일이 오래되어 다시 검증하는 편이 안전합니다."
+            tip += ":\n- " + "\n- ".join(known_models)
+            self.txtModel.setToolTip(tip)
+
+            try:
+                completer = QtWidgets.QCompleter(known_models, self)
+                completer.setCaseSensitivity(Qt.CaseInsensitive)
+                if hasattr(completer, "setFilterMode"):
+                    completer.setFilterMode(Qt.MatchContains)
+                self.txtModel.setCompleter(completer)
+            except Exception:
+                pass
+            return
+
+        self.txtModel.setToolTip("")
+
+    def _refresh_model_status(self) -> None:
+        if self._get_provider() != "gemini":
+            self.lblModelStatus.setText("현재는 로컬 요약 모드라 Gemini 모델 설정을 사용하지 않습니다.")
+            self.lblModelStatus.setStyleSheet("color:#455a64;")
+            return
+
+        verified_models = list(self._last_verified_models or ai_gemini.get_known_models())
+        verified_at = str(self._last_models_verified_at or ai_gemini.get_known_models_verified_at() or "").strip()
+        level, message = ai_gemini.describe_model_status(
+            str(self.txtModel.text() or "").strip(),
+            verified_models=verified_models,
+            verified_at=verified_at,
+        )
+        color = "#455a64"
+        if level == "ok":
+            color = "#2e7d32"
+        elif level == "warning":
+            color = "#ef6c00"
+        self.lblModelStatus.setText(message)
+        self.lblModelStatus.setStyleSheet(f"color:{color};")
 
     def _get_provider(self) -> str:
         try:
@@ -196,17 +398,22 @@ class AiAoiReportDialog(QtWidgets.QDialog):
 
     def _setup_ui(self):
         self.setWindowTitle("AI 조사요약 (AOI Report) - ArchToolkit")
-        try:
-            plugin_dir = os.path.dirname(os.path.dirname(__file__))
-            for icon_name in ("AI.png", "ai.png", "icon.png"):
-                icon_path = os.path.join(plugin_dir, icon_name)
-                if os.path.exists(icon_path):
-                    self.setWindowIcon(QIcon(icon_path))
-                    break
-        except Exception:
-            pass
+        set_plugin_window_icon(self, ("AI.png", "ai.png", "icon.png"))
+        self.resize(920, 760)
 
         layout = QtWidgets.QVBoxLayout(self)
+
+        self.scrollArea = QtWidgets.QScrollArea(self)
+        self.scrollArea.setWidgetResizable(True)
+        self.scrollArea.setFrameShape(QtWidgets.QFrame.NoFrame)
+        self.scrollArea.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.scrollArea.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        layout.addWidget(self.scrollArea, 1)
+
+        self.scrollContent = QtWidgets.QWidget(self.scrollArea)
+        self.scrollArea.setWidget(self.scrollContent)
+        content_layout = QtWidgets.QVBoxLayout(self.scrollContent)
+        content_layout.setContentsMargins(0, 0, 0, 0)
 
         header = QtWidgets.QLabel(
             "<b>AI 조사요약</b><br>"
@@ -217,14 +424,14 @@ class AiAoiReportDialog(QtWidgets.QDialog):
         )
         header.setWordWrap(True)
         header.setStyleSheet("background:#e3f2fd; padding:10px; border:1px solid #bbdefb; border-radius:4px;")
-        layout.addWidget(header)
+        content_layout.addWidget(header)
 
         help_row = QtWidgets.QHBoxLayout()
         help_row.addStretch(1)
         self.btnHelp = QtWidgets.QPushButton("도움말")
         self.btnHelp.clicked.connect(self._on_help)
         help_row.addWidget(self.btnHelp)
-        layout.addLayout(help_row)
+        content_layout.addLayout(help_row)
 
         grp_in = QtWidgets.QGroupBox("1. 입력")
         form = QtWidgets.QFormLayout(grp_in)
@@ -297,7 +504,10 @@ class AiAoiReportDialog(QtWidgets.QDialog):
         row_layers.addWidget(self.lblSelectedLayers, 1)
         form.addRow("대상 레이어:", w_layers)
 
-        layout.addWidget(grp_in)
+        content_layout.addWidget(grp_in)
+
+        self.lblScopeSummary = create_hint_label("현재 스캔 범위를 확인하는 중입니다.", tone="tip", parent=self.scrollContent)
+        content_layout.addWidget(self.lblScopeSummary)
 
         grp_ai = QtWidgets.QGroupBox("2. AI 설정")
         grid = QtWidgets.QGridLayout(grp_ai)
@@ -322,10 +532,22 @@ class AiAoiReportDialog(QtWidgets.QDialog):
 
         self.txtModel = QtWidgets.QLineEdit()
         self.txtModel.setText(ai_gemini.get_configured_model())
-        self.txtModel.setPlaceholderText("예: gemini-1.5-flash")
+        self.txtModel.textChanged.connect(self._refresh_model_status)
+        self._update_model_field_hint()
 
         self.btnSaveModel = QtWidgets.QPushButton("모델 저장")
         self.btnSaveModel.clicked.connect(self._on_save_model)
+        self.btnRefreshModels = QtWidgets.QPushButton("모델 확인")
+        self.btnRefreshModels.clicked.connect(self._on_refresh_models_safe)
+
+        self.lblModelStatus = QtWidgets.QLabel("")
+        self.lblModelStatus.setWordWrap(True)
+
+        w_model_actions = QtWidgets.QWidget()
+        row_model_actions = QtWidgets.QHBoxLayout(w_model_actions)
+        row_model_actions.setContentsMargins(0, 0, 0, 0)
+        row_model_actions.addWidget(self.btnSaveModel)
+        row_model_actions.addWidget(self.btnRefreshModels)
 
         grid.addWidget(QtWidgets.QLabel("모드:"), 0, 0)
         grid.addWidget(self.cmbProvider, 0, 1, 1, 2)
@@ -334,25 +556,39 @@ class AiAoiReportDialog(QtWidgets.QDialog):
         grid.addWidget(self.btnSetKey, 1, 2)
         grid.addWidget(QtWidgets.QLabel("모델:"), 2, 0)
         grid.addWidget(self.txtModel, 2, 1)
-        grid.addWidget(self.btnSaveModel, 2, 2)
+        grid.addWidget(w_model_actions, 2, 2)
+        grid.addWidget(self.lblModelStatus, 3, 0, 1, 3)
 
         self.lblLocalHint = QtWidgets.QLabel("무료(로컬 요약) 모드는 외부 API 호출/전송 없이, 프로젝트 통계를 문장으로 정리합니다.")
         self.lblLocalHint.setWordWrap(True)
         self.lblLocalHint.setStyleSheet("color:#455a64;")
-        grid.addWidget(self.lblLocalHint, 3, 0, 1, 3)
+        grid.addWidget(self.lblLocalHint, 4, 0, 1, 3)
 
         self.lblAuthHint = QtWidgets.QLabel(ai_gemini.explain_auth_manager_once())
         self.lblAuthHint.setWordWrap(True)
         self.lblAuthHint.setStyleSheet("color:#455a64;")
-        grid.addWidget(self.lblAuthHint, 4, 0, 1, 3)
+        grid.addWidget(self.lblAuthHint, 5, 0, 1, 3)
 
-        layout.addWidget(grp_ai)
+        self.lblModelGuide = create_hint_label(
+            "Gemini를 쓸 때는 먼저 '모델 확인'으로 현재 사용 가능한 모델을 갱신하세요. "
+            "무료(로컬 요약) 모드는 외부 전송 없이 바로 실행됩니다.",
+            tone="info",
+            parent=grp_ai,
+        )
+        grid.addWidget(self.lblModelGuide, 6, 0, 1, 3)
+
+        content_layout.addWidget(grp_ai)
+
+        self.lblTransmissionHint = create_hint_label("", tone="tip", parent=self.scrollContent)
+        content_layout.addWidget(self.lblTransmissionHint)
+        self._refresh_model_status()
 
         grp_out = QtWidgets.QGroupBox("3. 결과")
         v = QtWidgets.QVBoxLayout(grp_out)
         self.txtOutput = QtWidgets.QTextEdit()
         self.txtOutput.setReadOnly(True)
         self.txtOutput.setPlaceholderText("여기에 AI 보고서가 생성됩니다.")
+        self.txtOutput.setMinimumHeight(240)
         v.addWidget(self.txtOutput)
 
         btn_row = QtWidgets.QHBoxLayout()
@@ -375,7 +611,21 @@ class AiAoiReportDialog(QtWidgets.QDialog):
         btn_row.addWidget(self.btnClose)
         v.addLayout(btn_row)
 
-        layout.addWidget(grp_out)
+        content_layout.addWidget(grp_out)
+        content_layout.addStretch(1)
+
+        try:
+            self.cmbAoi.layerChanged.connect(self._refresh_scope_summary)
+        except Exception:
+            pass
+        self.spinRadius.valueChanged.connect(self._refresh_scope_summary)
+        self.chkSelectedOnly.toggled.connect(self._refresh_scope_summary)
+        self.chkOnlyArchToolkit.toggled.connect(self._refresh_scope_summary)
+        self.chkExcludeStyling.toggled.connect(self._refresh_scope_summary)
+        self.cmbProvider.currentIndexChanged.connect(self._refresh_transmission_hint)
+        self.txtModel.textChanged.connect(self._refresh_transmission_hint)
+        self._refresh_scope_summary()
+        self._refresh_transmission_hint()
 
     def _collect_group_paths(self) -> List[str]:
         root = QgsProject.instance().layerTreeRoot()
@@ -415,8 +665,9 @@ class AiAoiReportDialog(QtWidgets.QDialog):
                     self.cmbTargetGroup.setCurrentIndex(idx)
         finally:
             self.cmbTargetGroup.blockSignals(False)
+        self._refresh_scope_summary()
 
-    def _update_selected_layers_label(self):
+    def _selected_layers_snapshot(self):
         ids: List[str] = []
         names: List[str] = []
         for lid in self._selected_layer_ids:
@@ -429,14 +680,74 @@ class AiAoiReportDialog(QtWidgets.QDialog):
             except Exception:
                 pass
         self._selected_layer_ids = ids
+        return ids, names
+
+    def _update_selected_layers_label(self):
+        ids, names = self._selected_layers_snapshot()
 
         if not ids:
             self.lblSelectedLayers.setText("선택 없음")
             self.lblSelectedLayers.setToolTip("")
             return
-        self.lblSelectedLayers.setText(f"{len(ids)}개 선택됨")
+        if len(names) <= 2:
+            summary = ", ".join([name for name in names if name])
+        else:
+            summary = f"{names[0]}, {names[1]} 외 {len(names) - 2}개"
+        if summary:
+            self.lblSelectedLayers.setText(f"{len(ids)}개 선택됨: {summary}")
+        else:
+            self.lblSelectedLayers.setText(f"{len(ids)}개 선택됨")
         preview = "\n".join([n for n in names if n][:30])
         self.lblSelectedLayers.setToolTip(preview)
+
+    def _refresh_scope_summary(self, *_args):
+        try:
+            aoi_layer = self.cmbAoi.currentLayer()
+        except Exception:
+            aoi_layer = None
+
+        aoi_name = ""
+        if isinstance(aoi_layer, QgsVectorLayer):
+            try:
+                aoi_name = str(aoi_layer.name() or "").strip()
+            except Exception:
+                aoi_name = ""
+
+        selected_only = bool(self.chkSelectedOnly.isChecked())
+        try:
+            radius_text = f"{int(round(float(self.spinRadius.value()))):,} m"
+        except Exception:
+            radius_text = f"{self.spinRadius.value()} m"
+
+        lines = [
+            f"<b>현재 스캔 범위</b>: AOI={aoi_name or '미선택'} / 반경={radius_text} / "
+            f"{'선택 피처만 사용' if selected_only else 'AOI 전체 사용'}"
+        ]
+
+        scope = self._get_layer_scope()
+        if scope == "group":
+            group_path = self._get_target_group_path()
+            lines.append(
+                "선택 그룹만 스캔합니다: "
+                + (group_path or "<span style='color:#8a4b00;'>아직 그룹을 고르지 않았습니다.</span>")
+            )
+        elif scope == "layers":
+            ids, names = self._selected_layers_snapshot()
+            if ids:
+                preview = ", ".join([name for name in names[:3] if name])
+                extra = ""
+                if len(names) > 3:
+                    extra = f" 외 {len(names) - 3}개"
+                lines.append(f"직접 선택한 {len(ids)}개 레이어만 스캔합니다: {preview}{extra}")
+            else:
+                lines.append("<span style='color:#8a4b00;'>레이어 직접 선택 모드입니다. 아직 선택된 레이어가 없습니다.</span>")
+        else:
+            auto_filters: List[str] = []
+            auto_filters.append("ArchToolkit 결과만" if self.chkOnlyArchToolkit.isChecked() else "일반 레이어도 포함")
+            auto_filters.append("도면/Style 제외" if self.chkExcludeStyling.isChecked() else "도면/Style도 포함")
+            lines.append("자동 스캔 모드입니다: " + ", ".join(auto_filters))
+
+        self.lblScopeSummary.setText("<br>".join(lines))
 
     def _update_layer_scope_ui(self):
         scope = self._get_layer_scope()
@@ -462,6 +773,7 @@ class AiAoiReportDialog(QtWidgets.QDialog):
             pass
 
         self._update_selected_layers_label()
+        self._refresh_scope_summary()
 
     def _on_layer_scope_changed(self):
         scope = self._get_layer_scope()
@@ -470,6 +782,7 @@ class AiAoiReportDialog(QtWidgets.QDialog):
 
     def _on_target_group_changed(self):
         self._settings_set("target_group_path", self._get_target_group_path())
+        self._refresh_scope_summary()
 
     def _on_select_layers(self):
         aoi_layer = self.cmbAoi.currentLayer()
@@ -485,10 +798,12 @@ class AiAoiReportDialog(QtWidgets.QDialog):
             return
         self._selected_layer_ids = dlg.selected_layer_ids()
         self._update_selected_layers_label()
+        self._refresh_scope_summary()
 
     def _on_clear_layers(self):
         self._selected_layer_ids = []
         self._update_selected_layers_label()
+        self._refresh_scope_summary()
 
     def _on_provider_changed(self):
         provider = self._get_provider()
@@ -504,6 +819,7 @@ class AiAoiReportDialog(QtWidgets.QDialog):
             self.btnSetKey.setEnabled(is_gemini)
             self.txtModel.setEnabled(is_gemini)
             self.btnSaveModel.setEnabled(is_gemini)
+            self.btnRefreshModels.setEnabled(is_gemini)
         except Exception:
             pass
 
@@ -512,6 +828,27 @@ class AiAoiReportDialog(QtWidgets.QDialog):
             self.lblLocalHint.setVisible(not is_gemini)
         except Exception:
             pass
+        self._refresh_model_status()
+        self._refresh_transmission_hint()
+
+    def _refresh_transmission_hint(self, *_args):
+        provider = self._get_provider()
+        if provider != "gemini":
+            self.lblTransmissionHint.setText(
+                "<b>외부 전송 없음</b>: 무료(로컬 요약) 모드는 AOI/레이어 통계를 이 컴퓨터 안에서만 문장으로 정리합니다."
+            )
+            apply_hint_label_style(self.lblTransmissionHint, tone="tip")
+            return
+
+        model_name = ai_gemini.normalize_model_name(str(self.txtModel.text() or "").strip())
+        if not model_name:
+            model_name = ai_gemini.get_configured_model() or ai_gemini.get_default_model_name()
+        self.lblTransmissionHint.setText(
+            "<b>Gemini 전송 범위</b>: AOI 이름, 반경, 레이어 이름, 통계 요약, "
+            f"ArchToolkit 메타데이터가 JSON 형태로 <b>{model_name}</b>에 전달됩니다. "
+            "원본 지오메트리나 래스터 전체 픽셀을 통째로 업로드하는 방식은 아닙니다."
+        )
+        apply_hint_label_style(self.lblTransmissionHint, tone="warn")
 
     def _refresh_key_status(self):
         if self._get_provider() != "gemini":
@@ -542,12 +879,66 @@ class AiAoiReportDialog(QtWidgets.QDialog):
         if self._get_provider() != "gemini":
             push_message(self.iface, "정보", "현재 모드에서는 모델 설정이 필요하지 않습니다.", level=1, duration=4)
             return
-        model = str(self.txtModel.text() or "").strip()
+        raw_model = str(self.txtModel.text() or "").strip()
+        model = ai_gemini.normalize_model_name(raw_model)
         if not model:
             push_message(self.iface, "오류", "모델 이름을 입력하세요.", level=2, duration=5)
             return
+        if model != raw_model:
+            self.txtModel.setText(model)
         ai_gemini.set_configured_model(model)
-        push_message(self.iface, "완료", f"모델을 저장했습니다: {model}", level=0, duration=4)
+        if model != raw_model:
+            push_message(self.iface, "완료", f"구형 모델 ID를 최신 ID로 바꿔 저장했습니다: {raw_model} -> {model}", level=0, duration=5)
+        else:
+            push_message(self.iface, "완료", f"모델을 저장했습니다: {model}", level=0, duration=4)
+        self._refresh_model_status()
+
+    def _on_refresh_models(self):
+        self._on_refresh_models_safe()
+
+    def _on_refresh_models_safe(self):
+        if self._get_provider() != "gemini":
+            push_message(self.iface, "정보", "Gemini 모드에서만 모델 확인을 사용할 수 있습니다.", level=1, duration=4)
+            return
+
+        api_key = ai_gemini.get_api_key()
+        if not api_key:
+            self._on_set_key()
+            api_key = ai_gemini.get_api_key()
+            if not api_key:
+                return
+
+        push_message(self.iface, "Gemini", "사용 가능한 공식 모델 ID를 확인 중…", level=0, duration=4)
+        models, err = ai_gemini.list_available_models(api_key=str(api_key), timeout_ms=20000)
+        if err or not models:
+            push_message(self.iface, "오류", err or "Gemini 모델 ID를 확인할 수 없습니다.", level=2, duration=8)
+            return
+
+        normalized_models = []
+        for model in models:
+            model_name = ai_gemini.normalize_model_name(model)
+            if model_name and model_name not in normalized_models:
+                normalized_models.append(model_name)
+
+        self._last_verified_models = normalized_models
+        self._last_models_verified_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self._update_model_field_hint()
+
+        current_model = ai_gemini.normalize_model_name(str(self.txtModel.text() or "").strip())
+        if not current_model:
+            self.txtModel.setText(normalized_models[0])
+            current_model = normalized_models[0]
+        elif current_model != str(self.txtModel.text() or "").strip():
+            self.txtModel.setText(current_model)
+
+        level = 0
+        detail = f"Gemini 모델 {len(normalized_models)}개 확인"
+        if current_model and current_model not in normalized_models:
+            level = 1
+            detail += f" / 현재 입력 모델 미확인: {current_model}"
+        push_message(self.iface, "Gemini", detail, level=level, duration=6)
+        self._refresh_model_status()
+        self._refresh_transmission_hint()
 
     def _build_prompt(self, ctx: dict) -> str:
         ctx_json = json.dumps(ctx, ensure_ascii=False, indent=2)
@@ -560,6 +951,8 @@ class AiAoiReportDialog(QtWidgets.QDialog):
             "아래 JSON은 QGIS 프로젝트에서 ‘조사지역(AOI) 반경’ 내의 레이어들을 요약한 것입니다.\n"
             "\n"
             "중요: 각 레이어 항목에 `archtoolkit` 메타데이터가 포함될 수 있습니다.\n"
+            "- `archtoolkit_interpretation`이 있으면, 이는 플러그인이 도구 의미를 1차 해석한 값입니다.\n"
+            "- `archtoolkit_runs`는 같은 `run_id` 결과를 실행 단위로 묶은 요약입니다.\n"
             "- 가능하면 `archtoolkit.tool_id/kind/units/run_id`를 우선 사용해 레이어 의미를 해석하세요.\n"
             "- 메타데이터가 있는 경우, 레이어 이름만 보고 임의로 의미를 추측하지 마세요.\n"
             "- 동일 `run_id`는 같은 도구 실행(run)에서 나온 결과이므로 묶어서 설명해도 됩니다.\n"
@@ -626,6 +1019,7 @@ class AiAoiReportDialog(QtWidgets.QDialog):
             str(target_group or ""),
             lids,
             int(max_layers),
+            int(self._ctx_revision),
         )
 
     def _get_or_build_ctx(self, *, max_layers: int = 40, prompt_select_layers: bool = True):
@@ -706,7 +1100,11 @@ class AiAoiReportDialog(QtWidgets.QDialog):
                 if not api_key:
                     return
 
-            model = str(self.txtModel.text() or "").strip() or ai_gemini.get_configured_model()
+            raw_model = str(self.txtModel.text() or "").strip() or ai_gemini.get_configured_model()
+            model = ai_gemini.normalize_model_name(raw_model)
+            if model != raw_model:
+                self.txtModel.setText(model)
+                push_message(self.iface, "정보", f"구형 모델 ID를 최신 ID로 바꿔 사용합니다: {raw_model} -> {model}", level=1, duration=6)
 
         try:
             ensure_live_log_dialog(self.iface, owner=self, show=True, clear=True)
@@ -741,6 +1139,7 @@ class AiAoiReportDialog(QtWidgets.QDialog):
 
             self.txtOutput.setPlainText(text or "")
             self._last_report_text = str(text or "")
+            self._last_report_ctx_key = self._last_ctx_key
             push_message(self.iface, "AI 요약", "완료 (로컬)", level=0, duration=4)
             return
 
@@ -773,6 +1172,7 @@ class AiAoiReportDialog(QtWidgets.QDialog):
                         "※ Gemini 호출 실패로 로컬 요약으로 대체했습니다.\n\n" + str(fallback)
                     )
                     self._last_report_text = str(fallback or "")
+                    self._last_report_ctx_key = self._last_ctx_key
                     push_message(self.iface, "AI 요약", "로컬 요약으로 대체 완료", level=1, duration=6)
             except Exception:
                 pass
@@ -780,6 +1180,7 @@ class AiAoiReportDialog(QtWidgets.QDialog):
 
         self.txtOutput.setPlainText(text or "")
         self._last_report_text = str(text or "")
+        self._last_report_ctx_key = self._last_ctx_key
         push_message(self.iface, "AI 요약", "완료", level=0, duration=4)
 
     def _on_help(self):
@@ -797,13 +1198,17 @@ class AiAoiReportDialog(QtWidgets.QDialog):
             "- 현재 QGIS 프로젝트의 레이어 중 AOI 버퍼와 겹치는 레이어를 스캔합니다.<br>"
             "- 벡터: 피처 수, (가능하면) 길이/면적 합, 일부 필드 분포(상위 값).<br>"
             "- 래스터: min/mean/max 등 단순 통계(가능하면).<br><br>"
+            "<b>Gemini 모드에서 외부로 나가는 것</b><br>"
+            "- AOI 이름, 반경, 선택된 레이어 이름, 통계 요약, ArchToolkit 메타데이터가 JSON으로 전송됩니다.<br>"
+            "- 원본 지오메트리 전체나 래스터 픽셀 전체를 그대로 업로드하는 구조는 아닙니다.<br><br>"
             "<b>모든 분석을 AI가 답변할 수 있나요?</b><br>"
             "원칙적으로 ‘결과가 레이어(래스터/벡터)로 존재’하면 요약에 포함될 수 있습니다. "
-            "다만 현재는 <b>도구별 의미(예: 가시비율, corridor 면적 등)를 완벽히 해석하는 단계까지는 아닙니다</b> — "
-            "지금은 레이어 기반 통계를 모아 문장화하는 구조입니다. "
-            "추후 각 도구 출력에 표준 메타데이터(파라미터/요약지표)를 붙이면, 도구별로 더 정확한 해석/답변이 가능해집니다.<br><br>"
+            "지금은 레이어 기반 통계를 모아 문장화하는 구조이지만, "
+            "<b>ArchToolkit 메타데이터(tool_id/kind/run_id 등)가 있으면 도구 의미를 더 우선적으로 해석</b>합니다. "
+            "그래도 최종 해석은 사용자가 검토해야 합니다.<br><br>"
             "<b>팁</b><br>"
             "- AOI는 가능하면 <b>투영 CRS(미터)</b>에서 사용하세요.<br>"
+            "- 입력 섹션 아래의 <b>현재 스캔 범위</b> 안내 배너에서 실제로 어떤 범위를 읽을지 먼저 확인하세요.<br>"
             "- 대상 레이어가 너무 많거나 섞여 있으면, <b>대상 그룹/대상 레이어</b>를 지정해 범위를 좁히면 더 정확합니다.<br>"
             "- <b>통계 CSV</b>는 AI 없이 AOI 주변 표준 통계를 CSV로 저장합니다.<br>"
             "- <b>번들 저장</b>은 report.md + context.json + CSV + canvas.png + params.json을 한 폴더로 저장합니다.<br>"
@@ -811,7 +1216,7 @@ class AiAoiReportDialog(QtWidgets.QDialog):
             "- 도면/Style 결과는 해석에 방해가 될 수 있어 기본적으로 제외(체크)하는 것을 권장합니다."
         )
         try:
-            QtWidgets.QMessageBox.information(self, "AI 조사요약 도움말", html)
+            show_help_dialog(parent=self, title="AI 조사요약 도움말", html=html)
         except Exception:
             # Fallback plain text
             QtWidgets.QMessageBox.information(self, "AI 조사요약 도움말", "README의 AI 조사요약 섹션을 참고하세요.")
@@ -929,17 +1334,31 @@ class AiAoiReportDialog(QtWidgets.QDialog):
             push_message(self.iface, "오류", f"폴더 생성 실패: {e}", level=2, duration=8)
             return
 
-        # Report text: use current UI text first, then last cached, else generate local.
+        current_report_key = self._last_ctx_key
+        report_matches_ctx = self._last_report_ctx_key == current_report_key
+
+        # Report text: use current UI/cached text only when it matches the current context.
         report_text = ""
-        try:
-            report_text = str(self.txtOutput.toPlainText() or "")
-        except Exception:
-            report_text = ""
-        if not report_text.strip():
-            report_text = str(self._last_report_text or "")
+        report_source = "regenerated_local"
+        if report_matches_ctx:
+            try:
+                report_text = str(self.txtOutput.toPlainText() or "")
+            except Exception:
+                report_text = ""
+            if report_text.strip():
+                report_source = "current_output"
+            else:
+                report_text = str(self._last_report_text or "")
+                if report_text.strip():
+                    report_source = "cached_output"
         if not report_text.strip():
             try:
                 report_text = str(ai_local_summarizer.generate_report(ctx) or "")
+                if report_text.strip():
+                    self._last_report_text = report_text
+                    self._last_report_ctx_key = current_report_key
+                    self._last_provider = "local"
+                    self._last_model = ""
             except Exception:
                 report_text = ""
 
@@ -960,8 +1379,9 @@ class AiAoiReportDialog(QtWidgets.QDialog):
         try:
             params = {
                 "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "provider": str(self._last_provider or self._get_provider() or ""),
-                "gemini_model": str(self._last_model or ""),
+                "provider": str((self._last_provider if report_source != "regenerated_local" else "local") or self._get_provider() or ""),
+                "gemini_model": str(self._last_model or "") if report_source != "regenerated_local" else "",
+                "report_source": report_source,
                 "aoi_layer_name": aoi_name,
                 "radius_m": ctx.get("radius_m"),
                 "options": ctx.get("options") or {},

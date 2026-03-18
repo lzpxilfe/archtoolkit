@@ -17,6 +17,7 @@ import math
 import os
 import threading
 import uuid
+import weakref
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -64,9 +65,11 @@ from .cost_surface_dialog import (
     _safe_layer_name_fragment,
     _window_geotransform,
 )
+from .config import get_output_group_name
 from .utils import (
     is_metric_crs,
     log_message,
+    open_gdal_dataset_from_qgis_source,
     push_message,
     restore_ui_focus,
     set_archtoolkit_layer_metadata,
@@ -360,7 +363,7 @@ class CostNetworkWorker(QgsTask):
             ),
             level=Qgis.Info,
         )
-        ds = gdal.Open(self.dem_source, gdal.GA_ReadOnly)
+        ds, _opened_dem_source = open_gdal_dataset_from_qgis_source(self.dem_source, access=gdal.GA_ReadOnly)
         if ds is None:
             return NetworkTaskResult(ok=False, message="DEM을 GDAL로 열 수 없습니다.")
 
@@ -1151,6 +1154,8 @@ class CostNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
 
         self._task = None
         self._task_running = False
+        self._task_generation = 0
+        self._task_accept_results = False
 
         self.cmbDemLayer.setFilters(QgsMapLayerProxyModel.RasterLayer)
         self.cmbSiteLayer.setFilters(QgsMapLayerProxyModel.VectorLayer)
@@ -1340,15 +1345,17 @@ MST/k-NN/Hub 네트워크를 생성합니다.
     def _cleanup_for_close(self):
         # Best-effort: cancel background task so it can't outlive the dialog.
         try:
+            self._task_accept_results = False
             if self._task_running and self._task is not None:
                 try:
                     self._task.cancel()
                 except Exception:
                     pass
+            else:
+                self._task_running = False
+                self._task = None
         except Exception:
             pass
-        self._task_running = False
-        self._task = None
 
     def _wrap_in_scroll_area(self):
         # Keep bottom buttons always visible, and make the long form scrollable.
@@ -2192,7 +2199,10 @@ MST/k-NN/Hub 네트워크를 생성합니다.
                     skipped += 1
                     continue
 
-                pt_dem = transform_point(pt, site_layer.crs(), dem_layer.crs())
+                pt_dem = transform_point(pt, site_layer.crs(), dem_layer.crs(), strict=True)
+                if pt_dem is None:
+                    skipped += 1
+                    continue
 
                 fid = str(ft.id())
                 name = fid
@@ -2262,14 +2272,9 @@ MST/k-NN/Hub 네트워크를 생성합니다.
             "pandolf_terrain_factor": float(self.spinPandolfTerrainFactor.value()),
         }
 
-        self._task_running = True
-        self._set_running_ui(True)
-
-        def on_done(res: NetworkTaskResult):
-            self._task_running = False
-            self._task = None
-            self._set_running_ui(False)
-            self._handle_task_result(res)
+        self._task_generation += 1
+        task_generation = int(self._task_generation)
+        self._task_accept_results = True
 
         task = CostNetworkWorker(
             dem_source=dem_layer.source(),
@@ -2286,11 +2291,35 @@ MST/k-NN/Hub 네트워크를 생성합니다.
             model_params=model_params,
             model_label=model_label,
             cost_mode=cost_mode,
-            on_done=on_done,
+            on_done=None,
         )
+        dialog_ref = weakref.ref(self)
+
+        def on_done(res: NetworkTaskResult, *, _dialog_ref=dialog_ref, _task=task, _generation=task_generation):
+            dialog = _dialog_ref()
+            if dialog is None:
+                return
+            dialog._on_task_done(_task, _generation, res)
+
+        task.on_done = on_done
         self._task = task
+        self._task_running = True
+        self._set_running_ui(True)
         QgsApplication.taskManager().addTask(task)
         push_message(self.iface, "최소비용 네트워크", "분석을 시작했습니다. (QGIS 작업 관리자 확인)", level=0, duration=6)
+
+    def _on_task_done(self, task, generation: int, res: NetworkTaskResult):
+        if self._task is not task or int(self._task_generation) != int(generation):
+            return
+        self._task_running = False
+        self._task = None
+        try:
+            self._set_running_ui(False)
+        except Exception:
+            pass
+        if not self._task_accept_results:
+            return
+        self._handle_task_result(res)
 
     def _handle_task_result(self, res: NetworkTaskResult):
         if not isinstance(res, NetworkTaskResult) or not res.ok:
@@ -2311,7 +2340,7 @@ MST/k-NN/Hub 네트워크를 생성합니다.
         project = QgsProject.instance()
         root = project.layerTreeRoot()
 
-        parent_name = "ArchToolkit - 최소비용 네트워크 (Least-cost Network)"
+        parent_name = get_output_group_name("cost_network", "ArchToolkit - 최소비용 네트워크 (Least-cost Network)")
         parent_group = root.findGroup(parent_name)
         if parent_group is None:
             parent_group = root.insertGroup(0, parent_name)
