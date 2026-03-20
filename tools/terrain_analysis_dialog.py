@@ -31,6 +31,7 @@ from qgis.core import (
     QgsRasterShader, QgsColorRampShader, QgsSingleBandPseudoColorRenderer
 )
 import processing
+from .i18n import apply_language, is_english_ui
 from .utils import cleanup_files, push_message, restore_ui_focus, set_archtoolkit_layer_metadata
 from .live_log_dialog import ensure_live_log_dialog
 from .help_dialog import show_help_dialog
@@ -43,7 +44,7 @@ FORM_CLASS, _ = uic.loadUiType(os.path.join(
 
 
 class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
-    
+
     # Slope classifications
     SLOPE_CLASSIFICATIONS = {
         'korean': {
@@ -87,7 +88,7 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
             ]
         }
     }
-    
+
     # Aspect 8-direction with flat area
     ASPECT_CLASSES = [
         {'max': 0, 'label': '평탄 | 0° | 평지/수면', 'color': '#808080'},
@@ -100,7 +101,7 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
         {'max': 315, 'label': 'W-NW | 270~315° | 서~북서', 'color': '#0000ff'},
         {'max': 360, 'label': 'NW-N | 315~360° | 북서~북', 'color': '#7f00ff'},
     ]
-    
+
     # TRI - Riley et al. (1999) - Blue to Red (default values)
     TRI_CLASSES = [
         {'max': 2, 'label': 'I | 0~2 | 평탄', 'color': '#2166ac'},
@@ -109,7 +110,7 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
         {'max': 20, 'label': 'IV | 10~20 | 중간', 'color': '#ef8a62'},
         {'max': 500, 'label': 'V | 20+ | 험준', 'color': '#b2182b'},
     ]
-    
+
     # Weiss (2001) 6-class Slope Position Classification
     SLOPE_POSITION_CLASSES = [
         {'max': 1, 'label': '1 | 깊은 곡저 (Incised Valley)', 'color': '#08306b'},
@@ -119,7 +120,7 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
         {'max': 5, 'label': '5 | 능선 평탄부 (Upland Flat)', 'color': '#ec7014'},
         {'max': 6, 'label': '6 | 급경사 능선 (Steep Ridge)', 'color': '#8c2d04'},
     ]
-    
+
     # Roughness - Wilson (2000) - Greens to Purple
     ROUGHNESS_CLASSES = [
         {'max': 1, 'label': '평탄 | 0~1m', 'color': '#d9f0d3'},
@@ -128,21 +129,21 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
         {'max': 15, 'label': '험준 | 6~15m', 'color': '#c2a5cf'},
         {'max': 500, 'label': '극도험준 | 15m+', 'color': '#762a83'},
     ]
-    
+
     def __init__(self, iface, parent=None):
         super(TerrainAnalysisDialog, self).__init__(parent)
         self.setupUi(self)
         self.iface = iface
-        
+
         self.cmbDemLayer.setFilters(QgsMapLayerProxyModel.RasterLayer)
         self.btnRun.clicked.connect(self.run_analysis)
         self.btnClose.clicked.connect(self.reject)
-        
+
         # Advanced settings toggle - EXPANDED by default (user request)
         self.widgetAdvanced.setVisible(True)
-        self.btnAdvanced.setText("⚙ 고급 설정 ▲")
+        self.btnAdvanced.setText("⚙ Advanced Settings ▲" if is_english_ui() else "⚙ 고급 설정 ▲")
         self.btnAdvanced.clicked.connect(self.toggle_advanced)
-        
+
         # Auto-SD checkbox connection and initial state
         if hasattr(self, 'chkAutoSD'):
             self.chkAutoSD.stateChanged.connect(self.on_auto_sd_changed)
@@ -150,6 +151,7 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
             self._apply_auto_sd_state(self.chkAutoSD.isChecked())
 
         self._setup_help_button()
+        apply_language(self)
 
     def _setup_help_button(self):
         try:
@@ -175,50 +177,69 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
     def _on_help(self):
         try:
             plugin_dir = os.path.dirname(os.path.dirname(__file__))
-            html = (
-                "<h2>지형 분석 (Terrain Analysis)</h2>"
-                "<p>DEM에서 지형 지표를 계산하고(경사/사면방향/TRI/TPI/Roughness/Slope Position) "
-                "분류·스타일을 적용합니다.</p>"
-                "<h3>출력</h3>"
-                "<ul>"
-                "<li>선택한 지표별 래스터 레이어</li>"
-                "<li>(옵션) 분류/색상표 적용</li>"
-                "</ul>"
-                "<h3>팁</h3>"
-                "<ul>"
-                "<li>DEM이 너무 거칠면(해상도 낮음) TPI/TRI가 과도하게 튈 수 있습니다.</li>"
-                "<li>TPI 자동 SD 모드는 입력 DEM 통계에 따라 임계값을 자동으로 잡습니다.</li>"
-                "<li>학술 출처는 <code>REFERENCES.md</code>를 참고하세요.</li>"
-                "</ul>"
-            )
-            show_help_dialog(parent=self, title="지형 분석 도움말", html=html, plugin_dir=plugin_dir)
+            if is_english_ui():
+                html = (
+                    "<h2>Terrain Analysis</h2>"
+                    "<p>Calculates terrain indicators from a DEM (slope, aspect, TRI, TPI, roughness, slope position) and applies classification / styling.</p>"
+                    "<h3>Outputs</h3>"
+                    "<ul>"
+                    "<li>Raster layers for each selected terrain indicator</li>"
+                    "<li>Optional class breaks and color styling</li>"
+                    "</ul>"
+                    "<h3>Tips</h3>"
+                    "<ul>"
+                    "<li>If the DEM is too coarse, TPI / TRI can become exaggerated.</li>"
+                    "<li>The automatic TPI SD mode chooses thresholds from the DEM statistics.</li>"
+                    "<li>See <code>REFERENCES.md</code> for academic sources.</li>"
+                    "</ul>"
+                )
+                title = "Terrain Analysis Help"
+            else:
+                html = (
+                    "<h2>지형 분석 (Terrain Analysis)</h2>"
+                    "<p>DEM에서 지형 지표를 계산하고(경사/사면방향/TRI/TPI/Roughness/Slope Position) "
+                    "분류·스타일을 적용합니다.</p>"
+                    "<h3>출력</h3>"
+                    "<ul>"
+                    "<li>선택한 지표별 래스터 레이어</li>"
+                    "<li>(옵션) 분류/색상표 적용</li>"
+                    "</ul>"
+                    "<h3>팁</h3>"
+                    "<ul>"
+                    "<li>DEM이 너무 거칠면(해상도 낮음) TPI/TRI가 과도하게 튈 수 있습니다.</li>"
+                    "<li>TPI 자동 SD 모드는 입력 DEM 통계에 따라 임계값을 자동으로 잡습니다.</li>"
+                    "<li>학술 출처는 <code>REFERENCES.md</code>를 참고하세요.</li>"
+                    "</ul>"
+                )
+                title = "지형 분석 도움말"
+            show_help_dialog(parent=self, title=title, html=html, plugin_dir=plugin_dir)
         except Exception:
             try:
                 QtWidgets.QMessageBox.information(self, "도움말", "README.md를 참고하세요.")
             except Exception:
                 pass
-    
+
     def on_auto_sd_changed(self, state):
         """Enable/disable manual TPI threshold inputs based on auto-SD checkbox"""
         # Use isChecked() for reliable check - stateChanged sends int (0, 1, or 2)
         auto_mode = self.chkAutoSD.isChecked()
         self._apply_auto_sd_state(auto_mode)
-    
+
     def _apply_auto_sd_state(self, auto_mode):
         """Apply the auto-SD state to disable/enable relevant spinboxes"""
         self.spinTPILow.setEnabled(not auto_mode)
         self.spinTPIHigh.setEnabled(not auto_mode)
         self.spinTPIThreshold.setEnabled(not auto_mode)
-    
+
     def toggle_advanced(self):
         """Toggle visibility of advanced settings"""
         is_visible = self.widgetAdvanced.isVisible()
         self.widgetAdvanced.setVisible(not is_visible)
         if is_visible:
-            self.btnAdvanced.setText("⚙ 고급 설정 ▼")
+            self.btnAdvanced.setText("⚙ Advanced Settings ▼" if is_english_ui() else "⚙ 고급 설정 ▼")
         else:
-            self.btnAdvanced.setText("⚙ 고급 설정 ▲")
-    
+            self.btnAdvanced.setText("⚙ Advanced Settings ▲" if is_english_ui() else "⚙ 고급 설정 ▲")
+
     def get_selected_classification(self):
         if self.radioKorean.isChecked():
             return 'korean'
@@ -228,7 +249,7 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
             return 'minetti'
         else:
             return 'llobera'
-    
+
     def get_tpi_classes(self, threshold):
         """Generate TPI classification classes based on user threshold"""
         return [
@@ -236,10 +257,10 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
             {'max': threshold, 'label': f'평지 | -{threshold:.2f}~+{threshold:.2f}', 'color': '#f7f7f7'},
             {'max': 500, 'label': f'능선 | >+{threshold:.2f}', 'color': '#8b4513'},
         ]
-    
+
     def get_tri_classes(self, max_rugged):
         """Generate TRI classification classes based on user-defined max ruggedness threshold
-        
+
         Parameters:
         - max_rugged: The threshold above which terrain is classified as 'rugged' (V)
           Lower values = more sensitive to subtle terrain variations
@@ -247,7 +268,7 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
         """
         # Proportionally distribute the 5 classes based on max_rugged
         t1 = max_rugged * 0.1   # ~10% = flat
-        t2 = max_rugged * 0.25  # ~25% = nearly flat  
+        t2 = max_rugged * 0.25  # ~25% = nearly flat
         t3 = max_rugged * 0.5   # ~50% = slightly rugged
         t4 = max_rugged         # 100% = moderately rugged
         return [
@@ -257,40 +278,40 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
             {'max': t4, 'label': f'IV | {t3:.0f}~{t4:.0f} | 중간', 'color': '#ef8a62'},
             {'max': 500, 'label': f'V | {t4:.0f}+ | 험준', 'color': '#b2182b'},
         ]
-    
+
     def apply_style(self, layer, classes, max_val):
         """Apply discrete color classification"""
         color_ramp = QgsColorRampShader()
         color_ramp.setColorRampType(QgsColorRampShader.Discrete)
-        
+
         items = []
         for cls in classes:
             item = QgsColorRampShader.ColorRampItem(
                 cls['max'], QColor(cls['color']), cls['label']
             )
             items.append(item)
-        
+
         color_ramp.setColorRampItemList(items)
-        
+
         shader = QgsRasterShader()
         shader.setRasterShaderFunction(color_ramp)
-        
+
         renderer = QgsSingleBandPseudoColorRenderer(layer.dataProvider(), 1, shader)
         renderer.setClassificationMin(0)
         renderer.setClassificationMax(max_val)
-        
+
         layer.setRenderer(renderer)
         layer.triggerRepaint()
-    
+
     def run_analysis(self):
         dem_layer = self.cmbDemLayer.currentLayer()
         if not dem_layer:
             push_message(self.iface, "오류", "DEM 래스터를 선택해주세요", level=2)
             restore_ui_focus(self)
             return
-        
+
         has_any = any([self.chkSlope.isChecked(), self.chkAspect.isChecked(),
-                       self.chkTRI.isChecked(), self.chkTPI.isChecked(), 
+                       self.chkTRI.isChecked(), self.chkTPI.isChecked(),
                        self.chkRoughness.isChecked(), self.chkSlopePosition.isChecked()])
         if not has_any:
             push_message(self.iface, "오류", "분석 유형을 선택해주세요", level=2)
@@ -299,17 +320,17 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
 
         # Live log window (non-modal) so users can see progress in real time.
         ensure_live_log_dialog(self.iface, owner=self, show=True, clear=True)
-        
+
         push_message(self.iface, "처리 중", "지형 분석 실행 중...", level=0)
         self.hide()
         QtWidgets.QApplication.processEvents()
-        
+
         success = False
         try:
             dem_source = dem_layer.source()
             results = []
             run_id = uuid.uuid4().hex[:8]
-            
+
             # Get user parameters
             tpi_radius = self.spinTPIRadius.value()
             tpi_threshold = self.spinTPIThreshold.value()
@@ -317,7 +338,7 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
             tpi_low = self.spinTPILow.value()
             tpi_high = self.spinTPIHigh.value()
             tri_max = self.spinTRIMax.value()
-            
+
             # Slope
             if self.chkSlope.isChecked():
                 output = os.path.join(tempfile.gettempdir(), f'archtoolkit_slope_{run_id}.tif')
@@ -342,7 +363,7 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                     QgsProject.instance().addMapLayer(layer)
                     self.apply_style(layer, cls_info['classes'], 90)
                     results.append("경사도")
-            
+
             # Aspect
             if self.chkAspect.isChecked():
                 output = os.path.join(tempfile.gettempdir(), f'archtoolkit_aspect_{run_id}.tif')
@@ -364,7 +385,7 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                     QgsProject.instance().addMapLayer(layer)
                     self.apply_style(layer, self.ASPECT_CLASSES, 360)
                     results.append("사면방향")
-            
+
             # TRI with user-defined classification threshold
             if self.chkTRI.isChecked():
                 output = os.path.join(tempfile.gettempdir(), f'archtoolkit_tri_{run_id}.tif')
@@ -389,11 +410,11 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                     QgsProject.instance().addMapLayer(layer)
                     self.apply_style(layer, tri_classes, tri_max * 2.5)
                     results.append("TRI")
-            
+
             # TPI with user parameters (radius and threshold)
             if self.chkTPI.isChecked():
                 self.run_tpi_analysis(dem_layer, dem_source, tpi_radius, tpi_threshold, results, run_id)
-            
+
             # Roughness
             if self.chkRoughness.isChecked():
                 output = os.path.join(tempfile.gettempdir(), f'archtoolkit_roughness_{run_id}.tif')
@@ -415,11 +436,11 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                     QgsProject.instance().addMapLayer(layer)
                     self.apply_style(layer, self.ROUGHNESS_CLASSES, 20)
                     results.append("Roughness")
-            
+
             # Slope Position - Weiss (2001) 6-class with user thresholds
             if self.chkSlopePosition.isChecked():
                 self.run_slope_position_analysis(dem_source, slope_threshold, tpi_low, tpi_high, results, run_id)
-            
+
             if results:
                 push_message(self.iface, "완료", f"분석 완료: {', '.join(results)}", level=0)
                 success = True
@@ -427,21 +448,21 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
             else:
                 push_message(self.iface, "오류", "분석 결과가 없습니다.", level=2)
                 restore_ui_focus(self)
-                
+
         except Exception as e:
             push_message(self.iface, "오류", f"처리 중 오류: {str(e)}", level=2)
             restore_ui_focus(self)
         finally:
             if not success:
                 restore_ui_focus(self)
-    
+
     def run_tpi_analysis(self, dem_layer, dem_source, radius, threshold, results, run_id):
         """Run TPI analysis with user-specified radius and classification threshold
-        
+
         TPI = Elevation - Mean of Neighborhood
-        
+
         Uses GDAL only - for radius > 1, uses resampling trick to approximate larger windows.
-        
+
         Parameters:
         - radius: Number of cells for neighborhood window (larger = broader terrain features)
         - threshold: Classification boundary for valley/flat/ridge (smaller = more sensitive)
@@ -450,10 +471,10 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
         mean_approx = None
         try:
             output = os.path.join(tempfile.gettempdir(), f'archtoolkit_tpi_{run_id}.tif')
-            
+
             # Calculate window size (must be odd number: 3, 5, 7, ...)
             window_size = radius * 2 + 1 if radius > 1 else 3
-            
+
             if radius <= 1:
                 # Use standard GDAL TPI for radius=1 (3x3 window)
                 processing.run("gdal:tpitopographicpositionindex", {
@@ -461,12 +482,12 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                 })
             else:
                 # Pure GDAL approach for custom radius:
-                
+
                 # Get original resolution
                 pixel_size_x = dem_layer.rasterUnitsPerPixelX()
                 pixel_size_y = dem_layer.rasterUnitsPerPixelY()
                 new_res = max(pixel_size_x, pixel_size_y) * radius
-                
+
                 # Step 1: Downsample (average resampling = approximate focal mean)
                 downsampled = os.path.join(tempfile.gettempdir(), f'archtoolkit_tpi_down_{run_id}.tif')
                 processing.run("gdal:warpreproject", {
@@ -484,12 +505,12 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                     'EXTRA': '',
                     'OUTPUT': downsampled
                 })
-                
+
                 # Step 2: Resample back to original resolution (neighborhood mean approximation)
                 mean_approx = os.path.join(tempfile.gettempdir(), f'archtoolkit_tpi_mean_{run_id}.tif')
                 extent = dem_layer.extent()
                 extent_str = f"{extent.xMinimum()},{extent.xMaximum()},{extent.yMinimum()},{extent.yMaximum()}"
-                
+
                 processing.run("gdal:warpreproject", {
                     'INPUT': downsampled,
                     'SOURCE_CRS': None,
@@ -505,7 +526,7 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                     'EXTRA': '',
                     'OUTPUT': mean_approx
                 })
-                
+
                 # Step 3: Calculate TPI = DEM - Mean
                 if os.path.exists(mean_approx):
                     processing.run("gdal:rastercalculator", {
@@ -521,12 +542,12 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                         'INPUT': dem_source, 'BAND': 1, 'OUTPUT': output
                     })
                     window_size = 3
-            
+
             # Apply classification with user threshold
             tpi_classes = self.get_tpi_classes(threshold)
             layer_name = f"TPI (창:{window_size}x{window_size}, 임계값:±{threshold:.2f})"
             layer = QgsRasterLayer(output, layer_name)
-            
+
             if layer.isValid():
                 try:
                     set_archtoolkit_layer_metadata(
@@ -542,20 +563,20 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                 QgsProject.instance().addMapLayer(layer)
                 self.apply_style(layer, tpi_classes, 10)
                 results.append("TPI")
-            
+
         except Exception as e:
             self.iface.messageBar().pushMessage("경고", f"TPI 분석 오류: {str(e)}", level=1)
         finally:
             cleanup_files([downsampled, mean_approx])
-    
+
     def run_slope_position_analysis(self, dem_source, slope_thresh, tpi_low, tpi_high, results, run_id):
         """Run Weiss (2001) 6-class Landform Classification using GDAL with user thresholds
-        
+
         Parameters:
         - slope_thresh: Degree threshold for flat vs sloped areas (e.g., 5°)
         - tpi_low: TPI threshold for valley classification (e.g., -1.0)
         - tpi_high: TPI threshold for ridge classification (e.g., 1.0)
-        
+
         Classification Logic:
         1. 깊은 곡저 (Incised Valley): TPI < tpi_low
         2. 곡저/하상 (Valley Floor): tpi_low <= TPI < tpi_low/2
@@ -570,18 +591,18 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
             processing.run("gdal:tpitopographicpositionindex", {
                 'INPUT': dem_source, 'BAND': 1, 'OUTPUT': tpi_path
             })
-            
+
             # 2. Generate Slope
             slope_path = os.path.join(tempfile.gettempdir(), f'archtoolkit_slope_temp_{run_id}.tif')
             processing.run("gdal:slope", {
                 'INPUT': dem_source, 'BAND': 1, 'SCALE': 1, 'AS_PERCENT': False, 'OUTPUT': slope_path
             })
-            
+
             # 3. Check if files exist
             if not os.path.exists(tpi_path) or not os.path.exists(slope_path):
                 self.iface.messageBar().pushMessage("경고", "TPI/Slope 생성 실패", level=1)
                 return
-            
+
             # 3.5 AUTO-SD CALCULATION (Weiss 2001 standard approach)
             # Calculate TPI statistics to use 1 SD as threshold
             use_auto_sd = hasattr(self, 'chkAutoSD') and self.chkAutoSD.isChecked()
@@ -596,18 +617,18 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                     tpi_low = -tpi_sd
                     tpi_high = tpi_sd
                     self.iface.messageBar().pushMessage(
-                        "자동 SD", 
+                        "자동 SD",
                         f"TPI 통계: 평균={tpi_mean:.2f}, 표준편차={tpi_sd:.2f} → 임계값 ±{tpi_sd:.2f} 적용",
                         level=0
                     )
-            
+
             # 4. Use gdal_calc.py for classification with thresholds
             output_path = os.path.join(tempfile.gettempdir(), f'archtoolkit_landform_{run_id}.tif')
-            
+
             # Calculate intermediate thresholds (Weiss 2001: 0.5 SD boundaries)
             tpi_mid_low = tpi_low / 2   # -0.5 SD
             tpi_mid_high = tpi_high / 2  # +0.5 SD
-            
+
             # Classification: 1=Valley, 2=Lower, 3=Flat, 4=Mid, 5=Upper, 6=Ridge
             # Using user-defined thresholds
             calc_expr = (
@@ -618,7 +639,7 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                 f"((A>{tpi_mid_high})*(A<={tpi_high}))*5 + "
                 f"(A>{tpi_high})*6"
             )
-            
+
             result = processing.run("gdal:rastercalculator", {
                 'INPUT_A': tpi_path, 'BAND_A': 1,
                 'INPUT_B': slope_path, 'BAND_B': 1,
@@ -626,7 +647,7 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                 'OUTPUT': output_path,
                 'RTYPE': 1  # Int16
             })
-            
+
             if result and os.path.exists(output_path):
                 layer_name = f"지형분류 (경사:{slope_thresh}°, TPI:{tpi_low:.1f}~{tpi_high:.1f})"
                 layer = QgsRasterLayer(output_path, layer_name)
@@ -653,7 +674,7 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                     self.iface.messageBar().pushMessage("경고", "지형분류 레이어 생성 실패", level=1)
             else:
                 self.iface.messageBar().pushMessage("경고", "지형분류 래스터 생성 실패", level=1)
-                
+
         except Exception as e:
             self.iface.messageBar().pushMessage("경고", f"지형분류 분석 오류: {str(e)}", level=1)
         finally:

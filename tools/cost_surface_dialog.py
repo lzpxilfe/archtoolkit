@@ -58,6 +58,7 @@ from qgis.core import (
 from qgis.gui import QgsMapToolEmitPoint, QgsRubberBand, QgsSnapIndicator
 
 from .config import get_output_group_name
+from .i18n import apply_language, is_english_ui
 from .utils import (
     cleanup_files,
     is_metric_crs,
@@ -2014,6 +2015,7 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
                 self._on_friction_vector_toggled(bool(self.chkUseFrictionVector.isChecked()))
         except Exception:
             pass
+        apply_language(self)
 
     def _setup_help_button(self):
         try:
@@ -2033,7 +2035,34 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
             pass
 
     def _on_help(self):
-        html = """
+        if is_english_ui():
+            html = """
+<h3>Cost Surface / Least-cost Path (LCP) Help</h3>
+<p>Builds movement cost from a DEM and the selected model, then generates the least-cost path from the start point to the end point.</p>
+
+<h4>Main Outputs</h4>
+<ul>
+  <li><b>Accumulated cost raster</b> (time / energy)</li>
+  <li><b>Least-cost path</b> line (optional)</li>
+  <li>(Optional) isochrones / isoenergy surfaces and a corridor</li>
+</ul>
+
+<h4>Typical Workflow</h4>
+<ol>
+  <li>Select a DEM layer and choose a movement model. A projected CRS in meters is recommended.</li>
+  <li>Pick the start and end points on the map.</li>
+  <li>Enable extra friction options if needed, then run the analysis.</li>
+</ol>
+
+<h4>Tips</h4>
+<ul>
+  <li>DEM NoData, resolution, and CRS strongly affect result quality.</li>
+  <li>The corridor output highlights a broader low-cost zone around the least-cost path.</li>
+</ul>
+"""
+            title = "Cost Surface / LCP Help"
+        else:
+            html = """
 <h3>비용표면 / 최소비용경로(Cost Surface / LCP) 도움말</h3>
 <p>DEM을 기반으로 경사(및 선택한 모델)에 따라 이동 비용을 계산하고, 시작점→종료점의 최소비용경로를 생성합니다.</p>
 
@@ -2057,9 +2086,10 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
   <li>회랑(corridor)은 “최소경로 주변의 저비용 통로”를 표현하는 옵션입니다.</li>
 </ul>
 """
+            title = "Cost Surface / LCP 도움말"
         try:
             plugin_dir = os.path.dirname(os.path.dirname(__file__))
-            show_help_dialog(parent=self, title="Cost Surface / LCP 도움말", html=html, plugin_dir=plugin_dir)
+            show_help_dialog(parent=self, title=title, html=html, plugin_dir=plugin_dir)
         except Exception:
             pass
 
@@ -2069,12 +2099,31 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
 
     def _init_models(self):
         self.cmbModel.clear()
-        self.cmbModel.addItem("토블러 보행함수 (Tobler Hiking Function)", MODEL_TOBLER)
-        self.cmbModel.addItem("나이스미스 규칙 (Naismith's Rule)", MODEL_NAISMITH)
-        self.cmbModel.addItem("허조그 메타볼릭 (Herzog metabolic, via Čučković)", MODEL_HERZOG_METABOLIC)
-        self.cmbModel.addItem("코놀리&레이크 경사비용 (Conolly & Lake, 2006)", MODEL_CONOLLY_LAKE)
-        self.cmbModel.addItem("허조그 차량/수레 (Herzog wheeled vehicle, via Čučković)", MODEL_HERZOG_WHEELED)
-        self.cmbModel.addItem("판돌프 운반 에너지 (Pandolf load carriage, 1977)", MODEL_PANDOLF)
+        english = is_english_ui()
+        self.cmbModel.addItem(
+            "Tobler Hiking Function" if english else "토블러 보행함수 (Tobler Hiking Function)",
+            MODEL_TOBLER,
+        )
+        self.cmbModel.addItem(
+            "Naismith's Rule" if english else "나이스미스 규칙 (Naismith's Rule)",
+            MODEL_NAISMITH,
+        )
+        self.cmbModel.addItem(
+            "Herzog Metabolic (via Čučković)" if english else "허조그 메타볼릭 (Herzog metabolic, via Čučković)",
+            MODEL_HERZOG_METABOLIC,
+        )
+        self.cmbModel.addItem(
+            "Conolly & Lake Slope Cost (2006)" if english else "코놀리&레이크 경사비용 (Conolly & Lake, 2006)",
+            MODEL_CONOLLY_LAKE,
+        )
+        self.cmbModel.addItem(
+            "Herzog Wheeled Vehicle (via Čučković)" if english else "허조그 차량/수레 (Herzog wheeled vehicle, via Čučković)",
+            MODEL_HERZOG_WHEELED,
+        )
+        self.cmbModel.addItem(
+            "Pandolf Load Carriage (1977)" if english else "판돌프 운반 에너지 (Pandolf load carriage, 1977)",
+            MODEL_PANDOLF,
+        )
 
     def _is_path_required(self):
         try:
@@ -2092,9 +2141,17 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
     def _update_point_help(self):
         try:
             if self._is_path_required():
-                self.lblPointHelp.setText("왼쪽 클릭 2번(시작→도착), 우클릭/ESC: 종료")
+                self.lblPointHelp.setText(
+                    "Left click twice (start -> end), right click / ESC to finish"
+                    if is_english_ui()
+                    else "왼쪽 클릭 2번(시작→도착), 우클릭/ESC: 종료"
+                )
             else:
-                self.lblPointHelp.setText("왼쪽 클릭 1번(시작), 우클릭/ESC: 종료")
+                self.lblPointHelp.setText(
+                    "Left click once (start), right click / ESC to finish"
+                    if is_english_ui()
+                    else "왼쪽 클릭 1번(시작), 우클릭/ESC: 종료"
+                )
         except Exception:
             pass
 
@@ -2145,6 +2202,7 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
     def _on_model_changed(self):
         try:
             model_key = self.cmbModel.currentData()
+            english = is_english_ui()
             # Reset all param panels first
             self.groupToblerParams.setVisible(False)
             self.groupNaismithParams.setVisible(False)
@@ -2168,77 +2226,166 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
             if model_key == MODEL_TOBLER:
                 self.groupToblerParams.setVisible(True)
                 self.lblModelHelp.setText(
-                    "<b>토블러 보행함수 (Tobler, 1993)</b><br>"
-                    "속도(km/h)=a·exp(-b·|slope+c|), slope=Δz/Δd (예: 0.1=10%)<br>"
-                    "<br><b>변수 해석</b><br>"
-                    "• 기본속도(a): 평지 기준 속도. 값↑ → 전체 시간이↓<br>"
-                    "• 경사 민감도(b): 값↑ → 경사에 따른 속도 감소가 더 급격<br>"
-                    "• 최적 경사(c): 속도가 가장 빠른 경사(대략 -c가 최적). c=0.05는 약 -5% 내리막에서 최적<br>"
-                    "<br><b>분석 제한</b>: 0=DEM 전체(느릴 수 있음), 값&gt;0=주변만 계산(빠름)<br>"
-                    "<b>누적 비용</b>: 출발점→각 셀 최소 이동시간(분)<br>"
-                    "<b>최소비용경로</b>: 출발점→도착점 경로(도착점 필요)"
+                    (
+                        "<b>Tobler Hiking Function (Tobler, 1993)</b><br>"
+                        "Speed (km/h) = a·exp(-b·|slope+c|), where slope=Δz/Δd (for example 0.1 = 10%)<br>"
+                        "<br><b>Parameter Guide</b><br>"
+                        "• Base speed (a): reference speed on flat ground. Higher values reduce total travel time<br>"
+                        "• Slope sensitivity (b): higher values make speed drop more sharply as slope increases<br>"
+                        "• Optimal slope (c): the slope with maximum speed (roughly -c). c=0.05 means an optimal downhill slope of about -5%<br>"
+                        "<br><b>Analysis Limit</b>: 0 = whole DEM (can be slow), value &gt; 0 = compute only around the route area (faster)<br>"
+                        "<b>Cumulative Cost</b>: minimum travel time from the start point to each cell (minutes)<br>"
+                        "<b>Least-cost Path</b>: route from start to destination (requires an end point)"
+                    )
+                    if english
+                    else
+                    (
+                        "<b>토블러 보행함수 (Tobler, 1993)</b><br>"
+                        "속도(km/h)=a·exp(-b·|slope+c|), slope=Δz/Δd (예: 0.1=10%)<br>"
+                        "<br><b>변수 해석</b><br>"
+                        "• 기본속도(a): 평지 기준 속도. 값↑ → 전체 시간이↓<br>"
+                        "• 경사 민감도(b): 값↑ → 경사에 따른 속도 감소가 더 급격<br>"
+                        "• 최적 경사(c): 속도가 가장 빠른 경사(대략 -c가 최적). c=0.05는 약 -5% 내리막에서 최적<br>"
+                        "<br><b>분석 제한</b>: 0=DEM 전체(느릴 수 있음), 값&gt;0=주변만 계산(빠름)<br>"
+                        "<b>누적 비용</b>: 출발점→각 셀 최소 이동시간(분)<br>"
+                        "<b>최소비용경로</b>: 출발점→도착점 경로(도착점 필요)"
+                    )
                 )
             elif model_key == MODEL_NAISMITH:
                 self.groupNaismithParams.setVisible(True)
                 self.lblModelHelp.setText(
-                    "<b>나이스미스 규칙 (Naismith, 1892)</b><br>"
-                    "시간=수평거리/속도 + 상승고도/상승페널티(하강은 페널티 없음)<br>"
-                    "<br><b>변수 해석</b><br>"
-                    "• 수평 속도: 값↑ → 전체 시간이↓<br>"
-                    "• 상승 페널티(m/h): 값↓ → 오르막에 더 불리(상승에 더 많은 시간 부여)<br>"
-                    "<br><b>분석 제한</b>: 0=DEM 전체(느릴 수 있음), 값&gt;0=주변만 계산(빠름)<br>"
-                    "<b>누적 비용</b>: 출발점→각 셀 최소 이동시간(분)<br>"
-                    "<b>최소비용경로</b>: 출발점→도착점 경로(도착점 필요)"
+                    (
+                        "<b>Naismith's Rule (Naismith, 1892)</b><br>"
+                        "Time = horizontal distance / speed + ascent / ascent penalty (no downhill penalty)<br>"
+                        "<br><b>Parameter Guide</b><br>"
+                        "• Horizontal speed: higher values reduce total travel time<br>"
+                        "• Ascent penalty (m/h): lower values make uphill movement more costly by assigning more time to ascent<br>"
+                        "<br><b>Analysis Limit</b>: 0 = whole DEM (can be slow), value &gt; 0 = compute only around the route area (faster)<br>"
+                        "<b>Cumulative Cost</b>: minimum travel time from the start point to each cell (minutes)<br>"
+                        "<b>Least-cost Path</b>: route from start to destination (requires an end point)"
+                    )
+                    if english
+                    else
+                    (
+                        "<b>나이스미스 규칙 (Naismith, 1892)</b><br>"
+                        "시간=수평거리/속도 + 상승고도/상승페널티(하강은 페널티 없음)<br>"
+                        "<br><b>변수 해석</b><br>"
+                        "• 수평 속도: 값↑ → 전체 시간이↓<br>"
+                        "• 상승 페널티(m/h): 값↓ → 오르막에 더 불리(상승에 더 많은 시간 부여)<br>"
+                        "<br><b>분석 제한</b>: 0=DEM 전체(느릴 수 있음), 값&gt;0=주변만 계산(빠름)<br>"
+                        "<b>누적 비용</b>: 출발점→각 셀 최소 이동시간(분)<br>"
+                        "<b>최소비용경로</b>: 출발점→도착점 경로(도착점 필요)"
+                    )
                 )
             elif model_key == MODEL_HERZOG_METABOLIC:
                 self.groupHerzogMetabolicParams.setVisible(True)
                 self.lblModelHelp.setText(
-                    "<b>허조그 메타볼릭(상대속도) (Herzog metabolic, via Čučković)</b><br>"
-                    "경사(절대값)에 따른 이동 저항을 다항식으로 표현한 모델입니다. (상·하행 동일하게 취급)<br>"
-                    "<br><b>변수 해석</b><br>"
-                    "• 기본속도: 평지 기준 속도. 값↑ → 전체 시간이↓<br>"
-                    "<br><b>참고</b>: 수식은 Zoran Čučković의 QGIS 'Movement Analysis' 플러그인(slope_cost) 구현을 따릅니다.<br>"
-                    "<br><b>누적 비용</b>: 출발점→각 셀 최소 이동시간(분)"
+                    (
+                        "<b>Herzog Metabolic (Relative Speed) (via Čučković)</b><br>"
+                        "This model represents movement resistance as a polynomial of slope magnitude. Uphill and downhill are treated symmetrically.<br>"
+                        "<br><b>Parameter Guide</b><br>"
+                        "• Base speed: reference speed on flat ground. Higher values reduce total travel time<br>"
+                        "<br><b>Reference</b>: follows the slope_cost implementation in Zoran Čučković's QGIS 'Movement Analysis' plugin.<br>"
+                        "<br><b>Cumulative Cost</b>: minimum travel time from the start point to each cell (minutes)"
+                    )
+                    if english
+                    else
+                    (
+                        "<b>허조그 메타볼릭(상대속도) (Herzog metabolic, via Čučković)</b><br>"
+                        "경사(절대값)에 따른 이동 저항을 다항식으로 표현한 모델입니다. (상·하행 동일하게 취급)<br>"
+                        "<br><b>변수 해석</b><br>"
+                        "• 기본속도: 평지 기준 속도. 값↑ → 전체 시간이↓<br>"
+                        "<br><b>참고</b>: 수식은 Zoran Čučković의 QGIS 'Movement Analysis' 플러그인(slope_cost) 구현을 따릅니다.<br>"
+                        "<br><b>누적 비용</b>: 출발점→각 셀 최소 이동시간(분)"
+                    )
                 )
             elif model_key == MODEL_CONOLLY_LAKE:
                 self.groupConollyLakeParams.setVisible(True)
                 self.lblModelHelp.setText(
-                    "<b>코놀리&레이크 경사비용 (Conolly & Lake, 2006)</b><br>"
-                    "경사(절대값)에 비례한 상대 비용을 적용합니다. (상·하행 동일하게 취급)<br>"
-                    "<br><b>변수 해석</b><br>"
-                    "• 기본속도: 평지 기준 속도. 값↑ → 전체 시간이↓<br>"
-                    "• 기준경사(°): 값↓ → 약한 경사에도 페널티가 빨리 커짐(민감). 값↑ → 완만한 지형에서는 차이가 줄어듦<br>"
-                    "<br><b>주의</b>: 완만한 지형이 '더 빠르게' 나오지 않도록, 기준경사 이하에서는 페널티를 1로 고정합니다.<br>"
-                    "<br><b>누적 비용</b>: 출발점→각 셀 최소 이동시간(분)"
+                    (
+                        "<b>Conolly & Lake Slope Cost (Conolly & Lake, 2006)</b><br>"
+                        "Applies a relative cost proportional to slope magnitude. Uphill and downhill are treated symmetrically.<br>"
+                        "<br><b>Parameter Guide</b><br>"
+                        "• Base speed: reference speed on flat ground. Higher values reduce total travel time<br>"
+                        "• Reference slope (°): lower values make even gentle slopes gain penalty quickly; higher values reduce contrast on mild terrain<br>"
+                        "<br><b>Note</b>: to avoid mild slopes appearing faster than flat ground, penalty is fixed at 1 below the reference slope.<br>"
+                        "<br><b>Cumulative Cost</b>: minimum travel time from the start point to each cell (minutes)"
+                    )
+                    if english
+                    else
+                    (
+                        "<b>코놀리&레이크 경사비용 (Conolly & Lake, 2006)</b><br>"
+                        "경사(절대값)에 비례한 상대 비용을 적용합니다. (상·하행 동일하게 취급)<br>"
+                        "<br><b>변수 해석</b><br>"
+                        "• 기본속도: 평지 기준 속도. 값↑ → 전체 시간이↓<br>"
+                        "• 기준경사(°): 값↓ → 약한 경사에도 페널티가 빨리 커짐(민감). 값↑ → 완만한 지형에서는 차이가 줄어듦<br>"
+                        "<br><b>주의</b>: 완만한 지형이 '더 빠르게' 나오지 않도록, 기준경사 이하에서는 페널티를 1로 고정합니다.<br>"
+                        "<br><b>누적 비용</b>: 출발점→각 셀 최소 이동시간(분)"
+                    )
                 )
             elif model_key == MODEL_HERZOG_WHEELED:
                 self.groupHerzogWheeledParams.setVisible(True)
                 self.lblModelHelp.setText(
-                    "<b>허조그 차량/수레 모델 (Herzog wheeled vehicle, via Čučković)</b><br>"
-                    "경사가 커질수록 속도가 비선형으로 급격히 감소하는 차량/수레 모델입니다. (상·하행 동일)<br>"
-                    "<br><b>변수 해석</b><br>"
-                    "• 기본속도: 평지 기준 속도. 값↑ → 전체 시간이↓<br>"
-                    "• 임계경사(°): 값↓ → 경사에 더 취약(조금만 경사져도 속도 급감). 값↑ → 경사 영향이 완만<br>"
-                    "• 통행한계(°): 이 각도를 넘는 경사는 사실상 '불통'으로 간주해 강하게 회피합니다(차량/수레에 현실적).<br>"
-                    "<br><b>참고</b>: 수식은 Zoran Čučković의 QGIS 'Movement Analysis' 플러그인(slope_cost) 구현을 참고했습니다.<br>"
-                    "<br><b>주의</b>: 이 도구는 '도로/길' 정보를 모르므로, 평지 우회로가 너무 길면 산을 가로지르는 경로가 선택될 수 있습니다. "
-                    "차량/수레라면 임계경사를 낮추거나 통행한계를 설정해 완만한 경로를 더 선호하게 하세요.<br>"
-                    "<br><b>누적 비용</b>: 출발점→각 셀 최소 이동시간(분)"
+                    (
+                        "<b>Herzog Wheeled Vehicle Model (via Čučković)</b><br>"
+                        "A wheeled-vehicle/cart model in which speed drops nonlinearly as slope increases. Uphill and downhill are treated symmetrically.<br>"
+                        "<br><b>Parameter Guide</b><br>"
+                        "• Base speed: reference speed on flat ground. Higher values reduce total travel time<br>"
+                        "• Critical slope (°): lower values make the model more sensitive to slope; higher values soften the slope effect<br>"
+                        "• Passability limit (°): slopes above this angle are treated as nearly impassable "
+                        "and strongly avoided, which is more realistic for wheeled travel<br>"
+                        "<br><b>Reference</b>: adapted from Zoran Čučković's QGIS 'Movement Analysis' slope_cost implementation.<br>"
+                        "<br><b>Warning</b>: because this tool does not know the road network, it may still cross hills "
+                        "if a detour on flat terrain is too long. For wheeled travel, lower the critical slope "
+                        "or set a stricter passability limit to prefer gentler routes.<br>"
+                        "<br><b>Cumulative Cost</b>: minimum travel time from the start point to each cell (minutes)"
+                    )
+                    if english
+                    else
+                    (
+                        "<b>허조그 차량/수레 모델 (Herzog wheeled vehicle, via Čučković)</b><br>"
+                        "경사가 커질수록 속도가 비선형으로 급격히 감소하는 차량/수레 모델입니다. (상·하행 동일)<br>"
+                        "<br><b>변수 해석</b><br>"
+                        "• 기본속도: 평지 기준 속도. 값↑ → 전체 시간이↓<br>"
+                        "• 임계경사(°): 값↓ → 경사에 더 취약(조금만 경사져도 속도 급감). 값↑ → 경사 영향이 완만<br>"
+                        "• 통행한계(°): 이 각도를 넘는 경사는 사실상 '불통'으로 간주해 강하게 회피합니다(차량/수레에 현실적).<br>"
+                        "<br><b>참고</b>: 수식은 Zoran Čučković의 QGIS 'Movement Analysis' 플러그인(slope_cost) 구현을 참고했습니다.<br>"
+                        "<br><b>주의</b>: 이 도구는 '도로/길' 정보를 모르므로, 평지 우회로가 너무 길면 산을 가로지르는 경로가 선택될 수 있습니다. "
+                        "차량/수레라면 임계경사를 낮추거나 통행한계를 설정해 완만한 경로를 더 선호하게 하세요.<br>"
+                        "<br><b>누적 비용</b>: 출발점→각 셀 최소 이동시간(분)"
+                    )
                 )
             elif model_key == MODEL_PANDOLF:
                 self.groupPandolfParams.setVisible(True)
                 self.lblModelHelp.setText(
-                    "<b>판돌프 운반 에너지 (Pandolf load carriage, 1977)</b><br>"
-                    "운반(체중/짐)과 지면계수(η), 경사(%)를 고려해 에너지 소모를 계산합니다.<br>"
-                    "<br><b>핵심</b>: 이 모델은 <u>시간</u>이 아니라 <u>에너지(소모)</u>를 최소화하는 경로를 찾는 데 적합합니다.<br>"
-                    "<br><b>변수 해석</b><br>"
-                    "• 체중/짐: 값↑ → 에너지 비용↑ (특히 짐/체중 비율 영향)<br>"
-                    "• 속도: 시간은 거리/속도이지만, 에너지(수식)도 속도에 따라 변합니다<br>"
-                    "• 지면계수 η: 1.0=단단한 지면, 값↑ → 같은 경사에서도 에너지 비용↑<br>"
-                    "<br><b>출력</b><br>"
-                    "• 누적 에너지(kcal): 출발점→각 셀 최소 누적 에너지 (체크 시 생성)<br>"
-                    "• 누적 시간(분): (체크 시) 속도 기반 이동시간을 별도로 출력할 수 있습니다<br>"
-                    "<br><b>참고</b>: 에너지(kcal)=J/4184 로 변환하여 저장합니다."
+                    (
+                        "<b>Pandolf Load Carriage Energy (Pandolf et al., 1977)</b><br>"
+                        "Estimates energy expenditure from load (body weight and carried weight), terrain coefficient (η), and slope (%).<br>"
+                        "<br><b>Key Point</b>: this model is best for finding routes that minimize <u>energy expenditure</u>, not travel time.<br>"
+                        "<br><b>Parameter Guide</b><br>"
+                        "• Body/load weight: higher values increase energy cost, especially as the load-to-body-weight ratio rises<br>"
+                        "• Speed: time still depends on distance / speed, and the energy equation also changes with speed<br>"
+                        "• Terrain coefficient η: 1.0 = firm ground; higher values increase energy cost even on the same slope<br>"
+                        "<br><b>Outputs</b><br>"
+                        "• Cumulative energy (kcal): minimum accumulated energy from the start point to each cell (generated when enabled)<br>"
+                        "• Cumulative time (min): optional travel time output based on speed<br>"
+                        "<br><b>Reference</b>: energy is stored after converting J to kcal using J / 4184."
+                    )
+                    if english
+                    else
+                    (
+                        "<b>판돌프 운반 에너지 (Pandolf load carriage, 1977)</b><br>"
+                        "운반(체중/짐)과 지면계수(η), 경사(%)를 고려해 에너지 소모를 계산합니다.<br>"
+                        "<br><b>핵심</b>: 이 모델은 <u>시간</u>이 아니라 <u>에너지(소모)</u>를 최소화하는 경로를 찾는 데 적합합니다.<br>"
+                        "<br><b>변수 해석</b><br>"
+                        "• 체중/짐: 값↑ → 에너지 비용↑ (특히 짐/체중 비율 영향)<br>"
+                        "• 속도: 시간은 거리/속도이지만, 에너지(수식)도 속도에 따라 변합니다<br>"
+                        "• 지면계수 η: 1.0=단단한 지면, 값↑ → 같은 경사에서도 에너지 비용↑<br>"
+                        "<br><b>출력</b><br>"
+                        "• 누적 에너지(kcal): 출발점→각 셀 최소 누적 에너지 (체크 시 생성)<br>"
+                        "• 누적 시간(분): (체크 시) 속도 기반 이동시간을 별도로 출력할 수 있습니다<br>"
+                        "<br><b>참고</b>: 에너지(kcal)=J/4184 로 변환하여 저장합니다."
+                    )
                 )
         except Exception:
             pass
@@ -2268,12 +2415,20 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
             self.map_tool = CostPathPointTool(self.canvas, self)
         self.canvas.setMapTool(self.map_tool)
         self.hide()
-        msg = "지도에서 시작점을 클릭하세요. (우클릭/ESC 종료)"
+        msg = (
+            "Click the start point on the map. (Right-click / ESC to finish)"
+            if is_english_ui()
+            else "지도에서 시작점을 클릭하세요. (우클릭/ESC 종료)"
+        )
         if self._is_path_required():
-            msg = "지도에서 시작점→도착점을 순서대로 클릭하세요. (우클릭/ESC 종료)"
+            msg = (
+                "Click the start point and then the end point on the map. (Right-click / ESC to finish)"
+                if is_english_ui()
+                else "지도에서 시작점→도착점을 순서대로 클릭하세요. (우클릭/ESC 종료)"
+            )
         push_message(
             self.iface,
-            "비용표면/최소비용경로",
+            "Cost Surface / LCP" if is_english_ui() else "비용표면/최소비용경로",
             msg,
             level=0,
             duration=6,
@@ -2329,18 +2484,23 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
             self._rb_line.addPoint(self._end_canvas)
 
     def _update_labels(self):
+        english = is_english_ui()
         if not self._start_canvas:
-            self.lblStart.setText("시작점: (미설정)")
+            self.lblStart.setText("Start: (not set)" if english else "시작점: (미설정)")
         else:
             self.lblStart.setText(
-                f"시작점: {self._start_canvas.x():.3f}, {self._start_canvas.y():.3f}"
+                f"Start: {self._start_canvas.x():.3f}, {self._start_canvas.y():.3f}"
+                if english
+                else f"시작점: {self._start_canvas.x():.3f}, {self._start_canvas.y():.3f}"
             )
 
         if not self._end_canvas:
-            self.lblEnd.setText("도착점: (선택)")
+            self.lblEnd.setText("End: (optional)" if english else "도착점: (선택)")
         else:
             self.lblEnd.setText(
-                f"도착점: {self._end_canvas.x():.3f}, {self._end_canvas.y():.3f}"
+                f"End: {self._end_canvas.x():.3f}, {self._end_canvas.y():.3f}"
+                if english
+                else f"도착점: {self._end_canvas.x():.3f}, {self._end_canvas.y():.3f}"
             )
 
         if self._start_canvas and self._end_canvas:
@@ -2348,9 +2508,13 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
                 self._end_canvas.x() - self._start_canvas.x(),
                 self._end_canvas.y() - self._start_canvas.y(),
             )
-            self.lblDistance.setText(f"직선거리: {d:.1f} (지도 CRS 단위)")
+            self.lblDistance.setText(
+                f"Straight-line distance: {d:.1f} (map CRS units)"
+                if english
+                else f"직선거리: {d:.1f} (지도 CRS 단위)"
+            )
         else:
-            self.lblDistance.setText("직선거리: -")
+            self.lblDistance.setText("Straight-line distance: -" if english else "직선거리: -")
 
     def run_analysis(self):
         if self._task_running:
@@ -2526,17 +2690,24 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
     def _handle_task_result(self, res: CostTaskResult):
         if not isinstance(res, CostTaskResult) or not res.ok:
             msg = getattr(res, "message", "") or "분석 실패"
-            push_message(self.iface, "오류", msg, level=2, duration=8)
+            push_message(self.iface, "Error" if is_english_ui() else "오류", msg, level=2, duration=8)
             return
 
         try:
             self._add_result_layers(res)
         except Exception as e:
             log_message(f"Add cost result layers error: {e}", level=Qgis.Critical)
-            push_message(self.iface, "오류", f"결과 레이어 추가 실패: {e}", level=2, duration=8)
+            push_message(
+                self.iface,
+                "Error" if is_english_ui() else "오류",
+                f"Failed to add result layers: {e}" if is_english_ui() else f"결과 레이어 추가 실패: {e}",
+                level=2,
+                duration=8,
+            )
             return
 
-        summary = res.message or "완료"
+        english = is_english_ui()
+        summary = res.message or ("Done" if english else "완료")
 
         if res.total_energy_kcal is not None and math.isfinite(res.total_energy_kcal):
             lcp_kcal = float(res.total_energy_kcal)
@@ -2544,7 +2715,7 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
             if res.lcp_dist_m is not None and math.isfinite(res.lcp_dist_m):
                 lcp_detail.append(f"{res.lcp_dist_m/1000.0:.2f}km")
             if res.lcp_time_s is not None and math.isfinite(res.lcp_time_s):
-                lcp_detail.append(f"{res.lcp_time_s/60.0:.1f}분")
+                lcp_detail.append(f"{res.lcp_time_s/60.0:.1f}{' min' if english else '분'}")
             lcp_txt = f"LCP {lcp_kcal:.0f}kcal"
             if lcp_detail:
                 lcp_txt = f"{lcp_txt}({', '.join(lcp_detail)})"
@@ -2555,8 +2726,8 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
                 if res.straight_dist_m is not None and math.isfinite(res.straight_dist_m):
                     straight_detail.append(f"{res.straight_dist_m/1000.0:.2f}km")
                 if res.straight_time_s is not None and math.isfinite(res.straight_time_s):
-                    straight_detail.append(f"{res.straight_time_s/60.0:.1f}분")
-                straight_txt = f"직선 {straight_kcal:.0f}kcal"
+                    straight_detail.append(f"{res.straight_time_s/60.0:.1f}{' min' if english else '분'}")
+                straight_txt = f"{'Straight' if english else '직선'} {straight_kcal:.0f}kcal"
                 if straight_detail:
                     straight_txt = f"{straight_txt}({', '.join(straight_detail)})"
 
@@ -2568,7 +2739,7 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
         else:
             lcp_time_s = res.lcp_time_s if res.lcp_time_s is not None else res.total_cost_s
             if lcp_time_s is not None and math.isfinite(lcp_time_s):
-                summary = f"{summary} | LCP {float(lcp_time_s)/60.0:.1f}분"
+                summary = f"{summary} | LCP {float(lcp_time_s)/60.0:.1f}{' min' if english else '분'}"
 
             if (
                 res.straight_time_s is not None
@@ -2588,16 +2759,21 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
                 ):
                     summary = (
                         f"{summary}({res.lcp_dist_m/1000.0:.2f}km)"
-                        f" / 직선 {straight_min:.1f}분({res.straight_dist_m/1000.0:.2f}km)"
-                        f" (Δ {sign}{abs(delta_min):.1f}분)"
+                        f" / {'Straight' if english else '직선'} {straight_min:.1f}{' min' if english else '분'}({res.straight_dist_m/1000.0:.2f}km)"
+                        f" (Δ {sign}{abs(delta_min):.1f}{' min' if english else '분'})"
                     )
                 else:
-                    summary = f"{summary} / 직선 {straight_min:.1f}분 (Δ {sign}{abs(delta_min):.1f}분)"
-        push_message(self.iface, "비용표면/최소비용경로", summary, level=0, duration=7)
+                    summary = (
+                        f"{summary} / {'Straight' if english else '직선'} "
+                        f"{straight_min:.1f}{' min' if english else '분'} "
+                        f"(Δ {sign}{abs(delta_min):.1f}{' min' if english else '분'})"
+                    )
+        push_message(self.iface, "Cost Surface / LCP" if english else "비용표면/최소비용경로", summary, level=0, duration=7)
 
     def _add_result_layers(self, res: CostTaskResult):
         project = QgsProject.instance()
         root = project.layerTreeRoot()
+        english = is_english_ui()
 
         parent_name = get_output_group_name("cost_surface", "ArchToolkit - 비용표면/최소비용경로 (Cost Surface / LCP)")
         parent_group = root.findGroup(parent_name)
@@ -2606,14 +2782,21 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
 
         run_id = uuid.uuid4().hex[:6]
         model_tag = _safe_layer_name_fragment(res.model_label or "")
-        group_name = f"비용표면_{model_tag}_{run_id}" if model_tag else f"비용표면_{run_id}"
+        if is_english_ui():
+            group_name = f"Cost_Surface_{model_tag}_{run_id}" if model_tag else f"Cost_Surface_{run_id}"
+        else:
+            group_name = f"비용표면_{model_tag}_{run_id}" if model_tag else f"비용표면_{run_id}"
         run_group = parent_group.insertGroup(0, group_name)
         run_group.setExpanded(False)
 
         bottom_to_top = []
 
         if res.cost_raster_path:
-            layer_name = f"누적 비용(분) (Cumulative Cost, min) - {(res.model_label or '').strip()}"
+            layer_name = (
+                f"Cumulative Cost (min) - {(res.model_label or '').strip()}"
+                if english
+                else f"누적 비용(분) (Cumulative Cost, min) - {(res.model_label or '').strip()}"
+            )
             cost_layer = QgsRasterLayer(res.cost_raster_path, layer_name)
             if cost_layer.isValid():
                 self._tag_cost_surface_layer(cost_layer, run_id, "cost_raster")
@@ -2622,7 +2805,11 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
                 bottom_to_top.append(cost_layer)
 
         if res.energy_raster_path:
-            layer_name = f"누적 에너지(kcal) (Cumulative Energy, kcal) - {(res.model_label or '').strip()}"
+            layer_name = (
+                f"Cumulative Energy (kcal) - {(res.model_label or '').strip()}"
+                if english
+                else f"누적 에너지(kcal) (Cumulative Energy, kcal) - {(res.model_label or '').strip()}"
+            )
             energy_layer = QgsRasterLayer(res.energy_raster_path, layer_name)
             if energy_layer.isValid():
                 self._tag_cost_surface_layer(energy_layer, run_id, "energy_raster")
@@ -2667,7 +2854,7 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
                 bottom_to_top.append(corridor_poly)
 
         if res.isochrones_vector_path:
-            iso_name = "등시간선 (Isochrones)"
+            iso_name = "Isochrones" if english else "등시간선 (Isochrones)"
             if model_tag:
                 iso_name = f"{iso_name} - {model_tag}"
             iso_layer = QgsVectorLayer(
@@ -2682,7 +2869,7 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
                 bottom_to_top.append(iso_layer)
 
         if res.isoenergy_vector_path:
-            iso_name = "등에너지선 (Iso-energy)"
+            iso_name = "Iso-energy" if english else "등에너지선 (Iso-energy)"
             if model_tag:
                 iso_name = f"{iso_name} - {model_tag}"
             iso_layer = QgsVectorLayer(
@@ -2697,7 +2884,11 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
                 bottom_to_top.append(iso_layer)
 
         if res.start_xy and res.dem_authid:
-            pt_layer = QgsVectorLayer(f"Point?crs={res.dem_authid}", "시작/도착점 (Start/End)", "memory")
+            pt_layer = QgsVectorLayer(
+                f"Point?crs={res.dem_authid}",
+                "Start/End" if english else "시작/도착점 (Start/End)",
+                "memory",
+            )
             pr = pt_layer.dataProvider()
             pr.addAttributes([QgsField("role", QVariant.String)])
             pt_layer.updateFields()
@@ -2729,7 +2920,7 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
             bottom_to_top.append(pt_layer)
 
         if res.end_xy and res.start_xy and res.dem_authid:
-            path_name = "경로 비교 (Straight vs LCP)"
+            path_name = "Path Comparison (Straight vs LCP)" if english else "경로 비교 (Straight vs LCP)"
             if model_tag:
                 path_name = f"{path_name} - {model_tag}"
             path_layer = QgsVectorLayer(
@@ -2792,8 +2983,8 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
             renderer = QgsCategorizedSymbolRenderer(
                 "kind",
                 [
-                    QgsRendererCategory("straight", sym_straight, "직선 (Straight)"),
-                    QgsRendererCategory("lcp", sym_lcp, "최소비용경로 (LCP)"),
+                    QgsRendererCategory("straight", sym_straight, "Straight" if english else "직선 (Straight)"),
+                    QgsRendererCategory("lcp", sym_lcp, "Least-cost Path (LCP)" if english else "최소비용경로 (LCP)"),
                 ],
             )
             path_layer.setRenderer(renderer)
@@ -2806,7 +2997,7 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
                     "case "
                     "when \"kind\"='lcp' then "
                     "  'LCP ' || round(\"dist_m\"/1000.0, 2) || 'km'"
-                    "  || coalesce(' / ' || round(\"time_min\", 1) || '분', '')"
+                    f"  || coalesce(' / ' || round(\"time_min\", 1) || '{' min' if english else '분'}', '')"
                     "  || coalesce(' / ' || round(\"energy_kcal\", 0) || 'kcal', '')"
                     "end"
                 )
@@ -2842,7 +3033,9 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
                 "path_coords": res.path_coords,
             }
             try:
-                handler = lambda *_args, lid=path_layer.id(): self._on_path_layer_selection_changed(lid)
+                def handler(*_args, lid=path_layer.id()):
+                    self._on_path_layer_selection_changed(lid)
+
                 self._profile_selection_handlers[path_layer.id()] = handler
                 path_layer.selectionChanged.connect(handler)
             except Exception:
@@ -2860,7 +3053,15 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
                         model_params=res.model_params or {},
                         path_coords=res.path_coords,
                         interval_m=500.0,
-                        layer_name=f"LCP 마일스톤 (500m) - {model_tag}" if model_tag else "LCP 마일스톤 (500m)",
+                        layer_name=(
+                            f"LCP Milestones (500m) - {model_tag}"
+                            if english and model_tag
+                            else "LCP Milestones (500m)"
+                            if english
+                            else f"LCP 마일스톤 (500m) - {model_tag}"
+                            if model_tag
+                            else "LCP 마일스톤 (500m)"
+                        ),
                     )
                     if milestone_layer is not None and milestone_layer.isValid():
                         self._tag_cost_surface_layer(milestone_layer, run_id, "milestones")
@@ -2975,7 +3176,7 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
             pal.fieldName = (
                 "case "
                 "when \"minutes\" >= 120 then round(\"minutes\"/60.0, 1) || 'h' "
-                "else round(\"minutes\", 0) || '분' "
+                f"else round(\"minutes\", 0) || '{' min' if is_english_ui() else '분'}' "
                 "end"
             )
             pal.placement = QgsPalLayerSettings.Curved
@@ -3121,7 +3322,7 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
             for i, t in enumerate(ticks):
                 label = fmt_minutes(t)
                 if i == 0:
-                    label = f"{label} (출발점)"
+                    label = f"{label} ({'Start' if is_english_ui() else '출발점'})"
                 items.append(QgsColorRampShader.ColorRampItem(float(t), colors[i], label))
             ramp.setColorRampItemList(items)
             shader.setRasterShaderFunction(ramp)
@@ -3193,7 +3394,7 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
             for i, t in enumerate(ticks):
                 label = fmt_kcal(t)
                 if i == 0:
-                    label = f"{label} (출발점)"
+                    label = f"{label} ({'Start' if is_english_ui() else '출발점'})"
                 items.append(QgsColorRampShader.ColorRampItem(float(t), colors[i], label))
             ramp.setColorRampItemList(items)
             shader.setRasterShaderFunction(ramp)
@@ -3324,7 +3525,7 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
             target_d = float(i) * float(interval_m)
             nearest = min(profile, key=lambda p: abs(float(p[0]) - target_d))
             d_m, x, y, t_min, e_kcal = nearest
-            parts = [f"{d_m/1000.0:.1f}km", f"{t_min:.1f}분"]
+            parts = [f"{d_m/1000.0:.1f}km", f"{t_min:.1f}{' min' if is_english_ui() else '분'}"]
             if e_kcal is not None:
                 parts.append(f"{e_kcal:.0f}kcal")
             label = " / ".join(parts)
@@ -3490,11 +3691,17 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
             ds = None
 
         except Exception as e:
-            push_message(self.iface, "오류", f"프로파일 계산 실패: {e}", level=2, duration=7)
+            if is_english_ui():
+                push_message(self.iface, "Error", f"Profile calculation failed: {e}", level=2, duration=7)
+            else:
+                push_message(self.iface, "오류", f"프로파일 계산 실패: {e}", level=2, duration=7)
             return
 
         dlg = QtWidgets.QDialog(self)
-        dlg.setWindowTitle(f"최소비용경로 프로파일 (LCP Profile) - {model_label}".strip())
+        english = is_english_ui()
+        dlg.setWindowTitle(
+            (f"Least-cost Path Profile (LCP Profile) - {model_label}" if english else f"최소비용경로 프로파일 (LCP Profile) - {model_label}").strip()
+        )
         dlg.setModal(False)
         try:
             dlg.setAttribute(Qt.WA_DeleteOnClose, True)
@@ -3506,13 +3713,13 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
         if lcp_pts:
             total_d = lcp_pts[-1][0] / 1000.0
             total_t = lcp_pts[-1][2]
-            summary_parts.append(f"LCP {total_d:.2f}km / {total_t:.1f}분")
+            summary_parts.append(f"LCP {total_d:.2f}km / {total_t:.1f}{' min' if english else '분'}")
             if lcp_pts[-1][3] is not None:
                 summary_parts.append(f"{lcp_pts[-1][3]:.0f}kcal")
         if straight_pts:
             sd = straight_pts[-1][0] / 1000.0
             st = straight_pts[-1][2]
-            summary_parts.append(f"직선 {sd:.2f}km / {st:.1f}분")
+            summary_parts.append(f"{'Straight' if english else '직선'} {sd:.2f}km / {st:.1f}{' min' if english else '분'}")
             if straight_pts[-1][3] is not None:
                 summary_parts.append(f"{straight_pts[-1][3]:.0f}kcal")
         lbl = QtWidgets.QLabel(" | ".join(summary_parts))
@@ -3521,22 +3728,22 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
 
         elev_chart = MultiLineChartWidget()
         elev_chart.set_series(
-            title="고도 (Elevation)",
+            title="Elevation" if english else "고도 (Elevation)",
             unit="m",
             series=[
                 {"name": "LCP", "color": QColor(0, 160, 0, 220), "dash": False, "points": [(d, z) for d, z, _t, _e in lcp_pts]},
-                {"name": "직선", "color": QColor(90, 90, 90, 220), "dash": True, "points": [(d, z) for d, z, _t, _e in straight_pts]},
+                {"name": "Straight" if english else "직선", "color": QColor(90, 90, 90, 220), "dash": True, "points": [(d, z) for d, z, _t, _e in straight_pts]},
             ],
         )
         layout.addWidget(elev_chart)
 
         time_chart = MultiLineChartWidget()
         time_chart.set_series(
-            title="누적 시간 (Cumulative Time)",
-            unit="분",
+            title="Cumulative Time" if english else "누적 시간 (Cumulative Time)",
+            unit="min" if english else "분",
             series=[
                 {"name": "LCP", "color": QColor(0, 120, 255, 220), "dash": False, "points": [(d, t) for d, _z, t, _e in lcp_pts]},
-                {"name": "직선", "color": QColor(90, 90, 90, 220), "dash": True, "points": [(d, t) for d, _z, t, _e in straight_pts]},
+                {"name": "Straight" if english else "직선", "color": QColor(90, 90, 90, 220), "dash": True, "points": [(d, t) for d, _z, t, _e in straight_pts]},
             ],
         )
         layout.addWidget(time_chart)
@@ -3544,11 +3751,16 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
         if model_key == MODEL_PANDOLF:
             energy_chart = MultiLineChartWidget()
             energy_chart.set_series(
-                title="누적 에너지 (Cumulative Energy)",
+                title="Cumulative Energy" if english else "누적 에너지 (Cumulative Energy)",
                 unit="kcal",
                 series=[
                     {"name": "LCP", "color": QColor(120, 0, 200, 220), "dash": False, "points": [(d, e) for d, _z, _t, e in lcp_pts if e is not None]},
-                    {"name": "직선", "color": QColor(90, 90, 90, 220), "dash": True, "points": [(d, e) for d, _z, _t, e in straight_pts if e is not None]},
+                    {
+                        "name": "Straight" if english else "직선",
+                        "color": QColor(90, 90, 90, 220),
+                        "dash": True,
+                        "points": [(d, e) for d, _z, _t, e in straight_pts if e is not None],
+                    },
                 ],
             )
             layout.addWidget(energy_chart)
@@ -3598,7 +3810,7 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
             energy_chart.on_hover_distance = on_hover
 
         btn_row = QtWidgets.QHBoxLayout()
-        btn_close = QtWidgets.QPushButton("닫기")
+        btn_close = QtWidgets.QPushButton("Close" if english else "닫기")
         btn_close.clicked.connect(dlg.close)
         btn_row.addStretch(1)
         btn_row.addWidget(btn_close)
@@ -3738,9 +3950,21 @@ class CostPathPointTool(QgsMapToolEmitPoint):
             self._has_start = False
 
         if self._has_start:
-            push_message(self.dialog.iface, "비용표면/최소비용경로", "도착점을 클릭하세요. (우클릭/ESC 종료)", level=0, duration=4)
+            push_message(
+                self.dialog.iface,
+                "Cost Surface / LCP" if is_english_ui() else "비용표면/최소비용경로",
+                "Click the end point. (Right-click or ESC to finish)" if is_english_ui() else "도착점을 클릭하세요. (우클릭/ESC 종료)",
+                level=0,
+                duration=4,
+            )
         else:
-            push_message(self.dialog.iface, "비용표면/최소비용경로", "시작점을 클릭하세요. (우클릭/ESC 종료)", level=0, duration=4)
+            push_message(
+                self.dialog.iface,
+                "Cost Surface / LCP" if is_english_ui() else "비용표면/최소비용경로",
+                "Click the start point. (Right-click or ESC to finish)" if is_english_ui() else "시작점을 클릭하세요. (우클릭/ESC 종료)",
+                level=0,
+                duration=4,
+            )
 
     def canvasMoveEvent(self, event):
         res = self.canvas().snappingUtils().snapToMap(event.pos())
@@ -3763,7 +3987,13 @@ class CostPathPointTool(QgsMapToolEmitPoint):
             if not self.dialog._is_path_required():
                 self.finish_selection()
                 return
-            push_message(self.dialog.iface, "비용표면/최소비용경로", "도착점을 클릭하세요. (또는 우클릭/ESC로 종료)", level=0, duration=4)
+            push_message(
+                self.dialog.iface,
+                "Cost Surface / LCP" if is_english_ui() else "비용표면/최소비용경로",
+                "Click the end point. (Or right-click / ESC to finish)" if is_english_ui() else "도착점을 클릭하세요. (또는 우클릭/ESC로 종료)",
+                level=0,
+                duration=4,
+            )
             return
 
         self.dialog.set_end_point(point)

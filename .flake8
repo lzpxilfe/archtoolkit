@@ -1,0 +1,8 @@
+[flake8]
+max-line-length = 160
+exclude =
+    dist
+    .venv
+    __pycache__
+per-file-ignores =
+    tools/i18n.py:E501

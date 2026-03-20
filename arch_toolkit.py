@@ -21,8 +21,9 @@ from importlib import import_module
 import os.path
 
 from qgis.PyQt.QtGui import QIcon
-from qgis.PyQt.QtWidgets import QAction, QMenu, QToolButton, QMessageBox
+from qgis.PyQt.QtWidgets import QAction, QActionGroup, QMenu, QToolButton, QMessageBox
 
+from .tools.i18n import apply_language, get_ui_language, install_runtime_i18n_hooks, set_ui_language, tr
 from .tools.utils import log_exception, start_ui_log_pump, stop_ui_log_pump
 
 
@@ -39,6 +40,15 @@ class ToolSpec:
     persistent_attr: str = None
     modal: bool = True
     error_operation: str = "여는"
+
+
+def _translate_error_operation(operation: str) -> str:
+    if get_ui_language() == "en":
+        return {
+            "여는": "opening",
+            "실행": "running",
+        }.get(operation, tr(operation))
+    return operation
 
 
 TOOL_SPECS = (
@@ -211,6 +221,7 @@ TOOL_SPECS = (
     ),
 )
 
+
 class ArchToolkit:
     def __init__(self, iface):
         self.iface = iface
@@ -223,6 +234,10 @@ class ArchToolkit:
         self.main_action = None
         self.tool_button = None
         self.tool_menu = None
+        self.language_menu = None
+        self.language_action_group = None
+        self.language_ko_action = None
+        self.language_en_action = None
         self.viewshed_dlg = None  # Persistent reference for marker cleanup
         self.cost_dlg = None  # Persistent reference for temp/preview cleanup
         self.profile_dlg = None  # Persistent reference for multi-profile selection/view
@@ -242,9 +257,42 @@ class ArchToolkit:
         return QIcon(icon_path) if icon_path else QIcon()
 
     def _create_tool_action(self, spec):
-        action = QAction(self._resolve_icon(spec.icon_candidates), spec.text, self.iface.mainWindow())
+        action = QAction(self._resolve_icon(spec.icon_candidates), tr(spec.text), self.iface.mainWindow())
+        try:
+            action.setProperty("_archtoolkit_i18n_source_text", spec.text)
+        except Exception:
+            pass
         action.triggered.connect(partial(self._execute_tool, spec.key))
         return action
+
+    def _build_language_menu(self):
+        if self.language_menu is not None:
+            apply_language(self.language_menu)
+            self._sync_language_actions()
+            return self.language_menu
+
+        menu = QMenu(self.iface.mainWindow())
+        menu.setTitle("언어 (Language)")
+
+        self.language_action_group = QActionGroup(menu)
+        self.language_action_group.setExclusive(True)
+
+        self.language_ko_action = QAction("한국어", menu)
+        self.language_ko_action.setCheckable(True)
+        self.language_ko_action.triggered.connect(partial(self._change_ui_language, "ko"))
+        self.language_action_group.addAction(self.language_ko_action)
+
+        self.language_en_action = QAction("영어 (English)", menu)
+        self.language_en_action.setCheckable(True)
+        self.language_en_action.triggered.connect(partial(self._change_ui_language, "en"))
+        self.language_action_group.addAction(self.language_en_action)
+
+        menu.addAction(self.language_ko_action)
+        menu.addAction(self.language_en_action)
+        self.language_menu = menu
+        self._sync_language_actions()
+        apply_language(menu)
+        return menu
 
     def _build_tool_menu(self):
         menu = QMenu(self.iface.mainWindow())
@@ -257,7 +305,57 @@ class ArchToolkit:
                 menu.addSeparator()
             menu.addAction(self.tool_actions[spec.key])
             previous_group = spec.menu_group
+        menu.addSeparator()
+        menu.addMenu(self.language_menu or self._build_language_menu())
+        apply_language(menu)
         return menu
+
+    def _sync_language_actions(self):
+        lang = get_ui_language()
+        if self.language_ko_action is not None:
+            self.language_ko_action.setChecked(lang == "ko")
+        if self.language_en_action is not None:
+            self.language_en_action.setChecked(lang == "en")
+
+    def _refresh_ui_language(self):
+        for spec in TOOL_SPECS:
+            action = self.tool_actions.get(spec.key)
+            if action is not None:
+                try:
+                    action.setText(tr(spec.text))
+                except Exception:
+                    pass
+
+        if self.language_menu is not None:
+            try:
+                self.language_menu.setTitle(tr("언어 (Language)"))
+            except Exception:
+                pass
+            apply_language(self.language_menu)
+
+        self._sync_language_actions()
+
+        if self.tool_menu is not None:
+            apply_language(self.tool_menu)
+        if self.main_action is not None:
+            apply_language(self.main_action)
+
+        for attr_name in {spec.persistent_attr for spec in TOOL_SPECS if spec.persistent_attr}:
+            dialog = getattr(self, attr_name, None)
+            if dialog is not None:
+                apply_language(dialog)
+
+    def _change_ui_language(self, code, _checked=False):
+        lang = set_ui_language(code)
+        self._refresh_ui_language()
+        if lang == "en":
+            notice = "영어 UI가 적용되었습니다. 이미 열려 있던 창은 일부 다시 열어야 완전히 반영될 수 있습니다."
+        else:
+            notice = "한국어 UI가 적용되었습니다."
+        try:
+            self.iface.messageBar().pushMessage(tr("언어 (Language)"), tr(notice), level=0, duration=5)
+        except Exception:
+            pass
 
     def _load_dialog_class(self, spec):
         package_name = __package__ or __name__.rpartition(".")[0]
@@ -275,6 +373,7 @@ class ArchToolkit:
         return dialog
 
     def _show_dialog(self, dialog, *, modal):
+        apply_language(dialog)
         if modal:
             dialog.exec_()
             return
@@ -293,8 +392,12 @@ class ArchToolkit:
             log_exception(f"{spec.log_label} error", e)
             QMessageBox.critical(
                 self.iface.mainWindow(),
-                "오류",
-                f"도구를 {spec.error_operation} 중 오류가 발생했습니다: {str(e)}",
+                tr("오류"),
+                tr(
+                    "도구를 {operation} 중 오류가 발생했습니다: {error}",
+                    operation=_translate_error_operation(spec.error_operation),
+                    error=str(e),
+                ),
             )
 
     def _cleanup_dialog(self, attr_name):
@@ -324,6 +427,10 @@ class ArchToolkit:
                 start_ui_log_pump()
             except Exception:
                 pass
+            try:
+                install_runtime_i18n_hooks()
+            except Exception:
+                pass
 
             self.actions = []
             self.menu_actions = []
@@ -337,9 +444,14 @@ class ArchToolkit:
                 self.tool_actions[spec.key] = action
                 self.menu_actions.append(action)
 
+            self._build_language_menu()
+
             # 2. Add to Plugin Menu
             for action in self.menu_actions:
                 self.iface.addPluginToMenu(self.menu_name, action)
+            if self.language_menu is not None:
+                self.iface.addPluginToMenu(self.menu_name, self.language_menu.menuAction())
+                self.menu_actions.append(self.language_menu.menuAction())
 
             # 3. Create Dedicated Toolbar for Visibility
             self.toolbar = self.iface.addToolBar(u"ArchToolkit")
@@ -350,22 +462,27 @@ class ArchToolkit:
 
             # Create dropdown menu using the same group metadata as the plugin menu.
             self.tool_menu = self._build_tool_menu()
-             
+
             self.main_action.setMenu(self.tool_menu)
-            
+
             # Add QToolButton to toolbar for instant popup support
             self.tool_button = QToolButton()
             self.tool_button.setDefaultAction(self.main_action)
             self.tool_button.setMenu(self.tool_menu)
             self.tool_button.setPopupMode(QToolButton.InstantPopup)
-            
+
             self.toolbar.addWidget(self.tool_button)
-            
+
             # Keep references for cleanup
             self.actions = list(self.menu_actions) + [self.main_action]
+            self._refresh_ui_language()
         except Exception as e:
             log_exception("ArchToolkit initGui error", e)
-            QMessageBox.critical(self.iface.mainWindow(), "ArchToolkit 로드 오류", f"플러그인을 초기화하는 중 오류가 발생했습니다: {str(e)}")
+            QMessageBox.critical(
+                self.iface.mainWindow(),
+                tr("ArchToolkit 로드 오류"),
+                tr("플러그인을 초기화하는 중 오류가 발생했습니다: {error}", error=str(e)),
+            )
 
     def unload(self):
         # Remove from menu
@@ -383,7 +500,7 @@ class ArchToolkit:
         # Close persistent dialogs and disconnect long-lived signals (prevents stale callbacks after reload)
         for attr_name in {spec.persistent_attr for spec in TOOL_SPECS if spec.persistent_attr}:
             self._cleanup_dialog(attr_name)
-             
+
         # Remove toolbar cleanly from mainWindow
         if self.toolbar:
             try:
@@ -398,6 +515,10 @@ class ArchToolkit:
 
         self.tool_button = None
         self.tool_menu = None
+        self.language_menu = None
+        self.language_action_group = None
+        self.language_ko_action = None
+        self.language_en_action = None
         self.main_action = None
         self.menu_actions = []
         self.tool_actions = {}

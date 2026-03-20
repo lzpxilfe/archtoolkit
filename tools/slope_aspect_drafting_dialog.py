@@ -54,7 +54,6 @@ from qgis.core import (
     QgsProject,
     QgsProperty,
     QgsRendererCategory,
-    QgsSingleSymbolRenderer,
     QgsStyle,
     QgsSymbolLayer,
     QgsTextBufferSettings,
@@ -67,6 +66,7 @@ from qgis.core import (
 import processing
 
 from .config import get_output_group_name
+from .i18n import apply_language, is_english_ui
 from .utils import cleanup_files, push_message, restore_ui_focus, set_archtoolkit_layer_metadata
 from .live_log_dialog import ensure_live_log_dialog
 from .help_dialog import show_help_dialog
@@ -90,6 +90,7 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
         self.btnRun.clicked.connect(self.run_drafting)
         self.btnClose.clicked.connect(self.reject)
         self._setup_help_button()
+        apply_language(self)
 
     def _setup_help_button(self):
         try:
@@ -116,20 +117,37 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
     def _on_help(self):
         try:
             plugin_dir = os.path.dirname(os.path.dirname(__file__))
-            html = (
-                "<h2>경사도/사면방향 도면화 (Slope/Aspect Drafting)</h2>"
-                "<p>AOI(작업영역)를 기준으로 인쇄용 경사 래스터와 사면방향(방위각) 화살표 레이어를 생성합니다.</p>"
-                "<h3>입력</h3>"
-                "<ul>"
-                "<li>DEM 래스터</li>"
-                "<li>AOI 폴리곤(없으면 ‘작업영역(AOI) 폴리곤 생성’으로 생성)</li>"
-                "</ul>"
-                "<h3>팁</h3>"
-                "<ul>"
-                "<li>AOI 범위를 너무 크게 잡으면 출력이 무거워질 수 있습니다.</li>"
-                "</ul>"
-            )
-            show_help_dialog(parent=self, title="도면화(경사/사면방향) 도움말", html=html, plugin_dir=plugin_dir)
+            if is_english_ui():
+                html = (
+                    "<h2>Slope / Aspect Drafting</h2>"
+                    "<p>Creates print-ready slope raster output and aspect-arrow layers inside the selected AOI.</p>"
+                    "<h3>Inputs</h3>"
+                    "<ul>"
+                    "<li>DEM raster</li>"
+                    "<li>AOI polygon (create one with 'New Polygon' if needed)</li>"
+                    "</ul>"
+                    "<h3>Tip</h3>"
+                    "<ul>"
+                    "<li>If the AOI is too large, the output can become heavy and slow.</li>"
+                    "</ul>"
+                )
+                title = "Slope / Aspect Drafting Help"
+            else:
+                html = (
+                    "<h2>경사도/사면방향 도면화 (Slope/Aspect Drafting)</h2>"
+                    "<p>AOI(작업영역)를 기준으로 인쇄용 경사 래스터와 사면방향(방위각) 화살표 레이어를 생성합니다.</p>"
+                    "<h3>입력</h3>"
+                    "<ul>"
+                    "<li>DEM 래스터</li>"
+                    "<li>AOI 폴리곤(없으면 ‘작업영역(AOI) 폴리곤 생성’으로 생성)</li>"
+                    "</ul>"
+                    "<h3>팁</h3>"
+                    "<ul>"
+                    "<li>AOI 범위를 너무 크게 잡으면 출력이 무거워질 수 있습니다.</li>"
+                    "</ul>"
+                )
+                title = "도면화(경사/사면방향) 도움말"
+            show_help_dialog(parent=self, title=title, html=html, plugin_dir=plugin_dir)
         except Exception:
             try:
                 QtWidgets.QMessageBox.information(self, "도움말", "README.md를 참고하세요.")
@@ -144,9 +162,8 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
             else QgsProject.instance().crs().authid()
         )
 
-        layer = QgsVectorLayer(
-            f"MultiPolygon?crs={crs_authid}", "작업영역_AOI (AOI polygon)", "memory"
-        )
+        layer_name = "AOI_Work_Area" if is_english_ui() else "작업영역_AOI (AOI polygon)"
+        layer = QgsVectorLayer(f"MultiPolygon?crs={crs_authid}", layer_name, "memory")
         pr = layer.dataProvider()
         pr.addAttributes([QgsField("name", QVariant.String)])
         layer.updateFields()
@@ -286,7 +303,11 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
             parent_group = root.findGroup(parent_name)
             if parent_group is None:
                 parent_group = root.insertGroup(0, parent_name)
-            group_name = f"도면화_{dem_layer.name()}_{run_id}"
+            group_name = (
+                f"Drafting_{dem_layer.name()}_{run_id}"
+                if is_english_ui()
+                else f"도면화_{dem_layer.name()}_{run_id}"
+            )
             run_group = parent_group.insertGroup(0, group_name)
             run_group.setExpanded(False)
 
@@ -411,7 +432,9 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
             )
 
         layer = QgsVectorLayer(
-            f"Polygon?crs={dem_authid}", "경사도_격자 (Slope grid)", "memory"
+            f"Polygon?crs={dem_authid}",
+            "Slope_Grid" if is_english_ui() else "경사도_격자 (Slope grid)",
+            "memory",
         )
         pr = layer.dataProvider()
         pr.addAttributes(
@@ -521,7 +544,7 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
                 pass
 
             if hasattr(out_layer, "setName"):
-                out_layer.setName("경사도_구역(1°) (Slope zones)")
+                out_layer.setName("Slope_Zones_1deg" if is_english_ui() else "경사도_구역(1°) (Slope zones)")
         except Exception:
             out_layer = layer
 
@@ -725,7 +748,9 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
             )
 
         layer = QgsVectorLayer(
-            f"Point?crs={dem_authid}", "사면방향_화살표 (Aspect arrows)", "memory"
+            f"Point?crs={dem_authid}",
+            "Aspect_Arrows" if is_english_ui() else "사면방향_화살표 (Aspect arrows)",
+            "memory",
         )
         pr = layer.dataProvider()
         pr.addAttributes(

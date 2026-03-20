@@ -25,6 +25,7 @@ from qgis.core import QgsProject, QgsVectorLayer
 from qgis.PyQt.QtGui import QIcon
 import processing
 import tempfile
+from .i18n import is_english_ui, set_widget_item_translation
 from .utils import new_run_id, push_message, restore_ui_focus, set_archtoolkit_layer_metadata
 from .live_log_dialog import ensure_live_log_dialog
 from .help_dialog import show_help_dialog
@@ -33,18 +34,19 @@ from .help_dialog import show_help_dialog
 FORM_CLASS, _ = uic.loadUiType(os.path.join(
     os.path.dirname(__file__), 'dem_generator_dialog_base.ui'))
 
+
 class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
     # Map scale to recommended pixel size (meters)
     # Based on contour interval standards from National Geographic Information Institute
     SCALE_PIXEL_MAP = {
         '1:1,000 (등고선 1m)': 1.0,
-        '1:2,500 (등고선 2m)': 2.0, 
+        '1:2,500 (등고선 2m)': 2.0,
         '1:5,000 (등고선 5m)': 5.0,
         '1:25,000 (등고선 10m)': 10.0,
         '1:50,000 (등고선 20m)': 20.0,
         'Custom (사용자 지정)': None
     }
-    
+
     # Interpolation methods with academic citations
     INTERPOLATION_METHODS = {
         'TIN - Linear (선형)': {
@@ -68,7 +70,7 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
             'desc': '💡 포인트 기반 Ordinary Kriging(Lite). 자동 파라미터 + 예측 DEM + 분산(_variance.tif) 출력. 미터 단위 투영 CRS 권장 [Matheron, 1963; Cressie, 1993]'
         }
     }
-    
+
     # DXF Layer definitions for Korean digital topographic maps (DXF/NGI 표준코드 + 구(숫자) 코드 혼재)
     DXF_LAYER_INFO = {
         # --- 현행 수치지형도(일반적으로 많이 쓰이는 F*** 코드) ---
@@ -85,8 +87,7 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
         'H0027312': {'name': '수준점', 'desc': '수준점(기준점). 데이터에 존재하면 보간 품질 향상(선택)', 'category': '현행(포인트)', 'default': False},
         'E0011111': {'name': '하천중심선', 'desc': '하천 물길 (고도값 없을 수 있음)', 'category': '수계', 'default': False},
         'E0011112': {'name': '하천경계선', 'desc': '강물/지면 경계', 'category': '수계', 'default': False},
-        'E0041311': {'name': '호수/저수지', 'desc': '수면 경계', 'category': '수계', 'default': False}
-        ,
+        'E0041311': {'name': '호수/저수지', 'desc': '수면 경계', 'category': '수계', 'default': False},
         # --- 구(2000년대 등) 수치지형도: 숫자 레이어 코드 ---
         # 주로 71XX(등고선), 7217(표고점), 73XX(기준점/수치) 형태로 등장합니다.
         # (예) "Layer" IN ('7111','7114','2121','2122')
@@ -154,15 +155,16 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
         },
     }
 
-    
     def __init__(self, iface, parent=None):
         super(DemGeneratorDialog, self).__init__(parent)
         self.setupUi(self)
         self.iface = iface
         self.loaded_dxf_layers = []
+        set_widget_item_translation(self.cmbScale, True)
+        set_widget_item_translation(self.cmbInterpolation, True)
         self._setup_kriging_controls()
         self._setup_help_button()
-        
+
         # Initialize UI
         self.populate_layers()
         self.populate_scales()
@@ -170,7 +172,8 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
         self.setup_layer_table()
         self.setup_layer_presets()
         self.setup_layer_list()
-        
+        self._apply_english_shell()
+
         # Connect signals
         self.cmbScale.currentIndexChanged.connect(self.on_scale_changed)
         self.cmbInterpolation.currentIndexChanged.connect(self.on_interpolation_changed)
@@ -180,17 +183,39 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
         self.btnRefreshLayers.clicked.connect(self.populate_layers)
         self.btnRun.clicked.connect(self.run_process)
         self.btnClose.clicked.connect(self.reject)
-        
+
         # Set button icon
         icon_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'dem_icon.png')
         if os.path.exists(icon_path):
             self.btnRun.setIcon(QIcon(icon_path))
             self.btnRun.setIconSize(QSize(32, 32))
 
+    def _apply_english_shell(self):
+        if not is_english_ui():
+            return
+        try:
+            self.setWindowTitle("DEM Generator - ArchToolkit")
+        except Exception:
+            pass
+        for attr_name, text in (
+            ("btnLoadDxf", "Load DXF..."),
+            ("btnSelectAll", "Select All"),
+            ("btnDeselectAll", "Clear Selection"),
+            ("btnRefreshLayers", "Refresh Layers"),
+            ("btnRun", "Generate DEM"),
+            ("btnClose", "Close"),
+        ):
+            try:
+                btn = getattr(self, attr_name, None)
+                if btn is not None:
+                    btn.setText(text)
+            except Exception:
+                continue
+
     def _setup_help_button(self):
         """Add a Help button without editing the .ui file."""
         try:
-            self.btnHelp = QtWidgets.QPushButton("도움말", self)
+            self.btnHelp = QtWidgets.QPushButton("Help" if is_english_ui() else "도움말", self)
             self.btnHelp.clicked.connect(self._on_help)
 
             layout = self.layout()
@@ -213,29 +238,49 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
     def _on_help(self):
         try:
             plugin_dir = os.path.dirname(os.path.dirname(__file__))
-            html = (
-                "<h2>DEM 생성 (Generate DEM)</h2>"
-                "<p>등고선/표고점(벡터)에서 DEM(GeoTIFF)을 생성합니다.</p>"
-                "<h3>보간 방법</h3>"
-                "<ul>"
-                "<li><b>TIN</b>: 등고선(선) 데이터에 권장</li>"
-                "<li><b>IDW</b>: 포인트 데이터에 권장</li>"
-                "<li><b>Kriging (Lite)</b>: 포인트 + 값 필드(Z) 기반. 예측 DEM과 함께 "
-                "<code>_variance.tif</code>(불확실성)도 생성됩니다. (미터 단위 투영 CRS 권장)</li>"
-                "</ul>"
-                "<h3>팁</h3>"
-                "<ul>"
-                "<li>대상 범위가 넓으면 픽셀 크기를 키우면 더 안정적입니다.</li>"
-                "<li>출처/레퍼런스는 <code>REFERENCES.md</code>를 참고하세요.</li>"
-                "</ul>"
-            )
-            show_help_dialog(parent=self, title="DEM 생성 도움말", html=html, plugin_dir=plugin_dir)
+            if is_english_ui():
+                html = (
+                    "<h2>Generate DEM</h2>"
+                    "<p>Creates a DEM (GeoTIFF) from contour lines and spot-height vectors.</p>"
+                    "<h3>Interpolation Methods</h3>"
+                    "<ul>"
+                    "<li><b>TIN</b>: recommended for contour-line data</li>"
+                    "<li><b>IDW</b>: recommended for point data</li>"
+                    "<li><b>Kriging (Lite)</b>: point-based using a Z / value field. It creates the predicted DEM and "
+                    "<code>_variance.tif</code> for uncertainty. A projected CRS in meters is recommended.</li>"
+                    "</ul>"
+                    "<h3>Tips</h3>"
+                    "<ul>"
+                    "<li>If the target extent is large, increasing pixel size can make processing more stable.</li>"
+                    "<li>See <code>REFERENCES.md</code> for sources and references.</li>"
+                    "</ul>"
+                )
+                title = "DEM Generator Help"
+            else:
+                html = (
+                    "<h2>DEM 생성 (Generate DEM)</h2>"
+                    "<p>등고선/표고점(벡터)에서 DEM(GeoTIFF)을 생성합니다.</p>"
+                    "<h3>보간 방법</h3>"
+                    "<ul>"
+                    "<li><b>TIN</b>: 등고선(선) 데이터에 권장</li>"
+                    "<li><b>IDW</b>: 포인트 데이터에 권장</li>"
+                    "<li><b>Kriging (Lite)</b>: 포인트 + 값 필드(Z) 기반. 예측 DEM과 함께 "
+                    "<code>_variance.tif</code>(불확실성)도 생성됩니다. (미터 단위 투영 CRS 권장)</li>"
+                    "</ul>"
+                    "<h3>팁</h3>"
+                    "<ul>"
+                    "<li>대상 범위가 넓으면 픽셀 크기를 키우면 더 안정적입니다.</li>"
+                    "<li>출처/레퍼런스는 <code>REFERENCES.md</code>를 참고하세요.</li>"
+                    "</ul>"
+                )
+                title = "DEM 생성 도움말"
+            show_help_dialog(parent=self, title=title, html=html, plugin_dir=plugin_dir)
         except Exception:
             try:
                 QtWidgets.QMessageBox.information(self, "도움말", "README.md를 참고하세요.")
             except Exception:
                 pass
-    
+
     def setup_layer_list(self):
         """Setup multi-select layer list with checkboxes"""
         self.listLayers.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
@@ -301,7 +346,7 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
 
     def _is_kriging_selected(self) -> bool:
         try:
-            method_name = self.cmbInterpolation.currentText()
+            method_name = str(self.cmbInterpolation.currentData() or self.cmbInterpolation.currentText() or "")
             info = self.INTERPOLATION_METHODS.get(method_name, {})
             return str(info.get("algorithm") or "") == "archtoolkit:kriging_lite"
         except Exception:
@@ -338,21 +383,21 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
                     pass
         finally:
             cmb.blockSignals(False)
-    
+
     def on_layer_item_changed(self, item):
         """When one checkbox is toggled, toggle all selected items too"""
         if self._updating_checkboxes:
             return
-        
+
         self._updating_checkboxes = True
         new_state = item.checkState()
-        
+
         # If this item is in selection, apply to all selected
         selected_items = self.listLayers.selectedItems()
         if item in selected_items:
             for sel_item in selected_items:
                 sel_item.setCheckState(new_state)
-        
+
         self._updating_checkboxes = False
 
         try:
@@ -360,7 +405,7 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
                 self._refresh_kriging_value_fields()
         except Exception:
             pass
-    
+
     def populate_layers(self):
         """Populate layer list with vector layers (checkboxes)"""
         self.listLayers.clear()
@@ -372,7 +417,7 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
                 item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
                 item.setCheckState(Qt.Unchecked)
                 self.listLayers.addItem(item)
-        
+
         # Auto-check layers containing 'DEM용' in name
         for i in range(self.listLayers.count()):
             item = self.listLayers.item(i)
@@ -384,7 +429,7 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
                 self._refresh_kriging_value_fields()
         except Exception:
             pass
-    
+
     def setup_layer_table(self):
         """Setup the layer selection table with predefined DXF layers"""
         self.tblLayers.setColumnCount(4)
@@ -393,39 +438,39 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
         self.tblLayers.setColumnWidth(0, 30)
         self.tblLayers.setColumnWidth(1, 80)
         self.tblLayers.setColumnWidth(2, 100)
-        
+
         self.layer_checkboxes = {}
         self.layer_row_by_code = {}
         row = 0
         self.tblLayers.setRowCount(len(self.DXF_LAYER_INFO))
-        
+
         for layer_code, info in self.DXF_LAYER_INFO.items():
             checkbox = QCheckBox()
             checkbox.setChecked(info['default'])
             checkbox.setToolTip(f"{info['category']}: {info['desc']}")
             self.layer_checkboxes[layer_code] = checkbox
-            
+
             widget = QWidget()
             layout = QHBoxLayout(widget)
             layout.addWidget(checkbox)
             layout.setAlignment(Qt.AlignCenter)
             layout.setContentsMargins(0, 0, 0, 0)
             self.tblLayers.setCellWidget(row, 0, widget)
-            
+
             code_item = QTableWidgetItem(layer_code)
             code_item.setFlags(code_item.flags() & ~Qt.ItemIsEditable)
             self.tblLayers.setItem(row, 1, code_item)
-            
+
             name_item = QTableWidgetItem(info['name'])
             name_item.setFlags(name_item.flags() & ~Qt.ItemIsEditable)
             self.tblLayers.setItem(row, 2, name_item)
-            
+
             desc_item = QTableWidgetItem(info['desc'])
             desc_item.setFlags(desc_item.flags() & ~Qt.ItemIsEditable)
             self.tblLayers.setItem(row, 3, desc_item)
 
             self.layer_row_by_code[str(layer_code)] = int(row)
-            
+
             row += 1
 
     def setup_layer_presets(self):
@@ -446,6 +491,7 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
             self.lblDxfEra = QtWidgets.QLabel("시기", self)
             self.cmbDxfEra = QtWidgets.QComboBox(self)
             self.cmbDxfEra.setMinimumWidth(170)
+            set_widget_item_translation(self.cmbDxfEra, True)
             self.cmbDxfEra.addItem("현행 수치지형도", "modern")
             self.cmbDxfEra.addItem("구 수치지형도(숫자)", "legacy")
             try:
@@ -465,6 +511,7 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
             self.lblLayerPreset = QtWidgets.QLabel("프리셋", self)
             self.cmbLayerPreset = QtWidgets.QComboBox(self)
             self.cmbLayerPreset.setMinimumWidth(220)
+            set_widget_item_translation(self.cmbLayerPreset, True)
 
             # Populate presets based on era
             self._refresh_layer_preset_items()
@@ -635,7 +682,7 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
             self._selected_codes_by_era[str(self._current_dxf_era)] = set(self.get_selected_layer_codes())
         except Exception:
             pass
-    
+
     def select_all_layers(self):
         for code, checkbox in (self.layer_checkboxes or {}).items():
             if not self._is_code_visible(code):
@@ -644,7 +691,7 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
                 checkbox.setChecked(True)
             except Exception:
                 pass
-    
+
     def deselect_all_layers(self):
         for code, checkbox in (self.layer_checkboxes or {}).items():
             if not self._is_code_visible(code):
@@ -653,7 +700,7 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
                 checkbox.setChecked(False)
             except Exception:
                 pass
-    
+
     def get_selected_layer_codes(self):
         selected = []
         for code, checkbox in (self.layer_checkboxes or {}).items():
@@ -665,7 +712,7 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
             except Exception:
                 continue
         return selected
-    
+
     def load_dxf_file(self):
         """Load multiple DXF files"""
         dxf_paths, _ = QFileDialog.getOpenFileNames(
@@ -674,67 +721,67 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
             "",
             "DXF Files (*.dxf);;All Files (*)"
         )
-        
+
         if not dxf_paths:
             return
-        
+
         selected_codes = self.get_selected_layer_codes()
         if not selected_codes:
             push_message(self.iface, "오류", "최소 하나의 레이어를 선택해주세요", level=2)
             restore_ui_focus(self)
             return
-        
+
         query = '"Layer" IN (' + ','.join([f"'{code}'" for code in selected_codes]) + ')'
-        
+
         total_features = 0
         loaded_count = 0
-        
+
         for dxf_path in dxf_paths:
             try:
                 layer_name = os.path.splitext(os.path.basename(dxf_path))[0] + "_DEM용"
                 layer = QgsVectorLayer(dxf_path + "|layername=entities", layer_name, "ogr")
-                
+
                 if layer.isValid():
                     layer.setSubsetString(query)
                     QgsProject.instance().addMapLayer(layer)
                     self.loaded_dxf_layers.append(layer)
                     total_features += layer.featureCount()
                     loaded_count += 1
-                    
+
             except Exception:
                 push_message(self.iface, "경고", f"{os.path.basename(dxf_path)} 로드 실패", level=1)
-        
+
         self.populate_layers()
-        
+
         if loaded_count > 0:
             push_message(self.iface, "성공", f"{loaded_count}개 DXF 로드 완료: 총 {total_features}개 피처", level=0)
-    
+
     def populate_scales(self):
         self.cmbScale.clear()
         for scale in self.SCALE_PIXEL_MAP.keys():
-            self.cmbScale.addItem(scale)
+            self.cmbScale.addItem(scale, scale)
         # Default to 1:5,000 (index 2)
         self.cmbScale.setCurrentIndex(2)
         self.on_scale_changed()
-    
+
     def on_scale_changed(self):
-        scale = self.cmbScale.currentText()
+        scale = str(self.cmbScale.currentData() or self.cmbScale.currentText() or "")
         recommended = self.SCALE_PIXEL_MAP.get(scale)
-        
+
         if recommended is not None:
             self.spinPixelSize.setValue(recommended)
             self.lblRecommended.setText(f"(권장: {recommended}m)")
         else:
             self.lblRecommended.setText("(직접 입력)")
-    
+
     def populate_interpolation_methods(self):
         self.cmbInterpolation.clear()
         for method_name in self.INTERPOLATION_METHODS.keys():
-            self.cmbInterpolation.addItem(method_name)
+            self.cmbInterpolation.addItem(method_name, method_name)
         self.on_interpolation_changed()
-    
+
     def on_interpolation_changed(self):
-        method_name = self.cmbInterpolation.currentText()
+        method_name = str(self.cmbInterpolation.currentData() or self.cmbInterpolation.currentText() or "")
         method_info = self.INTERPOLATION_METHODS.get(method_name, {})
         desc = method_info.get('desc', '')
         self.lblInterpDesc.setText(desc)
@@ -772,7 +819,7 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
         output_path = self.fileOutput.filePath()
         pixel_size = self.spinPixelSize.value()
         run_id = new_run_id("dem")
-        
+
         if not selected_layers:
             push_message(self.iface, "오류", "레이어를 체크해주세요", level=2)
             restore_ui_focus(self)
@@ -785,11 +832,11 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
         # Live log window (non-modal) so users can see progress in real time.
         ensure_live_log_dialog(self.iface, owner=self, show=True, clear=True)
 
-        method_name = self.cmbInterpolation.currentText()
+        method_name = str(self.cmbInterpolation.currentData() or self.cmbInterpolation.currentText() or "")
         method_info = self.INTERPOLATION_METHODS.get(method_name, {})
         algorithm = method_info.get('algorithm', 'qgis:tininterpolation')
         method_param = method_info.get('method')
-        
+
         # Build query for DXF layer filtering
         selected_codes = self.get_selected_layer_codes()
 
@@ -798,14 +845,14 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
             query = '"Layer" IN (' + ','.join([f"'{code}'" for code in selected_codes]) + ')'
         else:
             query = None
-        
+
         push_message(self.iface, "처리 중", f"{len(selected_layers)}개 레이어 병합 중...", level=0)
         self.hide()
         QtWidgets.QApplication.processEvents()
-        
+
         try:
             temp_merged = None
-            
+
             # Step 1: Merge all selected layers into one temp file
             if len(selected_layers) > 1:
                 temp_merged = os.path.join(tempfile.gettempdir(), f'archtoolkit_merged_{uuid.uuid4().hex[:8]}.gpkg')
@@ -817,16 +864,16 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
                 merged_layer = QgsVectorLayer(temp_merged, "merged", "ogr")
             else:
                 merged_layer = selected_layers[0]
-            
+
             if not merged_layer or not merged_layer.isValid():
                 push_message(self.iface, "오류", "레이어 병합에 실패했습니다.", level=2)
                 restore_ui_focus(self)
                 return
-            
+
             # Step 2: Apply query filter
             if query and merged_layer.fields().indexFromName('Layer') >= 0:
                 merged_layer.setSubsetString(query)
-            
+
             # Step 3: Find Z field
             z_field_idx = -1
             for fn in ['Z_COORD', 'z_coord', 'Elevation', 'ELEVATION', 'z_first']:
@@ -834,18 +881,18 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
                 if idx >= 0:
                     z_field_idx = idx
                     break
-            
+
             geom_type = merged_layer.geometryType()
             interp_type = 0 if geom_type == 0 else 1
-            
+
             # Use source() for file-based layer
             source_path = merged_layer.source()
-            
+
             if z_field_idx >= 0:
                 interp_data = f'{source_path}::~::0::~::{z_field_idx}::~::{interp_type}'
             else:
                 interp_data = f'{source_path}::~::1::~::0::~::{interp_type}'
-            
+
             combined_extent = merged_layer.extent()
 
             # Kriging (Lite) path: implemented in pure Python (numpy) + QGIS, no external providers.
@@ -983,9 +1030,6 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
                     push_message(self.iface, "오류", f"Kriging 처리 중 오류: {str(e)}", level=2, duration=10)
                     restore_ui_focus(self)
                     return
-
-
-            
             params = {
                 'INTERPOLATION_DATA': interp_data,
                 'EXTENT': combined_extent,
@@ -994,13 +1038,13 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
             }
             if method_param is not None:
                 params['METHOD'] = method_param
-            
+
             push_message(self.iface, "처리 중", f"{method_name} 보간 실행 중...", level=0)
             QtWidgets.QApplication.processEvents()
-            
+
             # Step 4: Run TIN interpolation
             result = processing.run(algorithm, params)
-            
+
             # Add result to map
             if result and os.path.exists(output_path):
                 out_layer = self.iface.addRasterLayer(output_path, "생성된 DEM")
@@ -1025,7 +1069,7 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
             else:
                 push_message(self.iface, "오류", "DEM이 생성되지 않았습니다.", level=2)
                 restore_ui_focus(self)
-            
+
         except Exception as e:
             push_message(self.iface, "오류", f"처리 중 오류: {str(e)}", level=2)
             restore_ui_focus(self)
@@ -1033,9 +1077,3 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
             if temp_merged and os.path.exists(temp_merged):
                 from .utils import cleanup_files
                 cleanup_files([temp_merged])
-
-
-
-
-
-

@@ -53,13 +53,13 @@ from qgis.core import (
 from qgis.gui import QgsMapLayerComboBox  # noqa: F401 (needed for .ui custom widget loading)
 
 from .config import get_output_group_name
+from .i18n import apply_language, is_english_ui
 from .utils import (
     is_metric_crs,
     log_message,
     push_message,
     restore_ui_focus,
     set_archtoolkit_layer_metadata,
-    transform_point,
 )
 from .live_log_dialog import ensure_live_log_dialog
 from .help_dialog import show_help_dialog
@@ -182,6 +182,7 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
 
         self._on_site_layer_changed(self.cmbSiteLayer.currentLayer())
         self._on_mode_changed()
+        apply_language(self)
 
     def _setup_help_button(self):
         try:
@@ -204,7 +205,36 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
             pass
 
     def _on_help(self):
-        html = """
+        if is_english_ui():
+            html = """
+<h3>Spatial / Visibility Network Help</h3>
+<p>
+Builds either (1) a proximity network (PPA) or (2) a DEM-based visibility network (LOS)
+from a site layer.
+</p>
+
+<h4>Modes</h4>
+<ul>
+  <li><b>PPA</b>: creates edges using straight-line distance rules such as k-NN, threshold, or Delaunay-derived graphs.</li>
+  <li><b>Visibility (LOS)</b>: samples the DEM to test whether pairs of nodes can see each other.</li>
+</ul>
+
+<h4>Input / Output</h4>
+<ul>
+  <li><b>Input</b>: site layer (points / polygons), plus a DEM for LOS mode</li>
+  <li><b>Output</b>: edge layer + optional node-metrics layer (centrality / components)</li>
+</ul>
+
+<h4>Tips</h4>
+<ul>
+  <li>LOS can become expensive very quickly. Limiting candidate <b>k</b> and <b>max distance</b> is recommended.</li>
+  <li>Polygon sites use representative points by default. Turn on boundary sampling when you need visibility ratios.</li>
+  <li>Use the <b>Interpretation Guide</b> button for help reading the results.</li>
+</ul>
+"""
+            title = "Spatial / Visibility Network Help"
+        else:
+            html = """
 <h3>근접/가시권 네트워크(Spatial / Visibility Network) 도움말</h3>
 <p>
 유적(노드) 레이어를 입력으로 받아, (1) 근접성 네트워크(PPA) 또는 (2) DEM 기반 가시성(LOS) 네트워크를 생성합니다.
@@ -229,9 +259,10 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
   <li>더 자세한 해석은 버튼행의 <b>해석 가이드</b>를 참고하세요.</li>
 </ul>
 """
+            title = "Spatial / Visibility Network 도움말"
         try:
             plugin_dir = os.path.dirname(os.path.dirname(__file__))
-            show_help_dialog(parent=self, title="Spatial / Visibility Network 도움말", html=html, plugin_dir=plugin_dir)
+            show_help_dialog(parent=self, title=title, html=html, plugin_dir=plugin_dir)
         except Exception:
             pass
 
@@ -609,6 +640,79 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
         except Exception:
             mode = ""
 
+        if is_english_ui():
+            ppa = """
+            <h3>Proximity Network (PPA)</h3>
+            <p><b>What does it show?</b><br>
+            It links sites using <b>straight-line (Euclidean) distance</b> only, without terrain cost.
+            It is useful for quickly checking neighborhood-style interaction hypotheses.</p>
+
+            <p><b>How should the outputs be read?</b><br>
+            <ul>
+              <li><b>Edge layer</b>: neighborhood connections between sites. <code>dist_km</code> stores straight-line distance.</li>
+              <li><b>Node layer (SNA)</b>: <code>degree</code>, <code>component</code>, and <code>comp_size</code> summarize local and network structure.</li>
+            </ul></p>
+
+            <p><b>How can I reduce spaghetti-like edges?</b><br>
+            <ul>
+              <li><b>Mutual k-NN</b>: keeps only reciprocal neighbors.</li>
+              <li><b>Gabriel / RNG</b>: keeps only more essential proximity edges derived from Delaunay.</li>
+              <li><b>Max dist (m)</b>: removes unrealistically long links.</li>
+            </ul></p>
+            """
+
+            vis = """
+            <h3>Visibility Network (LOS)</h3>
+            <p><b>What does it show?</b><br>
+            It samples the DEM with line-of-sight tests to ask whether site A and site B can see each other.
+            It fits questions about watch, signaling, defense, or communication systems.</p>
+
+            <p><b>How should the outputs be read?</b><br>
+            <ul>
+              <li><b>Edge layer</b>: the <code>status</code> field distinguishes mutually visible, one-way visible, mutually hidden, and failed samples.</li>
+              <li><b>Directionality</b>: <code>vis_ab</code> and <code>vis_ba</code> store A->B and B->A separately.</li>
+              <li><b>Polygon input</b>: if boundary sampling is enabled, fields like <code>vis_ratio_ab</code> show how much of a target is visible.</li>
+            </ul></p>
+
+            <p><b>How can I reduce runtime?</b><br>
+            <ul>
+              <li><b>Candidate k</b>: tests only nearby candidates for each node.</li>
+              <li><b>All pairs in range</b>: use only for small datasets when exhaustive checking matters.</li>
+              <li><b>Max dist (m)</b>: skips distant pairs entirely.</li>
+            </ul></p>
+            """
+
+            sna = """
+            <h3>SNA Metrics (Point Layer)</h3>
+            <p><b>Why use them?</b><br>
+            They help identify hubs, strategic intermediaries, isolation, and network fragmentation numerically.</p>
+            <ul>
+              <li><code>degree</code>: number of links.</li>
+              <li><code>component</code> / <code>comp_size</code>: disconnected sub-networks and their sizes.</li>
+              <li><code>closeness</code>: how near a node is to the rest of the network.</li>
+              <li><code>betweenness</code>: how strongly a node acts as a bridge between others.</li>
+            </ul>
+            """
+
+            refs = """
+            <h3>References (summary)</h3>
+            <ul>
+              <li>Proximity graphs: Delaunay (1934), Gabriel &amp; Sokal (1969), Toussaint (1980)</li>
+              <li>Archaeological network review: Brughmans &amp; Peeples (2017)</li>
+              <li>Visibility / visibility graphs: Gillings &amp; Wheatley (2001), Turner et al. (2001), Van Dyke et al. (2016)</li>
+            </ul>
+            """
+
+            body = vis + sna + ppa if mode == NETWORK_VISIBILITY else ppa + sna + vis
+            return (
+                "<html><head><meta charset='utf-8'></head><body style='font-family:Sans-Serif;'>"
+                "<h2>Network Interpretation Guide</h2>"
+                "<p style='color:#444'>Tip: hover over each option to see a short explanation and reference note.</p>"
+                + body
+                + refs
+                + "</body></html>"
+            )
+
         # Keep it practical: how to read the output layers/fields and when to use each option.
         ppa = """
         <h3>근접성 네트워크 (PPA)</h3>
@@ -702,7 +806,9 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
 
             dlg = QtWidgets.QDialog(self)
             dlg.setAttribute(Qt.WA_DeleteOnClose, True)
-            dlg.setWindowTitle("해석 가이드 (Network Interpretation)")
+            dlg.setWindowTitle(
+                "Network Interpretation Guide" if is_english_ui() else "해석 가이드 (Network Interpretation)"
+            )
             dlg.resize(560, 520)
 
             layout = QtWidgets.QVBoxLayout(dlg)
@@ -712,8 +818,8 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
             layout.addWidget(browser)
 
             row = QtWidgets.QHBoxLayout()
-            btn_copy = QtWidgets.QPushButton("복사", dlg)
-            btn_close = QtWidgets.QPushButton("닫기", dlg)
+            btn_copy = QtWidgets.QPushButton("Copy" if is_english_ui() else "복사", dlg)
+            btn_close = QtWidgets.QPushButton("Close" if is_english_ui() else "닫기", dlg)
             row.addStretch(1)
             row.addWidget(btn_copy)
             row.addWidget(btn_close)
@@ -1236,8 +1342,8 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
             r2 = float(max_dist_m) ** 2
             log_message(f"PPA: threshold building (n={n}, max_dist_m={max_dist_m})", level=Qgis.Info)
             for i in range(n - 1):
-                dx = coords[i + 1 :, 0] - coords[i, 0]
-                dy = coords[i + 1 :, 1] - coords[i, 1]
+                dx = coords[i + 1:, 0] - coords[i, 0]
+                dy = coords[i + 1:, 1] - coords[i, 1]
                 d2 = dx * dx + dy * dy
                 js = np.where(d2 <= r2)[0]
                 for j_off in js:
@@ -1308,7 +1414,7 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
         comps, comp_sizes = self._components(n, edges)
         msg = (
             f"완료: 노드 {n} / 간선 {len(edges)}  "
-            f"(평균 degree {float(sum(deg))/max(1,n):.2f}, components {len(comp_sizes)})"
+            f"(평균 degree {float(sum(deg))/max(1, n):.2f}, components {len(comp_sizes)})"
         )
         log_message(f"PPA: {msg}  [method={method}]", level=Qgis.Info)
         push_message(self.iface, "PPA", msg, level=0, duration=7)
@@ -1490,7 +1596,6 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
     def _ppa_filter_gabriel(self, *, cand_edges: Set[Tuple[int, int]], coords: np.ndarray) -> Set[Tuple[int, int]]:
         """Gabriel graph filter (usually applied on Delaunay candidate edges)."""
         out: Set[Tuple[int, int]] = set()
-        n = int(coords.shape[0])
         eps = 1e-9
         for a, b in cand_edges:
             a = int(a)
@@ -1939,10 +2044,17 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                 return None
             return float(visible) / float(valid)
 
+        status_sample_failed = "Sample Failed" if is_english_ui() else "샘플 실패"
+        status_visible = "Visible" if is_english_ui() else "보임"
+        status_hidden = "Not Visible" if is_english_ui() else "안보임"
+        status_mutual_visible = "Mutually Visible" if is_english_ui() else "상호 보임"
+        status_oneway_visible = "One-way Visible" if is_english_ui() else "단방향 보임"
+        status_mutual_hidden = "Mutually Hidden" if is_english_ui() else "상호 안보임"
+
         def _status_from_vis(vis: Optional[bool]) -> str:
             if vis is None:
-                return "샘플 실패"
-            return "보임" if bool(vis) else "안보임"
+                return status_sample_failed
+            return status_visible if bool(vis) else status_hidden
 
         def _eval_pair(a: int, b: int) -> Tuple[str, float, Dict[str, Any]]:
             """Evaluate visibility for pair (a<b), returning (edge_status, ratio_mean, extras)."""
@@ -2009,17 +2121,17 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
             ratio_mean = float(sum(vals) / float(len(vals))) if vals else 0.0
 
             # Aggregate status for styling
-            if status_ab == "샘플 실패" or status_ba == "샘플 실패":
-                edge_status = "샘플 실패"
+            if status_ab == status_sample_failed or status_ba == status_sample_failed:
+                edge_status = status_sample_failed
             else:
                 vab = bool(vis_ab)
                 vba = bool(vis_ba)
                 if vab and vba:
-                    edge_status = "상호 보임"
+                    edge_status = status_mutual_visible
                 elif vab or vba:
-                    edge_status = "단방향 보임"
+                    edge_status = status_oneway_visible
                 else:
-                    edge_status = "상호 안보임"
+                    edge_status = status_mutual_hidden
 
             extras = {
                 "status_ab": status_ab,
@@ -2029,7 +2141,7 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                 "vis_ratio_ab": float(r_ab) if r_ab is not None else 0.0,
                 "vis_ratio_ba": float(r_ba) if r_ba is not None else 0.0,
                 "vis_ratio": float(ratio_mean),
-                "mutual": int(1 if (edge_status == "상호 보임") else 0),
+                "mutual": int(1 if (edge_status == status_mutual_visible) else 0),
             }
             return edge_status, float(ratio_mean), extras
 
@@ -2050,7 +2162,7 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
 
                     tested_pairs += 1
                     edge_status, ratio_mean, extras = _eval_pair(i, j)
-                    if edge_status == "샘플 실패":
+                    if edge_status == status_sample_failed:
                         failed_pairs += 1
 
                     edges.add((i, j))
@@ -2092,7 +2204,7 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                     tested.add((a, b))
                     tested_pairs += 1
                     edge_status, ratio_mean, extras = _eval_pair(a, b)
-                    if edge_status == "샘플 실패":
+                    if edge_status == status_sample_failed:
                         failed_pairs += 1
 
                     edges.add((a, b))
@@ -2176,10 +2288,10 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                 extra_values_by_node=extra_values_by_node,
             )
 
-        mutual_edges = sum(1 for v in status_by_edge.values() if v == "상호 보임")
-        oneway_edges = sum(1 for v in status_by_edge.values() if v == "단방향 보임")
-        hidden_edges = sum(1 for v in status_by_edge.values() if v == "상호 안보임")
-        fail_edges = sum(1 for v in status_by_edge.values() if v == "샘플 실패")
+        mutual_edges = sum(1 for v in status_by_edge.values() if v == status_mutual_visible)
+        oneway_edges = sum(1 for v in status_by_edge.values() if v == status_oneway_visible)
+        hidden_edges = sum(1 for v in status_by_edge.values() if v == status_mutual_hidden)
+        fail_edges = sum(1 for v in status_by_edge.values() if v == status_sample_failed)
 
         msg = (
             f"완료: 검사쌍 {tested_pairs}개 (상호보임 {mutual_edges}, 단방향 {oneway_edges}, "
@@ -2279,6 +2391,12 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
         # Styling
         if status_by_edge is not None:
             categories: List[QgsRendererCategory] = []
+            status_sample_failed = "Sample Failed" if is_english_ui() else "샘플 실패"
+            status_visible = "Visible" if is_english_ui() else "보임"
+            status_hidden = "Not Visible" if is_english_ui() else "안보임"
+            status_mutual_visible = "Mutually Visible" if is_english_ui() else "상호 보임"
+            status_oneway_visible = "One-way Visible" if is_english_ui() else "단방향 보임"
+            status_mutual_hidden = "Mutually Hidden" if is_english_ui() else "상호 안보임"
 
             def _mk_sym(col: QColor, *, dashed: bool = False, dotted: bool = False) -> QgsLineSymbol:
                 sym = QgsLineSymbol.createSimple(
@@ -2296,6 +2414,12 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                 return sym
 
             # Backward compatible labels (older builds used "보임/안보임").
+            categories.append(QgsRendererCategory(status_mutual_visible, _mk_sym(QColor(0, 180, 0, 230)), status_mutual_visible))
+            categories.append(QgsRendererCategory(status_visible, _mk_sym(QColor(0, 180, 0, 230)), status_visible))
+            categories.append(QgsRendererCategory(status_oneway_visible, _mk_sym(QColor(240, 140, 0, 220), dashed=True), status_oneway_visible))
+            categories.append(QgsRendererCategory(status_mutual_hidden, _mk_sym(QColor(220, 0, 0, 190), dashed=True), status_mutual_hidden))
+            categories.append(QgsRendererCategory(status_hidden, _mk_sym(QColor(220, 0, 0, 190), dashed=True), status_hidden))
+            categories.append(QgsRendererCategory(status_sample_failed, _mk_sym(QColor(120, 120, 120, 180), dotted=True), status_sample_failed))
             categories.append(QgsRendererCategory("상호 보임", _mk_sym(QColor(0, 180, 0, 230)), "상호 보임"))
             categories.append(QgsRendererCategory("보임", _mk_sym(QColor(0, 180, 0, 230)), "보임"))
             categories.append(QgsRendererCategory("단방향 보임", _mk_sym(QColor(240, 140, 0, 220), dashed=True), "단방향 보임"))

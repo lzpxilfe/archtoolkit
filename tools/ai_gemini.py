@@ -19,6 +19,7 @@ from qgis.PyQt.QtCore import QEventLoop, QSettings, QTimer, QUrl
 from qgis.PyQt.QtNetwork import QNetworkRequest
 
 from .config import get_plugin_config_value
+from .i18n import is_english_ui
 from .utils import push_message
 
 
@@ -112,12 +113,20 @@ def describe_model_status(
     raw_model = str(model or "").strip()
     if not raw_model:
         default_model = get_default_model_name()
+        if is_english_ui():
+            return "info", f"If left blank, the default model `{default_model}` will be used."
         return "info", f"비워두면 기본 모델 `{default_model}`을 사용합니다."
 
     normalized = normalize_model_name(raw_model)
     replacement = get_model_replacement(raw_model)
     if replacement:
         note = _DEPRECATED_MODEL_NOTES.get(raw_model) or f"`{replacement}` 사용을 권장합니다."
+        if is_english_ui():
+            note_en = (
+                _DEPRECATED_MODEL_NOTES.get(raw_model)
+                and f"The Google changelog says it was retired on March 9, 2026 and replaced by `{replacement}`."
+            ) or f"`{replacement}` is recommended."
+            return "warning", f"The current value `{raw_model}` is a legacy model ID. {note_en}"
         return "warning", f"현재 입력값 `{raw_model}`은 구형 ID입니다. {note}"
 
     known = list(verified_models or get_known_models())
@@ -126,21 +135,39 @@ def describe_model_status(
         if is_stale:
             suffix = f" (마지막 확인일: {verified_at})" if str(verified_at or "").strip() else ""
             stale_days = get_known_models_stale_after_days()
+            if is_english_ui():
+                suffix_en = f" (last verified: {verified_at})" if str(verified_at or "").strip() else ""
+                return "warning", (
+                    f"The model `{normalized}` is in the saved catalog, "
+                    f"but that catalog is over {stale_days} days old{suffix_en}. Refresh it with 'Check Models'."
+                )
             return "warning", (
                 f"현재 모델 `{normalized}`은 저장된 목록에는 있지만, "
                 f"확인일이 {stale_days}일 이상 지난 상태입니다{suffix}. '모델 확인'으로 갱신해보세요."
             )
         suffix = f" (공식 확인일: {verified_at})" if str(verified_at or "").strip() else ""
+        if is_english_ui():
+            suffix_en = f" (officially verified: {verified_at})" if str(verified_at or "").strip() else ""
+            return "ok", f"The model `{normalized}` is in the recently verified catalog{suffix_en}."
         return "ok", f"현재 모델 `{normalized}`은 최근 확인 목록에 있습니다{suffix}."
 
     if normalized == get_default_model_name():
         if is_stale:
+            if is_english_ui():
+                return "warning", (
+                    f"The model `{normalized}` is the plugin default, "
+                    "but the built-in catalog is stale, so re-checking the latest model status is safer."
+                )
             return "warning", (
                 f"현재 모델 `{normalized}`은 플러그인 기본 모델이지만, "
                 "내장 목록 확인일이 오래되어 최신 여부를 다시 확인하는 편이 안전합니다."
             )
+        if is_english_ui():
+            return "ok", f"The model `{normalized}` is the plugin's default Gemini model."
         return "ok", f"현재 모델 `{normalized}`은 플러그인 기본 Gemini 모델입니다."
 
+    if is_english_ui():
+        return "warning", f"The model `{normalized}` was not found in the recently verified catalog. Re-check it with 'Check Models'."
     return "warning", f"현재 모델 `{normalized}`은 최근 확인 목록에서 찾지 못했습니다. '모델 확인'으로 다시 검증해보세요."
 
 
@@ -239,7 +266,7 @@ def list_available_models(
                 continue
             name = str(item.get("name") or "").strip()
             if name.startswith("models/"):
-                name = name[len("models/") :]
+                name = name[len("models/"):]
             if not name.startswith("gemini"):
                 continue
             if name not in out:
@@ -386,7 +413,9 @@ def configure_api_key(parent: QtWidgets.QWidget, *, iface=None) -> Optional[str]
         key, ok = QtWidgets.QInputDialog.getText(
             parent,
             "Gemini API Key",
-            "Gemini API 키를 입력하세요 (QGIS 인증 저장소에 저장됩니다):",
+            "Enter the Gemini API key (it will be stored in the QGIS authentication store):"
+            if is_english_ui()
+            else "Gemini API 키를 입력하세요 (QGIS 인증 저장소에 저장됩니다):",
             QtWidgets.QLineEdit.Password,
         )
     except Exception:
@@ -403,7 +432,13 @@ def configure_api_key(parent: QtWidgets.QWidget, *, iface=None) -> Optional[str]
     auth_cfg = _new_auth_config()
     if authm is None or auth_cfg is None:
         if iface is not None:
-            push_message(iface, "경고", "QGIS AuthManager를 사용할 수 없습니다. 키 저장에 실패했습니다.", level=1, duration=6)
+            push_message(
+                iface,
+                "Warning" if is_english_ui() else "경고",
+                "QGIS AuthManager is unavailable, so the key could not be saved." if is_english_ui() else "QGIS AuthManager를 사용할 수 없습니다. 키 저장에 실패했습니다.",
+                level=1,
+                duration=6,
+            )
         return None
 
     # Reuse existing config if present; otherwise create a new one.
@@ -420,7 +455,13 @@ def configure_api_key(parent: QtWidgets.QWidget, *, iface=None) -> Optional[str]
         auth_cfg.setConfig("password", api_key)
     except Exception:
         if iface is not None:
-            push_message(iface, "오류", "AuthManager 설정 구성 중 오류가 발생했습니다.", level=2, duration=6)
+            push_message(
+                iface,
+                "Error" if is_english_ui() else "오류",
+                "An error occurred while configuring AuthManager." if is_english_ui() else "AuthManager 설정 구성 중 오류가 발생했습니다.",
+                level=2,
+                duration=6,
+            )
         return None
 
     ok = False
@@ -436,8 +477,10 @@ def configure_api_key(parent: QtWidgets.QWidget, *, iface=None) -> Optional[str]
         if iface is not None:
             push_message(
                 iface,
-                "오류",
-                "Gemini API 키를 AuthManager에 저장하지 못했습니다. (마스터 비밀번호 설정이 필요할 수 있습니다)",
+                "Error" if is_english_ui() else "오류",
+                "Could not save the Gemini API key to AuthManager. (A master password may need to be configured.)"
+                if is_english_ui()
+                else "Gemini API 키를 AuthManager에 저장하지 못했습니다. (마스터 비밀번호 설정이 필요할 수 있습니다)",
                 level=2,
                 duration=8,
             )
@@ -451,7 +494,13 @@ def configure_api_key(parent: QtWidgets.QWidget, *, iface=None) -> Optional[str]
     if authcfg_id:
         _settings_set("authcfg", authcfg_id)
         if iface is not None:
-            push_message(iface, "완료", "Gemini API 키를 저장했습니다.", level=0, duration=5)
+            push_message(
+                iface,
+                "Done" if is_english_ui() else "완료",
+                "Saved the Gemini API key." if is_english_ui() else "Gemini API 키를 저장했습니다.",
+                level=0,
+                duration=5,
+            )
 
     return api_key
 
@@ -587,8 +636,13 @@ def generate_text(
 
 def explain_auth_manager_once() -> str:
     """User-facing short explanation about AuthManager persistence."""
+    if is_english_ui():
+        return (
+            "Yes. Once it is saved in the same QGIS profile, the plugin usually only reuses the stored authcfg id, "
+            "so you normally do not need to enter it again. If the QGIS authentication store is reset or deleted, "
+            "or if you switch to another QGIS profile, you may need to configure it again."
+        )
     return (
         "네. 한 번 저장해두면(동일 QGIS 프로필 내) 다음부터는 authcfg id만 참조하므로 보통 다시 입력할 필요가 없습니다. "
         "다만 QGIS 인증 저장소(마스터 비밀번호)를 초기화/삭제하거나 다른 프로필을 쓰면 다시 설정해야 할 수 있습니다."
     )
-

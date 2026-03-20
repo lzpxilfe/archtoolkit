@@ -28,7 +28,7 @@ except Exception:  # pragma: no cover
 import processing
 from qgis.PyQt import QtWidgets
 from qgis.PyQt.QtCore import Qt
-from qgis.PyQt.QtGui import QColor, QIcon
+from qgis.PyQt.QtGui import QColor
 from qgis.core import (
     QgsColorRampShader,
     QgsCoordinateTransform,
@@ -47,6 +47,7 @@ from qgis.gui import QgsMapLayerComboBox
 from .config import get_output_group_name
 from .live_log_dialog import ensure_live_log_dialog
 from .help_dialog import show_help_dialog
+from .i18n import apply_language, is_english_ui, tr
 from .ui_helpers import create_hint_label, set_plugin_window_icon
 from .utils import (
     get_archtoolkit_layer_metadata,
@@ -107,6 +108,18 @@ _GUIDE_DIFF_TO_SAATY = {
     3: 7.0,
     4: 9.0,
 }
+
+
+def _guide_importance_options() -> List[Tuple[str, int]]:
+    if is_english_ui():
+        return [
+            ("1 | Very low", 1),
+            ("2 | Low", 2),
+            ("3 | Medium", 3),
+            ("4 | High", 4),
+            ("5 | Very high", 5),
+        ]
+    return list(_GUIDE_IMPORTANCE_OPTIONS)
 
 
 def _fmt_float(v: Any, *, digits: int = 4) -> str:
@@ -220,40 +233,40 @@ def _describe_consistency(cr: Optional[float]) -> str:
     try:
         value = float(cr)
     except Exception:
-        return "가중치 일관성을 아직 판단할 수 없습니다. 기준을 추가하고 쌍대비교를 입력하세요."
+        return tr("가중치 일관성을 아직 판단할 수 없습니다. 기준을 추가하고 쌍대비교를 입력하세요.")
 
     if not math.isfinite(value):
-        return "가중치 일관성을 수치로 계산하지 못했습니다. NumPy 또는 입력 상태를 확인하세요."
+        return tr("가중치 일관성을 수치로 계산하지 못했습니다. NumPy 또는 입력 상태를 확인하세요.")
     if value <= 0.10:
-        return "일관성 양호: 현재 쌍대비교는 일반 권장 기준(CR ≤ 0.10) 안에 있습니다."
+        return tr("일관성 양호: 현재 쌍대비교는 일반 권장 기준(CR ≤ 0.10) 안에 있습니다.")
     if value <= 0.20:
-        return "일관성 주의: 몇몇 기준의 상대 중요도를 다시 보면 더 설득력 있는 결과가 됩니다."
-    return "일관성 낮음: 현재 비교는 서로 충돌할 가능성이 큽니다. 중요도 판단을 다시 맞춰보세요."
+        return tr("일관성 주의: 몇몇 기준의 상대 중요도를 다시 보면 더 설득력 있는 결과가 됩니다.")
+    return tr("일관성 낮음: 현재 비교는 서로 충돌할 가능성이 큽니다. 중요도 판단을 다시 맞춰보세요.")
 
 
 def _criterion_mode_label(mode: str) -> str:
     key = str(mode or "benefit").strip()
     return {
-        "benefit": "Benefit(값↑)",
-        "cost": "Cost(값↓)",
-        "target": "목표값 최적",
-        "range": "선호구간 최적",
-        "reclass": "구간 점수표",
-    }.get(key, key or "Benefit(값↑)")
+        "benefit": tr("Benefit(값↑)"),
+        "cost": tr("Cost(값↓)"),
+        "target": tr("목표값 최적"),
+        "range": tr("선호구간 최적"),
+        "reclass": tr("구간 점수표"),
+    }.get(key, key or tr("Benefit(값↑)"))
 
 
 def _criterion_setting_summary(crit: _Criterion) -> str:
     mode = str(getattr(crit, "direction", "benefit") or "benefit")
     if mode == "target":
-        return f"목표={_fmt_float(getattr(crit, 'target_v', None), digits=3)}"
+        return f"{tr('목표=')}{_fmt_float(getattr(crit, 'target_v', None), digits=3)}"
     if mode == "range":
         return (
-            f"선호={_fmt_float(getattr(crit, 'prefer_min', None), digits=3)}"
+            f"{tr('선호=')}{_fmt_float(getattr(crit, 'prefer_min', None), digits=3)}"
             f" ~ {_fmt_float(getattr(crit, 'prefer_max', None), digits=3)}"
         )
     if mode == "reclass":
         rows = getattr(crit, "score_ranges", None) or []
-        return f"구간 {len(rows)}개"
+        return f"{tr('구간')} {len(rows)} {tr('개')}"
     return "-"
 
 
@@ -409,13 +422,23 @@ class _GuidedWeightingDialog(QtWidgets.QDialog):
         self._setup_ui()
 
     def _setup_ui(self):
-        self.setWindowTitle("AHP 질문형 가이드")
+        english = is_english_ui()
+        self.setWindowTitle("AHP Guided Weighting" if english else "AHP 질문형 가이드")
         layout = QtWidgets.QVBoxLayout(self)
 
         intro = QtWidgets.QLabel(
-            "각 기준이 최종 입지 판단에 얼마나 중요한지 1~5단계로 답하면,\n"
-            "플러그인이 이를 Saaty 척도(1, 3, 5, 7, 9)로 바꿔 쌍대비교 표를 채웁니다.\n"
-            "같은 단계면 같은 중요도, 1단계 차이는 3, 2단계 차이는 5로 처리됩니다."
+            (
+                "Answer how important each criterion is for the final suitability decision on a 1-5 scale,\n"
+                "and the plugin will convert it to the Saaty scale (1, 3, 5, 7, 9) to fill the pairwise matrix.\n"
+                "The same level means equal importance, a 1-level gap becomes 3, and a 2-level gap becomes 5."
+            )
+            if english
+            else
+            (
+                "각 기준이 최종 입지 판단에 얼마나 중요한지 1~5단계로 답하면,\n"
+                "플러그인이 이를 Saaty 척도(1, 3, 5, 7, 9)로 바꿔 쌍대비교 표를 채웁니다.\n"
+                "같은 단계면 같은 중요도, 1단계 차이는 3, 2단계 차이는 5로 처리됩니다."
+            )
         )
         intro.setWordWrap(True)
         intro.setStyleSheet("color:#455a64;")
@@ -423,7 +446,7 @@ class _GuidedWeightingDialog(QtWidgets.QDialog):
 
         table = QtWidgets.QTableWidget()
         table.setColumnCount(2)
-        table.setHorizontalHeaderLabels(["기준", "중요도"])
+        table.setHorizontalHeaderLabels(["Criterion", "Importance"] if english else ["기준", "중요도"])
         table.setRowCount(len(self._criteria_rows))
         table.verticalHeader().setVisible(False)
         table.horizontalHeader().setStretchLastSection(True)
@@ -431,12 +454,12 @@ class _GuidedWeightingDialog(QtWidgets.QDialog):
         table.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
 
         for row, (layer_id, label) in enumerate(self._criteria_rows):
-            item = QtWidgets.QTableWidgetItem(str(label or "(이름 없음)"))
+            item = QtWidgets.QTableWidgetItem(str(label or ("(Unnamed)" if english else "(이름 없음)")))
             item.setFlags(item.flags() & ~Qt.ItemIsEditable)
             table.setItem(row, 0, item)
 
             combo = QtWidgets.QComboBox()
-            for text, value in _GUIDE_IMPORTANCE_OPTIONS:
+            for text, value in _guide_importance_options():
                 combo.addItem(text, int(value))
             default_level = int(self._initial_levels.get(layer_id, 3) or 3)
             index = max(0, min(len(_GUIDE_IMPORTANCE_OPTIONS) - 1, default_level - 1))
@@ -451,9 +474,9 @@ class _GuidedWeightingDialog(QtWidgets.QDialog):
         layout.addWidget(table, 1)
 
         quick_row = QtWidgets.QHBoxLayout()
-        btn_mid = QtWidgets.QPushButton("모두 보통(3)")
+        btn_mid = QtWidgets.QPushButton("Set all to Medium (3)" if english else "모두 보통(3)")
         btn_mid.clicked.connect(lambda: self._set_all_levels(3))
-        btn_high = QtWidgets.QPushButton("앞쪽 기준 높게")
+        btn_high = QtWidgets.QPushButton("Prioritize top rows" if english else "앞쪽 기준 높게")
         btn_high.clicked.connect(self._set_descending_levels)
         quick_row.addWidget(btn_mid)
         quick_row.addWidget(btn_high)
@@ -466,6 +489,7 @@ class _GuidedWeightingDialog(QtWidgets.QDialog):
         layout.addWidget(buttons)
 
         self.resize(560, 420)
+        apply_language(self)
 
     def _set_all_levels(self, level: int):
         level0 = int(level)
@@ -513,13 +537,23 @@ class _CriterionPreferenceDialog(QtWidgets.QDialog):
         self._setup_ui()
 
     def _setup_ui(self):
-        self.setWindowTitle("기준 선호 설정")
+        english = is_english_ui()
+        self.setWindowTitle("Criterion Preference" if english else "기준 선호 설정")
         layout = QtWidgets.QVBoxLayout(self)
 
         intro = QtWidgets.QLabel(
-            f"<b>{self._layer_name}</b><br>"
-            "이 기준을 0~1 점수로 바꾸는 방식을 정합니다. "
-            "Benefit/Cost는 단조 증가/감소, 목표값/선호구간은 특정 값 또는 범위를 가장 높게 평가합니다."
+            (
+                f"<b>{self._layer_name}</b><br>"
+                "Choose how this criterion is converted to a 0-1 score. "
+                "Benefit/Cost uses monotonic increase or decrease, while target/range gives the highest score to a preferred value or interval."
+            )
+            if english
+            else
+            (
+                f"<b>{self._layer_name}</b><br>"
+                "이 기준을 0~1 점수로 바꾸는 방식을 정합니다. "
+                "Benefit/Cost는 단조 증가/감소, 목표값/선호구간은 특정 값 또는 범위를 가장 높게 평가합니다."
+            )
         )
         intro.setWordWrap(True)
         intro.setStyleSheet("color:#455a64;")
@@ -529,8 +563,8 @@ class _CriterionPreferenceDialog(QtWidgets.QDialog):
         self.cmbMode = QtWidgets.QComboBox()
         self.cmbMode.addItem("Benefit(값↑ 좋음)", "benefit")
         self.cmbMode.addItem("Cost(값↓ 좋음)", "cost")
-        self.cmbMode.addItem("목표값 최적", "target")
-        self.cmbMode.addItem("선호구간 최적", "range")
+        self.cmbMode.addItem("Target optimum" if english else "목표값 최적", "target")
+        self.cmbMode.addItem("Preferred range optimum" if english else "선호구간 최적", "range")
         try:
             idx = self.cmbMode.findData(str(self._criterion.direction or "benefit"))
             if idx >= 0:
@@ -538,31 +572,33 @@ class _CriterionPreferenceDialog(QtWidgets.QDialog):
         except Exception:
             pass
         self.cmbMode.currentIndexChanged.connect(self._update_mode_ui)
-        self._form.addRow("점수화 방식:", self.cmbMode)
+        self._form.addRow("Scoring mode:" if english else "점수화 방식:", self.cmbMode)
 
         min_text = _fmt_float(self._criterion.min_v, digits=3)
         max_text = _fmt_float(self._criterion.max_v, digits=3)
-        self.lblStats = QtWidgets.QLabel(f"현재 min/max: {min_text} / {max_text}")
+        self.lblStats = QtWidgets.QLabel(
+            f"Current min/max: {min_text} / {max_text}" if english else f"현재 min/max: {min_text} / {max_text}"
+        )
         self.lblStats.setStyleSheet("color:#455a64;")
-        self._form.addRow("통계 참고:", self.lblStats)
+        self._form.addRow("Reference stats:" if english else "통계 참고:", self.lblStats)
 
         self.spinTarget = QtWidgets.QDoubleSpinBox()
         self.spinTarget.setDecimals(6)
         self.spinTarget.setRange(-1e12, 1e12)
         self.spinTarget.setValue(float(self._criterion.target_v or 0.0))
-        self._form.addRow("목표값:", self.spinTarget)
+        self._form.addRow("Target value:" if english else "목표값:", self.spinTarget)
 
         self.spinPreferMin = QtWidgets.QDoubleSpinBox()
         self.spinPreferMin.setDecimals(6)
         self.spinPreferMin.setRange(-1e12, 1e12)
         self.spinPreferMin.setValue(float(self._criterion.prefer_min or 0.0))
-        self._form.addRow("선호 최소:", self.spinPreferMin)
+        self._form.addRow("Preferred min:" if english else "선호 최소:", self.spinPreferMin)
 
         self.spinPreferMax = QtWidgets.QDoubleSpinBox()
         self.spinPreferMax.setDecimals(6)
         self.spinPreferMax.setRange(-1e12, 1e12)
         self.spinPreferMax.setValue(float(self._criterion.prefer_max or 0.0))
-        self._form.addRow("선호 최대:", self.spinPreferMax)
+        self._form.addRow("Preferred max:" if english else "선호 최대:", self.spinPreferMax)
 
         layout.addLayout(self._form)
 
@@ -578,6 +614,7 @@ class _CriterionPreferenceDialog(QtWidgets.QDialog):
 
         self._update_mode_ui()
         self.resize(520, 260)
+        apply_language(self)
 
     def _update_mode_ui(self):
         mode = str(self.cmbMode.currentData() or "benefit")
@@ -593,10 +630,18 @@ class _CriterionPreferenceDialog(QtWidgets.QDialog):
         except Exception:
             pass
         hint = {
-            "benefit": "값이 클수록 높은 점수를 부여합니다.",
-            "cost": "값이 작을수록 높은 점수를 부여합니다.",
-            "target": "지정한 목표값에서 점수 1을 받고, min/max 쪽으로 갈수록 선형으로 감소합니다.",
-            "range": "선호 구간 안에서는 점수 1, 그 밖에서는 min/max 방향으로 선형 감소합니다.",
+            "benefit": "Higher values receive higher scores." if is_english_ui() else "값이 클수록 높은 점수를 부여합니다.",
+            "cost": "Lower values receive higher scores." if is_english_ui() else "값이 작을수록 높은 점수를 부여합니다.",
+            "target": (
+                "Score 1 is assigned at the target value and decreases linearly toward min/max."
+                if is_english_ui()
+                else "지정한 목표값에서 점수 1을 받고, min/max 쪽으로 갈수록 선형으로 감소합니다."
+            ),
+            "range": (
+                "Values inside the preferred range receive score 1, and values outside decrease linearly toward min/max."
+                if is_english_ui()
+                else "선호 구간 안에서는 점수 1, 그 밖에서는 min/max 방향으로 선형 감소합니다."
+            ),
         }.get(mode, "")
         self.lblModeHint.setText(hint)
 
@@ -618,27 +663,41 @@ class _CriterionReclassDialog(QtWidgets.QDialog):
         self._setup_ui()
 
     def _setup_ui(self):
-        self.setWindowTitle("구간 점수표 설정")
+        english = is_english_ui()
+        self.setWindowTitle("Reclass Score Table" if english else "구간 점수표 설정")
         layout = QtWidgets.QVBoxLayout(self)
 
         intro = QtWidgets.QLabel(
-            f"<b>{self._layer_name}</b><br>"
-            "각 구간에 0~1 점수를 직접 부여합니다. "
-            "경사 구간, 거리 구간, 범주 코드별 점수화처럼 논문식 재분류가 필요할 때 사용합니다."
+            (
+                f"<b>{self._layer_name}</b><br>"
+                "Assign a 0-1 score directly to each interval. "
+                "Use this when you need paper-style reclassification such as slope classes, distance bands, or category-code scoring."
+            )
+            if english
+            else
+            (
+                f"<b>{self._layer_name}</b><br>"
+                "각 구간에 0~1 점수를 직접 부여합니다. "
+                "경사 구간, 거리 구간, 범주 코드별 점수화처럼 논문식 재분류가 필요할 때 사용합니다."
+            )
         )
         intro.setWordWrap(True)
         intro.setStyleSheet("color:#455a64;")
         layout.addWidget(intro)
 
         stats = QtWidgets.QLabel(
-            f"현재 min/max: {_fmt_float(self._criterion.min_v, digits=3)} / {_fmt_float(self._criterion.max_v, digits=3)}"
+            (
+                f"Current min/max: {_fmt_float(self._criterion.min_v, digits=3)} / {_fmt_float(self._criterion.max_v, digits=3)}"
+                if english
+                else f"현재 min/max: {_fmt_float(self._criterion.min_v, digits=3)} / {_fmt_float(self._criterion.max_v, digits=3)}"
+            )
         )
         stats.setStyleSheet("color:#455a64;")
         layout.addWidget(stats)
 
         self.tbl = QtWidgets.QTableWidget()
         self.tbl.setColumnCount(3)
-        self.tbl.setHorizontalHeaderLabels(["최소", "최대", "점수(0-1)"])
+        self.tbl.setHorizontalHeaderLabels(["Min", "Max", "Score (0-1)"] if english else ["최소", "최대", "점수(0-1)"])
         self.tbl.verticalHeader().setVisible(False)
         self.tbl.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
         self.tbl.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
@@ -646,13 +705,13 @@ class _CriterionReclassDialog(QtWidgets.QDialog):
         layout.addWidget(self.tbl, 1)
 
         row_btns = QtWidgets.QHBoxLayout()
-        self.btnAddRow = QtWidgets.QPushButton("행 추가")
+        self.btnAddRow = QtWidgets.QPushButton("Add row" if english else "행 추가")
         self.btnAddRow.clicked.connect(self._add_row)
-        self.btnRemoveRow = QtWidgets.QPushButton("선택 삭제")
+        self.btnRemoveRow = QtWidgets.QPushButton("Remove selected" if english else "선택 삭제")
         self.btnRemoveRow.clicked.connect(self._remove_selected_row)
-        self.btnOneRange = QtWidgets.QPushButton("전체범위 1행")
+        self.btnOneRange = QtWidgets.QPushButton("Single full-range row" if english else "전체범위 1행")
         self.btnOneRange.clicked.connect(self._populate_single_range)
-        self.btnFourRanges = QtWidgets.QPushButton("4등분 예시")
+        self.btnFourRanges = QtWidgets.QPushButton("Quartered example" if english else "4등분 예시")
         self.btnFourRanges.clicked.connect(self._populate_quarters)
         row_btns.addWidget(self.btnAddRow)
         row_btns.addWidget(self.btnRemoveRow)
@@ -662,7 +721,11 @@ class _CriterionReclassDialog(QtWidgets.QDialog):
         layout.addLayout(row_btns)
 
         self.lblHint = QtWidgets.QLabel(
-            "구간은 최소값 기준으로 정렬되어 저장됩니다. 구간이 겹치면 실행 시 오류를 내어 조용한 오작동을 막습니다."
+            (
+                "Intervals are saved sorted by minimum value. Overlapping intervals raise an error at run time to prevent silent misbehavior."
+                if english
+                else "구간은 최소값 기준으로 정렬되어 저장됩니다. 구간이 겹치면 실행 시 오류를 내어 조용한 오작동을 막습니다."
+            )
         )
         self.lblHint.setWordWrap(True)
         self.lblHint.setStyleSheet("color:#455a64;")
@@ -675,6 +738,7 @@ class _CriterionReclassDialog(QtWidgets.QDialog):
 
         self._load_rows()
         self.resize(560, 420)
+        apply_language(self)
 
     def _new_spin(self, *, minimum: float, maximum: float, decimals: int, value: float) -> QtWidgets.QDoubleSpinBox:
         spin = QtWidgets.QDoubleSpinBox()
@@ -776,6 +840,7 @@ class _PairwiseMatrixDialog(QtWidgets.QDialog):
 
     def _setup_ui(self):
         self.setWindowTitle(self._title)
+        english = is_english_ui()
         layout = QtWidgets.QVBoxLayout(self)
 
         lbl = QtWidgets.QLabel(self._intro)
@@ -788,7 +853,7 @@ class _PairwiseMatrixDialog(QtWidgets.QDialog):
         layout.addWidget(self.tbl, 1)
 
         row_btn = QtWidgets.QHBoxLayout()
-        self.btnReset = QtWidgets.QPushButton("초기화(모두 1)")
+        self.btnReset = QtWidgets.QPushButton("Reset (all 1)" if english else "초기화(모두 1)")
         self.btnReset.clicked.connect(self._on_reset)
         row_btn.addWidget(self.btnReset)
         row_btn.addStretch(1)
@@ -811,6 +876,7 @@ class _PairwiseMatrixDialog(QtWidgets.QDialog):
 
         self._rebuild_table()
         self.resize(760, 460)
+        apply_language(self)
 
     def _rebuild_table(self):
         n = len(self._rows)
@@ -819,7 +885,7 @@ class _PairwiseMatrixDialog(QtWidgets.QDialog):
         self.tbl.setColumnCount(n)
         headers = []
         for _row_id, label in self._rows:
-            text = str(label or "(항목)")
+            text = str(label or ("(Item)" if is_english_ui() else "(항목)"))
             headers.append(text[:18] + ("…" if len(text) > 18 else ""))
         self.tbl.setHorizontalHeaderLabels(headers)
         self.tbl.setVerticalHeaderLabels(headers)
@@ -909,14 +975,14 @@ class _PairwiseMatrixDialog(QtWidgets.QDialog):
         note = ""
         try:
             if math.isfinite(float(cr)) and float(cr) > 0.10:
-                note = " (주의: 0.10 초과)"
+                note = " (warning: > 0.10)" if is_english_ui() else " (주의: 0.10 초과)"
         except Exception:
             note = ""
         self.lblConsistency.setText(f"λmax={lam_txt}, CR={cr_txt}{note} | {_describe_consistency(cr)}")
         preview = []
         for row_id, label in self._rows[:6]:
             preview.append(f"{label}={_fmt_float(weights.get(row_id), digits=3)}")
-        self.lblPreview.setText("가중치 미리보기: " + (" / ".join(preview) if preview else "-"))
+        self.lblPreview.setText(("Weight preview: " if is_english_ui() else "가중치 미리보기: ") + (" / ".join(preview) if preview else "-"))
 
     def pairs(self) -> Dict[Tuple[str, str], float]:
         return dict(self._pairs)
@@ -940,12 +1006,21 @@ class _HierarchyConfigDialog(QtWidgets.QDialog):
         self._load_initial_state()
 
     def _setup_ui(self):
-        self.setWindowTitle("계층형 AHP 설정")
+        english = is_english_ui()
+        self.setWindowTitle("Hierarchical AHP" if english else "계층형 AHP 설정")
         layout = QtWidgets.QVBoxLayout(self)
 
         intro = QtWidgets.QLabel(
-            "기준들을 상위그룹으로 묶은 뒤, 상위그룹 간 중요도와 그룹 내부 하위기준 중요도를 따로 비교합니다.\n"
-            "예: 경사/고도/방위 -> '지형', 하천거리/수자원거리 -> '수계'."
+            (
+                "Group criteria into higher-level themes, then compare the importance of the groups and the subcriteria inside each group separately.\n"
+                "Example: slope/elevation/aspect -> 'Terrain', distance to stream/distance to water source -> 'Hydrology'."
+            )
+            if english
+            else
+            (
+                "기준들을 상위그룹으로 묶은 뒤, 상위그룹 간 중요도와 그룹 내부 하위기준 중요도를 따로 비교합니다.\n"
+                "예: 경사/고도/방위 -> '지형', 하천거리/수자원거리 -> '수계'."
+            )
         )
         intro.setWordWrap(True)
         intro.setStyleSheet("color:#455a64;")
@@ -953,17 +1028,17 @@ class _HierarchyConfigDialog(QtWidgets.QDialog):
 
         self.tblAssignments = QtWidgets.QTableWidget()
         self.tblAssignments.setColumnCount(2)
-        self.tblAssignments.setHorizontalHeaderLabels(["기준", "상위그룹"])
+        self.tblAssignments.setHorizontalHeaderLabels(["Criterion", "Parent Group"] if english else ["기준", "상위그룹"])
         self.tblAssignments.horizontalHeader().setStretchLastSection(True)
         self.tblAssignments.itemChanged.connect(self._on_assignment_changed)
         layout.addWidget(self.tblAssignments, 1)
 
         row_btn = QtWidgets.QHBoxLayout()
-        self.btnDistinctGroups = QtWidgets.QPushButton("각 기준 독립")
+        self.btnDistinctGroups = QtWidgets.QPushButton("Separate all criteria" if english else "각 기준 독립")
         self.btnDistinctGroups.clicked.connect(self._assign_distinct_groups)
-        self.btnSingleGroup = QtWidgets.QPushButton("모두 한 그룹")
+        self.btnSingleGroup = QtWidgets.QPushButton("Put all in one group" if english else "모두 한 그룹")
         self.btnSingleGroup.clicked.connect(self._assign_single_group)
-        self.btnRefreshGroups = QtWidgets.QPushButton("그룹 목록 갱신")
+        self.btnRefreshGroups = QtWidgets.QPushButton("Refresh group list" if english else "그룹 목록 갱신")
         self.btnRefreshGroups.clicked.connect(self._sync_state_from_assignments)
         row_btn.addWidget(self.btnDistinctGroups)
         row_btn.addWidget(self.btnSingleGroup)
@@ -980,9 +1055,9 @@ class _HierarchyConfigDialog(QtWidgets.QDialog):
         split.addLayout(left, 0)
 
         right = QtWidgets.QVBoxLayout()
-        self.btnEditGroupPairs = QtWidgets.QPushButton("상위그룹 비교…")
+        self.btnEditGroupPairs = QtWidgets.QPushButton("Compare parent groups…" if english else "상위그룹 비교…")
         self.btnEditGroupPairs.clicked.connect(self._on_edit_group_pairs)
-        self.btnEditLocalPairs = QtWidgets.QPushButton("선택 그룹 비교…")
+        self.btnEditLocalPairs = QtWidgets.QPushButton("Compare selected group…" if english else "선택 그룹 비교…")
         self.btnEditLocalPairs.clicked.connect(self._on_edit_local_pairs)
         right.addWidget(self.btnEditGroupPairs)
         right.addWidget(self.btnEditLocalPairs)
@@ -991,7 +1066,11 @@ class _HierarchyConfigDialog(QtWidgets.QDialog):
 
         self.tblPreview = QtWidgets.QTableWidget()
         self.tblPreview.setColumnCount(4)
-        self.tblPreview.setHorizontalHeaderLabels(["기준", "상위그룹", "로컬 가중치", "글로벌 가중치"])
+        self.tblPreview.setHorizontalHeaderLabels(
+            ["Criterion", "Parent Group", "Local Weight", "Global Weight"]
+            if english
+            else ["기준", "상위그룹", "로컬 가중치", "글로벌 가중치"]
+        )
         self.tblPreview.horizontalHeader().setStretchLastSection(True)
         split.addWidget(self.tblPreview, 1)
 
@@ -1008,6 +1087,7 @@ class _HierarchyConfigDialog(QtWidgets.QDialog):
         layout.addWidget(buttons)
 
         self.resize(980, 620)
+        apply_language(self)
 
     def _load_initial_state(self):
         assignments = dict(self._config.get("criterion_groups") or {})
@@ -1015,12 +1095,12 @@ class _HierarchyConfigDialog(QtWidgets.QDialog):
         try:
             self.tblAssignments.setRowCount(len(self._criteria_rows))
             for row, (layer_id, label) in enumerate(self._criteria_rows):
-                item_label = QtWidgets.QTableWidgetItem(str(label or "(기준)"))
+                item_label = QtWidgets.QTableWidgetItem(str(label or ("(Criterion)" if is_english_ui() else "(기준)")))
                 item_label.setFlags(item_label.flags() & ~Qt.ItemIsEditable)
                 self.tblAssignments.setItem(row, 0, item_label)
                 group_name = str(assignments.get(layer_id) or "").strip()
                 if not group_name:
-                    group_name = str(label or layer_id or f"그룹 {row + 1}").strip()
+                    group_name = str(label or layer_id or (f"Group {row + 1}" if is_english_ui() else f"그룹 {row + 1}")).strip()
                 self.tblAssignments.setItem(row, 1, QtWidgets.QTableWidgetItem(group_name))
         finally:
             self._loading_assignments = False
@@ -1042,7 +1122,7 @@ class _HierarchyConfigDialog(QtWidgets.QDialog):
             item = self.tblAssignments.item(row, 1)
             group_name = str(item.text() if item is not None else "").strip()
             if not group_name:
-                group_name = str(label or layer_id or f"그룹 {row + 1}").strip() or layer_id
+                group_name = str(label or layer_id or (f"Group {row + 1}" if is_english_ui() else f"그룹 {row + 1}")).strip() or layer_id
             out[layer_id] = group_name
         return out
 
@@ -1089,7 +1169,7 @@ class _HierarchyConfigDialog(QtWidgets.QDialog):
                 if item is None:
                     item = QtWidgets.QTableWidgetItem("")
                     self.tblAssignments.setItem(row, 1, item)
-                item.setText(str(label or f"그룹 {row + 1}"))
+                item.setText(str(label or (f"Group {row + 1}" if is_english_ui() else f"그룹 {row + 1}")))
         finally:
             self._loading_assignments = False
         self._sync_state_from_assignments()
@@ -1102,7 +1182,7 @@ class _HierarchyConfigDialog(QtWidgets.QDialog):
                 if item is None:
                     item = QtWidgets.QTableWidgetItem("")
                     self.tblAssignments.setItem(row, 1, item)
-                item.setText("기준군 1")
+                item.setText("Criteria Group 1" if is_english_ui() else "기준군 1")
         finally:
             self._loading_assignments = False
         self._sync_state_from_assignments()
@@ -1120,12 +1200,22 @@ class _HierarchyConfigDialog(QtWidgets.QDialog):
             if group_name and group_name not in groups:
                 groups.append(group_name)
         if len(groups) < 2:
-            QtWidgets.QMessageBox.information(self, "계층형 AHP", "상위그룹이 2개 이상일 때만 상위그룹 비교가 필요합니다.")
+            QtWidgets.QMessageBox.information(
+                self,
+                "Hierarchical AHP" if is_english_ui() else "계층형 AHP",
+                "You only need parent-group comparison when there are at least two parent groups."
+                if is_english_ui()
+                else "상위그룹이 2개 이상일 때만 상위그룹 비교가 필요합니다.",
+            )
             return
         dlg = _PairwiseMatrixDialog(
             rows=[(group_name, group_name) for group_name in groups],
-            title="상위그룹 쌍대비교",
-            intro="상위그룹(예: 지형, 수계, 자원)끼리의 중요도를 Saaty 1~9 척도로 비교합니다.",
+            title="Parent-group Pairwise Comparison" if is_english_ui() else "상위그룹 쌍대비교",
+            intro=(
+                "Compare the importance of the parent groups (for example Terrain, Hydrology, Resources) using the Saaty 1-9 scale."
+                if is_english_ui()
+                else "상위그룹(예: 지형, 수계, 자원)끼리의 중요도를 Saaty 1~9 척도로 비교합니다."
+            ),
             saved_pairs=self._group_pairs,
             parent=self,
         )
@@ -1140,16 +1230,30 @@ class _HierarchyConfigDialog(QtWidgets.QDialog):
         current_item = self.lstGroups.currentItem()
         group_name = str(current_item.text() if current_item is not None else "").strip()
         if not group_name:
-            QtWidgets.QMessageBox.information(self, "계층형 AHP", "먼저 그룹을 하나 선택하세요.")
+            QtWidgets.QMessageBox.information(
+                self,
+                "Hierarchical AHP" if is_english_ui() else "계층형 AHP",
+                "Select a group first." if is_english_ui() else "먼저 그룹을 하나 선택하세요.",
+            )
             return
         member_rows = [(layer_id, label) for layer_id, label in self._criteria_rows if assignments.get(layer_id) == group_name]
         if len(member_rows) < 2:
-            QtWidgets.QMessageBox.information(self, "계층형 AHP", "선택 그룹의 하위기준이 2개 이상일 때만 내부 비교가 필요합니다.")
+            QtWidgets.QMessageBox.information(
+                self,
+                "Hierarchical AHP" if is_english_ui() else "계층형 AHP",
+                "You only need local comparison when the selected group has at least two subcriteria."
+                if is_english_ui()
+                else "선택 그룹의 하위기준이 2개 이상일 때만 내부 비교가 필요합니다.",
+            )
             return
         dlg = _PairwiseMatrixDialog(
             rows=member_rows,
-            title=f"{group_name} 하위기준 쌍대비교",
-            intro="같은 상위그룹 안의 하위기준끼리 상대 중요도를 비교합니다.",
+            title=f"{group_name} Local Pairwise Comparison" if is_english_ui() else f"{group_name} 하위기준 쌍대비교",
+            intro=(
+                "Compare the relative importance of subcriteria inside the same parent group."
+                if is_english_ui()
+                else "같은 상위그룹 안의 하위기준끼리 상대 중요도를 비교합니다."
+            ),
             saved_pairs=self._local_pairs.get(group_name),
             parent=self,
         )
@@ -1178,7 +1282,7 @@ class _HierarchyConfigDialog(QtWidgets.QDialog):
             except Exception:
                 local_weight = None
             self.tblPreview.insertRow(row)
-            self.tblPreview.setItem(row, 0, QtWidgets.QTableWidgetItem(str(label or "(기준)")))
+            self.tblPreview.setItem(row, 0, QtWidgets.QTableWidgetItem(str(label or ("(Criterion)" if is_english_ui() else "(기준)"))))
             self.tblPreview.setItem(row, 1, QtWidgets.QTableWidgetItem(group_name))
             self.tblPreview.setItem(row, 2, QtWidgets.QTableWidgetItem(_fmt_float(local_weight, digits=4)))
             self.tblPreview.setItem(row, 3, QtWidgets.QTableWidgetItem(_fmt_float(global_weights.get(layer_id), digits=4)))
@@ -1188,7 +1292,7 @@ class _HierarchyConfigDialog(QtWidgets.QDialog):
             pass
 
         group_cr = summary.get("group_consistency_ratio")
-        parts = [f"상위그룹 CR={_fmt_float(group_cr, digits=3)}"]
+        parts = [f"{'Parent-group' if is_english_ui() else '상위그룹'} CR={_fmt_float(group_cr, digits=3)}"]
         for group_name in summary.get("group_order") or []:
             try:
                 cr0 = summary.get("local_consistency_ratio", {}).get(group_name)
@@ -1237,19 +1341,26 @@ class _ExpertPairwiseDialog(QtWidgets.QDialog):
         raw_experts = list(experts or [])
         if raw_experts:
             for item in raw_experts:
-                name = str((item or {}).get("name") or "").strip() or f"전문가 {len(self._experts) + 1}"
+                name = str((item or {}).get("name") or "").strip() or (
+                    f"Expert {len(self._experts) + 1}" if is_english_ui() else f"전문가 {len(self._experts) + 1}"
+                )
                 pairs = dict((item or {}).get("pairs") or {})
                 self._experts.append({"name": name, "pairs": pairs})
         if not self._experts:
-            self._experts = [{"name": "전문가 1", "pairs": dict(base_pairs or {})}]
+            self._experts = [{"name": "Expert 1" if is_english_ui() else "전문가 1", "pairs": dict(base_pairs or {})}]
         self._setup_ui()
 
     def _setup_ui(self):
-        self.setWindowTitle("전문가 쌍대비교 집계")
+        english = is_english_ui()
+        self.setWindowTitle("Expert Pairwise Aggregation" if english else "전문가 쌍대비교 집계")
         layout = QtWidgets.QVBoxLayout(self)
 
         intro = QtWidgets.QLabel(
-            "여러 전문가의 쌍대비교 표를 입력한 뒤 geometric mean으로 하나의 합의 가중치 표를 만듭니다."
+            (
+                "Enter pairwise matrices from multiple experts, then combine them into one consensus weight table using the geometric mean."
+                if english
+                else "여러 전문가의 쌍대비교 표를 입력한 뒤 geometric mean으로 하나의 합의 가중치 표를 만듭니다."
+            )
         )
         intro.setWordWrap(True)
         intro.setStyleSheet("color:#455a64;")
@@ -1262,9 +1373,9 @@ class _ExpertPairwiseDialog(QtWidgets.QDialog):
         self.lstExperts.currentRowChanged.connect(self._on_expert_changed)
         left.addWidget(self.lstExperts, 1)
         btns = QtWidgets.QHBoxLayout()
-        self.btnAddExpert = QtWidgets.QPushButton("전문가 추가")
+        self.btnAddExpert = QtWidgets.QPushButton("Add expert" if english else "전문가 추가")
         self.btnAddExpert.clicked.connect(self._on_add_expert)
-        self.btnRemoveExpert = QtWidgets.QPushButton("선택 삭제")
+        self.btnRemoveExpert = QtWidgets.QPushButton("Remove selected" if english else "선택 삭제")
         self.btnRemoveExpert.clicked.connect(self._on_remove_expert)
         btns.addWidget(self.btnAddExpert)
         btns.addWidget(self.btnRemoveExpert)
@@ -1275,7 +1386,9 @@ class _ExpertPairwiseDialog(QtWidgets.QDialog):
         self.tblPairs = QtWidgets.QTableWidget()
         self.tblPairs.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
         right.addWidget(self.tblPairs, 1)
-        self.lblExpertHint = QtWidgets.QLabel("각 전문가별로 쌍대비교를 입력하세요.")
+        self.lblExpertHint = QtWidgets.QLabel(
+            "Enter the pairwise matrix for each expert." if english else "각 전문가별로 쌍대비교를 입력하세요."
+        )
         self.lblExpertHint.setWordWrap(True)
         self.lblExpertHint.setStyleSheet("color:#455a64;")
         right.addWidget(self.lblExpertHint)
@@ -1290,13 +1403,14 @@ class _ExpertPairwiseDialog(QtWidgets.QDialog):
 
         self._reload_expert_list()
         self.resize(860, 520)
+        apply_language(self)
 
     def _reload_expert_list(self):
         self.lstExperts.blockSignals(True)
         try:
             self.lstExperts.clear()
             for item in self._experts:
-                self.lstExperts.addItem(str(item.get("name") or "전문가"))
+                self.lstExperts.addItem(str(item.get("name") or ("Expert" if is_english_ui() else "전문가")))
             row = 0 if self.lstExperts.count() > 0 else -1
             self.lstExperts.setCurrentRow(row)
         finally:
@@ -1341,7 +1455,7 @@ class _ExpertPairwiseDialog(QtWidgets.QDialog):
         self.tblPairs.setColumnCount(n)
         headers = []
         for _layer_id, label in self._criteria_rows:
-            text = str(label or "(레이어)")
+            text = str(label or ("(Layer)" if is_english_ui() else "(레이어)"))
             headers.append(text[:18] + ("…" if len(text) > 18 else ""))
         self.tblPairs.setHorizontalHeaderLabels(headers)
         self.tblPairs.setVerticalHeaderLabels(headers)
@@ -1419,7 +1533,12 @@ class _ExpertPairwiseDialog(QtWidgets.QDialog):
 
     def _on_add_expert(self):
         self._save_current_expert_pairs(self._active_expert_index)
-        self._experts.append({"name": f"전문가 {len(self._experts) + 1}", "pairs": {}})
+        self._experts.append(
+            {
+                "name": f"Expert {len(self._experts) + 1}" if is_english_ui() else f"전문가 {len(self._experts) + 1}",
+                "pairs": {},
+            }
+        )
         self._reload_expert_list()
         self._active_expert_index = len(self._experts) - 1
         self.lstExperts.setCurrentRow(self._active_expert_index)
@@ -1469,7 +1588,8 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
         self._set_weight_input_mode("manual")
 
     def _setup_ui(self):
-        self.setWindowTitle("AHP 입지적합도 (Suitability) - ArchToolkit")
+        english = is_english_ui()
+        self.setWindowTitle("AHP Suitability - ArchToolkit" if english else "AHP 입지적합도 (Suitability) - ArchToolkit")
         set_plugin_window_icon(self, ("AHP.png", "ahp.png", "icon.png"))
 
         outer_layout = QtWidgets.QVBoxLayout(self)
@@ -1486,17 +1606,29 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
         self.scrollArea.setWidget(scroll_content)
 
         header = QtWidgets.QLabel(
-            "<b>AHP 입지적합도</b><br>"
-            "만들어진 환경변수(래스터)를 AHP(쌍대비교) 가중치로 통합해 적합도 래스터를 생성합니다.<br>"
-            "<span style='color:#455a64;'>현재 구현식: 각 기준을 0–1로 정규화한 뒤, AHP 가중치로 가중합합니다.</span><br>"
-            "<i>Tip: AOI를 지정하고 ‘AOI 범위로 자르기’를 켜면 결과가 가벼워집니다.</i><br>"
-            "<span style='color:#455a64;'>Reference: Saaty (1980) The Analytic Hierarchy Process</span>"
+            (
+                "<b>AHP Suitability</b><br>"
+                "Combine prepared environmental rasters with AHP (pairwise-comparison) weights to create a suitability raster.<br>"
+                "<span style='color:#455a64;'>Current formulation: each criterion is normalized to 0-1, "
+                "then combined with AHP weights in a weighted sum.</span><br>"
+                "<i>Tip: choose an AOI and enable 'Clip to AOI extent' to keep outputs lighter.</i><br>"
+                "<span style='color:#455a64;'>Reference: Saaty (1980) The Analytic Hierarchy Process</span>"
+            )
+            if english
+            else
+            (
+                "<b>AHP 입지적합도</b><br>"
+                "만들어진 환경변수(래스터)를 AHP(쌍대비교) 가중치로 통합해 적합도 래스터를 생성합니다.<br>"
+                "<span style='color:#455a64;'>현재 구현식: 각 기준을 0–1로 정규화한 뒤, AHP 가중치로 가중합합니다.</span><br>"
+                "<i>Tip: AOI를 지정하고 ‘AOI 범위로 자르기’를 켜면 결과가 가벼워집니다.</i><br>"
+                "<span style='color:#455a64;'>Reference: Saaty (1980) The Analytic Hierarchy Process</span>"
+            )
         )
         header.setWordWrap(True)
         header.setStyleSheet("background:#f1f8e9; padding:10px; border:1px solid #dcedc8; border-radius:4px;")
         layout.addWidget(header)
 
-        grp_in = QtWidgets.QGroupBox("1. 입력")
+        grp_in = QtWidgets.QGroupBox("1. Inputs" if english else "1. 입력")
         form = QtWidgets.QFormLayout(grp_in)
 
         self.cmbAoi = QgsMapLayerComboBox(grp_in)
@@ -1510,23 +1642,23 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
             self.cmbAoi.setFilters(poly_filter)
         except Exception:
             pass
-        form.addRow("AOI(선택):", self.cmbAoi)
+        form.addRow("AOI (optional):" if english else "AOI(선택):", self.cmbAoi)
 
-        self.chkAoiSelectedOnly = QtWidgets.QCheckBox("AOI 선택 피처만 사용")
+        self.chkAoiSelectedOnly = QtWidgets.QCheckBox("Use selected AOI features only" if english else "AOI 선택 피처만 사용")
         form.addRow("", self.chkAoiSelectedOnly)
 
-        self.chkClipToAoiExtent = QtWidgets.QCheckBox("AOI 범위로 자르기(권장)")
+        self.chkClipToAoiExtent = QtWidgets.QCheckBox("Clip to AOI extent (recommended)" if english else "AOI 범위로 자르기(권장)")
         self.chkClipToAoiExtent.setChecked(True)
         form.addRow("", self.chkClipToAoiExtent)
 
-        self.chkAlignToFirst = QtWidgets.QCheckBox("첫 번째 기준 레이어에 정렬(리샘플)")
+        self.chkAlignToFirst = QtWidgets.QCheckBox("Align to first criterion layer (resample)" if english else "첫 번째 기준 레이어에 정렬(리샘플)")
         self.chkAlignToFirst.setChecked(True)
         form.addRow("", self.chkAlignToFirst)
 
         layout.addWidget(grp_in)
 
         # 2) Criteria selection
-        grp_crit = QtWidgets.QGroupBox("2. 기준(환경변수) 선택")
+        grp_crit = QtWidgets.QGroupBox("2. Criteria Selection" if english else "2. 기준(환경변수) 선택")
         vcrit = QtWidgets.QVBoxLayout(grp_crit)
 
         row_add = QtWidgets.QHBoxLayout()
@@ -1546,22 +1678,22 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
         self.cmbDirection = QtWidgets.QComboBox()
         self.cmbDirection.addItem("Benefit(값↑ 좋음)", "benefit")
         self.cmbDirection.addItem("Cost(값↓ 좋음)", "cost")
-        self.cmbDirection.addItem("목표값 최적", "target")
-        self.cmbDirection.addItem("선호구간 최적", "range")
-        self.cmbDirection.addItem("구간 점수표", "reclass")
+        self.cmbDirection.addItem("Target optimum" if english else "목표값 최적", "target")
+        self.cmbDirection.addItem("Preferred range optimum" if english else "선호구간 최적", "range")
+        self.cmbDirection.addItem("Reclass score table" if english else "구간 점수표", "reclass")
 
-        self.btnAdd = QtWidgets.QPushButton("추가")
+        self.btnAdd = QtWidgets.QPushButton("Add" if english else "추가")
         self.btnAdd.clicked.connect(self._on_add_criterion)
-        self.btnRemove = QtWidgets.QPushButton("선택 제거")
+        self.btnRemove = QtWidgets.QPushButton("Remove selected" if english else "선택 제거")
         self.btnRemove.clicked.connect(self._on_remove_selected_criteria)
-        self.btnPreference = QtWidgets.QPushButton("선호 설정…")
+        self.btnPreference = QtWidgets.QPushButton("Preference…" if english else "선호 설정…")
         self.btnPreference.clicked.connect(self._on_edit_selected_preference)
-        self.btnStats = QtWidgets.QPushButton("통계 계산(min/max)")
+        self.btnStats = QtWidgets.QPushButton("Compute stats (min/max)" if english else "통계 계산(min/max)")
         self.btnStats.clicked.connect(self._on_compute_stats)
 
-        row_add.addWidget(QtWidgets.QLabel("래스터:"))
+        row_add.addWidget(QtWidgets.QLabel("Raster:" if english else "래스터:"))
         row_add.addWidget(self.cmbRaster, 1)
-        row_add.addWidget(QtWidgets.QLabel("선호:"))
+        row_add.addWidget(QtWidgets.QLabel("Preference:" if english else "선호:"))
         row_add.addWidget(self.cmbDirection)
         row_add.addWidget(self.btnAdd)
         row_add.addWidget(self.btnRemove)
@@ -1571,7 +1703,11 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
 
         self.tblCriteria = QtWidgets.QTableWidget()
         self.tblCriteria.setColumnCount(6)
-        self.tblCriteria.setHorizontalHeaderLabels(["레이어", "선호", "설정", "min", "max", "weight"])
+        self.tblCriteria.setHorizontalHeaderLabels(
+            ["Layer", "Preference", "Config", "min", "max", "weight"]
+            if english
+            else ["레이어", "선호", "설정", "min", "max", "weight"]
+        )
         self.tblCriteria.horizontalHeader().setStretchLastSection(True)
         self.tblCriteria.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
         self.tblCriteria.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
@@ -1582,44 +1718,66 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
         layout.addWidget(grp_crit, 1)
 
         # 3) Pairwise comparison
-        grp_w = QtWidgets.QGroupBox("3. AHP 가중치(쌍대비교)")
+        grp_w = QtWidgets.QGroupBox("3. AHP Weights (Pairwise Comparison)" if english else "3. AHP 가중치(쌍대비교)")
         vw = QtWidgets.QVBoxLayout(grp_w)
 
         hint = QtWidgets.QLabel(
-            "표의 (i, j) 값은 i 기준이 j 기준보다 얼마나 중요한지를 의미합니다.\n"
-            "- 1: 동일 중요\n"
-            "- 3/5/7/9: 점점 더 중요 (반대로 덜 중요하면 1/3, 1/5 ...)"
+            (
+                "The value at (i, j) expresses how much more important criterion i is than criterion j.\n"
+                "- 1: equal importance\n"
+                "- 3/5/7/9: increasingly more important (use 1/3, 1/5 ... for less important)"
+            )
+            if english
+            else
+            (
+                "표의 (i, j) 값은 i 기준이 j 기준보다 얼마나 중요한지를 의미합니다.\n"
+                "- 1: 동일 중요\n"
+                "- 3/5/7/9: 점점 더 중요 (반대로 덜 중요하면 1/3, 1/5 ...)"
+            )
         )
         hint.setWordWrap(True)
         hint.setStyleSheet("color:#455a64;")
         vw.addWidget(hint)
 
         self.lblMethodSummary = QtWidgets.QLabel(
-            "계산 방식: Benefit/Cost 외에 목표값 최적, 선호구간 최적, 구간 점수표도 지원하며, "
-            "선택적으로 상위그룹-하위기준의 2단계 계층형 AHP도 지원합니다. "
-            "최종 적합도 = Σ(정규화값 × 가중치)입니다. "
-            "연속형/서열형 래스터에 적합하며, 범주형은 먼저 점수 래스터로 바꿔 사용하는 것을 권장합니다."
+            (
+                "Scoring options include Benefit/Cost, target optimum, preferred range optimum, and reclass score tables. "
+                "An optional two-level hierarchical AHP with parent groups and subcriteria is also supported. "
+                "Final suitability = Σ(normalized value × weight). "
+                "This works best for continuous or ordinal rasters; categorical rasters are usually better converted to score rasters first."
+            )
+            if english
+            else
+            (
+                "계산 방식: Benefit/Cost 외에 목표값 최적, 선호구간 최적, 구간 점수표도 지원하며, "
+                "선택적으로 상위그룹-하위기준의 2단계 계층형 AHP도 지원합니다. "
+                "최종 적합도 = Σ(정규화값 × 가중치)입니다. "
+                "연속형/서열형 래스터에 적합하며, 범주형은 먼저 점수 래스터로 바꿔 사용하는 것을 권장합니다."
+            )
         )
         self.lblMethodSummary.setWordWrap(True)
         self.lblMethodSummary.setStyleSheet("color:#455a64;")
         vw.addWidget(self.lblMethodSummary)
 
         self.lblWorkflowTip = create_hint_label(
-            "처음에는 3~5개 기준으로 시작해 질문형 가이드나 계층형 설정으로 뼈대를 만든 뒤, "
-            "마지막에 쌍대비교 표를 미세조정하면 훨씬 수월합니다.",
+            (
+                "Start with 3-5 criteria, build the first draft with the guided or hierarchical setup, and fine-tune the pairwise matrix at the end."
+                if english
+                else "처음에는 3~5개 기준으로 시작해 질문형 가이드나 계층형 설정으로 뼈대를 만든 뒤, 마지막에 쌍대비교 표를 미세조정하면 훨씬 수월합니다."
+            ),
             tone="tip",
             parent=grp_w,
         )
         vw.addWidget(self.lblWorkflowTip)
 
         row_quick = QtWidgets.QHBoxLayout()
-        self.btnGuidePairwise = QtWidgets.QPushButton("질문형 가이드…")
+        self.btnGuidePairwise = QtWidgets.QPushButton("Guided weighting…" if english else "질문형 가이드…")
         self.btnGuidePairwise.clicked.connect(self._on_open_weight_guide)
-        self.btnHierarchy = QtWidgets.QPushButton("계층형 설정…")
+        self.btnHierarchy = QtWidgets.QPushButton("Hierarchical setup…" if english else "계층형 설정…")
         self.btnHierarchy.clicked.connect(self._on_open_hierarchy_builder)
-        self.btnExpertAggregate = QtWidgets.QPushButton("전문가 집계…")
+        self.btnExpertAggregate = QtWidgets.QPushButton("Aggregate experts…" if english else "전문가 집계…")
         self.btnExpertAggregate.clicked.connect(self._on_open_expert_aggregation)
-        self.btnEqualWeights = QtWidgets.QPushButton("균등 가중치")
+        self.btnEqualWeights = QtWidgets.QPushButton("Equal weights" if english else "균등 가중치")
         self.btnEqualWeights.clicked.connect(self._on_apply_equal_weights)
         row_quick.addWidget(self.btnGuidePairwise)
         row_quick.addWidget(self.btnHierarchy)
@@ -1629,7 +1787,11 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
         vw.addLayout(row_quick)
 
         self.lblWeightInputMode = QtWidgets.QLabel(
-            "빠른 입력: 질문형 가이드로 중요도를 먼저 만든 뒤, 필요하면 표에서 세부 조정하세요."
+            (
+                "Quick start: draft the importance with the guided tool first, then fine-tune the matrix if needed."
+                if english
+                else "빠른 입력: 질문형 가이드로 중요도를 먼저 만든 뒤, 필요하면 표에서 세부 조정하세요."
+            )
         )
         self.lblWeightInputMode.setWordWrap(True)
         self.lblWeightInputMode.setStyleSheet("color:#455a64;")
@@ -1641,12 +1803,16 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
         vw.addWidget(self.tblPairwise, 1)
 
         row_w = QtWidgets.QHBoxLayout()
-        self.btnResetPairwise = QtWidgets.QPushButton("초기화(모두 1)")
+        self.btnResetPairwise = QtWidgets.QPushButton("Reset (all 1)" if english else "초기화(모두 1)")
         self.btnResetPairwise.clicked.connect(self._on_reset_pairwise)
         self.lblConsistency = QtWidgets.QLabel("CR: -")
         self.lblConsistency.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
         try:
-            self.lblConsistency.setToolTip("일관성비율(CR). 일반적으로 CR ≤ 0.10 권장 (Saaty, 1980).")
+            self.lblConsistency.setToolTip(
+                "Consistency ratio (CR). CR ≤ 0.10 is generally recommended (Saaty, 1980)."
+                if english
+                else "일관성비율(CR). 일반적으로 CR ≤ 0.10 권장 (Saaty, 1980)."
+            )
         except Exception:
             pass
         row_w.addWidget(self.btnResetPairwise)
@@ -1655,7 +1821,11 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
         vw.addLayout(row_w)
 
         self.lblConsistencyHint = QtWidgets.QLabel(
-            "기준을 추가하고 중요도를 조정하면 여기서 가중치 일관성을 설명해줍니다."
+            (
+                "Once you add criteria and adjust importance, consistency guidance will be shown here."
+                if english
+                else "기준을 추가하고 중요도를 조정하면 여기서 가중치 일관성을 설명해줍니다."
+            )
         )
         self.lblConsistencyHint.setWordWrap(True)
         self.lblConsistencyHint.setStyleSheet("color:#455a64;")
@@ -1664,31 +1834,31 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
         layout.addWidget(grp_w, 2)
 
         # 4) Output
-        grp_out = QtWidgets.QGroupBox("4. 출력")
+        grp_out = QtWidgets.QGroupBox("4. Output" if english else "4. 출력")
         fout = QtWidgets.QFormLayout(grp_out)
 
         self.txtOut = QtWidgets.QLineEdit()
-        self.txtOut.setPlaceholderText("(비우면 임시 파일로 생성 후 프로젝트에 추가)")
-        self.btnBrowse = QtWidgets.QPushButton("찾기…")
+        self.txtOut.setPlaceholderText("(Leave empty to create a temporary file and add it to the project)" if english else "(비우면 임시 파일로 생성 후 프로젝트에 추가)")
+        self.btnBrowse = QtWidgets.QPushButton("Browse…" if english else "찾기…")
         self.btnBrowse.clicked.connect(self._on_browse_out)
         w_out = QtWidgets.QWidget()
         h_out = QtWidgets.QHBoxLayout(w_out)
         h_out.setContentsMargins(0, 0, 0, 0)
         h_out.addWidget(self.txtOut, 1)
         h_out.addWidget(self.btnBrowse)
-        fout.addRow("출력 GeoTIFF:", w_out)
+        fout.addRow("Output GeoTIFF:" if english else "출력 GeoTIFF:", w_out)
 
-        self.chkScale100 = QtWidgets.QCheckBox("0–100 스케일로 변환")
+        self.chkScale100 = QtWidgets.QCheckBox("Convert to 0-100 scale" if english else "0–100 스케일로 변환")
         self.chkScale100.setChecked(False)
         fout.addRow("", self.chkScale100)
 
-        self.chkAddToProject = QtWidgets.QCheckBox("완료 후 프로젝트에 추가")
+        self.chkAddToProject = QtWidgets.QCheckBox("Add to project when finished" if english else "완료 후 프로젝트에 추가")
         self.chkAddToProject.setChecked(True)
         fout.addRow("", self.chkAddToProject)
 
         layout.addWidget(grp_out)
 
-        grp_research = QtWidgets.QGroupBox("5. 연구용 제약/검증(선택)")
+        grp_research = QtWidgets.QGroupBox("5. Research Constraints / Validation (Optional)" if english else "5. 연구용 제약/검증(선택)")
         fresearch = QtWidgets.QFormLayout(grp_research)
 
         self.cmbConstraint = QgsMapLayerComboBox(grp_research)
@@ -1703,10 +1873,14 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
         except Exception:
             pass
         self.cmbConstraint.setAllowEmptyLayer(True)
-        fresearch.addRow("제약 마스크:", self.cmbConstraint)
+        fresearch.addRow("Constraint mask:" if english else "제약 마스크:", self.cmbConstraint)
 
         self.lblConstraintHint = QtWidgets.QLabel(
-            "폴리곤 마스크는 영역 밖을 NoData로, 래스터 마스크는 값이 0보다 큰 셀만 유지합니다."
+            (
+                "Polygon masks set areas outside the mask to NoData, while raster masks keep only cells with values greater than 0."
+                if english
+                else "폴리곤 마스크는 영역 밖을 NoData로, 래스터 마스크는 값이 0보다 큰 셀만 유지합니다."
+            )
         )
         self.lblConstraintHint.setWordWrap(True)
         self.lblConstraintHint.setStyleSheet("color:#455a64;")
@@ -1724,13 +1898,17 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
         except Exception:
             pass
         self.cmbValidation.setAllowEmptyLayer(True)
-        fresearch.addRow("검증 포인트:", self.cmbValidation)
+        fresearch.addRow("Validation points:" if english else "검증 포인트:", self.cmbValidation)
 
-        self.chkValidationSelectedOnly = QtWidgets.QCheckBox("검증 레이어 선택 피처만 사용")
+        self.chkValidationSelectedOnly = QtWidgets.QCheckBox("Use selected validation features only" if english else "검증 레이어 선택 피처만 사용")
         fresearch.addRow("", self.chkValidationSelectedOnly)
 
         self.lblValidationHint = QtWidgets.QLabel(
-            "실행 후 known-site suitability 값을 샘플링해 mean/median과 50/70/90% 도달률을 계산합니다."
+            (
+                "After running, the tool samples suitability values at known sites and reports mean/median plus 50/70/90% exceedance rates."
+                if english
+                else "실행 후 known-site suitability 값을 샘플링해 mean/median과 50/70/90% 도달률을 계산합니다."
+            )
         )
         self.lblValidationHint.setWordWrap(True)
         self.lblValidationHint.setStyleSheet("color:#455a64;")
@@ -1740,11 +1918,11 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
         layout.addStretch(1)
 
         btn_row = QtWidgets.QHBoxLayout()
-        self.btnRun = QtWidgets.QPushButton("실행")
+        self.btnRun = QtWidgets.QPushButton("Run" if english else "실행")
         self.btnRun.clicked.connect(self._on_run)
-        self.btnHelp = QtWidgets.QPushButton("도움말")
+        self.btnHelp = QtWidgets.QPushButton("Help" if english else "도움말")
         self.btnHelp.clicked.connect(self._on_help)
-        self.btnClose = QtWidgets.QPushButton("닫기")
+        self.btnClose = QtWidgets.QPushButton("Close" if english else "닫기")
         self.btnClose.clicked.connect(self.reject)
         btn_row.addWidget(self.btnRun)
         btn_row.addStretch(1)
@@ -1753,9 +1931,45 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
         outer_layout.addLayout(btn_row)
 
         self.resize(920, 720)
+        apply_language(self)
 
     def _on_help(self):
-        html = """
+        if is_english_ui():
+            html = """
+<h3>AHP Suitability Help</h3>
+<p>
+Combines multiple environmental rasters with AHP (pairwise-comparison) weights to create a single suitability raster.
+</p>
+
+<h4>Workflow</h4>
+<ol>
+  <li>Select an <b>AOI</b> if you want to align extent and resolution.</li>
+  <li>Add raster layers to use as <b>criteria</b>, then choose a benefit / cost preference for each one.</li>
+  <li>The <b>Question Guide</b> can build a starting pairwise-comparison table from simple 1-5 importance answers.</li>
+  <li><b>Hierarchy Settings</b> let you group criteria into parent groups and build a 2-level AHP structure.</li>
+  <li><b>Expert Aggregation</b> combines multiple pairwise-comparison tables with a geometric mean.</li>
+  <li>Fill in the <b>pairwise-comparison</b> table using the Saaty 1-9 scale.</li>
+  <li>Optionally apply a <b>constraint mask</b> to exclude areas from the final suitability output.</li>
+  <li>Optionally add <b>validation points</b> to quickly check whether known sites fall in high-suitability zones.</li>
+  <li>Review the <b>CR (Consistency Ratio)</b> and run the tool.</li>
+  <li>Optionally rescale the output to <b>0-100</b> for mapping or reporting.</li>
+</ol>
+
+<h4>Notes</h4>
+<ul>
+  <li>This tool calculates <b>AHP weights</b> first, then applies a <b>min-max normalization</b> and a weighted sum to the criterion rasters.</li>
+  <li>The default workflow is flat AHP + weighted overlay, but a two-level hierarchy can also be used.</li>
+  <li>Differences in <b>CRS, resolution, and NoData handling</b> between rasters can distort the result.</li>
+  <li>Criteria where lower values are preferable (for example slope or distance) should use <b>Cost</b>.</li>
+  <li>If a specific target value or preferred range is most suitable, use <b>Target Value Optimal</b> or <b>Preferred Range Optimal</b>.</li>
+  <li>For <b>categorical rasters</b> such as geology or land-cover classes, use the <b>Reclass Score Table</b> to assign 0-1 scores directly.</li>
+  <li>The current validation output is a <b>quick validation</b> summary, not a full ROC / AUC or predictive-gain workflow.</li>
+  <li>If pairwise comparison feels heavy, start with 3-5 criteria and expand gradually.</li>
+</ul>
+        """
+            title = "AHP Suitability Help"
+        else:
+            html = """
 <h3>AHP 입지분석(적합도) 도움말</h3>
 <p>
 여러 환경 래스터(기준)를 AHP(쌍대비교) 가중치로 결합해 하나의 적합도 래스터를 만듭니다.
@@ -1787,8 +2001,9 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
   <li>쌍대비교가 어려우면 먼저 3~5개 기준으로 시작해 점진적으로 늘리는 것을 권장합니다.</li>
 </ul>
         """
+            title = "AHP 적합도 도움말"
         try:
-            show_help_dialog(parent=self, title="AHP 적합도 도움말", html=html)
+            show_help_dialog(parent=self, title=title, html=html)
         except Exception:
             pass
 
@@ -1875,8 +2090,8 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
         if len(groups) > 4:
             preview = f"{preview} / ..."
         if preview:
-            return f"{len(groups)}개 상위그룹: {preview}"
-        return "계층형 AHP"
+            return f"{len(groups)} parent groups: {preview}" if is_english_ui() else f"{len(groups)}개 상위그룹: {preview}"
+        return "Hierarchical AHP" if is_english_ui() else "계층형 AHP"
 
     def _apply_hierarchy_config(self, config: Optional[Dict[str, Any]], *, note_prefix: str = "") -> bool:
         config0 = self._sanitize_hierarchy_config(config)
@@ -2068,7 +2283,7 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
         self._expert_pairwise_inputs = []
         self._criteria.append(_Criterion(layer_id=lid, direction=direction))
         self._refresh_criteria_table()
-        if hierarchy_active and self._apply_hierarchy_config(self._hierarchy_config, note_prefix="기준 변경 후 재계산." ):
+        if hierarchy_active and self._apply_hierarchy_config(self._hierarchy_config, note_prefix="기준 변경 후 재계산."):
             return
         self._rebuild_pairwise_table(saved_pairs=saved_pairs)
 
@@ -2106,9 +2321,9 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
             cmb = QtWidgets.QComboBox()
             cmb.addItem("Benefit(값↑)", "benefit")
             cmb.addItem("Cost(값↓)", "cost")
-            cmb.addItem("목표값 최적", "target")
-            cmb.addItem("선호구간 최적", "range")
-            cmb.addItem("구간 점수표", "reclass")
+            cmb.addItem("Target optimum" if is_english_ui() else "목표값 최적", "target")
+            cmb.addItem("Preferred range optimum" if is_english_ui() else "선호구간 최적", "range")
+            cmb.addItem("Reclass score table" if is_english_ui() else "구간 점수표", "reclass")
             try:
                 idx = cmb.findData(str(crit.direction or "benefit"))
                 if idx >= 0:
@@ -2208,21 +2423,21 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
         self._weight_input_note = str(note or "").strip()
         text = ""
         if self._weight_input_mode == "guided_levels":
-            text = "현재 가중치 표는 질문형 가이드(1~5 중요도)에서 생성되었습니다."
+            text = tr("현재 가중치 표는 질문형 가이드(1~5 중요도)에서 생성되었습니다.")
         elif self._weight_input_mode == "guided_levels_manual_edit":
-            text = "질문형 가이드로 만든 표를 수동으로 미세조정한 상태입니다."
+            text = tr("질문형 가이드로 만든 표를 수동으로 미세조정한 상태입니다.")
         elif self._weight_input_mode == "hierarchy":
-            text = "현재 가중치 표는 상위그룹-하위기준의 2단계 계층형 AHP에서 생성되었습니다."
+            text = tr("현재 가중치 표는 상위그룹-하위기준의 2단계 계층형 AHP에서 생성되었습니다.")
         elif self._weight_input_mode == "hierarchy_manual_edit":
-            text = "계층형 AHP로 만든 표를 수동으로 미세조정한 상태입니다."
+            text = tr("계층형 AHP로 만든 표를 수동으로 미세조정한 상태입니다.")
         elif self._weight_input_mode == "expert_geomean":
-            text = "현재 가중치 표는 여러 전문가의 쌍대비교를 geometric mean으로 집계한 상태입니다."
+            text = tr("현재 가중치 표는 여러 전문가의 쌍대비교를 geometric mean으로 집계한 상태입니다.")
         elif self._weight_input_mode == "expert_geomean_manual_edit":
-            text = "전문가 집계 결과를 수동으로 미세조정한 상태입니다."
+            text = tr("전문가 집계 결과를 수동으로 미세조정한 상태입니다.")
         elif self._weight_input_mode == "equal":
-            text = "현재 모든 기준을 같은 중요도(1)로 두고 있습니다."
+            text = tr("현재 모든 기준을 같은 중요도(1)로 두고 있습니다.")
         else:
-            text = "현재 쌍대비교 표를 직접 편집하는 수동 입력 상태입니다."
+            text = tr("현재 쌍대비교 표를 직접 편집하는 수동 입력 상태입니다.")
         if self._weight_input_note:
             text = f"{text} {self._weight_input_note}"
         self.lblWeightInputMode.setText(text)
@@ -2326,7 +2541,10 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
 
         self._expert_pairwise_inputs = experts
         self._rebuild_pairwise_table(saved_pairs=aggregated)
-        self._set_weight_input_mode("expert_geomean", f"전문가 {len(experts)}명")
+        self._set_weight_input_mode(
+            "expert_geomean",
+            f"{len(experts)} experts" if is_english_ui() else f"전문가 {len(experts)}명",
+        )
 
     def _on_apply_equal_weights(self):
         self._rebuild_pairwise_table(saved_pairs={})
@@ -2364,7 +2582,7 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
         headers = []
         for c in self._criteria:
             lyr = self._criterion_layer(c)
-            name = str(lyr.name() if lyr is not None else "(레이어)")
+            name = str(lyr.name() if lyr is not None else ("(Layer)" if is_english_ui() else "(레이어)"))
             headers.append(name[:18] + ("…" if len(name) > 18 else ""))
 
         self.tblPairwise.setHorizontalHeaderLabels(headers)
@@ -2450,7 +2668,10 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
 
     def _on_reset_pairwise(self):
         self._rebuild_pairwise_table()
-        self._set_weight_input_mode("manual", "쌍대비교 값을 모두 1로 초기화했습니다.")
+        self._set_weight_input_mode(
+            "manual",
+            "Reset all pairwise values to 1." if is_english_ui() else "쌍대비교 값을 모두 1로 초기화했습니다.",
+        )
 
     def _build_pairwise_matrix(self) -> Optional["np.ndarray"]:
         n = int(len(self._criteria))
@@ -2476,7 +2697,11 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
         n = int(len(self._criteria))
         if n <= 0:
             self.lblConsistency.setText("CR: -")
-            self.lblConsistencyHint.setText("기준을 추가하면 AHP 가중치와 일관성(CR)을 계산합니다.")
+            self.lblConsistencyHint.setText(
+                "Add criteria to calculate AHP weights and the consistency ratio (CR)."
+                if is_english_ui()
+                else "기준을 추가하면 AHP 가중치와 일관성(CR)을 계산합니다."
+            )
             self._last_lambda_max = None
             self._last_consistency_ratio = None
             return
@@ -2485,8 +2710,12 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
         if mat is None:
             for c in self._criteria:
                 c.weight = 1.0 / float(n)
-            self.lblConsistency.setText("CR: - (numpy 없음: 균등 가중치)")
-            self.lblConsistencyHint.setText("NumPy를 사용할 수 없어 AHP 고유벡터 대신 균등 가중치로 처리됩니다.")
+            self.lblConsistency.setText("CR: - (NumPy unavailable: equal weights)" if is_english_ui() else "CR: - (numpy 없음: 균등 가중치)")
+            self.lblConsistencyHint.setText(
+                "NumPy is unavailable, so the tool falls back to equal weights instead of the AHP eigenvector solution."
+                if is_english_ui()
+                else "NumPy를 사용할 수 없어 AHP 고유벡터 대신 균등 가중치로 처리됩니다."
+            )
             self._last_lambda_max = None
             self._last_consistency_ratio = None
             self._update_criteria_weight_column()
@@ -2506,7 +2735,7 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
         note = ""
         try:
             if math.isfinite(float(cr)) and float(cr) > 0.10:
-                note = " (주의: 0.10 초과)"
+                note = " (warning: > 0.10)" if is_english_ui() else " (주의: 0.10 초과)"
         except Exception:
             note = ""
         self.lblConsistency.setText(f"λmax={lam_txt}, CR={cr_txt}{note}")

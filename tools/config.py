@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from .i18n import tr
+
 
 _DEFAULT_CONFIG = {
     "plugin": {
@@ -162,7 +164,8 @@ def get_plugin_config_value(*keys, default=None):
 def get_output_group_name(group_key: str, default: str = "") -> str:
     value = get_plugin_config_value("plugin", "output_groups", str(group_key or ""), default=default)
     out = str(value or "").strip()
-    return out or str(default or "").strip()
+    resolved = out or str(default or "").strip()
+    return tr(resolved)
 
 
 def get_output_group_names() -> dict[str, str]:
@@ -174,7 +177,7 @@ def get_output_group_names() -> dict[str, str]:
         key0 = str(key or "").strip()
         value0 = str(value or "").strip()
         if key0 and value0:
-            out[key0] = value0
+            out[key0] = tr(value0)
     return out
 
 
@@ -213,7 +216,7 @@ def get_contour_code_presets() -> list[dict[str, Any]]:
         out.append(
             {
                 "code": code,
-                "label": label,
+                "label": tr(label),
                 "default_checked": bool(item.get("default_checked", True)),
             }
         )

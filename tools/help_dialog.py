@@ -4,6 +4,7 @@ from typing import Optional
 from qgis.PyQt import QtGui, QtWidgets
 
 from .config import get_plugin_config_value
+from .i18n import apply_language, tr
 
 
 class ArchToolkitHelpDialog(QtWidgets.QDialog):
@@ -16,7 +17,7 @@ class ArchToolkitHelpDialog(QtWidgets.QDialog):
         parent=None,
     ):
         super().__init__(parent)
-        self.setWindowTitle(str(title or "도움말"))
+        self.setWindowTitle(tr(str(title or "도움말")))
         min_width = int(get_plugin_config_value("plugin", "ui", "help_dialog", "min_width", default=760) or 760)
         min_height = int(get_plugin_config_value("plugin", "ui", "help_dialog", "min_height", default=560) or 560)
         self.setMinimumSize(max(640, min_width), max(420, min_height))
@@ -34,7 +35,7 @@ class ArchToolkitHelpDialog(QtWidgets.QDialog):
             or ""
         ).strip()
         if hint_text:
-            self.lblHint = QtWidgets.QLabel(hint_text, self)
+            self.lblHint = QtWidgets.QLabel(tr(hint_text), self)
             self.lblHint.setWordWrap(True)
             self.lblHint.setStyleSheet(
                 "background:#f1f8e9; border:1px solid #dcedc8; color:#355724; "
@@ -45,7 +46,7 @@ class ArchToolkitHelpDialog(QtWidgets.QDialog):
         search_row = QtWidgets.QHBoxLayout()
         self.txtSearch = QtWidgets.QLineEdit(self)
         self.txtSearch.setPlaceholderText(
-            str(
+            tr(
                 get_plugin_config_value(
                     "plugin",
                     "ui",
@@ -56,9 +57,9 @@ class ArchToolkitHelpDialog(QtWidgets.QDialog):
                 or "도움말 검색..."
             )
         )
-        self.btnSearchNext = QtWidgets.QPushButton("다음", self)
-        self.btnSearchPrev = QtWidgets.QPushButton("이전", self)
-        self.btnSearchClear = QtWidgets.QPushButton("지우기", self)
+        self.btnSearchNext = QtWidgets.QPushButton(tr("다음"), self)
+        self.btnSearchPrev = QtWidgets.QPushButton(tr("이전"), self)
+        self.btnSearchClear = QtWidgets.QPushButton(tr("지우기"), self)
         self.lblSearchStatus = QtWidgets.QLabel("", self)
         self.lblSearchStatus.setStyleSheet("color:#455a64;")
         self.txtSearch.returnPressed.connect(self._find_next)
@@ -84,8 +85,8 @@ class ArchToolkitHelpDialog(QtWidgets.QDialog):
         btn_row = QtWidgets.QHBoxLayout()
         btn_row.addStretch(1)
 
-        self.btnCopy = QtWidgets.QPushButton("복사", self)
-        self.btnClose = QtWidgets.QPushButton("닫기", self)
+        self.btnCopy = QtWidgets.QPushButton(tr("복사"), self)
+        self.btnClose = QtWidgets.QPushButton(tr("닫기"), self)
 
         self.btnCopy.clicked.connect(self._copy_text)
         self.btnClose.clicked.connect(self.accept)
@@ -93,11 +94,12 @@ class ArchToolkitHelpDialog(QtWidgets.QDialog):
         btn_row.addWidget(self.btnCopy)
         btn_row.addWidget(self.btnClose)
         layout.addLayout(btn_row)
+        apply_language(self)
 
     def _find_text(self, *, backward: bool = False):
         text = str(self.txtSearch.text() or "").strip()
         if not text:
-            self.lblSearchStatus.setText("검색어를 입력하면 도움말 안에서 바로 찾을 수 있습니다.")
+            self.lblSearchStatus.setText(tr("검색어를 입력하면 도움말 안에서 바로 찾을 수 있습니다."))
             return
 
         flags = QtGui.QTextDocument.FindBackward if backward else QtGui.QTextDocument.FindFlags()
@@ -119,9 +121,9 @@ class ArchToolkitHelpDialog(QtWidgets.QDialog):
                 found = False
 
         if found:
-            self.lblSearchStatus.setText(f"'{text}' 검색 결과로 이동했습니다.")
+            self.lblSearchStatus.setText(tr("'{text}' 검색 결과로 이동했습니다.", text=text))
         else:
-            self.lblSearchStatus.setText(f"'{text}' 검색 결과를 찾지 못했습니다.")
+            self.lblSearchStatus.setText(tr("'{text}' 검색 결과를 찾지 못했습니다.", text=text))
 
     def _find_next(self):
         self._find_text(backward=False)

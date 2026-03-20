@@ -7,6 +7,7 @@ from qgis.PyQt.QtCore import QDateTime, QPoint, Qt, QEvent
 from qgis.PyQt.QtGui import QFontDatabase
 from qgis.core import Qgis
 
+from .i18n import tr
 from .utils import add_ui_log_listener, get_log_path, remove_ui_log_listener, start_ui_log_pump
 
 _live_log_dialog = None
@@ -56,7 +57,7 @@ class ArchToolkitLiveLogDialog(QtWidgets.QDialog):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("ArchToolkit 작업 로그")
+        self.setWindowTitle(tr("ArchToolkit 작업 로그"))
         try:
             self.setWindowFlag(Qt.Tool, True)
         except Exception:
@@ -82,8 +83,8 @@ class ArchToolkitLiveLogDialog(QtWidgets.QDialog):
         except Exception:
             pass
 
-        btn_clear = QtWidgets.QPushButton("비우기", self)
-        btn_close = QtWidgets.QPushButton("닫기", self)
+        btn_clear = QtWidgets.QPushButton(tr("비우기"), self)
+        btn_close = QtWidgets.QPushButton(tr("닫기"), self)
         btn_clear.clicked.connect(self.clear)
         btn_close.clicked.connect(self.close)
 
@@ -132,19 +133,19 @@ class ArchToolkitLiveLogDialog(QtWidgets.QDialog):
         license_name = meta.get("license", "GPL v3")
 
         lines = []
-        title = "ArchToolkit 작업 로그"
+        title = tr("ArchToolkit 작업 로그")
         lines.append(title)
-        lines.append("- 진행상황/오류가 여기에 실시간으로 기록됩니다.")
+        lines.append(tr("- 진행상황/오류가 여기에 실시간으로 기록됩니다."))
         if tracker:
-            lines.append(f"- 오류/제안 제보: {tracker}")
+            lines.append(tr("- 오류/제안 제보: {tracker}", tracker=tracker))
         else:
-            lines.append("- 오류/제안 제보: GitHub Issues (repo tracker)")
+            lines.append(tr("- 오류/제안 제보: GitHub Issues (repo tracker)"))
         try:
-            lines.append(f"- 로그 파일: {get_log_path()}")
+            lines.append(tr("- 로그 파일: {path}", path=get_log_path()))
         except Exception:
             pass
         lines.append(f"- Copyright (C) 2026 {author}  ·  License: {license_name}")
-        lines.append("- 참고문헌/모델 출처: REFERENCES.md")
+        lines.append(tr("- 참고문헌/모델 출처: REFERENCES.md"))
         lines.append("-" * 60)
         for ln in lines:
             try:

@@ -39,6 +39,7 @@ from qgis.core import (
     QgsSingleBandGrayRenderer, QgsHillshadeRenderer,
     QgsRasterBandStats, QgsLayerTreeLayer
 )
+from .i18n import apply_language, is_english_ui, tr
 from .utils import new_run_id, restore_ui_focus, push_message, set_archtoolkit_layer_metadata
 from .help_dialog import show_help_dialog
 
@@ -80,20 +81,21 @@ DEFAULT_CODE_CONFIG = {
     },
 }
 
+
 class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
-    
+
     def __init__(self, iface, parent=None):
         super(MapStylingDialog, self).__init__(parent)
         self.setupUi(self)
         self.iface = iface
         self._style_run_id = None
-        
+
         # Setup
         self.populate_layers()
         self.cmbDemLayer.setFilters(QgsMapLayerProxyModel.RasterLayer)
         self.code_config = self._load_code_config()
         self._sync_code_config_ui()
-        
+
         # Connect signals
         self.btnSelectAll.clicked.connect(lambda: self.set_all_checks(True))
         self.btnDeselectAll.clicked.connect(lambda: self.set_all_checks(False))
@@ -106,6 +108,7 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
         if hasattr(self, "btnExportPreset"):
             self.btnExportPreset.clicked.connect(self.export_qml_preset)
         self._setup_help_button()
+        apply_language(self)
 
     def _setup_help_button(self):
         try:
@@ -132,19 +135,37 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
     def _on_help(self):
         try:
             plugin_dir = os.path.dirname(os.path.dirname(__file__))
-            html = (
-                "<h2>도면 시각화 (Map Styling)</h2>"
-                "<p>한국 수치지형도(DXF) 레이어를 분류/집계하고, 도로·하천·건물 등 카토그래피 스타일을 적용합니다.</p>"
-                "<h3>커스터마이즈</h3>"
-                "<ul>"
-                "<li>DXF 코드 매핑은 <code>tools/map_styling_codes.json</code>에서 수정할 수 있습니다.</li>"
-                "<li>QML/프리셋 내보내기로 프로젝트 재사용성을 높일 수 있습니다.</li>"
-                "</ul>"
-            )
-            show_help_dialog(parent=self, title="Map Styling 도움말", html=html, plugin_dir=plugin_dir)
+            if is_english_ui():
+                html = (
+                    "<h2>Map Styling</h2>"
+                    "<p>Classifies South Korean digital topographic map (DXF) layers and applies cartographic "
+                    "styles for roads, rivers, buildings, and DEM backgrounds.</p>"
+                    "<h3>Customization</h3>"
+                    "<ul>"
+                    "<li>You can edit DXF code mappings in <code>tools/map_styling_codes.json</code>.</li>"
+                    "<li>QML / preset export makes it easier to reuse the same styling in other projects.</li>"
+                    "</ul>"
+                )
+                title = "Map Styling Help"
+            else:
+                html = (
+                    "<h2>도면 시각화 (Map Styling)</h2>"
+                    "<p>한국 수치지형도(DXF) 레이어를 분류/집계하고, 도로·하천·건물 등 카토그래피 스타일을 적용합니다.</p>"
+                    "<h3>커스터마이즈</h3>"
+                    "<ul>"
+                    "<li>DXF 코드 매핑은 <code>tools/map_styling_codes.json</code>에서 수정할 수 있습니다.</li>"
+                    "<li>QML/프리셋 내보내기로 프로젝트 재사용성을 높일 수 있습니다.</li>"
+                    "</ul>"
+                )
+                title = "Map Styling 도움말"
+            show_help_dialog(parent=self, title=title, html=html, plugin_dir=plugin_dir)
         except Exception:
             try:
-                QtWidgets.QMessageBox.information(self, "도움말", "README.md를 참고하세요.")
+                QtWidgets.QMessageBox.information(
+                    self,
+                    "Help" if is_english_ui() else "도움말",
+                    "See README.md." if is_english_ui() else "README.md를 참고하세요.",
+                )
             except Exception:
                 pass
 
@@ -231,20 +252,25 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
     def open_code_config_file(self):
         path = self._code_config_path()
         if not os.path.exists(path):
-            push_message(self.iface, "정보", f"매핑 파일이 없습니다: {path}", level=1)
+            push_message(self.iface, tr("정보"), tr("매핑 파일이 없습니다: {path}", path=path), level=1)
             return
         try:
             QDesktopServices.openUrl(QUrl.fromLocalFile(path))
         except Exception:
-            push_message(self.iface, "오류", "매핑 파일을 여는 중 오류가 발생했습니다.", level=2)
+            push_message(self.iface, tr("오류"), tr("매핑 파일을 여는 중 오류가 발생했습니다."), level=2)
 
     def reload_code_config(self):
         self.code_config = self._load_code_config()
         self._sync_code_config_ui()
         if getattr(self, "_code_config_load_error", None):
-            push_message(self.iface, "경고", f"기본 매핑으로 대체했습니다: {self._code_config_load_error}", level=1)
+            message = (
+                f"Fell back to the default mapping: {self._code_config_load_error}"
+                if is_english_ui()
+                else f"기본 매핑으로 대체했습니다: {self._code_config_load_error}"
+            )
+            push_message(self.iface, tr("경고"), message, level=1)
         else:
-            push_message(self.iface, "완료", "DXF 코드 매핑을 다시 불러왔습니다.", level=0)
+            push_message(self.iface, tr("완료"), tr("DXF 코드 매핑을 다시 불러왔습니다."), level=0)
 
     def populate_layers(self):
         """Fill the list widget with vector layers from the project"""
@@ -278,19 +304,18 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
         dem_layer = self.cmbDemLayer.currentLayer()
 
         if not source_layers and not (self.chkDemStyling.isChecked() and dem_layer):
-            push_message(self.iface, "오류", "시각화를 적용할 레이어를 선택해주세요.", level=2)
+            push_message(self.iface, tr("오류"), tr("시각화를 적용할 레이어를 선택해주세요."), level=2)
             restore_ui_focus(self)
             return
-
 
         try:
             self._style_run_id = new_run_id("map_styling")
             results = []
-            
+
             # 1. Raster Background Styling
             if self.chkDemStyling.isChecked() and isinstance(dem_layer, QgsRasterLayer):
                 self.style_dem_background(dem_layer)
-                results.append("배경 지형")
+                results.append(tr("배경 지형"))
 
             # 2. Vector Styling
             if source_layers:
@@ -300,33 +325,33 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
                 buildings_cfg = self.code_config.get("buildings", {})
                 if self.chkRoads.isChecked():
                     tasks.append({
-                        'name': roads_cfg.get("name", "Style: 도로"),
+                        'name': tr(str(roads_cfg.get("name", "Style: 도로"))),
                         'codes': [r.get("code") for r in roads_cfg.get("rules", []) if isinstance(r, dict) and r.get("code")],
                         'dest_geom': "line",
                         'style_func': self.style_road_layer,
                     })
                 if self.chkRivers.isChecked():
                     tasks.append({
-                        'name': rivers_cfg.get("name", "Style: 하천"),
+                        'name': tr(str(rivers_cfg.get("name", "Style: 하천"))),
                         'codes': [r.get("code") for r in rivers_cfg.get("rules", []) if isinstance(r, dict) and r.get("code")],
                         'dest_geom': "line",
                         'style_func': self.style_river_layer,
                     })
                 if self.chkBuildings.isChecked():
                     tasks.append({
-                        'name': buildings_cfg.get("name", "Style: 건물"),
+                        'name': tr(str(buildings_cfg.get("name", "Style: 건물"))),
                         'codes': buildings_cfg.get("codes", []) if isinstance(buildings_cfg.get("codes"), list) else [],
                         'dest_geom': "polygon",
                         'style_func': self.style_building_layer,
                     })
 
                 # 2.1 Create Vector Group
-                vector_group_name = "Style: 도면 데이터"
+                vector_group_name = tr("Style: 도면 데이터")
                 root = QgsProject.instance().layerTreeRoot()
                 vec_group = root.findGroup(vector_group_name)
                 if vec_group:
                     root.removeChildNode(vec_group)
-                vec_group = root.insertGroup(0, vector_group_name) # Always top for vector data
+                vec_group = root.insertGroup(0, vector_group_name)  # Always top for vector data
 
                 for task in tasks:
                     aggregated_layer = self.aggregate_features(source_layers, task.get('codes', []), task['name'], task.get("dest_geom", "line"))
@@ -334,16 +359,15 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
                         # Add directly to group (layer was added with addMapLayer(False))
                         layer_node = QgsLayerTreeLayer(aggregated_layer)
                         vec_group.insertChildNode(0, layer_node)  # Insert at top
-                        
+
                         # Apply style
                         task['style_func'](aggregated_layer, 'Layer')
                         results.append(task['name'].replace("Style: ", ""))
 
-
                 # 3. Move source layers into a hidden sub-group for unified control
-                source_group_name = "원본 레이어 (숨김)"
+                source_group_name = tr("원본 레이어 (숨김)")
                 source_sub_group = vec_group.addGroup(source_group_name)
-                
+
                 for sl in source_layers:
                     sl_node = root.findLayer(sl.id())
                     if sl_node:
@@ -354,44 +378,43 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
                         parent = sl_node.parent()
                         if parent:
                             parent.removeChildNode(sl_node)
-                
+
                 # Hide the source sub-group
                 source_sub_group.setItemVisibilityChecked(False)
 
             # Final message
             if results:
-                push_message(self.iface, "시각화 완료", f"통합 레이어가 생성되었습니다: {', '.join(results)}", level=0)
+                push_message(self.iface, tr("완료"), tr("통합 레이어가 생성되었습니다: {rest}", rest=", ".join(results)), level=0)
                 self.accept()
             else:
-                push_message(self.iface, "정보", "선택한 레이어들에서 해당하는 데이터를 찾을 수 없습니다.", level=1)
+                push_message(self.iface, tr("정보"), tr("선택한 레이어들에서 해당하는 데이터를 찾을 수 없습니다."), level=1)
                 restore_ui_focus(self)
-                
-        except Exception as e:
-            push_message(self.iface, "오류", f"스타일 적용 중 오류: {str(e)}", level=2)
-            restore_ui_focus(self)
 
+        except Exception as e:
+            push_message(self.iface, tr("오류"), tr("스타일 적용 중 오류: {rest}", rest=str(e)), level=2)
+            restore_ui_focus(self)
 
     def style_dem_background(self, source_raster):
         """Create a 3-layer styled background group from a single DEM"""
         run_id = str(getattr(self, "_style_run_id", "") or "").strip() or new_run_id("map_styling")
-        
-        group_name = f"Style: 배경 지형 ({source_raster.name()})"
+
+        group_name = f"{tr('Style: 배경 지형')} ({source_raster.name()})"
         root = QgsProject.instance().layerTreeRoot()
-        
+
         # Remove existing group if it exists
         existing_group = root.findGroup(group_name)
         if existing_group:
             root.removeChildNode(existing_group)
-        
+
         group = root.addGroup(group_name)
-        
+
         # We want: Color (Top), Gray (Mid), Hillshade (Bottom)
         # Strategy: Add all with addLayer (appends at bottom), then reorder manually.
         # Or: Add in reverse order. Let's add in reverse order so last added is at top.
-        
+
         # 1. Hillshade (should be at bottom, add first)
         hillshade_layer = source_raster.clone()
-        hillshade_layer.setName(f"{source_raster.name()}_음영기복")
+        hillshade_layer.setName(f"{source_raster.name()}_Hillshade" if is_english_ui() else f"{source_raster.name()}_음영기복")
         hillshade_layer.setRenderer(QgsHillshadeRenderer(hillshade_layer.dataProvider(), 1, 315, 45))
         try:
             set_archtoolkit_layer_metadata(
@@ -405,14 +428,14 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
         except Exception:
             pass
         QgsProject.instance().addMapLayer(hillshade_layer, False)
-        group.addLayer(hillshade_layer) 
-        
+        group.addLayer(hillshade_layer)
+
         # 2. Gray Layer (should be in middle, add second - will be on top of hillshade)
         gray_layer = source_raster.clone()
-        gray_layer.setName(f"{source_raster.name()}_그레이")
+        gray_layer.setName(f"{source_raster.name()}_Gray" if is_english_ui() else f"{source_raster.name()}_그레이")
         gray_layer.setRenderer(QgsSingleBandGrayRenderer(gray_layer.dataProvider(), 1))
         gray_layer.setOpacity(0.4)
-        gray_layer.setBlendMode(QPainter.CompositionMode_Multiply) 
+        gray_layer.setBlendMode(QPainter.CompositionMode_Multiply)
         try:
             set_archtoolkit_layer_metadata(
                 gray_layer,
@@ -426,12 +449,12 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
             pass
         QgsProject.instance().addMapLayer(gray_layer, False)
         gray_node = QgsLayerTreeLayer(gray_layer)
-        group.insertChildNode(0, gray_node) # Insert at top of group
-        
+        group.insertChildNode(0, gray_node)  # Insert at top of group
+
         # 3. Color Layer (should be at top, add last)
         color_layer = source_raster.clone()
-        color_layer.setName(f"{source_raster.name()}_고도색상")
-        
+        color_layer.setName(f"{source_raster.name()}_ElevationColor" if is_english_ui() else f"{source_raster.name()}_고도색상")
+
         stats = color_layer.dataProvider().bandStatistics(1, QgsRasterBandStats.All)
         min_val, max_val = stats.minimumValue, stats.maximumValue
         shader = QgsRasterShader()
@@ -461,8 +484,7 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
             pass
         QgsProject.instance().addMapLayer(color_layer, False)
         color_node = QgsLayerTreeLayer(color_layer)
-        group.insertChildNode(0, color_node) # Insert at very top of group
-
+        group.insertChildNode(0, color_node)  # Insert at very top of group
 
     def detect_code_field(self, layer):
         """Identify which field contains the layer codes"""
@@ -480,27 +502,28 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
             return None
         is_building = dest_geom == "polygon"
         crs = source_layers[0].crs().authid()
-        
+
         dest_geom_type = "MultiPolygon" if is_building else "LineString"
         dest_layer = QgsVectorLayer(f"{dest_geom_type}?crs={crs}", name, "memory")
         pr = dest_layer.dataProvider()
         pr.addAttributes([QgsField("Layer", QVariant.String)])
         dest_layer.updateFields()
-        
+
         all_features = []
-        
+
         for sl in source_layers:
             field_name = self.detect_code_field(sl)
-            if not field_name: continue
-            
+            if not field_name:
+                continue
+
             query = f"\"{field_name}\" IN ({', '.join([f'\'{c}\'' for c in codes])})"
             request = QgsFeatureRequest().setFilterExpression(query)
-            
+
             for feat in sl.getFeatures(request):
                 new_feat = QgsFeature(dest_layer.fields())
                 code_val = feat.attribute(field_name)
                 new_feat.setAttributes([code_val])
-                
+
                 geom = feat.geometry()
                 if is_building:
                     # Robust polygonization for buildings
@@ -516,7 +539,7 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
                                 poly_geom = QgsGeometry.fromPolygonXY([geom.asPolyline()])
                         except Exception:
                             pass
-                    
+
                     if poly_geom and not poly_geom.isNull() and not poly_geom.isEmpty():
                         new_feat.setGeometry(poly_geom)
                     else:
@@ -532,12 +555,11 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
                 else:
                     new_feat.setGeometry(geom)
 
-                
                 all_features.append(new_feat)
-        
+
         if not all_features:
             return None
-            
+
         pr.addFeatures(all_features)
         try:
             set_archtoolkit_layer_metadata(
@@ -557,10 +579,10 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
         cfg = self.code_config.get("roads", {})
         color = QColor(cfg.get("color", "#ff9501"))
         road_rules = cfg.get("rules", [])
-        
+
         # Create invisible root rule (ELSE filter catches nothing)
         root_rule = QgsRuleBasedRenderer.Rule(None)  # No symbol for root
-        
+
         for item in road_rules:
             if not isinstance(item, dict):
                 continue
@@ -576,7 +598,7 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
             sym = QgsLineSymbol.createSimple({'color': color.name(), 'width': str(width_f)})
             rule = QgsRuleBasedRenderer.Rule(sym, 0, 0, f"\"{field_name}\" = '{code}'", str(label))
             root_rule.appendChild(rule)
-            
+
         layer.setRenderer(QgsRuleBasedRenderer(root_rule))
         layer.triggerRepaint()
 
@@ -584,10 +606,10 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
         cfg = self.code_config.get("rivers", {})
         color = QColor(cfg.get("color", "#1ea1ff"))
         river_rules = cfg.get("rules", [])
-        
+
         # Create invisible root rule (ELSE filter catches nothing)
         root_rule = QgsRuleBasedRenderer.Rule(None)  # No symbol for root
-        
+
         for item in river_rules:
             if not isinstance(item, dict):
                 continue
@@ -603,7 +625,7 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
             sym = QgsLineSymbol.createSimple({'color': color.name(), 'width': str(width_f)})
             rule = QgsRuleBasedRenderer.Rule(sym, 0, 0, f"\"{field_name}\" = '{code}'", str(label))
             root_rule.appendChild(rule)
-            
+
         layer.setRenderer(QgsRuleBasedRenderer(root_rule))
         layer.triggerRepaint()
 
@@ -618,7 +640,7 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
         except Exception:
             shadow_alpha = 100
         shadow_alpha = max(0, min(255, shadow_alpha))
-        
+
         if layer.geometryType() == QgsWkbTypes.PolygonGeometry:
             symbol = QgsFillSymbol.createSimple({
                 'color': str(fill_color),
@@ -636,7 +658,7 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
             shadow_layer = QgsSimpleLineSymbolLayer()
             shadow_layer.setColor(QColor(0, 0, 0, shadow_alpha))
             shadow_layer.setWidth(0.3)
-            shadow_layer.setOffset(offset_val) 
+            shadow_layer.setOffset(offset_val)
             symbol.insertSymbolLayer(0, shadow_layer)
 
         layer.setRenderer(QgsSingleSymbolRenderer(symbol))
@@ -654,7 +676,7 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
 
     def export_qml_preset(self):
         """Export QML styles + current mapping config for reuse."""
-        base_dir = QtWidgets.QFileDialog.getExistingDirectory(self, "프리셋 저장 폴더 선택")
+        base_dir = QtWidgets.QFileDialog.getExistingDirectory(self, tr("프리셋 저장 폴더 선택"))
         if not base_dir:
             return
 
@@ -772,6 +794,4 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
         except Exception:
             pass
 
-        push_message(self.iface, "완료", f"프리셋을 저장했습니다: {preset_dir}", level=0)
-
-
+        push_message(self.iface, tr("완료"), tr("프리셋을 저장했습니다: {rest}", rest=preset_dir), level=0)

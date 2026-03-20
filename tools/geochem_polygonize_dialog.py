@@ -39,7 +39,7 @@ from osgeo import gdal, ogr
 
 import processing
 from qgis.PyQt import QtWidgets
-from qgis.PyQt.QtCore import Qt, QVariant
+from qgis.PyQt.QtCore import QVariant
 from qgis.PyQt.QtGui import QColor, QIcon, QImage
 from qgis.core import (
     Qgis,
@@ -60,8 +60,8 @@ from qgis.core import (
 from qgis.gui import QgsMapLayerComboBox
 
 from .config import get_output_group_name
+from .i18n import apply_language, is_english_ui, tr
 from .utils import (
-    is_metric_crs,
     log_exception,
     log_message,
     push_message,
@@ -562,7 +562,7 @@ class GeoChemPolygonizeDialog(QtWidgets.QDialog):
     def __init__(self, iface, parent=None):
         super().__init__(parent)
         self.iface = iface
-        self.setWindowTitle("지구화학도 래스터 수치화 (GeoChem WMS → Raster) - ArchToolkit")
+        self.setWindowTitle(tr("지구화학도 래스터 수치화 (GeoChem WMS → Raster) - ArchToolkit"))
 
         try:
             plugin_dir = os.path.dirname(os.path.dirname(__file__))
@@ -967,9 +967,41 @@ class GeoChemPolygonizeDialog(QtWidgets.QDialog):
             pass
 
         self.resize(700, 650)
+        apply_language(self)
 
     def _on_help(self):
-        html = """
+        if is_english_ui():
+            html = """
+<h3>GeoChem Help</h3>
+<p>
+This tool estimates <b>legend colors -> values</b> from RGB geochemical maps (WMS / raster)
+and creates value / class rasters and optional polygons.
+</p>
+
+<h4>Inputs / Outputs</h4>
+<ul>
+  <li><b>Input</b>: RGB geochemical layer and an AOI polygon</li>
+  <li><b>Output</b>: value raster, class raster, and optional class polygons / labels</li>
+  <li>Optional weighted centers and zonal statistics are also available</li>
+</ul>
+
+<h4>Accuracy Notes</h4>
+<ul>
+  <li>This works from a rendered image, not the original numeric source, so text, outlines, anti-aliasing, and compression can introduce error.</li>
+  <li>Clipping is based on the AOI bounding extent, not the polygon boundary itself.</li>
+  <li>Results are best when the visible WMS styling matches the legend image or preset exactly.</li>
+</ul>
+
+<h4>Tips</h4>
+<ul>
+  <li><b>Inpaint</b>: turn it on when black outlines or labels are breaking the value reconstruction.</li>
+  <li><b>High-value snap</b>: useful when the last legend class is under-detected, but it can overestimate high-value zones if overused.</li>
+  <li><b>Preset import</b>: importing a CSV legend (value,r,g,b) makes it easy to reuse other element maps.</li>
+</ul>
+"""
+            title = "GeoChem Help"
+        else:
+            html = """
 <h3>GeoChem (지구화학도) 도움말</h3>
 <p>
 이 도구는 RGB 지구화학도(WMS/래스터)에서 <b>범례 색상→값</b>을 역추정하여
@@ -997,9 +1029,10 @@ value/class 래스터와 폴리곤을 생성합니다.
   <li><b>프리셋 확장</b>: CSV(value,r,g,b)로 프리셋을 가져오면 다른 원소도 쉽게 추가할 수 있습니다.</li>
 </ul>
 """
+            title = "GeoChem 도움말"
         try:
             plugin_dir = os.path.dirname(os.path.dirname(__file__))
-            show_help_dialog(parent=self, title="GeoChem 도움말", html=html, plugin_dir=plugin_dir)
+            show_help_dialog(parent=self, title=title, html=html, plugin_dir=plugin_dir)
         except Exception:
             pass
 
@@ -1013,10 +1046,11 @@ value/class 래스터와 폴리곤을 생성합니다.
             pass
 
     def _import_preset_from_csv(self):
+        english = is_english_ui()
         try:
             path, _ = QtWidgets.QFileDialog.getOpenFileName(
                 self,
-                "CSV 프리셋 불러오기",
+                "Import CSV Preset" if english else "CSV 프리셋 불러오기",
                 "",
                 "CSV Files (*.csv);;All Files (*.*)",
             )
@@ -1036,7 +1070,12 @@ value/class 래스터와 폴리곤을 생성합니다.
 
         base_label = os.path.splitext(os.path.basename(path))[0]
         try:
-            label, ok = QtWidgets.QInputDialog.getText(self, "프리셋 이름", "프리셋 표시 이름", text=base_label)
+            label, ok = QtWidgets.QInputDialog.getText(
+                self,
+                "Preset Name" if english else "프리셋 이름",
+                "Display name for the preset" if english else "프리셋 표시 이름",
+                text=base_label,
+            )
         except Exception:
             label, ok = (base_label, True)
         label = (label or "").strip()
@@ -1044,7 +1083,14 @@ value/class 래스터와 폴리곤을 생성합니다.
             return
 
         try:
-            unit, ok2 = QtWidgets.QInputDialog.getText(self, "단위", "표시용 단위(예: ppm, %, wt%). 비워도 됩니다.", text="")
+            unit, ok2 = QtWidgets.QInputDialog.getText(
+                self,
+                "Unit" if english else "단위",
+                "Display unit (for example ppm, %, wt%). Leave blank if not needed."
+                if english
+                else "표시용 단위(예: ppm, %, wt%). 비워도 됩니다.",
+                text="",
+            )
         except Exception:
             unit, ok2 = ("", True)
         if not ok2:
@@ -1066,10 +1112,11 @@ value/class 래스터와 폴리곤을 생성합니다.
             pass
 
     def _import_preset_from_legend_image(self):
+        english = is_english_ui()
         try:
             img_path, _ = QtWidgets.QFileDialog.getOpenFileName(
                 self,
-                "범례 이미지 선택",
+                "Select Legend Image" if english else "범례 이미지 선택",
                 "",
                 "Image Files (*.png *.jpg *.jpeg *.bmp);;All Files (*.*)",
             )
@@ -1080,7 +1127,12 @@ value/class 래스터와 폴리곤을 생성합니다.
 
         base_label = os.path.splitext(os.path.basename(img_path))[0]
         try:
-            label, ok = QtWidgets.QInputDialog.getText(self, "프리셋 이름", "프리셋 표시 이름", text=base_label)
+            label, ok = QtWidgets.QInputDialog.getText(
+                self,
+                "Preset Name" if english else "프리셋 이름",
+                "Display name for the preset" if english else "프리셋 표시 이름",
+                text=base_label,
+            )
         except Exception:
             label, ok = (base_label, True)
         label = (label or "").strip()
@@ -2509,8 +2561,8 @@ value/class 래스터와 폴리곤을 생성합니다.
             if mask is None:
                 continue
 
-            v_sub = values[yoff : yoff + ysize, xoff : xoff + xsize]
-            c_sub = classes[yoff : yoff + ysize, xoff : xoff + xsize]
+            v_sub = values[yoff:yoff + ysize, xoff:xoff + xsize]
+            c_sub = classes[yoff:yoff + ysize, xoff:xoff + xsize]
 
             inside = mask.astype(bool, copy=False)
             try:

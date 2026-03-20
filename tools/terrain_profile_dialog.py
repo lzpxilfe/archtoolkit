@@ -32,10 +32,12 @@ from qgis.PyQt.QtGui import QColor, QPainter, QPen, QBrush, QPalette, QPainterPa
 from qgis.core import (
     QgsProject, QgsMapLayerProxyModel, QgsPointXY, QgsRaster,
     QgsVectorLayer, QgsField, QgsFeature, QgsFeatureRequest, QgsGeometry, QgsWkbTypes,
-    QgsLineSymbol, QgsSingleSymbolRenderer, QgsSymbolLayer, QgsProperty, Qgis, QgsDistanceArea, QgsCoordinateTransform
+    QgsLineSymbol, QgsSingleSymbolRenderer, QgsSymbolLayer, QgsProperty, Qgis, QgsDistanceArea, QgsCoordinateTransform,
+    QgsLayerTreeGroup,
 )
 from qgis.gui import QgsMapLayerComboBox, QgsMapToolEmitPoint, QgsRubberBand
 from .config import get_output_group_name
+from .i18n import apply_language, is_english_ui
 from .utils import (
     log_message,
     new_run_id,
@@ -50,8 +52,45 @@ from .help_dialog import show_help_dialog
 PROFILE_LAYER_NAME = "Terrain Profile Lines"
 PROFILE_GROUP_NAME = get_output_group_name("terrain_profile", "ArchToolkit - Terrain Profile")
 PROFILE_SINGLE_SUBGROUP_NAME = "단면선 (개별 레이어)"
+PROFILE_SINGLE_SUBGROUP_NAME_EN = "Profile Lines (Individual Layers)"
 PROFILE_KIND_PROP = "ArchToolkit/profile_kind"
 PROFILE_KIND_SINGLE = "terrain_profile_single"
+PROFILE_GROUP_KEY_PROP = "archtoolkit/group_key"
+PROFILE_GROUP_KEY = "terrain_profile_root"
+PROFILE_SINGLE_SUBGROUP_KEY = "terrain_profile_single_layers"
+
+
+def _find_group_by_key(parent, key: str, *fallback_names: str):
+    if parent is None:
+        return None
+    names = {str(name or "").strip() for name in fallback_names if str(name or "").strip()}
+    try:
+        children = list(parent.children() or [])
+    except Exception:
+        children = []
+    for child in children:
+        if not isinstance(child, QgsLayerTreeGroup):
+            continue
+        try:
+            if str(child.customProperty(PROFILE_GROUP_KEY_PROP, "") or "").strip() == str(key or "").strip():
+                return child
+        except Exception:
+            pass
+        try:
+            if names and str(child.name() or "").strip() in names:
+                return child
+        except Exception:
+            pass
+    return None
+
+
+def _tag_group_key(group, key: str) -> None:
+    if group is None:
+        return
+    try:
+        group.setCustomProperty(PROFILE_GROUP_KEY_PROP, str(key or "").strip())
+    except Exception:
+        pass
 
 
 def _profile_color_palette() -> List[QColor]:
@@ -76,14 +115,14 @@ FORM_CLASS, _ = uic.loadUiType(os.path.join(
 
 class ProfileChartWidget(QWidget):
     """Custom widget to draw elevation profile using QPainter
-    
+
     Features:
     - Scroll wheel to zoom in/out
     - Mouse tracking to show position info
     - Drag to pan when zoomed
     - Smooth line rendering
     """
-    
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.data = []      # List of {'distance': d, 'elevation': e, 'x': x, 'y': y}
@@ -94,11 +133,11 @@ class ProfileChartWidget(QWidget):
         self.setMinimumHeight(250)
         self.setBackgroundRole(QPalette.Base)
         self.setAutoFillBackground(True)
-        
+
         # Zoom and pan
         self.zoom_level = 1.0
         self.pan_offset = 0  # Horizontal offset in data units (distance)
-        
+
         # Mouse tracking
         self.setMouseTracking(True)
         self.mouse_x = -1
@@ -107,12 +146,12 @@ class ProfileChartWidget(QWidget):
         self.hover_elevation = None
         self.hover_x = None  # Map X coordinate
         self.hover_y = None  # Map Y coordinate
-        
+
         # Drag panning
         self.is_dragging = False
         self.drag_start_x = 0
         self.drag_start_offset = 0
-        
+
         # Callback for map synchronization
         self.on_hover_callback = None  # Function(x, y) to show position on map
 
@@ -132,7 +171,7 @@ class ProfileChartWidget(QWidget):
         self.overlay_color = QColor(76, 175, 80, 40)  # green with alpha
         self.overlay_markers: List[Tuple[float, str]] = []  # (distance_m, label)
         self.overlay_marker_color = QColor(76, 175, 80, 180)
-        
+
         # Margins
         self.margin_left = 60
         self.margin_top = 30
@@ -148,7 +187,7 @@ class ProfileChartWidget(QWidget):
         self.overlay_ranges = []
         self.overlay_label = ""
         self.overlay_markers = []
-        
+
         if not data:
             self.smooth_data = []
             self.update()
@@ -163,7 +202,7 @@ class ProfileChartWidget(QWidget):
             end = min(len(elevations), i + window + 1)
             avg = sum(elevations[start:end]) / (end - start)
             smoothed.append(avg)
-        
+
         self.smooth_data = []
         for i in range(len(data)):
             self.smooth_data.append({
@@ -174,33 +213,34 @@ class ProfileChartWidget(QWidget):
         self.min_e = min(elevations)
         self.max_e = max(elevations)
         self.total_d = data[-1]['distance']
-        
+
         # Add some margin to elevation range
         margin = (self.max_e - self.min_e) * 0.1
-        if margin == 0: margin = 1
+        if margin == 0:
+            margin = 1
         self.min_e -= margin
         self.max_e += margin
-        
+
         self.update()
 
     def wheelEvent(self, event):
         """Zoom in/out with scroll wheel"""
         if not self.data:
             return
-        
+
         # Get zoom direction
         delta = event.angleDelta().y()
         if delta > 0:
             self.zoom_level = min(10.0, self.zoom_level * 1.2)
         else:
             self.zoom_level = max(1.0, self.zoom_level / 1.2)
-        
+
         # Adjust pan offset to keep zoom centered
         if self.zoom_level == 1.0:
             self.pan_offset = 0
-        
+
         self.update()
-    
+
     def mousePressEvent(self, event):
         """Start dragging for pan"""
         if event.button() == Qt.LeftButton and self.zoom_level > 1.0:
@@ -208,46 +248,48 @@ class ProfileChartWidget(QWidget):
             self.drag_start_x = event.x()
             self.drag_start_offset = self.pan_offset
             self.setCursor(Qt.ClosedHandCursor)
-    
+
     def mouseReleaseEvent(self, event):
         """End dragging"""
         if event.button() == Qt.LeftButton:
             self.is_dragging = False
             self.setCursor(Qt.ArrowCursor)
-    
+
     def mouseMoveEvent(self, event):
         """Track mouse position, handle drag panning, and sync with map"""
         if not self.data or not self.smooth_data:
             return
-        
+
         self.mouse_x = event.x()
         self.mouse_y = event.y()
-        
+
         # Calculate chart area
         w = self.width() - self.margin_left - self.margin_right
         h = self.height() - self.margin_top - self.margin_bottom
         visible_range = self.total_d / self.zoom_level
-        
+
         # Handle drag panning
         if self.is_dragging and self.zoom_level > 1.0:
             delta_x = self.drag_start_x - self.mouse_x
             delta_distance = (delta_x / w) * visible_range
             new_offset = self.drag_start_offset + delta_distance
-            
+
             # Clamp to valid range
             max_offset = self.total_d - visible_range
             self.pan_offset = max(0, min(max_offset, new_offset))
             self.update()
             return
-        
+
         # Check if mouse is in chart area
-        if (self.margin_left <= self.mouse_x <= self.margin_left + w and
-            self.margin_top <= self.mouse_y <= self.margin_top + h):
-            
+        if (
+            self.margin_left <= self.mouse_x <= self.margin_left + w
+            and self.margin_top <= self.mouse_y <= self.margin_top + h
+        ):
+
             # Calculate distance at mouse position
             rel_x = (self.mouse_x - self.margin_left) / w
             distance = self.pan_offset + rel_x * visible_range
-            
+
             # Find closest data point (with map coordinates)
             if 0 <= distance <= self.total_d:
                 # Find from original data which has x, y coordinates
@@ -256,11 +298,11 @@ class ProfileChartWidget(QWidget):
                 self.hover_elevation = closest['elevation']
                 self.hover_x = closest.get('x')
                 self.hover_y = closest.get('y')
-                
+
                 # Show tooltip
                 tooltip_text = f"거리: {self.hover_distance:.1f}m\n고도: {self.hover_elevation:.1f}m"
                 self.setToolTip(tooltip_text)
-                
+
                 # Notify map to show position
                 if self.on_hover_callback and self.hover_x is not None and self.hover_y is not None:
                     self.on_hover_callback(self.hover_x, self.hover_y)
@@ -276,9 +318,9 @@ class ProfileChartWidget(QWidget):
             self.hover_x = None
             self.hover_y = None
             self.setToolTip("")
-        
+
         self.update()
-    
+
     def leaveEvent(self, event):
         """Clear hover state when mouse leaves widget"""
         self.hover_distance = None
@@ -387,17 +429,17 @@ class ProfileChartWidget(QWidget):
             return
 
         painter.setRenderHint(QPainter.Antialiasing)
-        
+
         # Margins
         left, top, right, bottom = self.margin_left, self.margin_top, self.margin_right, self.margin_bottom
         w = width - left - right
         h = height - top - bottom
-        
+
         # Calculate visible range based on zoom
         visible_range = self.total_d / self.zoom_level
         view_start = self.pan_offset
         view_end = view_start + visible_range
-        
+
         # Fill background
         painter.fillRect(0, 0, width, height, QColor(255, 255, 255))
 
@@ -409,7 +451,7 @@ class ProfileChartWidget(QWidget):
             painter.drawLine(left, int(y), left + w, int(y))
             val = self.min_e + (i / num_grids_y) * (self.max_e - self.min_e)
             painter.drawText(5, int(y + 5), f"{val:.1f}m")
-            
+
         num_grids_x = 5
         for i in range(num_grids_x + 1):
             x = left + (i / num_grids_x) * w
@@ -421,7 +463,7 @@ class ProfileChartWidget(QWidget):
         painter.setPen(QPen(Qt.black, 2))
         painter.drawLine(left, top, left, top + h)            # Y axis
         painter.drawLine(left, top + h, left + w, top + h)    # X axis
-        
+
         # Highlight ranges (behind the profile line)
         if self.highlight_ranges:
             try:
@@ -478,30 +520,30 @@ class ProfileChartWidget(QWidget):
         # Draw Profile Line using QPainterPath for smoothness
         path = QPainterPath()
         first_point = True
-        
+
         for p in self.smooth_data:
             dist = p['distance']
             if dist < view_start or dist > view_end:
                 continue
-            
+
             px = left + ((dist - view_start) / visible_range) * w
             py = top + h - ((p['elevation'] - self.min_e) / (self.max_e - self.min_e)) * h
-            
+
             if first_point:
                 path.moveTo(px, py)
                 first_point = False
             else:
                 path.lineTo(px, py)
-            
+
         # Draw the line
         painter.setPen(QPen(self.profile_color, 2))
         painter.drawPath(path)
-             
+
         # Draw Fill (area below profile)
         painter.setOpacity(0.15)
         painter.setBrush(QBrush(self.profile_color))
         painter.setPen(Qt.NoPen)
-        
+
         if not first_point:  # Only if we drew something
             fill_path = QPainterPath(path)
             # Find last drawn point
@@ -515,7 +557,7 @@ class ProfileChartWidget(QWidget):
                 fill_path.lineTo(start_x, top + h)
                 fill_path.closeSubpath()
                 painter.drawPath(fill_path)
-        
+
         painter.setOpacity(1.0)
 
         # Overlay markers (on top of profile line)
@@ -559,26 +601,26 @@ class ProfileChartWidget(QWidget):
                     painter.restore()
                 except Exception:
                     pass
-         
+
         # Draw hover indicator
         if self.hover_distance is not None and view_start <= self.hover_distance <= view_end:
             hover_x = left + ((self.hover_distance - view_start) / visible_range) * w
             hover_y = top + h - ((self.hover_elevation - self.min_e) / (self.max_e - self.min_e)) * h
-            
+
             # Vertical line
             painter.setPen(QPen(QColor(255, 0, 0, 150), 1, Qt.DashLine))
             painter.drawLine(int(hover_x), top, int(hover_x), top + h)
-            
+
             # Point marker
             painter.setPen(QPen(QColor(255, 0, 0), 2))
             painter.setBrush(QBrush(QColor(255, 255, 255)))
             painter.drawEllipse(QPointF(hover_x, hover_y), 5, 5)
-            
+
             # Info label
             painter.setPen(QPen(Qt.black))
             info_text = f"{self.hover_distance:.1f}m / {self.hover_elevation:.1f}m"
             painter.drawText(int(hover_x) + 8, int(hover_y) - 5, info_text)
-        
+
         # Zoom indicator
         if self.zoom_level > 1.0:
             painter.setPen(QPen(Qt.darkGray))
@@ -589,21 +631,21 @@ class ProfileChartWidget(QWidget):
         img_w, img_h = 1200, 800
         image = QImage(img_w, img_h, QImage.Format_RGB32)
         image.fill(Qt.white)
-        
+
         # Temporarily reset zoom for saving
         old_zoom = self.zoom_level
         old_pan = self.pan_offset
         self.zoom_level = 1.0
         self.pan_offset = 0
-        
+
         painter = QPainter(image)
         self.draw_chart(painter, img_w, img_h)
         painter.end()
-        
+
         # Restore zoom
         self.zoom_level = old_zoom
         self.pan_offset = old_pan
-        
+
         ext = os.path.splitext(str(path or ""))[1].lower()
         if ext == ".png":
             return image.save(path, "PNG")
@@ -611,19 +653,19 @@ class ProfileChartWidget(QWidget):
 
 
 class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
-     
+
     def __init__(self, iface, parent=None):
         super(TerrainProfileDialog, self).__init__(parent)
         self.setupUi(self)
         self.iface = iface
         self.canvas = iface.mapCanvas()
-        
+
         # Custom Chart Widget
         self.chart = ProfileChartWidget()
         # Insert chart into layout (replace placeholder or add to vertical layout)
         # We named the layout chartLayout in UI
         self.chartLayout.insertWidget(0, self.chart)
-        
+
         # Profile data
         self.points = []
         self.profile_data = []
@@ -809,7 +851,7 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
             self.chkShowOverlayOnProfile = None
             self.cmbOverlayLayer = None
             self.chkOverlaySelectedOnly = None
-        
+
         # Connect signals
         self.btnDrawLine.clicked.connect(self.start_drawing)
         self.btnClear.clicked.connect(self.clear_profile)
@@ -849,7 +891,7 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
                     self.horizontalLayout.addWidget(self.chkSingleLayers)
             except Exception:
                 self.horizontalLayout.addWidget(self.chkSingleLayers)
- 
+
             def _sync_single_layers(on: bool):
                 self._single_layers_enabled = bool(on)
 
@@ -866,21 +908,12 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
             self._layer_tree_view = view
         except Exception:
             self._layer_tree_view = None
-        
-        # Rubber band for drawing line
-        self.rubber_band = QgsRubberBand(self.canvas, QgsWkbTypes.LineGeometry)
-        self.rubber_band.setColor(QColor(255, 0, 0))
-        self.rubber_band.setWidth(2)
-        
-        # Hover marker for showing position on map
-        self.hover_marker = QgsRubberBand(self.canvas, QgsWkbTypes.PointGeometry)
-        self.hover_marker.setColor(QColor(255, 0, 0))
-        self.hover_marker.setWidth(10)
-        self.hover_marker.setIcon(QgsRubberBand.ICON_CIRCLE)
-        
-        # Connect chart hover callback
-        self.chart.on_hover_callback = self.show_position_on_map
-        
+
+        # Canvas helpers are recreated on demand because this dialog instance is persistent.
+        self.rubber_band = None
+        self.hover_marker = None
+        self._ensure_canvas_helpers()
+
         # Map tool
         self.map_tool = None
         self.original_tool = None
@@ -893,6 +926,46 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
                 self._connect_profile_layer(layers[0])
         except Exception:
             pass
+        apply_language(self)
+
+    def _ensure_canvas_helpers(self):
+        """Recreate transient canvas helpers if this persistent dialog was reopened."""
+        try:
+            self.chart.on_hover_callback = self.show_position_on_map
+        except Exception:
+            pass
+
+        if getattr(self, "canvas", None) is None:
+            return
+
+        if self.rubber_band is None:
+            try:
+                self.rubber_band = QgsRubberBand(self.canvas, QgsWkbTypes.LineGeometry)
+            except Exception:
+                self.rubber_band = None
+        if self.rubber_band is not None:
+            try:
+                self.rubber_band.setColor(QColor(255, 0, 0))
+                self.rubber_band.setWidth(2)
+            except Exception:
+                pass
+
+        if self.hover_marker is None:
+            try:
+                self.hover_marker = QgsRubberBand(self.canvas, QgsWkbTypes.PointGeometry)
+            except Exception:
+                self.hover_marker = None
+        if self.hover_marker is not None:
+            try:
+                self.hover_marker.setColor(QColor(255, 0, 0))
+                self.hover_marker.setWidth(10)
+                self.hover_marker.setIcon(QgsRubberBand.ICON_CIRCLE)
+            except Exception:
+                pass
+
+    def showEvent(self, event):
+        self._ensure_canvas_helpers()
+        super().showEvent(event)
 
     def _setup_help_button(self):
         try:
@@ -919,31 +992,54 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
     def _on_help(self):
         try:
             plugin_dir = os.path.dirname(os.path.dirname(__file__))
-            html = (
-                "<h2>지형 단면 (Terrain Profile)</h2>"
-                "<p>DEM 위에 단면선을 그려 고도 프로파일을 그래프로 표시하고, 통계/CSV/이미지로 내보냅니다.</p>"
-                "<h3>기본 흐름</h3>"
-                "<ol>"
-                "<li>DEM 선택</li>"
-                "<li>단면선 그리기(시작→끝)</li>"
-                "<li>(옵션) AOI/오버레이 레이어 표시</li>"
-                "<li>CSV/이미지 내보내기</li>"
-                "</ol>"
-                "<h3>팁</h3>"
-                "<ul>"
-                "<li>저장된 단면선 레이어에서 선을 선택하면 해당 단면이 자동으로 열립니다.</li>"
-                "<li>고정 길이 옵션은 여러 단면을 같은 길이로 비교할 때 유용합니다.</li>"
-                "</ul>"
-            )
-            show_help_dialog(parent=self, title="지형 단면 도움말", html=html, plugin_dir=plugin_dir)
+            if is_english_ui():
+                html = (
+                    "<h2>Terrain Profile</h2>"
+                    "<p>Draws a profile line on a DEM, shows the elevation profile as a chart, and lets you export statistics, CSV, and images.</p>"
+                    "<h3>Typical Workflow</h3>"
+                    "<ol>"
+                    "<li>Select a DEM</li>"
+                    "<li>Draw a profile line (start -> end)</li>"
+                    "<li>Optionally show AOI / overlay layers</li>"
+                    "<li>Export CSV or image output</li>"
+                    "</ol>"
+                    "<h3>Tips</h3>"
+                    "<ul>"
+                    "<li>Selecting a saved profile line can reopen its chart automatically.</li>"
+                    "<li>The fixed-length option is useful when you want to compare several profiles at the same length.</li>"
+                    "</ul>"
+                )
+                title = "Terrain Profile Help"
+            else:
+                html = (
+                    "<h2>지형 단면 (Terrain Profile)</h2>"
+                    "<p>DEM 위에 단면선을 그려 고도 프로파일을 그래프로 표시하고, 통계/CSV/이미지로 내보냅니다.</p>"
+                    "<h3>기본 흐름</h3>"
+                    "<ol>"
+                    "<li>DEM 선택</li>"
+                    "<li>단면선 그리기(시작→끝)</li>"
+                    "<li>(옵션) AOI/오버레이 레이어 표시</li>"
+                    "<li>CSV/이미지 내보내기</li>"
+                    "</ol>"
+                    "<h3>팁</h3>"
+                    "<ul>"
+                    "<li>저장된 단면선 레이어에서 선을 선택하면 해당 단면이 자동으로 열립니다.</li>"
+                    "<li>고정 길이 옵션은 여러 단면을 같은 길이로 비교할 때 유용합니다.</li>"
+                    "</ul>"
+                )
+                title = "지형 단면 도움말"
+            show_help_dialog(parent=self, title=title, html=html, plugin_dir=plugin_dir)
         except Exception:
             try:
                 QMessageBox.information(self, "도움말", "README.md를 참고하세요.")
             except Exception:
                 pass
-    
+
     def show_position_on_map(self, x, y):
         """Show hover position on map"""
+        self._ensure_canvas_helpers()
+        if self.hover_marker is None:
+            return
         if x is None or y is None:
             self.hover_marker.reset(QgsWkbTypes.PointGeometry)
             try:
@@ -960,6 +1056,9 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
 
     def _show_profile_line_on_map(self, *, start: QgsPointXY, end: QgsPointXY, color: Optional[QColor] = None):
         """Show the current profile line as a rubber band so users can see where it was drawn."""
+        self._ensure_canvas_helpers()
+        if self.rubber_band is None:
+            return
         if start is None or end is None:
             return
         try:
@@ -1268,7 +1367,9 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
 
         if self._overlay_layer is not None:
             try:
-                handler = lambda *_args: self._refresh_overlay()
+                def handler(*_args):
+                    self._refresh_overlay()
+
                 self._overlay_selection_handler = handler
                 self._overlay_layer.selectionChanged.connect(handler)
             except Exception:
@@ -1653,9 +1754,10 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
                 pass
         except Exception:
             pass
-    
+
     def start_drawing(self):
         """Start drawing profile line on map"""
+        self._ensure_canvas_helpers()
         dem_layer = self.cmbDemLayer.currentLayer()
         if not dem_layer:
             push_message(self.iface, "오류", "DEM 래스터를 선택해주세요", level=2)
@@ -1669,7 +1771,7 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
             self.rubber_band.setWidth(2)
         except Exception:
             pass
-        
+
         # Save original tool and set our tool
         self.original_tool = self.canvas.mapTool()
         self.map_tool = ProfileLineTool(self.canvas, self)
@@ -1686,7 +1788,7 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
         else:
             push_message(self.iface, "지형 단면", "지도에서 시작점과 끝점을 클릭하세요 (2번)", level=0)
         self.hide()
-    
+
     def add_point(self, point):
         """Add point to profile line"""
         if point is None:
@@ -1717,7 +1819,7 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
         self.rubber_band.addPoint(end)
         self.rubber_band.show()
         self.calculate_profile()
-    
+
     def calculate_profile(self):
         dem_layer = self.cmbDemLayer.currentLayer()
         if not dem_layer or len(self.points) < 2:
@@ -1738,7 +1840,7 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
 
             canvas_crs = self.canvas.mapSettings().destinationCrs()
             dem_crs = dem_layer.crs()
-            
+
             self.profile_data = []
 
             # Always measure in meters (ellipsoidal) so geographic CRS projects don't break stats/exports.
@@ -1755,14 +1857,14 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
                 self._update_fixed_length_ui()
             except Exception:
                 pass
-            
+
             push_message(
                 self.iface,
                 "단면 분석",
                 f"시작점에서 끝점까지 {total_distance_m:.1f}m, {num_samples}개 샘플 추출 중...",
                 level=0,
             )
-            
+
             valid_samples = 0
             for i in range(num_samples + 1):
                 fraction = i / num_samples
@@ -1772,12 +1874,12 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
 
                 # Identify expects coordinates in DEM CRS.
                 sample_dem = transform_point(sample_canvas, canvas_crs, dem_crs)
-                
+
                 result = dem_layer.dataProvider().identify(
                     sample_dem,
                     QgsRaster.IdentifyFormatValue
                 )
-                
+
                 if result.isValid():
                     # Try band 1 first, then any available band
                     results_dict = result.results()
@@ -1785,7 +1887,7 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
                     if value is None and results_dict:
                         # Fallback: get first available band value
                         value = list(results_dict.values())[0]
-                    
+
                     if value is not None and value != dem_layer.dataProvider().sourceNoDataValue(1):
                         dist = fraction * total_distance_m
                         self.profile_data.append({
@@ -1795,7 +1897,7 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
                             'y': y_canvas
                         })
                         valid_samples += 1
-            
+
             if self.profile_data:
                 # Save line to persistent layer first (assigns a per-profile color).
                 profile_color = None
@@ -1819,11 +1921,11 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
                     self._show_profile_line_on_map(start=start_canvas, end=end_canvas, color=profile_color)
                 except Exception:
                     pass
-                
+
                 push_message(self.iface, "단면 완료", f"{valid_samples}개 유효 샘플 추출 완료!", level=0)
             else:
                 push_message(self.iface, "경고", "유효한 고도 데이터를 추출하지 못했습니다. DEM 범위를 확인하세요.", level=1)
-            
+
         except Exception as e:
             push_message(self.iface, "오류", f"계산 실패: {str(e)}", level=2)
         finally:
@@ -2157,19 +2259,31 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
     def _ensure_single_group(self):
         project = QgsProject.instance()
         root = project.layerTreeRoot()
-        group = root.findGroup(PROFILE_GROUP_NAME)
+        group = _find_group_by_key(root, PROFILE_GROUP_KEY, PROFILE_GROUP_NAME)
         if group is None:
             group = root.insertGroup(0, PROFILE_GROUP_NAME)
-        sub = group.findGroup(PROFILE_SINGLE_SUBGROUP_NAME)
+        _tag_group_key(group, PROFILE_GROUP_KEY)
+        sub = _find_group_by_key(
+            group,
+            PROFILE_SINGLE_SUBGROUP_KEY,
+            PROFILE_SINGLE_SUBGROUP_NAME,
+            PROFILE_SINGLE_SUBGROUP_NAME_EN,
+        )
         if sub is None:
             try:
-                sub = group.insertGroup(0, PROFILE_SINGLE_SUBGROUP_NAME)
+                sub = group.insertGroup(
+                    0,
+                    PROFILE_SINGLE_SUBGROUP_NAME_EN if is_english_ui() else PROFILE_SINGLE_SUBGROUP_NAME,
+                )
             except Exception:
-                sub = group.addGroup(PROFILE_SINGLE_SUBGROUP_NAME)
+                sub = group.addGroup(
+                    PROFILE_SINGLE_SUBGROUP_NAME_EN if is_english_ui() else PROFILE_SINGLE_SUBGROUP_NAME
+                )
             try:
                 sub.setExpanded(False)
             except Exception:
                 pass
+        _tag_group_key(sub, PROFILE_SINGLE_SUBGROUP_KEY)
         return sub
 
     def _create_single_profile_layer(
@@ -2275,7 +2389,7 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
     def get_or_create_profile_layer(self):
         """Get or create a memory layer to store profile lines"""
         layers = QgsProject.instance().mapLayersByName(PROFILE_LAYER_NAME)
-        
+
         if layers:
             layer = layers[0]
             try:
@@ -2295,11 +2409,11 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
             except Exception:
                 pass
             return layer
-        
+
         # Create new memory layer
         crs = self.canvas.mapSettings().destinationCrs().authid()
         layer = QgsVectorLayer(f"LineString?crs={crs}", PROFILE_LAYER_NAME, "memory")
-        
+
         # Add fields
         pr = layer.dataProvider()
         pr.addAttributes([
@@ -2330,9 +2444,10 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
 
         project = QgsProject.instance()
         root = project.layerTreeRoot()
-        group = root.findGroup(PROFILE_GROUP_NAME)
+        group = _find_group_by_key(root, PROFILE_GROUP_KEY, PROFILE_GROUP_NAME)
         if group is None:
             group = root.insertGroup(0, PROFILE_GROUP_NAME)
+        _tag_group_key(group, PROFILE_GROUP_KEY)
         try:
             set_archtoolkit_layer_metadata(
                 layer,
@@ -2366,7 +2481,8 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
     def save_line_to_layer(self, total_distance, *, dem_layer=None, num_samples: int = 0) -> Optional[QColor]:
         """Save the profile line to the memory layer"""
         layer = self.get_or_create_profile_layer()
-        if not layer: return
+        if not layer:
+            return
 
         try:
             self._connect_profile_layer(layer)
@@ -2378,7 +2494,7 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
         next_no = int(layer.featureCount()) + 1
         palette = _profile_color_palette()
         color = palette[(next_no - 1) % len(palette)] if palette else QColor(0, 100, 255)
-        
+
         feat = QgsFeature(layer.fields())
         feat.setGeometry(QgsGeometry.fromPolylineXY([self.points[0], self.points[1]]))
         feat.setAttributes([
@@ -2393,7 +2509,7 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
             int(color.green()),
             int(color.blue()),
         ])
-        
+
         layer.dataProvider().addFeatures([feat])
         layer.updateExtents()
         layer.triggerRepaint()
@@ -2429,10 +2545,11 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
             pass
 
         return color
-    
+
     def update_stats(self):
-        if not self.profile_data: return
-        
+        if not self.profile_data:
+            return
+
         elevs = [float(p['elevation']) for p in self.profile_data]
         dists = [float(p['distance']) for p in self.profile_data]
         total_d = float(dists[-1]) if dists else 0.0
@@ -2508,13 +2625,15 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
         self.lblStats.setText(stats)
 
     def export_csv(self):
-        if not self.profile_data: return
-        
+        if not self.profile_data:
+            return
+
         path, _ = QFileDialog.getSaveFileName(
             self, "CSV 저장", os.path.expanduser("~"), "CSV Files (*.csv)"
         )
-        if not path: return
-        
+        if not path:
+            return
+
         try:
             with open(path, 'w', newline='', encoding='utf-8-sig') as f:
                 writer = csv.writer(f)
@@ -2668,15 +2787,17 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
             QMessageBox.critical(self, "오류", f"파일 저장 실패: {str(e)}")
 
     def export_image(self):
-        if not self.profile_data: return
-        
+        if not self.profile_data:
+            return
+
         path, selected_filter = QFileDialog.getSaveFileName(
             self,
             "이미지 저장",
             os.path.expanduser("~"),
             "PNG Files (*.png);;JPEG Files (*.jpg)",
         )
-        if not path: return
+        if not path:
+            return
         try:
             if not os.path.splitext(path)[1]:
                 if selected_filter and "PNG" in selected_filter:
@@ -2685,7 +2806,7 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
                     path += ".jpg"
         except Exception:
             pass
-        
+
         try:
             success = self.chart.save_to_image(path)
             if success:
@@ -2717,17 +2838,17 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
         self.lblStats.setText("지도를 클릭하여 단면을 생성하세요.")
         self.btnExportCsv.setEnabled(False)
         self.btnExportImage.setEnabled(False)
-    
+
     def cleanup_and_close(self):
         """Explicit cleanup called when Close button is clicked"""
         self._cleanup()
         self.close()
-    
+
     def reject(self):
         """Called when ESC is pressed or dialog is rejected"""
         self._cleanup()
         super().reject()
-    
+
     def closeEvent(self, event):
         """Clean up: remove temporary layer and map tools when dialog closes"""
         self._cleanup()
@@ -2756,7 +2877,7 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
         self._profile_layer_id = None
         self._layer_tree_view = None
         self._cleanup()
-     
+
     def _cleanup(self):
         """Internal cleanup method - removes rubber bands and restores map tool.
 
@@ -2773,7 +2894,8 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
                         self.canvas.scene().removeItem(self.rubber_band)
                     except Exception:
                         pass
-            
+                self.rubber_band = None
+
             if hasattr(self, 'hover_marker') and self.hover_marker:
                 self.hover_marker.reset(QgsWkbTypes.PointGeometry)
                 self.hover_marker.hide()
@@ -2782,14 +2904,15 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
                         self.canvas.scene().removeItem(self.hover_marker)
                     except Exception:
                         pass
-             
+                self.hover_marker = None
+
             # Restore original map tool
             if hasattr(self, 'original_tool') and self.original_tool:
                 try:
                     self.canvas.setMapTool(self.original_tool)
                 except Exception:
                     pass
-            
+
             # Refresh canvas
             if self.canvas:
                 self.canvas.refresh()
@@ -2801,7 +2924,7 @@ class ProfileLineTool(QgsMapToolEmitPoint):
     def __init__(self, canvas, dialog):
         super().__init__(canvas)
         self.dialog = dialog
-    
+
     def canvasReleaseEvent(self, event):
         point = self.toMapCoordinates(event.pos())
         self.dialog.add_point(point)

@@ -3,7 +3,7 @@ name=ArchToolkit
 qgisMinimumVersion=3.40
 qgisMaximumVersion=3.99
 description=Integrated archaeology toolkit for QGIS covering terrain, visibility, cost, geology, and AOI reporting workflows.
-version=0.1.0
+version=0.1.1
 author=balguljang2 (lzpxilfe)
 email=lzpxilfe@gmail.com
 license=GPL-3.0-or-later
@@ -20,4 +20,5 @@ about=ArchToolkit is an integrated QGIS plugin for archaeological and cultural-h
   It includes DEM generation, terrain analysis, viewshed and line-of-sight tools, cost surface and least-cost path/network analysis, terrain profiles, cadastral overlap, map styling, GeoChem helpers, KIGAM geology ZIP loading, and AOI reporting.
   Requirements: QGIS 3.40+, Processing, GDAL, and NumPy in the QGIS Python environment.
   Optional service: Gemini API access for AI AOI reporting.
-changelog=0.1.0 - Initial public beta covering terrain, visibility, cost, network, geology, GeoChem, cadastral overlap, styling, and AOI reporting workflows.
+changelog=0.1.1 - Added selectable English UI support across plugin menus, dialogs, help, messages, and outputs; fixed runtime i18n regressions, terrain profile reopen sync, safer geology QML parsing, and release polish.
+  0.1.0 - Initial public beta covering terrain, visibility, cost, network, geology, GeoChem, cadastral overlap, styling, and AOI reporting workflows.

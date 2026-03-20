@@ -13,13 +13,13 @@ import zipfile
 import csv
 import math
 import unicodedata
-import xml.etree.ElementTree as ET
 from typing import Dict, List, Optional, Tuple
 
 import processing
 from qgis.PyQt import QtWidgets
 from qgis.PyQt.QtCore import Qt, QVariant
 from qgis.PyQt.QtGui import QColor, QFont, QIcon
+from qgis.PyQt.QtXml import QDomDocument
 from qgis.core import (
     Qgis,
     QgsCategorizedSymbolRenderer,
@@ -44,6 +44,7 @@ from qgis.core import (
 
 from .config import get_output_group_name, get_plugin_config_value
 from .help_dialog import show_help_dialog
+from .i18n import apply_language, is_english_ui
 from .live_log_dialog import ensure_live_log_dialog
 from .utils import (
     log_message,
@@ -250,6 +251,7 @@ def _meters_to_degrees(pixel_m: float, lat_deg: float) -> Tuple[float, float]:
         return 0.0, 0.0
     return (m / m_per_deg_lon), (m / m_per_deg_lat)
 
+
 class KigamZipProcessor:
     def __init__(self):
         self.extract_root = os.path.join(tempfile.gettempdir(), GEOLOGY_EXTRACT_ROOT_NAME)
@@ -370,6 +372,54 @@ class KigamZipProcessor:
             return None
         return None
 
+    def _load_qml_dom(self, qml_path: Optional[str]) -> Optional[QDomDocument]:
+        if not qml_path or not os.path.exists(qml_path):
+            return None
+        try:
+            with open(qml_path, "rb") as fh:
+                raw = fh.read()
+        except Exception:
+            return None
+
+        doc = QDomDocument()
+        try:
+            result = doc.setContent(raw)
+        except Exception:
+            return None
+
+        ok = bool(result[0]) if isinstance(result, tuple) else bool(result)
+        if not ok:
+            return None
+        return doc
+
+    def _iter_dom_children(self, node, tag_name: Optional[str] = None):
+        if node is None:
+            return
+        try:
+            child = node.firstChildElement()
+        except Exception:
+            return
+        while not child.isNull():
+            try:
+                if tag_name is None or child.tagName() == tag_name:
+                    yield child
+            except Exception:
+                pass
+            try:
+                child = child.nextSiblingElement()
+            except Exception:
+                break
+
+    def _iter_dom_descendants(self, node, tag_name: Optional[str] = None):
+        for child in self._iter_dom_children(node):
+            try:
+                if tag_name is None or child.tagName() == tag_name:
+                    yield child
+            except Exception:
+                pass
+            for grandchild in self._iter_dom_descendants(child, tag_name):
+                yield grandchild
+
     def _parse_qml_mapping(
         self,
         qml_path: Optional[str],
@@ -380,37 +430,59 @@ class KigamZipProcessor:
         qml_field = None
         qml_value_to_image: Dict[str, str] = {}
         qml_lookup_map: Dict[str, str] = {}
+        doc = self._load_qml_dom(qml_path)
+        if doc is None:
+            return None, {}, {}
         try:
-            tree = ET.parse(qml_path)
-            root = tree.getroot()
+            root = doc.documentElement()
         except Exception:
             return None, {}, {}
+        if root is None or root.isNull():
+            return None, {}, {}
 
-        renderer = root.find(".//renderer-v2")
+        renderer = next(self._iter_dom_descendants(root, "renderer-v2"), None)
         if renderer is not None:
-            qml_field = (renderer.get("attr") or renderer.get("classAttribute") or "").strip() or None
+            try:
+                qml_field = (renderer.attribute("attr") or renderer.attribute("classAttribute") or "").strip() or None
+            except Exception:
+                qml_field = None
 
         symbol_images: Dict[str, str] = {}
-        for symbol_node in root.findall(".//renderer-v2/symbols/symbol"):
-            symbol_name = str(symbol_node.get("name") or "").strip()
-            image_ref = ""
-            for prop in symbol_node.findall(".//layer/prop"):
-                value = str(prop.get("v") or "").strip()
-                if value.lower().endswith(".png"):
-                    image_ref = value
-                    break
-            if symbol_name and image_ref:
-                symbol_images[symbol_name] = image_ref
+        if renderer is not None:
+            for symbols_node in self._iter_dom_children(renderer, "symbols"):
+                for symbol_node in self._iter_dom_children(symbols_node, "symbol"):
+                    try:
+                        symbol_name = str(symbol_node.attribute("name") or "").strip()
+                    except Exception:
+                        symbol_name = ""
+                    image_ref = ""
+                    for prop in self._iter_dom_descendants(symbol_node, "prop"):
+                        try:
+                            value = str(prop.attribute("v") or "").strip()
+                        except Exception:
+                            value = ""
+                        if value.lower().endswith(".png"):
+                            image_ref = value
+                            break
+                    if symbol_name and image_ref:
+                        symbol_images[symbol_name] = image_ref
 
-        for category_node in root.findall(".//renderer-v2/categories/category"):
-            value = str(category_node.get("value") or "").strip()
-            symbol_ref = str(category_node.get("symbol") or "").strip()
-            image_ref = symbol_images.get(symbol_ref) or symbol_images.get(value)
-            if not value or not image_ref:
-                continue
-            qml_value_to_image[value] = image_ref
-            for candidate in self._value_candidates(value):
-                qml_lookup_map.setdefault(candidate, image_ref)
+            for categories_node in self._iter_dom_children(renderer, "categories"):
+                for category_node in self._iter_dom_children(categories_node, "category"):
+                    try:
+                        value = str(category_node.attribute("value") or "").strip()
+                    except Exception:
+                        value = ""
+                    try:
+                        symbol_ref = str(category_node.attribute("symbol") or "").strip()
+                    except Exception:
+                        symbol_ref = ""
+                    image_ref = symbol_images.get(symbol_ref) or symbol_images.get(value)
+                    if not value or not image_ref:
+                        continue
+                    qml_value_to_image[value] = image_ref
+                    for candidate in self._value_candidates(value):
+                        qml_lookup_map.setdefault(candidate, image_ref)
 
         return qml_field, qml_value_to_image, qml_lookup_map
 
@@ -549,16 +621,23 @@ class KigamZipProcessor:
         if not qml_path or not os.path.exists(qml_path):
             return None, 0, 0
 
+        doc = self._load_qml_dom(qml_path)
+        if doc is None:
+            return None, 0, 0
         try:
-            tree = ET.parse(qml_path)
-            root = tree.getroot()
+            root = doc.documentElement()
         except Exception:
+            return None, 0, 0
+        if root is None or root.isNull():
             return None, 0, 0
 
         relinked = 0
         total_images = 0
-        for prop in root.findall(".//layer/prop"):
-            value = str(prop.get("v") or "").strip()
+        for prop in self._iter_dom_descendants(root, "prop"):
+            try:
+                value = str(prop.attribute("v") or "").strip()
+            except Exception:
+                value = ""
             if not value.lower().endswith(".png"):
                 continue
             total_images += 1
@@ -566,7 +645,10 @@ class KigamZipProcessor:
             resolved = self._resolve_symbol_path(symbol_name, raw_sym_files, lookup_sym_files)
             if not resolved:
                 continue
-            prop.set("v", resolved)
+            try:
+                prop.setAttribute("v", resolved)
+            except Exception:
+                continue
             relinked += 1
 
         if relinked <= 0:
@@ -577,7 +659,11 @@ class KigamZipProcessor:
             f"{os.path.splitext(os.path.basename(qml_path))[0]}_archtoolkit.qml",
         )
         try:
-            tree.write(out_path, encoding=GEOLOGY_QML_WRITE_ENCODING, xml_declaration=True)
+            xml_text = doc.toString(2)
+            if not str(xml_text or "").lstrip().startswith("<?xml"):
+                xml_text = f'<?xml version="1.0" encoding="{GEOLOGY_QML_WRITE_ENCODING}"?>\n{xml_text}'
+            with open(out_path, "w", encoding=GEOLOGY_QML_WRITE_ENCODING, newline="\n") as fh:
+                fh.write(xml_text)
         except Exception:
             return None, 0, total_images
         return out_path, relinked, total_images
@@ -886,7 +972,12 @@ class GeologyZipDialog(QtWidgets.QDialog):
     def __init__(self, iface, parent=None):
         super().__init__(parent)
         self.iface = iface
-        self.setWindowTitle("지질도 도엽 ZIP 불러오기 / MaxEnt 래스터 변환 - ArchToolkit")
+        use_en = is_english_ui()
+        self.setWindowTitle(
+            "KIGAM Geology ZIP Loader / MaxEnt Raster Conversion - ArchToolkit"
+            if use_en
+            else "지질도 도엽 ZIP 불러오기 / MaxEnt 래스터 변환 - ArchToolkit"
+        )
         try:
             plugin_dir = os.path.dirname(os.path.dirname(__file__))
             icon_path = os.path.join(plugin_dir, "geochem.png")
@@ -898,8 +989,16 @@ class GeologyZipDialog(QtWidgets.QDialog):
         layout = QtWidgets.QVBoxLayout(self)
 
         header = QtWidgets.QLabel(
-            "<b>KIGAM 1:50,000 지질도 ZIP 불러오기</b> + <b>벡터→래스터 변환</b><br>"
-            "지질도 도엽 ZIP을 바로 로드하고, MaxEnt 같은 예측 모델링용 래스터로 변환합니다."
+            (
+                "<b>Load KIGAM 1:50,000 Geology ZIP</b> + <b>Vector to Raster Conversion</b><br>"
+                "Load a geology map ZIP sheet directly and convert it into rasters for predictive modeling tools such as MaxEnt."
+            )
+            if use_en
+            else
+            (
+                "<b>KIGAM 1:50,000 지질도 ZIP 불러오기</b> + <b>벡터→래스터 변환</b><br>"
+                "지질도 도엽 ZIP을 바로 로드하고, MaxEnt 같은 예측 모델링용 래스터로 변환합니다."
+            )
         )
         header.setWordWrap(True)
         header.setStyleSheet("background:#e3f2fd; padding:10px; border:1px solid #bbdefb; border-radius:4px;")
@@ -911,11 +1010,11 @@ class GeologyZipDialog(QtWidgets.QDialog):
 
         self.txtZip = QtWidgets.QLineEdit()
         self.txtZip.setPlaceholderText("ZIP 파일을 선택하거나 경로를 입력하세요…")
-        btn_browse = QtWidgets.QPushButton("찾기…")
-        btn_browse.clicked.connect(self._browse_zip)
+        self.btnBrowseZip = QtWidgets.QPushButton("찾기…")
+        self.btnBrowseZip.clicked.connect(self._browse_zip)
         row_zip = QtWidgets.QHBoxLayout()
         row_zip.addWidget(self.txtZip, 1)
-        row_zip.addWidget(btn_browse)
+        row_zip.addWidget(self.btnBrowseZip)
         form_zip.addRow("ZIP 파일:", row_zip)
 
         self.cmbFont = QtWidgets.QFontComboBox()
@@ -965,15 +1064,15 @@ class GeologyZipDialog(QtWidgets.QDialog):
         vbox.addWidget(self.lstLayers)
 
         row_refresh = QtWidgets.QHBoxLayout()
-        btn_refresh = QtWidgets.QPushButton("레이어 목록 새로고침")
-        btn_refresh.clicked.connect(self.refresh_layer_list)
-        row_refresh.addWidget(btn_refresh)
+        self.btnRefreshLayers = QtWidgets.QPushButton("레이어 목록 새로고침")
+        self.btnRefreshLayers.clicked.connect(self.refresh_layer_list)
+        row_refresh.addWidget(self.btnRefreshLayers)
         row_refresh.addStretch(1)
         vbox.addLayout(row_refresh)
 
         form_rst = QtWidgets.QFormLayout()
         self.cmbField = QtWidgets.QComboBox()
-        self.cmbField.addItem("(자동 선택)")
+        self.cmbField.addItem("(자동 선택)", "")
         form_rst.addRow("값 필드:", self.cmbField)
 
         self.spinPixel = QtWidgets.QDoubleSpinBox()
@@ -1000,21 +1099,21 @@ class GeologyZipDialog(QtWidgets.QDialog):
 
         # Output path (single)
         self.txtOutFile = QtWidgets.QLineEdit()
-        btn_out_file = QtWidgets.QPushButton("저장 위치…")
-        btn_out_file.clicked.connect(self._browse_out_file)
+        self.btnBrowseOutFile = QtWidgets.QPushButton("저장 위치…")
+        self.btnBrowseOutFile.clicked.connect(self._browse_out_file)
         row_out = QtWidgets.QHBoxLayout()
         row_out.addWidget(self.txtOutFile, 1)
-        row_out.addWidget(btn_out_file)
+        row_out.addWidget(self.btnBrowseOutFile)
         vbox.addWidget(QtWidgets.QLabel("출력 파일(단일 모드):"))
         vbox.addLayout(row_out)
 
         # Output dir (per-layer)
         self.txtOutDir = QtWidgets.QLineEdit()
-        btn_out_dir = QtWidgets.QPushButton("폴더 선택…")
-        btn_out_dir.clicked.connect(self._browse_out_dir)
+        self.btnBrowseOutDir = QtWidgets.QPushButton("폴더 선택…")
+        self.btnBrowseOutDir.clicked.connect(self._browse_out_dir)
         row_dir = QtWidgets.QHBoxLayout()
         row_dir.addWidget(self.txtOutDir, 1)
-        row_dir.addWidget(btn_out_dir)
+        row_dir.addWidget(self.btnBrowseOutDir)
         vbox.addWidget(QtWidgets.QLabel("출력 폴더(레이어별 모드):"))
         vbox.addLayout(row_dir)
 
@@ -1044,35 +1143,48 @@ class GeologyZipDialog(QtWidgets.QDialog):
         self.resize(720, 760)
         self.refresh_layer_list()
         self._toggle_output_mode()
+        apply_language(self)
 
     def _browse_zip(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self, "KIGAM ZIP 파일 선택", "", "ZIP Files (*.zip *.ZIP)"
+            self,
+            "Select KIGAM ZIP File" if is_english_ui() else "KIGAM ZIP 파일 선택",
+            "",
+            "ZIP Files (*.zip *.ZIP)",
         )
         if path:
             self.txtZip.setText(path)
 
     def _browse_out_file(self):
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self, "래스터 저장", "", "GeoTIFF (*.tif);;ASCII Grid (*.asc)"
+            self,
+            "Save Raster" if is_english_ui() else "래스터 저장",
+            "",
+            "GeoTIFF (*.tif);;ASCII Grid (*.asc)",
         )
         if path:
             self.txtOutFile.setText(path)
 
     def _browse_out_dir(self):
-        path = QtWidgets.QFileDialog.getExistingDirectory(self, "출력 폴더 선택", "")
+        path = QtWidgets.QFileDialog.getExistingDirectory(
+            self,
+            "Select Output Folder" if is_english_ui() else "출력 폴더 선택",
+            "",
+        )
         if path:
             self.txtOutDir.setText(path)
 
     def _toggle_output_mode(self):
         is_merge = self.radMerge.isChecked()
         self.txtOutFile.setEnabled(is_merge)
-        # find browse button by sibling layout
-        for w in self.findChildren(QtWidgets.QPushButton):
-            if w.text() == "저장 위치…":
-                w.setEnabled(is_merge)
-            if w.text() == "폴더 선택…":
-                w.setEnabled(not is_merge)
+        try:
+            self.btnBrowseOutFile.setEnabled(is_merge)
+        except Exception:
+            pass
+        try:
+            self.btnBrowseOutDir.setEnabled(not is_merge)
+        except Exception:
+            pass
         self.txtOutDir.setEnabled(not is_merge)
 
     def _kigam_region_for_layer(self, layer: QgsVectorLayer) -> str:
@@ -1086,7 +1198,7 @@ class GeologyZipDialog(QtWidgets.QDialog):
                 if isinstance(parent, QgsLayerTreeGroup):
                     name = str(parent.name() or "").strip()
                     if name.startswith("KIGAM_"):
-                        return name[len("KIGAM_") :].strip()
+                        return name[len("KIGAM_"):].strip()
                 node = parent
         except Exception:
             pass
@@ -1157,13 +1269,13 @@ class GeologyZipDialog(QtWidgets.QDialog):
             item.setData(Qt.UserRole, layer.id())
             tip = []
             if geom == QgsWkbTypes.PointGeometry:
-                tip.append("포인트 레이어")
+                tip.append("Point Layer" if is_english_ui() else "포인트 레이어")
             elif geom == QgsWkbTypes.LineGeometry:
-                tip.append("라인 레이어")
+                tip.append("Line Layer" if is_english_ui() else "라인 레이어")
             elif geom == QgsWkbTypes.PolygonGeometry:
-                tip.append("폴리곤 레이어")
+                tip.append("Polygon Layer" if is_english_ui() else "폴리곤 레이어")
             if region:
-                tip.append(f"지역/도엽: {region}")
+                tip.append(f"Area / Sheet: {region}" if is_english_ui() else f"지역/도엽: {region}")
             if tip:
                 item.setToolTip(" / ".join(tip))
             item.setText(shown_name)
@@ -1203,14 +1315,14 @@ class GeologyZipDialog(QtWidgets.QDialog):
                     for f in lyr.fields():
                         fields.add(f.name())
 
-        current = self.cmbField.currentText()
+        current = str(self.cmbField.currentData() or self.cmbField.currentText() or "").strip()
         self.cmbField.blockSignals(True)
         self.cmbField.clear()
-        self.cmbField.addItem("(자동 선택)")
+        self.cmbField.addItem("(자동 선택)", "")
         for name in sorted(fields):
-            self.cmbField.addItem(name)
+            self.cmbField.addItem(name, name)
         if current:
-            idx = self.cmbField.findText(current)
+            idx = self.cmbField.findData(current)
             if idx >= 0:
                 self.cmbField.setCurrentIndex(idx)
         self.cmbField.blockSignals(False)
@@ -1218,8 +1330,8 @@ class GeologyZipDialog(QtWidgets.QDialog):
     def _choose_common_field(self, layers: List[QgsVectorLayer]) -> Optional[str]:
         if not layers:
             return None
-        chosen = self.cmbField.currentText().strip()
-        if chosen and chosen != "(자동 선택)":
+        chosen = str(self.cmbField.currentData() or self.cmbField.currentText() or "").strip()
+        if chosen:
             if all(lyr.fields().indexOf(chosen) >= 0 for lyr in layers):
                 return chosen
         # Auto: prefer common fields
@@ -1653,8 +1765,8 @@ class GeologyZipDialog(QtWidgets.QDialog):
                 return
 
             for lyr in layers:
-                field = self.cmbField.currentText().strip()
-                if field == "(자동 선택)" or lyr.fields().indexOf(field) < 0:
+                field = str(self.cmbField.currentData() or self.cmbField.currentText() or "").strip()
+                if not field or lyr.fields().indexOf(field) < 0:
                     # Choose best field for this layer
                     field = None
                     for p in GEOLOGY_RASTER_FIELD_PRIORITY:
@@ -1746,7 +1858,50 @@ class GeologyZipDialog(QtWidgets.QDialog):
         self.refresh_layer_list()
 
     def _on_help(self):
-        html = """
+        if is_english_ui():
+            html = """
+<h3>Geology ZIP Loader / MaxEnt Raster Conversion</h3>
+<p>
+Loads KIGAM 1:50,000 geology ZIP sheets directly and creates geology-code rasters
+that can be used with predictive modeling workflows such as MaxEnt.
+</p>
+
+<h4>Load ZIP</h4>
+<ul>
+  <li>Select a ZIP downloaded from KIGAM to load SHP layers automatically. If a <code>sym</code> folder is present, symbol styling is applied.</li>
+  <li>LITHOIDX / LITHONAME layers can receive labels automatically.</li>
+  <li>Layers are organized under <code>ArchToolkit - Geology</code> as <code>KIGAM_sheet_name</code>,
+  with lines and points placed above polygon geology layers.</li>
+</ul>
+
+<h4>Vector to Raster</h4>
+<ul>
+  <li><b>Default list</b>: for most predictive-modeling cases, Litho (rock / formation) polygons are enough,
+  so the default filter shows only <b>KIGAM ZIP layers + Litho polygons</b>.</li>
+  <li>Layer names include sheet / area tags such as <code>[GF13_Cheongju]</code> when multiple sheets are loaded.</li>
+  <li>Typical value fields are <code>LITHOIDX</code> and <code>AGEIDX</code>.</li>
+  <li>String codes (for example Qa, Jbgr) are mapped automatically to integer values, and an accompanying <code>*_mapping.csv</code> file is written.</li>
+  <li>When numeric codes are used, related labels such as <code>LITHONAME</code> / <code>AGENAME</code> are written to the mapping CSV when available.</li>
+  <li>You can create one merged raster or export a separate raster per layer.</li>
+  <li>After processing, the tool checks whether output files were actually created and logs the cause when something goes wrong.</li>
+</ul>
+
+<h4>Predictive Modeling Tips</h4>
+<ul>
+  <li>Geology units are usually <b>categorical</b> variables. The raster stores integer codes, and the mapping CSV explains them.</li>
+  <li>When using MaxEnt, treat the geology raster as a categorical input to avoid interpreting the codes as continuous values.</li>
+  <li>When combining geology with other variables such as geochemistry or terrain, align CRS, resolution, and extent across all rasters.</li>
+</ul>
+
+<h4>Troubleshooting</h4>
+<ul>
+  <li>If the CSV is created but the raster is missing, check output-folder permissions / path issues and try another folder such as Downloads.</li>
+  <li>For diagnosis, inspect the <code>KIGAM rasterize result</code> lines in the ArchToolkit live log.</li>
+</ul>
+"""
+            title = "Geology ZIP / MaxEnt Help"
+        else:
+            html = """
 <h3>지질도 ZIP 불러오기 / MaxEnt 래스터 변환</h3>
 <p>
 KIGAM 1:50,000 지질도 ZIP(도엽)을 바로 로드하고, 지질 코드 기반으로 래스터를 생성합니다.
@@ -1784,8 +1939,9 @@ KIGAM 1:50,000 지질도 ZIP(도엽)을 바로 로드하고, 지질 코드 기�
   <li>원인 파악: ArchToolkit 실시간 로그/로그 파일에서 <code>KIGAM rasterize result</code> 줄을 확인하세요.</li>
 </ul>
 """
+            title = "지질도 ZIP/MaxEnt 도움말"
         try:
             plugin_dir = os.path.dirname(os.path.dirname(__file__))
-            show_help_dialog(parent=self, title="지질도 ZIP/MaxEnt 도움말", html=html, plugin_dir=plugin_dir)
+            show_help_dialog(parent=self, title=title, html=html, plugin_dir=plugin_dir)
         except Exception:
             pass

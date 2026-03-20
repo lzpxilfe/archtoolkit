@@ -66,6 +66,7 @@ from .cost_surface_dialog import (
     _window_geotransform,
 )
 from .config import get_output_group_name
+from .i18n import apply_language, is_english_ui, tr
 from .utils import (
     is_metric_crs,
     log_message,
@@ -1279,6 +1280,7 @@ class CostNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
             self._apply_help_texts()
         except Exception:
             pass
+        apply_language(self)
 
     def _setup_help_button(self):
         try:
@@ -1301,7 +1303,37 @@ class CostNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
             pass
 
     def _on_help(self):
-        html = """
+        if is_english_ui():
+            html = """
+<h3>Least-cost Network Help</h3>
+<p>
+Builds least-cost paths (LCPs) between sites from a DEM-based movement-cost model,
+then creates MST, k-NN, and hub-based networks.
+</p>
+
+<h4>Inputs</h4>
+<ul>
+  <li><b>DEM</b>: raster used for movement cost calculation (a projected CRS in meters is recommended)</li>
+  <li><b>Site layer</b>: points or polygons</li>
+  <li><b>Hub field / values</b> (optional): for hub-centered network assumptions</li>
+</ul>
+
+<h4>Outputs</h4>
+<ul>
+  <li>Network edge layers with cost, time, distance, and related attributes</li>
+  <li>Optional node-metrics / centrality (SNA) result layers</li>
+</ul>
+
+<h4>Tips</h4>
+<ul>
+  <li>By default this reflects only <b>slope-based</b> movement cost. Roads, rivers, and land cover are not used unless modeled separately.</li>
+  <li>Runtime grows quickly with the number of nodes. Control scale with candidate k, path buffer, and network mode.</li>
+  <li>Use the <b>Interpretation Guide</b> button for more help reading the result networks.</li>
+</ul>
+"""
+            title = "Least-cost Network Help"
+        else:
+            html = """
 <h3>최소비용 네트워크(Least-cost Network) 도움말</h3>
 <p>
 DEM 기반 비용모델로 유적(포인트/폴리곤) 간 최소비용경로(LCP)를 계산하고,
@@ -1328,9 +1360,10 @@ MST/k-NN/Hub 네트워크를 생성합니다.
   <li>더 자세한 해석은 버튼행의 <b>해석 가이드</b>를 참고하세요.</li>
 </ul>
 """
+            title = "Least-cost Network 도움말"
         try:
             plugin_dir = os.path.dirname(os.path.dirname(__file__))
-            show_help_dialog(parent=self, title="Least-cost Network 도움말", html=html, plugin_dir=plugin_dir)
+            show_help_dialog(parent=self, title=title, html=html, plugin_dir=plugin_dir)
         except Exception:
             pass
 
@@ -1486,18 +1519,32 @@ MST/k-NN/Hub 네트워크를 생성합니다.
             layout.addWidget(group)
 
     def _apply_help_texts(self):
+        english = is_english_ui()
         # High-level description (keep it short; details go into tooltips)
-        self.lblDescription.setText(
-            "<html><head/><body>"
-            "<p><b>최소비용 네트워크(Least-cost Network)</b>는 DEM 경사 기반 이동비용(시간/에너지)으로 "
-            "유적 간 <b>최소비용경로(LCP)</b>를 계산하고, 그 결과로 네트워크를 만듭니다.</p>"
-            "<p>네트워크 방식: <b>MST</b>(전체 연결망 최소), <b>k-NN</b>(복수 경로), <b>Hub</b>(거점 기반), "
-            "<b>A+B+C(All)</b>(한 번에 생성).</p>"
-            "<p style='color:#444;'>유형/위계(예: 왕성·빈전·고분군)별 비교는 ‘선택된 피처만’으로 원하는 조합을 선택해 "
-            "여러 번 실행하면 해석이 쉽습니다.</p>"
-            "<p style='color:#444;'>Tip: <b>해석 가이드</b> 버튼에서 상세 설명을 열 수 있습니다.</p>"
-            "</body></html>"
-        )
+        if english:
+            self.lblDescription.setText(
+                "<html><head/><body>"
+                "<p><b>Least-cost Network</b> uses DEM-based movement cost (time / energy) "
+                "to calculate <b>least-cost paths (LCPs)</b> between sites and builds networks from them.</p>"
+                "<p>Network modes: <b>MST</b> (minimum spanning tree), <b>k-NN</b> (multiple routes), "
+                "<b>Hub</b> (hub-based), and <b>A+B+C (All)</b> (create all at once).</p>"
+                "<p style='color:#444;'>For comparisons by type or hierarchy, combine this with "
+                "<b>Use selected features only</b> and run the tool multiple times with different selections.</p>"
+                "<p style='color:#444;'>Tip: open the <b>Interpretation Guide</b> for a fuller reading of the outputs.</p>"
+                "</body></html>"
+            )
+        else:
+            self.lblDescription.setText(
+                "<html><head/><body>"
+                "<p><b>최소비용 네트워크(Least-cost Network)</b>는 DEM 경사 기반 이동비용(시간/에너지)으로 "
+                "유적 간 <b>최소비용경로(LCP)</b>를 계산하고, 그 결과로 네트워크를 만듭니다.</p>"
+                "<p>네트워크 방식: <b>MST</b>(전체 연결망 최소), <b>k-NN</b>(복수 경로), <b>Hub</b>(거점 기반), "
+                "<b>A+B+C(All)</b>(한 번에 생성).</p>"
+                "<p style='color:#444;'>유형/위계(예: 왕성·빈전·고분군)별 비교는 ‘선택된 피처만’으로 원하는 조합을 선택해 "
+                "여러 번 실행하면 해석이 쉽습니다.</p>"
+                "<p style='color:#444;'>Tip: <b>해석 가이드</b> 버튼에서 상세 설명을 열 수 있습니다.</p>"
+                "</body></html>"
+            )
         try:
             ss = self.lblDescription.styleSheet() or ""
             if "font-size" not in ss:
@@ -1505,33 +1552,61 @@ MST/k-NN/Hub 네트워크를 생성합니다.
         except Exception:
             pass
 
-        self.lblInputHelp.setText(
-            "<html>"
-            "• <b>포인트</b>: 그대로 노드로 사용합니다.<br/>"
-            "• <b>폴리곤</b>: 대표점(권장: Point on surface)으로 노드를 만듭니다.<br/>"
-            "• <b>선택 피처만</b> 체크 시: 선택된 피처만 네트워크에 포함됩니다."
-            "</html>"
-        )
-        self.chkSelectedOnly.setToolTip(
-            "선택된 피처만 사용\n"
-            "- 유형/위계(예: 왕성·빈전·고분군) 비교 분석에 유용합니다.\n"
-            "  1) 속성테이블에서 원하는 유형(값) 조합을 선택\n"
-            "  2) 이 옵션을 체크\n"
-            "  3) MST 또는 A+B+C(All) 실행\n"
-            "- 조합을 바꿔 여러 번 실행하면 층간/층내 연결망을 비교할 수 있습니다."
-        )
+        if english:
+            self.lblInputHelp.setText(
+                "<html>"
+                "• <b>Points</b>: used directly as nodes.<br/>"
+                "• <b>Polygons</b>: converted to nodes using a representative point (recommended: Point on Surface).<br/>"
+                "• If <b>Use selected features only</b> is checked, only selected features are included."
+                "</html>"
+            )
+            self.chkSelectedOnly.setToolTip(
+                "Use selected features only\n"
+                "- Helpful for comparing selected groups, types, or hierarchies.\n"
+                "  1) Select the combination of values you want in the attribute table\n"
+                "  2) Enable this option\n"
+                "  3) Run MST or A+B+C (All)\n"
+                "- Repeating the run with different selections makes between-group comparison easier."
+            )
+            self.lblNetworkHelp.setText(
+                "<html>"
+                "• <b>Candidate edges (k)</b>: reduces candidate pairs with Euclidean distance to speed up calculation. "
+                "If too small, the MST may fail because the graph becomes disconnected.<br/>"
+                "• <b>Path buffer (m)</b>: adds margin to the LCP bbox around each candidate pair. "
+                "If too small, the optimal path may leave the window and fail.<br/>"
+                "• <b>Symmetrization (MST)</b>: because uphill / downhill costs can differ for A→B and B→A, "
+                "the MST uses one combined value (mean / min / max).<br/>"
+                "• <b>A+B+C (All)</b>: creates MST / k-NN / Hub at once. (Hub requires configured hub values.)"
+                "</html>"
+            )
+        else:
+            self.lblInputHelp.setText(
+                "<html>"
+                "• <b>포인트</b>: 그대로 노드로 사용합니다.<br/>"
+                "• <b>폴리곤</b>: 대표점(권장: Point on surface)으로 노드를 만듭니다.<br/>"
+                "• <b>선택 피처만</b> 체크 시: 선택된 피처만 네트워크에 포함됩니다."
+                "</html>"
+            )
+            self.chkSelectedOnly.setToolTip(
+                "선택된 피처만 사용\n"
+                "- 유형/위계(예: 왕성·빈전·고분군) 비교 분석에 유용합니다.\n"
+                "  1) 속성테이블에서 원하는 유형(값) 조합을 선택\n"
+                "  2) 이 옵션을 체크\n"
+                "  3) MST 또는 A+B+C(All) 실행\n"
+                "- 조합을 바꿔 여러 번 실행하면 층간/층내 연결망을 비교할 수 있습니다."
+            )
 
-        self.lblNetworkHelp.setText(
-            "<html>"
-            "• <b>후보 간선(k)</b>: 유클리드 기준으로 후보를 줄여 계산을 빠르게 합니다. "
-            "너무 작으면 연결이 끊겨 MST가 실패할 수 있습니다.<br/>"
-            "• <b>경로 버퍼(m)</b>: 각 후보쌍 LCP 계산창(bbox)에 여유를 줍니다. "
-            "너무 작으면 최적 경로가 창 밖으로 나가 실패할 수 있습니다.<br/>"
-            "• <b>대칭화(MST)</b>: 오르막/내리막 차이로 A→B와 B→A 비용이 다를 수 있어, "
-            "MST는 (평균/최소/최대)로 한 값으로 만듭니다.<br/>"
-            "• <b>A+B+C(All)</b>: MST/k-NN/Hub를 한 번에 생성합니다(Hub는 허브 값 설정 시)."
-            "</html>"
-        )
+            self.lblNetworkHelp.setText(
+                "<html>"
+                "• <b>후보 간선(k)</b>: 유클리드 기준으로 후보를 줄여 계산을 빠르게 합니다. "
+                "너무 작으면 연결이 끊겨 MST가 실패할 수 있습니다.<br/>"
+                "• <b>경로 버퍼(m)</b>: 각 후보쌍 LCP 계산창(bbox)에 여유를 줍니다. "
+                "너무 작으면 최적 경로가 창 밖으로 나가 실패할 수 있습니다.<br/>"
+                "• <b>대칭화(MST)</b>: 오르막/내리막 차이로 A→B와 B→A 비용이 다를 수 있어, "
+                "MST는 (평균/최소/최대)로 한 값으로 만듭니다.<br/>"
+                "• <b>A+B+C(All)</b>: MST/k-NN/Hub를 한 번에 생성합니다(Hub는 허브 값 설정 시)."
+                "</html>"
+            )
 
         # Network parameters tooltips
         self.spinCandidateK.setToolTip(
@@ -1775,8 +1850,8 @@ MST/k-NN/Hub 네트워크를 생성합니다.
         selected = set(_parse_csv_values(self.txtHubValues.text()))
         dlg = _ValuePickerDialog(
             parent=self,
-            title="허브 값 선택 (Pick hub values)",
-            hint="허브로 사용할 값을 체크하세요. (여러 개 선택 가능)",
+            title=tr("허브 값 선택 (Pick hub values)"),
+            hint=tr("허브로 사용할 값을 체크하세요. (여러 개 선택 가능)"),
             values=values,
             selected=selected,
         )
@@ -1837,7 +1912,15 @@ MST/k-NN/Hub 네트워크를 생성합니다.
             pass
 
     def _model_help_text(self, model_key: str) -> str:
+        english = is_english_ui()
         if model_key == MODEL_TOBLER:
+            if english:
+                return (
+                    "Tobler Hiking Function (1993)\n"
+                    "- Calculates walking speed from slope (tan theta).\n"
+                    "- Higher base speed -> less total time\n"
+                    "- Higher slope factor -> stronger slowdown on steep terrain"
+                )
             return (
                 "Tobler Hiking Function (1993)\n"
                 "- 경사(tan θ)에 따라 보행 속도를 계산합니다.\n"
@@ -1845,6 +1928,13 @@ MST/k-NN/Hub 네트워크를 생성합니다.
                 "- 경사계수↑ → 경사에 더 민감(가파를수록 더 느림)"
             )
         if model_key == MODEL_NAISMITH:
+            if english:
+                return (
+                    "Naismith's Rule\n"
+                    "- Approximates travel time with horizontal distance plus ascent penalty.\n"
+                    "- Higher flat speed -> less total time\n"
+                    "- Higher ascent penalty -> higher uphill cost"
+                )
             return (
                 "Naismith’s Rule\n"
                 "- 수평 이동 + 상승 고도 페널티로 시간을 근사합니다.\n"
@@ -1852,18 +1942,37 @@ MST/k-NN/Hub 네트워크를 생성합니다.
                 "- 상승 페널티↑ → 오르막 비용↑"
             )
         if model_key == MODEL_HERZOG_METABOLIC:
+            if english:
+                return (
+                    "Herzog metabolic (via Cuckovic)\n"
+                    "- Empirically models movement cost from slope.\n"
+                    "- Higher base speed -> less total time"
+                )
             return (
                 "Herzog metabolic (via Čučković)\n"
                 "- 경사에 따른 이동 비용을 경험적으로 모델링합니다.\n"
                 "- 기본속도↑ → 전체 시간↓"
             )
         if model_key == MODEL_CONOLLY_LAKE:
+            if english:
+                return (
+                    "Conolly & Lake (2006)\n"
+                    "- Converts slope-based movement cost into walking speed.\n"
+                    "- Higher base speed -> less total time"
+                )
             return (
                 "Conolly & Lake (2006)\n"
                 "- 경사에 따른 이동 비용을 보행 속도로 환산해 적용합니다.\n"
                 "- 기본속도↑ → 전체 시간↓"
             )
         if model_key == MODEL_HERZOG_WHEELED:
+            if english:
+                return (
+                    "Herzog wheeled (via Cuckovic)\n"
+                    "- Assumes wheeled or cart movement.\n"
+                    "- Designed so cost rises sharply on steep slopes.\n"
+                    "- Higher critical slope -> more terrain remains passable before the sharp rise"
+                )
             return (
                 "Herzog wheeled (via Čučković)\n"
                 "- 차량/수레 이동을 가정합니다.\n"
@@ -1871,14 +1980,23 @@ MST/k-NN/Hub 네트워크를 생성합니다.
                 "- 임계 경사↑ → 더 가파른 곳까지 통과 가능(급증 시작이 늦음)"
             )
         if model_key == MODEL_PANDOLF:
+            if english:
+                return (
+                    "Pandolf et al. (1977) Load Carriage\n"
+                    "- Estimates energy expenditure from body weight, load, terrain factor, and slope.\n"
+                    "- Higher body weight, load, or terrain factor -> more energy cost"
+                )
             return (
                 "Pandolf et al. (1977) Load Carriage\n"
                 "- 체중/짐무게/지형계수(마찰) + 경사로 에너지(J)를 추정합니다.\n"
                 "- 체중·짐무게·지형계수↑ → 에너지 소모↑"
             )
+        if english:
+            return "Select a model to calculate movement cost by slope (uphill / downhill)."
         return "모델을 선택하면 경사(오르막/내리막)에 따라 이동 비용을 계산합니다."
 
     def _interpretation_guide_html(self) -> str:
+        english = is_english_ui()
         mode_label = ""
         cost_label = ""
         model_label = ""
@@ -1895,98 +2013,199 @@ MST/k-NN/Hub 네트워크를 생성합니다.
         except Exception:
             model_label = ""
 
-        hdr = (
-            "<h2>최소비용 네트워크 해석 가이드</h2>"
-            "<p style='color:#444'>Tip: 각 옵션 위에 마우스를 올리면 짧은 설명/참고문헌을 바로 볼 수 있어요.</p>"
-        )
+        if english:
+            hdr = (
+                "<h2>Least-cost Network Interpretation Guide</h2>"
+                "<p style='color:#444'>Tip: hover over options in the main dialog to see shorter explanations and references.</p>"
+            )
+        else:
+            hdr = (
+                "<h2>최소비용 네트워크 해석 가이드</h2>"
+                "<p style='color:#444'>Tip: 각 옵션 위에 마우스를 올리면 짧은 설명/참고문헌을 바로 볼 수 있어요.</p>"
+            )
         current = ""
         if any([mode_label, cost_label, model_label]):
             parts = []
             if mode_label:
-                parts.append(f"방식={mode_label}")
+                parts.append(f"{'Mode' if english else '방식'}={mode_label}")
             if cost_label:
-                parts.append(f"비용={cost_label}")
+                parts.append(f"{'Cost' if english else '비용'}={cost_label}")
             if model_label:
-                parts.append(f"모델={model_label}")
-            current = "<p><b>현재 설정</b>: " + " / ".join(parts) + "</p>"
+                parts.append(f"{'Model' if english else '모델'}={model_label}")
+            current = "<p><b>{}</b>: {}</p>".format(
+                "Current settings" if english else "현재 설정",
+                " / ".join(parts),
+            )
 
-        what = """
-        <h3>1) 이 도구가 하는 일</h3>
-        <p>입력 유적(점/폴리곤)을 <b>노드</b>로 만들고, DEM 경사 기반 비용모델로 유적 간 <b>최소비용경로(LCP)</b>를 계산해
-        <b>네트워크(간선)</b>를 생성합니다. 결과는 “어떤 길이 실제로 더 빠르거나/덜 힘든가”를 지형을 통해 추정하는 도면입니다.</p>
+        if english:
+            what = """
+            <h3>1) What this tool does</h3>
+            <p>It turns input sites (points or polygons) into <b>nodes</b>, calculates <b>least-cost paths (LCPs)</b>
+            between them with a DEM-based movement-cost model, and builds a <b>network of edges</b>.
+            In practice, it estimates which routes are likely faster or less costly to traverse given terrain.</p>
 
-        <ol>
-          <li><b>노드 만들기</b>: 점은 그대로 사용하고, 폴리곤은 ‘대표점’(Point-on-surface/centroid)으로 변환합니다.</li>
-          <li><b>후보 간선 만들기</b>: 모든 쌍(N²)을 계산하면 느리므로, 유클리드 거리로 가까운 이웃 <code>k</code>개만 후보로 뽑습니다.</li>
-          <li><b>LCP 계산</b>: 후보 쌍마다 A*로 최단 비용 경로를 구합니다. <code>경로 버퍼(m)</code>는 계산 범위를 줄여 속도를 올립니다.</li>
-          <li><b>간선 선택</b>: 선택한 방식(MST/k-NN/Hub)에 따라 어떤 간선을 채택할지 결정합니다.</li>
-          <li><b>레이어 생성</b>: 노드 레이어 + 네트워크 라인 레이어를 만들고, 시간/에너지 라벨을 표시합니다.</li>
-        </ol>
-        """
+            <ol>
+              <li><b>Build nodes</b>: points are used directly, and polygons are converted to representative points (point-on-surface or centroid).</li>
+              <li><b>Build candidate edges</b>: instead of testing every pair (N^2), it keeps only the nearest
+              <code>k</code> neighbors by Euclidean distance.</li>
+              <li><b>Compute LCPs</b>: for each candidate pair it uses A* to find the lowest-cost route.
+              <code>Path buffer (m)</code> limits the search window for speed.</li>
+              <li><b>Select final edges</b>: MST, k-NN, or Hub rules decide which candidate edges become part of the network.</li>
+              <li><b>Create layers</b>: it writes node and line layers and adds cost labels such as time or energy.</li>
+            </ol>
+            """
 
-        how = """
-        <h3>2) 방식별 해석</h3>
-        <ul>
-          <li><b>MST(최소 신장 트리)</b>: 전체를 연결하면서 ‘총 비용 합’이 최소가 되도록 <b>N-1개</b> 간선만 고릅니다.
-          “최소 골격(backbone)”을 보고 싶을 때 좋지만, 실제 복수 경로/우회로를 모두 표현하진 않습니다.</li>
-          <li><b>k-NN</b>: 각 노드에서 비용이 작은 상위 <code>k</code>개 이웃을 연결합니다(합집합).
-          연락망/교역망처럼 복수 경로를 남길 수 있지만, <code>k</code>가 너무 작으면 네트워크가 끊길 수 있습니다.</li>
-          <li><b>Hub</b>: 허브(왕성/산성/봉수 등)를 지정하면 비허브는 가장 ‘비용이 작은 허브’로 연결됩니다.
-          가정한 위계가 있을 때 해석이 쉽고, “허브들끼리 MST” 옵션으로 허브 간 골격도 함께 만들 수 있습니다.</li>
-          <li><b>A+B+C(All)</b>: 동일한 비용모델/파라미터로 MST/k-NN/Hub를 한 번에 생성해 결과를 바로 비교합니다.</li>
-        </ul>
-        """
+            how = """
+            <h3>2) How to read each mode</h3>
+            <ul>
+              <li><b>MST (minimum spanning tree)</b>: keeps only <b>N-1</b> edges so the whole graph stays connected with the lowest total cost.
+              It is useful when you want a minimal backbone, but it will not show every alternative route.</li>
+              <li><b>k-NN</b>: each node connects to its lowest-cost <code>k</code> neighbors (union of all such links).
+              It preserves multiple pathways, which is often useful for communication or exchange networks,
+              but small <code>k</code> values can fragment the graph.</li>
+              <li><b>Hub</b>: when hub sites are defined, non-hub sites connect to their least-cost hub.
+              This is helpful when you want to test a hierarchical model, and the optional hub MST adds a backbone among the hubs themselves.</li>
+              <li><b>A+B+C (All)</b>: creates MST, k-NN, and Hub outputs together with the same cost model
+              and parameters so they can be compared directly.</li>
+            </ul>
+            """
 
-        params = """
-        <h3>3) 파라미터를 어떻게 잡나</h3>
-        <ul>
-          <li><code>후보 간선(k)</code>: 클수록 MST가 끊길 위험이 줄고 정확도가 올라가지만 계산이 느려집니다.</li>
-          <li><code>경로 버퍼(m)</code>: 0이면 DEM 전체에서 경로를 찾습니다(매우 느림). 너무 작으면 실제 우회로가 잘려 경로가 실패할 수 있습니다.</li>
-          <li><code>대각 이동</code>: 8방향 이동은 더 자연스러운 경로가 나올 수 있지만, 4방향보다 계산이 늘 수 있습니다.</li>
-          <li><code>MST 대칭화</code>: 경사 기반 비용은 A→B와 B→A가 다를 수 있어, MST는 ‘대칭 비용’이 필요합니다(평균/최소/최대).</li>
-        </ul>
-        """
+            params = """
+            <h3>3) How to choose parameters</h3>
+            <ul>
+              <li><code>Candidate edges (k)</code>: larger values reduce the risk of a disconnected MST and improve
+              coverage, but they increase computation.</li>
+              <li><code>Path buffer (m)</code>: if set to 0, the full DEM is searched and runs may become very slow.
+              If it is too small, real detours can be clipped away and paths may fail.</li>
+              <li><code>Diagonal movement</code>: 8-direction movement often produces more natural routes,
+              but may cost more to compute than 4-direction movement.</li>
+              <li><code>MST symmetrization</code>: uphill and downhill costs can differ for A->B and B->A,
+              so the MST needs one combined undirected value (mean, min, or max).</li>
+            </ul>
+            """
 
-        sna = """
-        <h3>4) SNA 지표(노드 속성) 읽는 법</h3>
-        <p>SNA는 “선 몇 개”가 아니라 각 유적의 역할을 수치로 보여줍니다.
-        이 값들은 <b>선택한 네트워크 방식</b>(MST/k-NN/Hub)에 따라 달라집니다.</p>
-        <ul>
-          <li><code>degree</code>: 연결 수(많을수록 허브 후보).</li>
-          <li><code>component</code>/<code>comp_size</code>: 끊긴 덩어리(컴포넌트)와 그 크기.
-          컴포넌트가 많으면 <code>후보 k</code> 또는 <code>버퍼</code>를 늘려보세요.</li>
-          <li><code>closeness</code>(선택): 다른 노드까지의 “최단 비용 합”이 작을수록 큽니다(느릴 수 있음).</li>
-          <li><code>betweenness</code>(선택): 다른 노드 쌍의 최단 비용 경로를 “중개”하는 정도(매우 느릴 수 있음).</li>
-        </ul>
-        """
+            sna = """
+            <h3>4) Reading SNA node metrics</h3>
+            <p>SNA metrics describe each site's structural role, not just how many lines appear on the map.
+            Their values depend on the <b>selected network mode</b> (MST, k-NN, or Hub).</p>
+            <ul>
+              <li><code>degree</code>: number of connected edges; higher values often indicate hub-like roles.</li>
+              <li><code>component</code>/<code>comp_size</code>: disconnected components and their sizes.
+              If there are many small components, try increasing <code>candidate k</code> or <code>path buffer</code>.</li>
+              <li><code>closeness</code> (optional): larger values mean the node reaches others with lower total least-cost distance.</li>
+              <li><code>betweenness</code> (optional): larger values indicate stronger mediation of least-cost routes between other node pairs.</li>
+            </ul>
+            """
 
-        tips = """
-        <h3>5) 연구 팁(유형/위계)</h3>
-        <p>예: 왕성/빈전/고분군처럼 위계가 다른 폴리곤이 섞여 있다면,</p>
-        <ul>
-          <li>‘선택된 피처만’으로 조합을 바꿔 여러 번 실행하면 비교가 쉽습니다(왕성↔빈전, 빈전↔고분군 등).</li>
-          <li>또는 Hub 방식으로 “왕성”을 허브로 지정해 ‘중심-주변’ 가정을 시험할 수 있습니다.</li>
-        </ul>
-        """
+            tips = """
+            <h3>5) Research tips</h3>
+            <p>If your data mixes hierarchically different site types, such as capitals, secondary centers, and tomb clusters, try these strategies:</p>
+            <ul>
+              <li>Use <b>selected features only</b> and run the tool multiple times with different combinations
+              to compare between-group and within-group networks.</li>
+              <li>Use <b>Hub</b> mode to test a center-periphery assumption by designating a site class such as capitals as hubs.</li>
+            </ul>
+            """
 
-        limits = """
-        <h3>6) 한계와 주의</h3>
-        <ul>
-          <li>이 도구는 기본적으로 <b>DEM 경사</b>만 반영합니다. 도로/하천/토지피복/행정경계 같은 제약은 별도 입력이 없으면 고려되지 않습니다.</li>
-          <li>에너지(kcal) 모드는 Pandolf 모델에서 의미가 있으며, 모델/파라미터 설정에 따라 값이 크게 달라질 수 있습니다.</li>
-          <li>큰 데이터(예: 200개+)는 후보 k/버퍼 조절이 중요하며, SNA의 느린 지표는 자동 생략될 수 있습니다.</li>
-        </ul>
-        """
+            limits = """
+            <h3>6) Limits and cautions</h3>
+            <ul>
+              <li>This tool models movement mainly from <b>DEM slope</b>. Roads, rivers, land cover,
+              and administrative boundaries are not considered unless you encode them separately.</li>
+              <li>The energy mode (kcal) is meaningful with the Pandolf model and can shift substantially
+              depending on the model and parameter choices.</li>
+              <li>Large datasets often require tuning candidate <code>k</code> and buffer size,
+              and slower SNA metrics may be skipped automatically.</li>
+            </ul>
+            """
 
-        refs = """
-        <h3>참고(요약)</h3>
-        <ul>
-          <li>MST: Kruskal(1956), Prim(1957)</li>
-          <li>보행/비용모델: Tobler(1993), Naismith(1892), Conolly &amp; Lake(2006), Pandolf et al.(1977)</li>
-          <li>SNA: Freeman(1979), Wasserman &amp; Faust(1994), Brandes(2001)</li>
-        </ul>
-        <p style='color:#444'>전체 참고문헌: <code>REFERENCES.md</code></p>
-        """
+            refs = """
+            <h3>References (summary)</h3>
+            <ul>
+              <li>MST: Kruskal (1956), Prim (1957)</li>
+              <li>Walking / cost models: Tobler (1993), Naismith (1892), Conolly &amp; Lake (2006), Pandolf et al. (1977)</li>
+              <li>SNA: Freeman (1979), Wasserman &amp; Faust (1994), Brandes (2001)</li>
+            </ul>
+            <p style='color:#444'>Full bibliography: <code>REFERENCES.md</code></p>
+            """
+        else:
+            what = """
+            <h3>1) 이 도구가 하는 일</h3>
+            <p>입력 유적(점/폴리곤)을 <b>노드</b>로 만들고, DEM 경사 기반 비용모델로 유적 간 <b>최소비용경로(LCP)</b>를 계산해
+            <b>네트워크(간선)</b>를 생성합니다. 결과는 “어떤 길이 실제로 더 빠르거나/덜 힘든가”를 지형을 통해 추정하는 도면입니다.</p>
+
+            <ol>
+              <li><b>노드 만들기</b>: 점은 그대로 사용하고, 폴리곤은 ‘대표점’(Point-on-surface/centroid)으로 변환합니다.</li>
+              <li><b>후보 간선 만들기</b>: 모든 쌍(N²)을 계산하면 느리므로, 유클리드 거리로 가까운 이웃 <code>k</code>개만 후보로 뽑습니다.</li>
+              <li><b>LCP 계산</b>: 후보 쌍마다 A*로 최단 비용 경로를 구합니다. <code>경로 버퍼(m)</code>는 계산 범위를 줄여 속도를 올립니다.</li>
+              <li><b>간선 선택</b>: 선택한 방식(MST/k-NN/Hub)에 따라 어떤 간선을 채택할지 결정합니다.</li>
+              <li><b>레이어 생성</b>: 노드 레이어 + 네트워크 라인 레이어를 만들고, 시간/에너지 라벨을 표시합니다.</li>
+            </ol>
+            """
+
+            how = """
+            <h3>2) 방식별 해석</h3>
+            <ul>
+              <li><b>MST(최소 신장 트리)</b>: 전체를 연결하면서 ‘총 비용 합’이 최소가 되도록 <b>N-1개</b> 간선만 고릅니다.
+              “최소 골격(backbone)”을 보고 싶을 때 좋지만, 실제 복수 경로/우회로를 모두 표현하진 않습니다.</li>
+              <li><b>k-NN</b>: 각 노드에서 비용이 작은 상위 <code>k</code>개 이웃을 연결합니다(합집합).
+              연락망/교역망처럼 복수 경로를 남길 수 있지만, <code>k</code>가 너무 작으면 네트워크가 끊길 수 있습니다.</li>
+              <li><b>Hub</b>: 허브(왕성/산성/봉수 등)를 지정하면 비허브는 가장 ‘비용이 작은 허브’로 연결됩니다.
+              가정한 위계가 있을 때 해석이 쉽고, “허브들끼리 MST” 옵션으로 허브 간 골격도 함께 만들 수 있습니다.</li>
+              <li><b>A+B+C(All)</b>: 동일한 비용모델/파라미터로 MST/k-NN/Hub를 한 번에 생성해 결과를 바로 비교합니다.</li>
+            </ul>
+            """
+
+            params = """
+            <h3>3) 파라미터를 어떻게 잡나</h3>
+            <ul>
+              <li><code>후보 간선(k)</code>: 클수록 MST가 끊길 위험이 줄고 정확도가 올라가지만 계산이 느려집니다.</li>
+              <li><code>경로 버퍼(m)</code>: 0이면 DEM 전체에서 경로를 찾습니다(매우 느림). 너무 작으면 실제 우회로가 잘려 경로가 실패할 수 있습니다.</li>
+              <li><code>대각 이동</code>: 8방향 이동은 더 자연스러운 경로가 나올 수 있지만, 4방향보다 계산이 늘 수 있습니다.</li>
+              <li><code>MST 대칭화</code>: 경사 기반 비용은 A→B와 B→A가 다를 수 있어, MST는 ‘대칭 비용’이 필요합니다(평균/최소/최대).</li>
+            </ul>
+            """
+
+            sna = """
+            <h3>4) SNA 지표(노드 속성) 읽는 법</h3>
+            <p>SNA는 “선 몇 개”가 아니라 각 유적의 역할을 수치로 보여줍니다.
+            이 값들은 <b>선택한 네트워크 방식</b>(MST/k-NN/Hub)에 따라 달라집니다.</p>
+            <ul>
+              <li><code>degree</code>: 연결 수(많을수록 허브 후보).</li>
+              <li><code>component</code>/<code>comp_size</code>: 끊긴 덩어리(컴포넌트)와 그 크기.
+              컴포넌트가 많으면 <code>후보 k</code> 또는 <code>버퍼</code>를 늘려보세요.</li>
+              <li><code>closeness</code>(선택): 다른 노드까지의 “최단 비용 합”이 작을수록 큽니다(느릴 수 있음).</li>
+              <li><code>betweenness</code>(선택): 다른 노드 쌍의 최단 비용 경로를 “중개”하는 정도(매우 느릴 수 있음).</li>
+            </ul>
+            """
+
+            tips = """
+            <h3>5) 연구 팁(유형/위계)</h3>
+            <p>예: 왕성/빈전/고분군처럼 위계가 다른 폴리곤이 섞여 있다면,</p>
+            <ul>
+              <li>‘선택된 피처만’으로 조합을 바꿔 여러 번 실행하면 비교가 쉽습니다(왕성↔빈전, 빈전↔고분군 등).</li>
+              <li>또는 Hub 방식으로 “왕성”을 허브로 지정해 ‘중심-주변’ 가정을 시험할 수 있습니다.</li>
+            </ul>
+            """
+
+            limits = """
+            <h3>6) 한계와 주의</h3>
+            <ul>
+              <li>이 도구는 기본적으로 <b>DEM 경사</b>만 반영합니다. 도로/하천/토지피복/행정경계 같은 제약은 별도 입력이 없으면 고려되지 않습니다.</li>
+              <li>에너지(kcal) 모드는 Pandolf 모델에서 의미가 있으며, 모델/파라미터 설정에 따라 값이 크게 달라질 수 있습니다.</li>
+              <li>큰 데이터(예: 200개+)는 후보 k/버퍼 조절이 중요하며, SNA의 느린 지표는 자동 생략될 수 있습니다.</li>
+            </ul>
+            """
+
+            refs = """
+            <h3>참고(요약)</h3>
+            <ul>
+              <li>MST: Kruskal(1956), Prim(1957)</li>
+              <li>보행/비용모델: Tobler(1993), Naismith(1892), Conolly &amp; Lake(2006), Pandolf et al.(1977)</li>
+              <li>SNA: Freeman(1979), Wasserman &amp; Faust(1994), Brandes(2001)</li>
+            </ul>
+            <p style='color:#444'>전체 참고문헌: <code>REFERENCES.md</code></p>
+            """
 
         return (
             "<html><head><meta charset='utf-8'></head><body style='font-family:Sans-Serif;'>"
@@ -2017,7 +2236,7 @@ MST/k-NN/Hub 네트워크를 생성합니다.
 
             dlg = QtWidgets.QDialog(self)
             dlg.setAttribute(Qt.WA_DeleteOnClose, True)
-            dlg.setWindowTitle("해석 가이드 (Least-cost Network)")
+            dlg.setWindowTitle("Interpretation Guide (Least-cost Network)" if is_english_ui() else "해석 가이드 (Least-cost Network)")
             dlg.resize(560, 520)
 
             layout = QtWidgets.QVBoxLayout(dlg)
@@ -2027,8 +2246,8 @@ MST/k-NN/Hub 네트워크를 생성합니다.
             layout.addWidget(browser)
 
             row = QtWidgets.QHBoxLayout()
-            btn_copy = QtWidgets.QPushButton("복사", dlg)
-            btn_close = QtWidgets.QPushButton("닫기", dlg)
+            btn_copy = QtWidgets.QPushButton("Copy" if is_english_ui() else "복사", dlg)
+            btn_close = QtWidgets.QPushButton("Close" if is_english_ui() else "닫기", dlg)
             row.addStretch(1)
             row.addWidget(btn_copy)
             row.addWidget(btn_close)
@@ -2106,8 +2325,8 @@ MST/k-NN/Hub 네트워크를 생성합니다.
                     pass
             combo.blockSignals(False)
 
-        fill_combo(self.cmbNameField, True, "(피처 ID 사용)")
-        fill_combo(self.cmbHubField, True, "(허브 사용 안 함)")
+        fill_combo(self.cmbNameField, True, "(Use feature ID)" if is_english_ui() else "(피처 ID 사용)")
+        fill_combo(self.cmbHubField, True, "(Do not use hubs)" if is_english_ui() else "(허브 사용 안 함)")
 
     def _set_running_ui(self, running: bool):
         self.btnRun.setEnabled(not running)
@@ -2696,6 +2915,7 @@ class _ValuePickerDialog(QtWidgets.QDialog):
 
         for v in values:
             item = QtWidgets.QListWidgetItem(str(v))
+            item.setData(Qt.UserRole, str(v))
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
             item.setCheckState(Qt.Checked if str(v) in selected else Qt.Unchecked)
             self.listWidget.addItem(item)
@@ -2715,7 +2935,8 @@ class _ValuePickerDialog(QtWidgets.QDialog):
             t = (text or "").strip().lower()
             for i in range(self.listWidget.count()):
                 it = self.listWidget.item(i)
-                it.setHidden(bool(t) and t not in it.text().lower())
+                source = str(it.data(Qt.UserRole) or it.text() or "").lower()
+                it.setHidden(bool(t) and t not in source)
 
         self.txtFilter.textChanged.connect(apply_filter)
         btn_all.clicked.connect(lambda: self._set_all(True))
@@ -2735,5 +2956,5 @@ class _ValuePickerDialog(QtWidgets.QDialog):
         for i in range(self.listWidget.count()):
             it = self.listWidget.item(i)
             if it.checkState() == Qt.Checked:
-                out.append(it.text())
+                out.append(str(it.data(Qt.UserRole) or it.text() or ""))
         return out

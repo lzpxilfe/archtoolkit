@@ -25,7 +25,7 @@ from typing import Iterable, List, Optional, Tuple
 
 from qgis.PyQt import QtWidgets
 from qgis.PyQt.QtCore import Qt, QVariant
-from qgis.PyQt.QtGui import QColor, QIcon
+from qgis.PyQt.QtGui import QIcon
 from qgis.core import (
     Qgis,
     QgsCoordinateTransform,
@@ -43,6 +43,7 @@ from qgis.core import (
 from qgis.gui import QgsMapLayerComboBox
 
 from .config import get_output_group_name
+from .i18n import apply_language, is_english_ui
 from .live_log_dialog import ensure_live_log_dialog
 from .utils import log_message, push_message, restore_ui_focus
 from .utils import set_archtoolkit_layer_metadata
@@ -108,7 +109,8 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
         self._setup_ui()
 
     def _setup_ui(self):
-        self.setWindowTitle("지적도 중첩 면적표 (Cadastral Overlap) - ArchToolkit")
+        use_en = is_english_ui()
+        self.setWindowTitle("Cadastral Overlap - ArchToolkit" if use_en else "지적도 중첩 면적표 (Cadastral Overlap) - ArchToolkit")
         try:
             plugin_dir = os.path.dirname(os.path.dirname(__file__))
             icon_path = None
@@ -125,24 +127,42 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
         layout = QtWidgets.QVBoxLayout(self)
 
         header = QtWidgets.QLabel(
-            "<b>지적도 중첩 면적표</b><br>"
-            "조사지역 폴리곤이 지적도(필지) 폴리곤을 어느 면적만큼 포함하는지 계산하여<br>"
-            "클립(모자이크) 레이어 + 속성테이블(면적/비율)을 생성합니다."
+            (
+                "<b>Cadastral Overlap</b><br>"
+                "Calculates how much of each cadastral parcel is included inside the AOI polygon<br>"
+                "and creates a clipped overlap layer with area and percentage fields."
+            )
+            if use_en
+            else
+            (
+                "<b>지적도 중첩 면적표</b><br>"
+                "조사지역 폴리곤이 지적도(필지) 폴리곤을 어느 면적만큼 포함하는지 계산하여<br>"
+                "클립(모자이크) 레이어 + 속성테이블(면적/비율)을 생성합니다."
+            )
         )
         header.setWordWrap(True)
         header.setStyleSheet("background:#e8f5e9; padding:10px; border:1px solid #c8e6c9; border-radius:4px;")
         layout.addWidget(header)
 
         notice = QtWidgets.QLabel(
-            "<b>주의</b>: 연속지적도/공간정보 데이터는 <b>참고용</b>입니다.<br>"
-            "법적 효력이 필요하거나 경계/면적이 중요한 경우, 관할 <b>시·군·구청(시청/구청)</b>에서 "
-            "발급받은 지적도/토지(임야)대장 등 <b>공식 자료</b>를 반드시 확인하세요."
+            (
+                "<b>Note</b>: cadastral / spatial-information data should be treated as <b>reference material</b>.<br>"
+                "If legal validity or exact boundary / area confirmation is required, verify the result with "
+                "<b>official cadastral records</b> issued by the relevant local authority."
+            )
+            if use_en
+            else
+            (
+                "<b>주의</b>: 연속지적도/공간정보 데이터는 <b>참고용</b>입니다.<br>"
+                "법적 효력이 필요하거나 경계/면적이 중요한 경우, 관할 <b>시·군·구청(시청/구청)</b>에서 "
+                "발급받은 지적도/토지(임야)대장 등 <b>공식 자료</b>를 반드시 확인하세요."
+            )
         )
         notice.setWordWrap(True)
         notice.setStyleSheet("background:#fff3e0; padding:10px; border:1px solid #ffe0b2; border-radius:4px; color:#e65100;")
         layout.addWidget(notice)
 
-        grp = QtWidgets.QGroupBox("1. 입력 레이어")
+        grp = QtWidgets.QGroupBox("1. Input Layers" if use_en else "1. 입력 레이어")
         form = QtWidgets.QFormLayout(grp)
 
         self.cmbCadastral = QgsMapLayerComboBox(grp)
@@ -155,24 +175,26 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
         self.cmbSurvey = QgsMapLayerComboBox(grp)
         self.cmbSurvey.setFilters(poly_filter)
 
-        self.chkCadastralSelected = QtWidgets.QCheckBox("지적도: 선택 피처만 사용")
-        self.chkSurveySelected = QtWidgets.QCheckBox("조사지역: 선택 피처만 사용")
+        self.chkCadastralSelected = QtWidgets.QCheckBox("Cadastral: Use Selected Features Only" if use_en else "지적도: 선택 피처만 사용")
+        self.chkSurveySelected = QtWidgets.QCheckBox("AOI: Use Selected Features Only" if use_en else "조사지역: 선택 피처만 사용")
         self.chkSurveySelected.setChecked(True)
-        self.chkSplitBySurveyFeature = QtWidgets.QCheckBox("조사지역 피처별로 결과 레이어 분리")
+        self.chkSplitBySurveyFeature = QtWidgets.QCheckBox(
+            "Create Separate Result Layers per AOI Feature" if use_en else "조사지역 피처별로 결과 레이어 분리"
+        )
         self.chkSplitBySurveyFeature.setChecked(False)
 
-        form.addRow("지적도(필지) 레이어", self.cmbCadastral)
+        form.addRow("Cadastral Parcel Layer" if use_en else "지적도(필지) 레이어", self.cmbCadastral)
         form.addRow("", self.chkCadastralSelected)
-        form.addRow("조사지역 레이어", self.cmbSurvey)
+        form.addRow("AOI Layer" if use_en else "조사지역 레이어", self.cmbSurvey)
         form.addRow("", self.chkSurveySelected)
         form.addRow("", self.chkSplitBySurveyFeature)
         layout.addWidget(grp)
 
         btn_row = QtWidgets.QHBoxLayout()
         btn_row.addStretch(1)
-        self.btnRun = QtWidgets.QPushButton("실행")
-        self.btnHelp = QtWidgets.QPushButton("도움말")
-        self.btnClose = QtWidgets.QPushButton("닫기")
+        self.btnRun = QtWidgets.QPushButton("Run" if use_en else "실행")
+        self.btnHelp = QtWidgets.QPushButton("Help" if use_en else "도움말")
+        self.btnClose = QtWidgets.QPushButton("Close" if use_en else "닫기")
         btn_row.addWidget(self.btnRun)
         btn_row.addWidget(self.btnHelp)
         btn_row.addWidget(self.btnClose)
@@ -183,17 +205,71 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
         self.btnHelp.clicked.connect(self._on_help)
 
         # Tooltips (compact UI, detailed info on hover)
-        self.cmbCadastral.setToolTip("조사 범위와 겹치는 지적도(필지) 폴리곤 레이어를 선택하세요.")
-        self.cmbSurvey.setToolTip("조사 범위를 나타내는 폴리곤 레이어를 선택하세요. 여러 피처면 합집합으로 처리합니다.")
-        self.chkCadastralSelected.setToolTip("체크하면 지적도 레이어에서 선택한 피처만 대상으로 계산합니다.")
-        self.chkSurveySelected.setToolTip("체크하면 조사지역 레이어에서 선택한 피처만 합집합(AOI)으로 사용합니다.")
-        self.chkSplitBySurveyFeature.setToolTip(
-            "조사지역 레이어에 폴리곤 피처가 여러 개라면, 피처(폴리곤)마다 결과 레이어를 따로 생성합니다.\n"
-            "해당 폴리곤별로 속성테이블을 분리해서 보고 싶을 때 사용하세요."
+        self.cmbCadastral.setToolTip(
+            "Select the cadastral parcel polygon layer that overlaps the study area."
+            if use_en
+            else "조사 범위와 겹치는 지적도(필지) 폴리곤 레이어를 선택하세요."
         )
+        self.cmbSurvey.setToolTip(
+            "Select the polygon layer representing the study area. Multiple features are merged into one AOI."
+            if use_en
+            else "조사 범위를 나타내는 폴리곤 레이어를 선택하세요. 여러 피처면 합집합으로 처리합니다."
+        )
+        self.chkCadastralSelected.setToolTip(
+            "If checked, only selected parcel features are used."
+            if use_en
+            else "체크하면 지적도 레이어에서 선택한 피처만 대상으로 계산합니다."
+        )
+        self.chkSurveySelected.setToolTip(
+            "If checked, only selected AOI features are used to build the merged AOI geometry."
+            if use_en
+            else "체크하면 조사지역 레이어에서 선택한 피처만 합집합(AOI)으로 사용합니다."
+        )
+        self.chkSplitBySurveyFeature.setToolTip(
+            (
+                "If the AOI layer contains multiple polygon features, create a separate result layer for each polygon.\n"
+                "Use this when you want a separate attribute table for each AOI polygon."
+            )
+            if use_en
+            else
+            (
+                "조사지역 레이어에 폴리곤 피처가 여러 개라면, 피처(폴리곤)마다 결과 레이어를 따로 생성합니다.\n"
+                "해당 폴리곤별로 속성테이블을 분리해서 보고 싶을 때 사용하세요."
+            )
+        )
+        apply_language(self)
 
     def _on_help(self):
-        html = """
+        if is_english_ui():
+            html = """
+<h3>Cadastral Overlap Help</h3>
+<p>
+Calculates the intersection area between an AOI polygon and cadastral parcel polygons,
+then creates a result layer that stores parcel area, area inside the AOI, and inclusion ratio (%).
+</p>
+
+<h4>Inputs</h4>
+<ul>
+  <li><b>Cadastral Parcel Layer</b>: polygon</li>
+  <li><b>AOI Layer</b>: polygon</li>
+</ul>
+
+<h4>Output Fields</h4>
+<ul>
+  <li><code>parcel_m2</code>: full parcel area (sqm)</li>
+  <li><code>in_aoi_m2</code>: area inside the AOI (sqm)</li>
+  <li><code>in_aoi_pct</code>: inclusion ratio (%)</li>
+</ul>
+
+<h4>Notes</h4>
+<ul>
+  <li>Cadastral / spatial data should be used as reference. For legally binding confirmation, verify the result with official cadastral records.</li>
+  <li>Area values depend on CRS and units. A projected CRS in meters is recommended whenever possible.</li>
+</ul>
+"""
+            title = "Cadastral Overlap Help"
+        else:
+            html = """
 <h3>지적도 중첩 면적표(Cadastral Overlap) 도움말</h3>
 <p>
 조사지역(AOI)과 지적도(필지) 폴리곤의 교차 면적을 계산해,
@@ -219,9 +295,10 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
   <li>면적 계산은 CRS/단위에 영향받습니다(가능하면 미터 단위 투영좌표계 권장).</li>
 </ul>
 """
+            title = "Cadastral Overlap 도움말"
         try:
             plugin_dir = os.path.dirname(os.path.dirname(__file__))
-            show_help_dialog(parent=self, title="Cadastral Overlap 도움말", html=html, plugin_dir=plugin_dir)
+            show_help_dialog(parent=self, title=title, html=html, plugin_dir=plugin_dir)
         except Exception:
             pass
 
@@ -267,10 +344,11 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
                 return 0.0
 
     def run(self):
-        cad = self._validate_layer(self.cmbCadastral.currentLayer(), name="지적도")
+        use_en = is_english_ui()
+        cad = self._validate_layer(self.cmbCadastral.currentLayer(), name="Cadastral" if use_en else "지적도")
         if cad is None:
             return
-        survey = self._validate_layer(self.cmbSurvey.currentLayer(), name="조사지역")
+        survey = self._validate_layer(self.cmbSurvey.currentLayer(), name="AOI" if use_en else "조사지역")
         if survey is None:
             return
 
@@ -313,9 +391,14 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
                     if idx >= 0:
                         out.setFieldAlias(idx, alias)
 
-                _set_alias("parcel_m2", "필지면적(㎡)")
-                _set_alias("in_aoi_m2", "조사지역 포함면적(㎡)")
-                _set_alias("in_aoi_pct", "포함비율(%)")
+                if use_en:
+                    _set_alias("parcel_m2", "Parcel Area (sqm)")
+                    _set_alias("in_aoi_m2", "Area Inside AOI (sqm)")
+                    _set_alias("in_aoi_pct", "Inclusion Ratio (%)")
+                else:
+                    _set_alias("parcel_m2", "필지면적(㎡)")
+                    _set_alias("in_aoi_m2", "조사지역 포함면적(㎡)")
+                    _set_alias("in_aoi_pct", "포함비율(%)")
             except Exception:
                 pass
             return out
@@ -339,7 +422,7 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
             pass
 
         run_id = uuid.uuid4().hex[:6]
-        run_group_name = f"지적중첩_{run_id}"
+        run_group_name = f"Cadastral_Overlap_{run_id}" if use_en else f"지적중첩_{run_id}"
         run_group = None
 
         def ensure_run_group():
@@ -386,7 +469,12 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
                         aoi_items.append((0, g))
 
             if not aoi_items:
-                push_message(self.iface, "오류", "조사지역(폴리곤)에서 유효한 지오메트리를 찾지 못했습니다.", level=2)
+                push_message(
+                    self.iface,
+                    "Error" if use_en else "오류",
+                    "No valid geometry was found in the AOI polygon layer." if use_en else "조사지역(폴리곤)에서 유효한 지오메트리를 찾지 못했습니다.",
+                    level=2,
+                )
                 restore_ui_focus(self)
                 return
 
@@ -396,7 +484,11 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
             )
 
             progress = QtWidgets.QProgressDialog(
-                "조사지역 피처별 지적도 중첩 면적 계산 중...", "취소", 0, len(aoi_items), self
+                "Calculating cadastral overlap for each AOI feature..." if use_en else "조사지역 피처별 지적도 중첩 면적 계산 중...",
+                "Cancel" if use_en else "취소",
+                0,
+                len(aoi_items),
+                self,
             )
             progress.setWindowModality(Qt.WindowModal)
             progress.show()
@@ -408,13 +500,22 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
 
             for idx, (aoi_fid, aoi_geom) in enumerate(aoi_items):
                 if progress.wasCanceled():
-                    push_message(self.iface, "취소", "중첩 계산이 취소되었습니다.", level=1, duration=4)
+                    push_message(
+                        self.iface,
+                        "Cancelled" if use_en else "취소",
+                        "Overlap calculation was cancelled." if use_en else "중첩 계산이 취소되었습니다.",
+                        level=1,
+                        duration=4,
+                    )
                     restore_ui_focus(self)
                     return
 
                 progress.setValue(idx)
                 try:
-                    progress.setLabelText(f"조사지역 {idx+1}/{len(aoi_items)} 처리 중... (fid={aoi_fid})")
+                    if use_en:
+                        progress.setLabelText(f"Processing AOI {idx + 1}/{len(aoi_items)}... (fid={aoi_fid})")
+                    else:
+                        progress.setLabelText(f"조사지역 {idx+1}/{len(aoi_items)} 처리 중... (fid={aoi_fid})")
                 except Exception:
                     pass
                 QtWidgets.QApplication.processEvents()
@@ -467,7 +568,13 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
 
                 for i, f in enumerate(feats):
                     if progress.wasCanceled():
-                        push_message(self.iface, "취소", "중첩 계산이 취소되었습니다.", level=1, duration=4)
+                        push_message(
+                            self.iface,
+                            "Cancelled" if use_en else "취소",
+                            "Overlap calculation was cancelled." if use_en else "중첩 계산이 취소되었습니다.",
+                            level=1,
+                            duration=4,
+                        )
                         restore_ui_focus(self)
                         return
                     if i % 200 == 0:
@@ -539,10 +646,13 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
             progress.setValue(len(aoi_items))
             QtWidgets.QApplication.processEvents()
 
-            msg = f"완료: {created_layers}개 레이어 생성, 포함면적 합 {total_in_m2:,.2f} ㎡"
+            if use_en:
+                msg = f"Done: created {created_layers} layer(s), total overlap area {total_in_m2:,.2f} sqm"
+            else:
+                msg = f"완료: {created_layers}개 레이어 생성, 포함면적 합 {total_in_m2:,.2f} ㎡"
             if empty_aois > 0:
-                msg += f"  (겹침 없음 {empty_aois}개)"
-            push_message(self.iface, "지적도 중첩 면적표", msg, level=0, duration=7)
+                msg += f"  ({empty_aois} AOI(s) without overlap)" if use_en else f"  (겹침 없음 {empty_aois}개)"
+            push_message(self.iface, "Cadastral Overlap" if use_en else "지적도 중첩 면적표", msg, level=0, duration=7)
             log_message(f"CadastralOverlap: done split-by-feature ({msg})", level=Qgis.Info)
             self.accept()
             return
@@ -551,7 +661,12 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
         survey_geoms = _iter_layer_geoms(survey, selected_only=survey_sel)
         aoi = _unary_union(survey_geoms)
         if aoi is None or aoi.isEmpty():
-            push_message(self.iface, "오류", "조사지역(폴리곤)에서 유효한 지오메트리를 찾지 못했습니다.", level=2)
+            push_message(
+                self.iface,
+                "Error" if use_en else "오류",
+                "No valid geometry was found in the AOI polygon layer." if use_en else "조사지역(폴리곤)에서 유효한 지오메트리를 찾지 못했습니다.",
+                level=2,
+            )
             restore_ui_focus(self)
             return
         aoi = _safe_make_valid(aoi)
@@ -594,7 +709,13 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
             level=Qgis.Info,
         )
 
-        progress = QtWidgets.QProgressDialog("지적도 중첩 면적 계산 중...", "취소", 0, max(1, total), self)
+        progress = QtWidgets.QProgressDialog(
+            "Calculating cadastral overlap..." if use_en else "지적도 중첩 면적 계산 중...",
+            "Cancel" if use_en else "취소",
+            0,
+            max(1, total),
+            self,
+        )
         progress.setWindowModality(Qt.WindowModal)
         progress.show()
         QtWidgets.QApplication.processEvents()
@@ -619,7 +740,13 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
 
         for i, f in enumerate(feats):
             if progress.wasCanceled():
-                push_message(self.iface, "취소", "중첩 계산이 취소되었습니다.", level=1, duration=4)
+                push_message(
+                    self.iface,
+                    "Cancelled" if use_en else "취소",
+                    "Overlap calculation was cancelled." if use_en else "중첩 계산이 취소되었습니다.",
+                    level=1,
+                    duration=4,
+                )
                 restore_ui_focus(self)
                 return
             if i % 50 == 0:
@@ -676,7 +803,13 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
         QtWidgets.QApplication.processEvents()
 
         if not out_feats:
-            push_message(self.iface, "결과 없음", "조사지역과 겹치는 지적도 피처를 찾지 못했습니다.", level=1, duration=5)
+            push_message(
+                self.iface,
+                "No Results" if use_en else "결과 없음",
+                "No cadastral features overlap the AOI." if use_en else "조사지역과 겹치는 지적도 피처를 찾지 못했습니다.",
+                level=1,
+                duration=5,
+            )
             restore_ui_focus(self)
             return
 
@@ -686,9 +819,16 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
         project.addMapLayer(out, False)
         ensure_run_group().addLayer(out)
 
-        msg = f"완료: {kept}개 필지, 포함면적 합 {sum_in:,.2f} ㎡"
+        if use_en:
+            msg = f"Done: {kept} parcel(s), total overlap area {sum_in:,.2f} sqm"
+        else:
+            msg = f"완료: {kept}개 필지, 포함면적 합 {sum_in:,.2f} ㎡"
         if aoi_area_m2 > 0.0:
-            msg += f"  (AOI {aoi_area_m2:,.2f} ㎡ 대비 {sum_in / aoi_area_m2 * 100.0:.1f}%)"
-        push_message(self.iface, "지적도 중첩 면적표", msg, level=0, duration=7)
+            msg += (
+                f"  ({sum_in / aoi_area_m2 * 100.0:.1f}% of AOI {aoi_area_m2:,.2f} sqm)"
+                if use_en
+                else f"  (AOI {aoi_area_m2:,.2f} ㎡ 대비 {sum_in / aoi_area_m2 * 100.0:.1f}%)"
+            )
+        push_message(self.iface, "Cadastral Overlap" if use_en else "지적도 중첩 면적표", msg, level=0, duration=7)
         log_message(f"CadastralOverlap: done ({msg})", level=Qgis.Info)
         self.accept()

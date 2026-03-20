@@ -15,6 +15,8 @@ from qgis.core import (
     Qgis,
 )
 
+from .i18n import tr
+
 _UI_LOG_QUEUE_MAX = 5000
 _ui_log_queue = queue.Queue(maxsize=_UI_LOG_QUEUE_MAX)
 _ui_log_timer = None
@@ -134,6 +136,7 @@ def open_gdal_dataset_from_qgis_source(source: str, *, access=None):
 
     return None, (normalized or source0)
 
+
 def cleanup_files(file_paths):
     """Safely remove a list of file paths"""
     for path in file_paths:
@@ -142,6 +145,7 @@ def cleanup_files(file_paths):
                 os.remove(path)
             except Exception:
                 pass
+
 
 def _log_file_path():
     """Return a writable log file path (best-effort)."""
@@ -353,12 +357,14 @@ def log_exception(context: str, exc: Exception = None, level=Qgis.Critical):
     except Exception:
         pass
 
+
 def is_metric_crs(crs):
     """Return True if CRS map units are meters (recommended for distance-based tools)."""
     try:
         return (not crs.isGeographic()) and crs.mapUnits() == QgsUnitTypes.DistanceMeters
     except Exception:
         return False
+
 
 def restore_ui_focus(dialog):
     """Ensure the dialog is visible and has focus"""
@@ -377,15 +383,18 @@ def restore_ui_focus(dialog):
     except Exception:
         pass
 
+
 def push_message(iface, title, text, level=0, duration=3):
     """Helper to push message to QGIS message bar"""
+    title_text = tr(title)
+    body_text = tr(text)
     try:
         lvl = Qgis.Info
         if level == 1:
             lvl = Qgis.Warning
         elif level == 2:
             lvl = Qgis.Critical
-        log_message(f"{title}: {text}", level=lvl)
+        log_message(f"{title_text}: {body_text}", level=lvl)
     except Exception:
         pass
     try:
@@ -394,11 +403,11 @@ def push_message(iface, title, text, level=0, duration=3):
         mb = iface.messageBar()
         if mb is None:
             return
-        mb.pushMessage(title, text, level=level, duration=duration)
+        mb.pushMessage(title_text, body_text, level=level, duration=duration)
     except Exception:
         # Never crash due to message bar errors
         try:
-            log_message(f"(messageBar failed) {title}: {text}", level=Qgis.Warning)
+            log_message(f"(messageBar failed) {title_text}: {body_text}", level=Qgis.Warning)
         except Exception:
             pass
 

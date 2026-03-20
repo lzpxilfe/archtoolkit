@@ -40,6 +40,7 @@ from qgis.core import (
 )
 
 from .config import is_archtoolkit_group_name
+from .i18n import is_english_ui, tr
 from .utils import get_archtoolkit_layer_metadata, is_metric_crs, log_message, open_gdal_dataset_from_qgis_source
 
 
@@ -180,17 +181,17 @@ def _tool_analysis_label(tool_id: str) -> str:
     key = str(tool_id or "").strip()
     if not key:
         return ""
-    return _TOOL_ANALYSIS_LABELS.get(key, key.replace("_", " ").strip())
+    return tr(_TOOL_ANALYSIS_LABELS.get(key, key.replace("_", " ").strip()))
 
 
 def _tool_result_label(tool_id: str, kind: str) -> str:
     key = (str(tool_id or "").strip(), str(kind or "").strip())
     if key in _TOOL_KIND_LABELS:
-        return _TOOL_KIND_LABELS[key]
+        return tr(_TOOL_KIND_LABELS[key])
     kind0 = key[1]
     if not kind0:
-        return "분석 결과"
-    return kind0.replace("_", " ").strip()
+        return tr("분석 결과")
+    return tr(kind0.replace("_", " ").strip())
 
 
 def _numeric_field_mean(stats: Dict[str, Any], field_name: str) -> Optional[float]:
@@ -215,25 +216,25 @@ def _describe_param_value(key: str, value: Any) -> Optional[str]:
         return None
     try:
         if isinstance(value, bool):
-            return f"{label}: {'예' if value else '아니오'}"
+            return f"{tr(label)}: {tr('예' if value else '아니오')}"
         if isinstance(value, (int, float)) and math.isfinite(float(value)):
             unit = ""
             if key0.endswith("_m"):
                 unit = " m"
             elif key0.endswith("_pct"):
                 unit = " %"
-            return f"{label}: {_fmt_number_text(value)}{unit}"
+            return f"{tr(label)}: {_fmt_number_text(value)}{unit}"
         if isinstance(value, list):
             if key0 == "criteria":
-                return f"기준 수: {len(value)}개"
+                return tr("기준 수: {count}개", count=len(value))
             preview = ", ".join(str(v) for v in value[:4])
             if preview:
-                return f"{label}: {preview}"
+                return f"{tr(label)}: {preview}"
             return None
         text = str(value).strip()
         if not text:
             return None
-        return f"{label}: {text}"
+        return f"{tr(label)}: {text}"
     except Exception:
         return None
 
@@ -254,7 +255,10 @@ def _interpret_archtoolkit_layer(item: Dict[str, Any]) -> Dict[str, Any]:
 
     analysis = _tool_analysis_label(tool_id)
     result_label = _tool_result_label(tool_id, kind)
-    summary = f"{analysis}의 {result_label}입니다." if analysis else f"{result_label}입니다."
+    if is_english_ui():
+        summary = f"{result_label} from {analysis}." if analysis else f"{result_label}."
+    else:
+        summary = f"{analysis}의 {result_label}입니다." if analysis else f"{result_label}입니다."
 
     notes: List[str] = []
     for key in (
@@ -281,33 +285,41 @@ def _interpret_archtoolkit_layer(item: Dict[str, Any]) -> Dict[str, Any]:
     if tool_id == "ahp_suitability":
         criteria = params.get("criteria") or []
         if isinstance(criteria, list) and criteria:
-            notes.append(f"기준 수: {len(criteria)}개")
+            notes.append(tr("기준 수: {count}개", count=len(criteria)))
         cr_value = params.get("consistency_ratio")
         if cr_value is not None:
-            notes.append(f"일관성비율(CR): {_fmt_number_text(cr_value, digits=3)}")
+            notes.append(tr("일관성비율(CR): {value}", value=_fmt_number_text(cr_value, digits=3)))
         method = params.get("suitability_method")
         if method:
-            notes.append(f"합성 방식: {str(method).replace('_', ' ')}")
+            notes.append(tr("합성 방식: {method}", method=str(method).replace('_', ' ')))
 
     metrics: List[str] = []
     if item.get("type") == "vector":
         features = stats.get("features")
         if features:
-            metrics.append(f"겹치는 피처 {int(features):,}개")
+            metrics.append(tr("겹치는 피처 {count}개", count=f"{int(features):,}"))
         if "total_length_m" in stats:
-            metrics.append(f"총 길이 {_fmt_number_text(stats.get('total_length_m'))} m")
+            metrics.append(tr("총 길이 {value} m", value=_fmt_number_text(stats.get('total_length_m'))))
         if "total_area_m2" in stats:
-            metrics.append(f"총 면적 {_fmt_number_text(stats.get('total_area_m2'))} ㎡")
+            metrics.append(tr("총 면적 {value} ㎡", value=_fmt_number_text(stats.get('total_area_m2'))))
     elif item.get("type") == "raster":
         if stats.get("count"):
-            metrics.append(
-                "래스터 값 min/mean/max = "
-                f"{_fmt_number_text(stats.get('min'), digits=3)} / "
-                f"{_fmt_number_text(stats.get('mean'), digits=3)} / "
-                f"{_fmt_number_text(stats.get('max'), digits=3)}"
-            )
+            if is_english_ui():
+                metrics.append(
+                    "Raster value min/mean/max = "
+                    f"{_fmt_number_text(stats.get('min'), digits=3)} / "
+                    f"{_fmt_number_text(stats.get('mean'), digits=3)} / "
+                    f"{_fmt_number_text(stats.get('max'), digits=3)}"
+                )
+            else:
+                metrics.append(
+                    "래스터 값 min/mean/max = "
+                    f"{_fmt_number_text(stats.get('min'), digits=3)} / "
+                    f"{_fmt_number_text(stats.get('mean'), digits=3)} / "
+                    f"{_fmt_number_text(stats.get('max'), digits=3)}"
+                )
         if "gt_0_5_pct" in stats:
-            metrics.append(f"0.5 초과 비율 {_fmt_number_text(stats.get('gt_0_5_pct'))} %")
+            metrics.append(tr("0.5 초과 비율 {value} %", value=_fmt_number_text(stats.get('gt_0_5_pct'))))
 
     special_fields = (
         ("vis_pct", "가시비율"),
@@ -333,7 +345,7 @@ def _interpret_archtoolkit_layer(item: Dict[str, Any]) -> Dict[str, Any]:
             suffix = " min"
         elif field_name == "energy_kcal":
             suffix = " kcal"
-        metrics.append(f"{label} 평균 {_fmt_number_text(mean_value)}{suffix}")
+        metrics.append(tr("{label} 평균 {value}{suffix}", label=tr(label), value=_fmt_number_text(mean_value), suffix=suffix))
 
     top_values = stats.get("top_values") or []
     top_field = str(stats.get("top_field") or "").strip()
@@ -344,7 +356,7 @@ def _interpret_archtoolkit_layer(item: Dict[str, Any]) -> Dict[str, Any]:
             if isinstance(d, dict)
         )
         if preview:
-            metrics.append(f"{top_field} 상위값: {preview}")
+            metrics.append(tr("{field} 상위값: {preview}", field=top_field, preview=preview))
 
     out = {
         "analysis": analysis,
@@ -398,7 +410,7 @@ def _summarize_archtoolkit_runs(items: List[Dict[str, Any]]) -> List[Dict[str, A
         analysis = str(bucket.get("analysis") or "").strip()
         results = list(bucket.get("result_labels") or [])
         layer_names = list(bucket.get("layer_names") or [])
-        summary = f"{analysis} 실행 묶음"
+        summary = f"{analysis} run group" if is_english_ui() else f"{analysis} 실행 묶음"
         if results:
             summary += f" ({', '.join(results[:3])})"
         out.append(
