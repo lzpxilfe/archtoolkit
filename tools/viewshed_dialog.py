@@ -34,7 +34,7 @@ from qgis.core import (
     QgsTextAnnotation, Qgis, QgsUnitTypes
 )
 from qgis.gui import QgsMapToolEmitPoint, QgsRubberBand, QgsSnapIndicator, QgsMapCanvasAnnotationItem
-from qgis.PyQt.QtGui import QTextDocument
+from qgis.PyQt.QtGui import QTextDocument, QTextOption
 
 from .utils import (
     cleanup_files,
@@ -472,7 +472,9 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             if k > 0:
                 d_for_1m = math.sqrt((2.0 * r_earth * 1.0) / k)
                 d_for_5m = math.sqrt((2.0 * r_earth * 5.0) / k)
-                ref_meaning_text = f"굴절 보정(=곡률 낙하 차이) 1m~{d_for_1m/1000:.1f}km, 5m~{d_for_5m/1000:.1f}km"
+                d_for_1m_km = d_for_1m / 1000
+                d_for_5m_km = d_for_5m / 1000
+                ref_meaning_text = f"굴절 보정(=곡률 낙하 차이) 1m~{d_for_1m_km:.1f}km, 5m~{d_for_5m_km:.1f}km"
             else:
                 ref_meaning_text = "k=0이면 굴절 효과 없음"
 
@@ -523,6 +525,10 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
 
             text = QtWidgets.QTextBrowser(dlg)
             text.setOpenExternalLinks(True)
+            text.setLineWrapMode(QtWidgets.QTextEdit.NoWrap)
+            text.setWordWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
+            text.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+            text.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
             text.setHtml(html)
             layout.addWidget(text)
 
@@ -875,11 +881,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             is_multi = self.radioMultiPoint.isChecked()
             from_layer = self.radioFromLayer.isChecked()
             obs_layer = self.cmbObserverLayer.currentLayer() if from_layer else None
-            is_poly = bool(
-                obs_layer
-                and hasattr(obs_layer, "geometryType")
-                and obs_layer.geometryType() == QgsWkbTypes.PolygonGeometry
-            )
+            is_poly = bool(obs_layer and hasattr(obs_layer, "geometryType") and obs_layer.geometryType() == QgsWkbTypes.PolygonGeometry)
             show = is_multi and from_layer and is_poly
             self.chkCutoutInputPolygon.setVisible(show)
             self.chkCutoutInputPolygon.setEnabled(show)
@@ -1435,8 +1437,8 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         # Creates segments
         for i in range(len(perimeter_points)):
             p1 = perimeter_points[i]
-            p2 = perimeter_points[(i+1) % len(perimeter_points)]
-            
+            p2 = perimeter_points[(i + 1) % len(perimeter_points)]
+
             status = point_status[i]
 
             feat = QgsFeature(layer.fields())
@@ -2009,13 +2011,10 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
     def _is_visual_imbalance_enabled(self):
         if hasattr(self, "chkHiguchi") and self.chkHiguchi.isChecked():
             return False
-        return (
-            hasattr(self, "chkVisualImbalance")
-            and self.chkVisualImbalance.isVisible()
-            and self.chkVisualImbalance.isEnabled()
-            and self.chkVisualImbalance.isChecked()
-            and self.radioReverseViewshed.isChecked()
-        )
+        visual = getattr(self, "chkVisualImbalance", None)
+        if visual is None:
+            return False
+        return visual.isVisible() and visual.isEnabled() and visual.isChecked() and self.radioReverseViewshed.isChecked()
 
     def _compute_viewshed_raster_file(
         self,
@@ -3897,9 +3896,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                 hasattr(self, "chkWeightedCumulative") and self.chkWeightedCumulative.isChecked()
             )
             normalize_weighted = bool(
-                weighted_mode
-                and hasattr(self, "chkNormalizeWeighted")
-                and self.chkNormalizeWeighted.isChecked()
+                weighted_mode and hasattr(self, "chkNormalizeWeighted") and self.chkNormalizeWeighted.isChecked()
             )
             if weighted_mode:
                 is_count_mode = False
@@ -4079,10 +4076,18 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         # Max: Cyan/Green (Frequently seen)
         
         colors = [
-            QgsColorRampShader.ColorRampItem(0, not_visible_color, "보이지 않음 (0)"),
-            QgsColorRampShader.ColorRampItem(1, QColor(255, 0, 0, 180), "1개소 관측 (최소)"),
-            QgsColorRampShader.ColorRampItem(max_count / 2, QColor(255, 255, 0, 180), f"{max_count/2:.1f}개소 중첩"),
-            QgsColorRampShader.ColorRampItem(max_count, QColor(0, 255, 255, 180), f"{max_count}개소 관측 (최대)")
+            QgsColorRampShader.ColorRampItem(0, not_visible_color, "Not visible (0)" if english else "보이지 않음 (0)"),
+            QgsColorRampShader.ColorRampItem(1, QColor(255, 0, 0, 180), "Observed by 1 point (minimum)" if english else "1개소 관측 (최소)"),
+            QgsColorRampShader.ColorRampItem(
+                max_count / 2,
+                QColor(255, 255, 0, 180),
+                f"{max_count / 2:.1f} overlaps" if english else f"{max_count / 2:.1f}개소 중첩",
+            ),
+            QgsColorRampShader.ColorRampItem(
+                max_count,
+                QColor(0, 255, 255, 180),
+                f"Observed by {max_count} points (maximum)" if english else f"{max_count}개소 관측 (최대)",
+            )
         ]
         
         color_ramp.setColorRampItemList(colors)
@@ -4505,8 +4510,13 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         
         # Add far zone only if max_dist is larger
         if max_dist > 2500:
-            zones.append((max_dist, f"원경 ({max_dist/1000:.1f}km)", QColor(50, 200, 50))) # Green
-        
+            max_dist_km = max_dist / 1000
+            if english:
+                zone_name = f"Far View ({max_dist_km:.1f} km)"
+            else:
+                zone_name = f"원경 ({max_dist_km:.1f}km)"
+            zones.append((max_dist, zone_name, QColor(50, 200, 50)))
+
         # Create ring features
         for distance, zone_name, color in zones:
             if distance <= max_dist:
@@ -4863,11 +4873,24 @@ class ViewshedLineTool(QgsMapToolEmitPoint):
 
         # Reverse viewshed: first click on an existing polygon selects it directly
         # (unless Shift is held to force drawing a custom polygon).
-        is_reverse_mode = (
-            self.dialog is not None
-            and getattr(self.dialog, "radioReverseViewshed", None) is not None
-            and self.dialog.radioReverseViewshed.isChecked()
-            and (getattr(self.dialog, "radioFromLayer", None) is None or not self.dialog.radioFromLayer.isChecked())
+        reverse_dialog = self.dialog
+        reverse_radio = (
+            getattr(reverse_dialog, "radioReverseViewshed", None)
+            if reverse_dialog is not None
+            else None
+        )
+        from_layer_radio = (
+            getattr(reverse_dialog, "radioFromLayer", None)
+            if reverse_dialog is not None
+            else None
+        )
+        is_reverse_mode = all(
+            (
+                reverse_dialog is not None,
+                reverse_radio is not None,
+                reverse_radio.isChecked(),
+                from_layer_radio is None or not from_layer_radio.isChecked(),
+            )
         )
         if is_reverse_mode and not self.points and not shift_pressed:
             # 1) If clicking on an existing polygon, select it immediately.
@@ -4905,27 +4928,26 @@ class ViewshedLineTool(QgsMapToolEmitPoint):
     
     def finish_line(self, close_line=False):
         # Reverse viewshed: allow 1-point target or polygon (3+ points).
-        if (
-            self.dialog is not None
-            and getattr(self.dialog, "radioReverseViewshed", None) is not None
-            and self.dialog.radioReverseViewshed.isChecked()
-        ):
-            if len(self.points) == 1:
-                # Treat as a single target point (reverse viewshed point)
-                self.dialog.set_observer_point(self.points[0])
-                self.cleanup()
+        dialog = self.dialog
+        if dialog is not None:
+            reverse_radio = getattr(dialog, "radioReverseViewshed", None)
+            if reverse_radio is not None and reverse_radio.isChecked():
+                if len(self.points) == 1:
+                    # Treat as a single target point (reverse viewshed point)
+                    self.dialog.set_observer_point(self.points[0])
+                    self.cleanup()
+                    return
+                if len(self.points) >= 3:
+                    self.dialog.set_line_from_tool(self.points, is_closed=True)
+                    self.cleanup()
+                    self.dialog.show()
+                    return
+                self.dialog.iface.messageBar().pushMessage(
+                    "알림",
+                    "역방향 폴리곤은 최소 3개 점이 필요합니다 (또는 1개 점으로 대상점 선택).",
+                    level=1,
+                )
                 return
-            if len(self.points) >= 3:
-                self.dialog.set_line_from_tool(self.points, is_closed=True)
-                self.cleanup()
-                self.dialog.show()
-                return
-            self.dialog.iface.messageBar().pushMessage(
-                "알림",
-                "역방향 폴리곤은 최소 3개 점이 필요합니다 (또는 1개 점으로 대상점 선택).",
-                level=1,
-            )
-            return
 
         if len(self.points) >= 2:
             self.dialog.set_line_from_tool(self.points, is_closed=close_line)
@@ -5039,10 +5061,7 @@ class ProfilePlotWidget(QWidget):
         if not view:
             return None
 
-        if not (
-            self.margin_left <= x <= self.margin_left + view["plot_w"]
-            and self.margin_top <= y <= self.margin_top + view["plot_h"]
-        ):
+        if not (self.margin_left <= x <= self.margin_left + view["plot_w"] and self.margin_top <= y <= self.margin_top + view["plot_h"]):
             return None
 
         rel_x = (x - self.margin_left) / view["plot_w"]
@@ -5300,7 +5319,7 @@ class ProfilePlotWidget(QWidget):
             x2, y2 = to_screen(d2c, e2c)
             
             # Use status of the endpoint to determine color
-            if visibility[i+1]:
+            if visibility[i + 1]:
                 painter.setPen(pen_visible)
             else:
                 painter.setPen(pen_hidden)

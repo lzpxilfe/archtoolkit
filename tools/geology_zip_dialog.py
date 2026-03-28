@@ -50,7 +50,126 @@ from .utils import (
 )
 
 
-PARENT_GROUP_NAME = "ArchToolkit - Geology"
+def _compact_str_list(value_list, *, include_none=False, lower=False):
+    """Normalize a config list by dropping blank values while optionally preserving None."""
+    out = []
+    for value in value_list or []:
+        if value is None:
+            if include_none:
+                out.append(None)
+            continue
+        text = str(value).strip()
+        if not text:
+            continue
+        out.append(text.lower() if lower else text)
+    return out
+
+
+PARENT_GROUP_NAME = get_output_group_name("geology", "ArchToolkit - Geology")
+GEOLOGY_EXTRACT_ROOT_NAME = str(
+    get_plugin_config_value("geology_zip", "extract_root_name", default="ArchToolkit_KIGAM_Extract") or ""
+).strip() or "ArchToolkit_KIGAM_Extract"
+GEOLOGY_EXTRACT_CLEANUP_DAYS = int(
+    get_plugin_config_value("geology_zip", "extract_cleanup_days", default=14) or 14
+)
+GEOLOGY_PROVIDER_ENCODING = str(
+    get_plugin_config_value("geology_zip", "provider_encoding", default="cp949") or ""
+).strip() or "cp949"
+GEOLOGY_CANDIDATE_ENCODINGS = _compact_str_list(
+    get_plugin_config_value("geology_zip", "candidate_encodings", default=["CP949", "EUC-KR", None, "UTF-8"]),
+    include_none=True,
+)
+GEOLOGY_ENCODING_PREFERENCE = get_plugin_config_value(
+    "geology_zip",
+    "encoding_preference",
+    default={"CP949": 4, "EUC-KR": 3, "default": 2, "UTF-8": 1},
+) or {"CP949": 4, "EUC-KR": 3, "default": 2, "UTF-8": 1}
+GEOLOGY_QML_WRITE_ENCODING = str(
+    get_plugin_config_value("geology_zip", "qml_write_encoding", default="UTF-8") or ""
+).strip() or "UTF-8"
+GEOLOGY_POINT_MARKER_SIZE = float(
+    get_plugin_config_value("geology_zip", "symbology", "point_marker_size", default=6.0) or 6.0
+)
+GEOLOGY_FILL_SYMBOL_WIDTH = float(
+    get_plugin_config_value("geology_zip", "symbology", "polygon_fill_width", default=10.0) or 10.0
+)
+GEOLOGY_SYMBOL_PRIORITY_FIELDS = _compact_str_list(
+    get_plugin_config_value(
+        "geology_zip",
+        "symbology",
+        "symbol_priority_fields",
+        default=["LITHOIDX", "TYPE", "ASGN_CODE", "SIGN", "CODE", "AGEIDX"],
+    )
+)
+GEOLOGY_LABEL_FIELD_CANDIDATES = _compact_str_list(
+    get_plugin_config_value(
+        "geology_zip",
+        "symbology",
+        "label_field_candidates",
+        default=["LITHOIDX", "LITHONAME"],
+    )
+)
+GEOLOGY_FRAME_LAYER_KEYWORDS = _compact_str_list(
+    get_plugin_config_value(
+        "geology_zip",
+        "symbology",
+        "frame_layer_keywords",
+        default=["frame"],
+    ),
+    lower=True,
+)
+GEOLOGY_REFERENCE_HIDE_KEYWORDS = _compact_str_list(
+    get_plugin_config_value(
+        "geology_zip",
+        "symbology",
+        "reference_hide_keywords",
+        default=["frame", "crosssection"],
+    ),
+    lower=True,
+)
+GEOLOGY_LITHO_LAYER_KEYWORD = str(
+    get_plugin_config_value("geology_zip", "symbology", "litho_layer_keyword", default="litho") or ""
+).strip().lower()
+GEOLOGY_RASTER_FIELD_PRIORITY = _compact_str_list(
+    get_plugin_config_value(
+        "geology_zip",
+        "raster",
+        "field_priority",
+        default=["LITHOIDX", "AGEIDX", "LITHONAME", "TYPE", "ASGN_CODE", "SIGN", "CODE"],
+    )
+)
+GEOLOGY_NAME_FIELD_CANDIDATES = _compact_str_list(
+    get_plugin_config_value(
+        "geology_zip",
+        "raster",
+        "name_field_candidates",
+        default=["LITHONAME", "AGENAME", "NAME", "KOR_NAME", "ENG_NAME"],
+    )
+)
+GEOLOGY_UI_FONT_SIZE_MIN = int(get_plugin_config_value("geology_zip", "ui", "font_size_min", default=5) or 5)
+GEOLOGY_UI_FONT_SIZE_MAX = int(get_plugin_config_value("geology_zip", "ui", "font_size_max", default=50) or 50)
+GEOLOGY_UI_FONT_SIZE_DEFAULT = int(
+    get_plugin_config_value("geology_zip", "ui", "font_size_default", default=10) or 10
+)
+GEOLOGY_UI_PIXEL_MIN = float(get_plugin_config_value("geology_zip", "ui", "pixel_size_min", default=0.1) or 0.1)
+GEOLOGY_UI_PIXEL_MAX = float(
+    get_plugin_config_value("geology_zip", "ui", "pixel_size_max", default=10000.0) or 10000.0
+)
+GEOLOGY_UI_PIXEL_DEFAULT = float(
+    get_plugin_config_value("geology_zip", "ui", "pixel_size_default", default=10.0) or 10.0
+)
+GEOLOGY_UI_NODATA_MIN = float(
+    get_plugin_config_value("geology_zip", "ui", "nodata_min", default=-9999999.0) or -9999999.0
+)
+GEOLOGY_UI_NODATA_MAX = float(
+    get_plugin_config_value("geology_zip", "ui", "nodata_max", default=9999999.0) or 9999999.0
+)
+GEOLOGY_UI_NODATA_DECIMALS = int(
+    get_plugin_config_value("geology_zip", "ui", "nodata_decimals", default=2) or 2
+)
+GEOLOGY_UI_NODATA_DEFAULT = float(
+    get_plugin_config_value("geology_zip", "ui", "nodata_default", default=-9999.0) or -9999.0
+)
 
 
 def _safe_name(name: str) -> str:
@@ -98,16 +217,20 @@ def _meters_to_degrees(pixel_m: float, lat_deg: float) -> Tuple[float, float]:
 
     r = math.radians(lat)
     # Approx meters per degree (WGS84). Good enough for small extents / UX.
-    m_per_deg_lat = (
-        111132.92
-        - 559.82 * math.cos(2 * r)
-        + 1.175 * math.cos(4 * r)
-        - 0.0023 * math.cos(6 * r)
+    m_per_deg_lat = sum(
+        (
+            111132.92,
+            -559.82 * math.cos(2 * r),
+            1.175 * math.cos(4 * r),
+            -0.0023 * math.cos(6 * r),
+        )
     )
-    m_per_deg_lon = (
-        111412.84 * math.cos(r)
-        - 93.5 * math.cos(3 * r)
-        + 0.118 * math.cos(5 * r)
+    m_per_deg_lon = sum(
+        (
+            111412.84 * math.cos(r),
+            -93.5 * math.cos(3 * r),
+            0.118 * math.cos(5 * r),
+        )
     )
     if m_per_deg_lat <= 0 or m_per_deg_lon <= 0:
         return 0.0, 0.0
@@ -606,7 +729,10 @@ class GeologyZipDialog(QtWidgets.QDialog):
                 try:
                     lname = str(layer.name() or "").lower()
                     fields_up = {str(f.name() or "").upper() for f in layer.fields()}
-                    if ("litho" not in lname) and ("LITHOIDX" not in fields_up) and ("LITHONAME" not in fields_up):
+                    candidate_fields_up = {name.upper() for name in GEOLOGY_LABEL_FIELD_CANDIDATES}
+                    has_keyword = GEOLOGY_LITHO_LAYER_KEYWORD and GEOLOGY_LITHO_LAYER_KEYWORD in lname
+                    has_candidate = any(name in fields_up for name in candidate_fields_up)
+                    if GEOLOGY_LITHO_LAYER_KEYWORD and not has_keyword and not has_candidate:
                         continue
                 except Exception:
                     continue

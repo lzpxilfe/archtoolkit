@@ -531,6 +531,80 @@ class AiAoiReportDialog(QtWidgets.QDialog):
         preview = "\n".join([n for n in names if n][:30])
         self.lblSelectedLayers.setToolTip(preview)
 
+    def _refresh_scope_summary(self, *_args):
+        english = is_english_ui()
+        try:
+            aoi_layer = self.cmbAoi.currentLayer()
+        except Exception:
+            aoi_layer = None
+
+        aoi_name = ""
+        if isinstance(aoi_layer, QgsVectorLayer):
+            try:
+                aoi_name = str(aoi_layer.name() or "").strip()
+            except Exception:
+                aoi_name = ""
+
+        selected_only = bool(self.chkSelectedOnly.isChecked())
+        try:
+            radius_text = f"{int(round(float(self.spinRadius.value()))):,} m"
+        except Exception:
+            radius_text = f"{self.spinRadius.value()} m"
+
+        if english:
+            lines = [
+                f"<b>Current Scan Scope</b>: AOI={aoi_name or 'Not selected'} / radius={radius_text} / "
+                f"{'Use selected features only' if selected_only else 'Use the full AOI'}"
+            ]
+        else:
+            lines = [
+                f"<b>현재 스캔 범위</b>: AOI={aoi_name or '미선택'} / 반경={radius_text} / "
+                f"{'선택 피처만 사용' if selected_only else 'AOI 전체 사용'}"
+            ]
+
+        scope = self._get_layer_scope()
+        if scope == "group":
+            group_path = self._get_target_group_path()
+            if english:
+                no_group_text = "<span style='color:#8a4b00;'>No group has been selected yet.</span>"
+                lines.append(
+                    f"Only the selected group will be scanned: {group_path or no_group_text}"
+                )
+            else:
+                no_group_text = "<span style='color:#8a4b00;'>아직 그룹을 고르지 않았습니다.</span>"
+                lines.append(
+                    f"선택 그룹만 스캔합니다: {group_path or no_group_text}"
+                )
+        elif scope == "layers":
+            ids, names = self._selected_layers_snapshot()
+            if ids:
+                preview = ", ".join([name for name in names[:3] if name])
+                extra = ""
+                if len(names) > 3:
+                    extra = f" plus {len(names) - 3} more" if english else f" 외 {len(names) - 3}개"
+                if english:
+                    lines.append(f"Only the {len(ids)} manually selected layers will be scanned: {preview}{extra}")
+                else:
+                    lines.append(f"직접 선택한 {len(ids)}개 레이어만 스캔합니다: {preview}{extra}")
+            else:
+                lines.append(
+                    "<span style='color:#8a4b00;'>Layer-selection mode is active, but no layers have been selected yet.</span>"
+                    if english
+                    else "<span style='color:#8a4b00;'>레이어 직접 선택 모드입니다. 아직 선택된 레이어가 없습니다.</span>"
+                )
+        else:
+            auto_filters: List[str] = []
+            if english:
+                auto_filters.append("ArchToolkit results only" if self.chkOnlyArchToolkit.isChecked() else "Include general layers")
+                auto_filters.append("Exclude styling / cartographic layers" if self.chkExcludeStyling.isChecked() else "Include styling / cartographic layers")
+                lines.append("Automatic scan mode: " + ", ".join(auto_filters))
+            else:
+                auto_filters.append("ArchToolkit 결과만" if self.chkOnlyArchToolkit.isChecked() else "일반 레이어도 포함")
+                auto_filters.append("도면/Style 제외" if self.chkExcludeStyling.isChecked() else "도면/Style도 포함")
+                lines.append("자동 스캔 모드입니다: " + ", ".join(auto_filters))
+
+        self.lblScopeSummary.setText("<br>".join(lines))
+
     def _update_layer_scope_ui(self):
         scope = self._get_layer_scope()
         is_auto = scope == "auto"
@@ -915,7 +989,83 @@ class AiAoiReportDialog(QtWidgets.QDialog):
         self._set_busy_state(True, message="AOI 컨텍스트 수집 중… 잠시만 기다려주세요.")
         try:
             try:
-                ensure_live_log_dialog(self.iface, owner=self, show=True, clear=True)
+                text = ai_local_summarizer.generate_report(ctx)
+            except Exception as e:
+                push_message(
+                    self.iface,
+                    "Error" if english else "오류",
+                    f"{'Local summary generation failed' if english else '로컬 요약 생성 실패'}: {e}",
+                    level=2,
+                    duration=8,
+                )
+                return
+
+            self.txtOutput.setPlainText(text or "")
+            self._last_report_text = str(text or "")
+            self._last_report_ctx_key = self._last_ctx_key
+            push_message(
+                self.iface,
+                "AI Summary" if english else "AI 요약",
+                "Done (local summary)" if english else "완료 (로컬)",
+                level=0,
+                duration=4,
+            )
+            return
+
+        prompt = self._build_prompt(ctx)
+
+        push_message(
+            self.iface,
+            "AI Summary" if english else "AI 요약",
+            "Calling Gemini... (sending only data summaries and layer names)"
+            if english
+            else "Gemini 호출 중…(데이터 요약/레이어명만 전송)",
+            level=0,
+            duration=5,
+        )
+        self.setEnabled(False)
+        QtWidgets.QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            text, api_err = ai_gemini.generate_text(
+                api_key=str(api_key or ""),
+                model=str(model or ""),
+                prompt=prompt,
+                temperature=0.2,
+                max_output_tokens=1400,
+                timeout_ms=45000,
+            )
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+            self.setEnabled(True)
+
+        if api_err:
+            log_message(f"Gemini error: {api_err}", level=2)
+            push_message(
+                self.iface,
+                "Error" if english else "오류",
+                f"{'Gemini call failed' if english else 'Gemini 호출 실패'}: {api_err}",
+                level=2,
+                duration=10,
+            )
+            # Fallback to local report so user still gets something usable.
+            try:
+                fallback = ai_local_summarizer.generate_report(ctx)
+                if fallback:
+                    fallback_prefix = (
+                        tr("※ Gemini 호출 실패로 로컬 요약으로 대체했습니다.\\n\\n")
+                        if not english
+                        else "Note: Gemini failed, so the result was replaced with a local summary.\\n\\n"
+                    )
+                    self.txtOutput.setPlainText(f"{fallback_prefix}{str(fallback)}")
+                    self._last_report_text = str(fallback or "")
+                    self._last_report_ctx_key = self._last_ctx_key
+                    push_message(
+                        self.iface,
+                        "AI Summary" if english else "AI 요약",
+                        "Replaced with local summary" if english else "로컬 요약으로 대체 완료",
+                        level=1,
+                        duration=6,
+                    )
             except Exception:
                 pass
 

@@ -26,7 +26,7 @@ import processing
 
 from qgis.PyQt import QtWidgets, uic
 from qgis.PyQt.QtCore import Qt, QVariant
-from qgis.PyQt.QtGui import QColor, QIcon
+from qgis.PyQt.QtGui import QColor, QIcon, QTextOption
 from qgis.core import (
     Qgis,
     QgsCategorizedSymbolRenderer,
@@ -608,6 +608,81 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
         except Exception:
             mode = ""
 
+        if is_english_ui():
+            ppa = """
+            <h3>Proximity Network (PPA)</h3>
+            <p><b>What does it show?</b><br>
+            It links sites using <b>straight-line (Euclidean) distance</b> only, without terrain cost.
+            It is useful for quickly checking neighborhood-style interaction hypotheses.</p>
+
+            <p><b>How should the outputs be read?</b><br>
+            <ul>
+              <li><b>Edge layer</b>: neighborhood connections between sites. <code>dist_km</code> stores straight-line distance.</li>
+              <li><b>Node layer (SNA)</b>: <code>degree</code>, <code>component</code>, and <code>comp_size</code> summarize local and network structure.</li>
+            </ul></p>
+
+            <p><b>How can I reduce spaghetti-like edges?</b><br>
+            <ul>
+              <li><b>Mutual k-NN</b>: keeps only reciprocal neighbors.</li>
+              <li><b>Gabriel / RNG</b>: keeps only more essential proximity edges derived from Delaunay.</li>
+              <li><b>Max dist (m)</b>: removes unrealistically long links.</li>
+            </ul></p>
+            """
+
+            vis = """
+            <h3>Visibility Network (LOS)</h3>
+            <p><b>What does it show?</b><br>
+            It samples the DEM with line-of-sight tests to ask whether site A and site B can see each other.
+            It fits questions about watch, signaling, defense, or communication systems.</p>
+
+            <p><b>How should the outputs be read?</b><br>
+            <ul>
+              <li><b>Edge layer</b>: the <code>status</code> field distinguishes mutually visible, one-way visible, mutually hidden, and failed samples.</li>
+              <li><b>Directionality</b>: <code>vis_ab</code> and <code>vis_ba</code> store A->B and B->A separately.</li>
+              <li><b>Polygon input</b>: if boundary sampling is enabled, fields like <code>vis_ratio_ab</code> show how much of a target is visible.</li>
+            </ul></p>
+
+            <p><b>How can I reduce runtime?</b><br>
+            <ul>
+              <li><b>Candidate k</b>: tests only nearby candidates for each node.</li>
+              <li><b>All pairs in range</b>: use only for small datasets when exhaustive checking matters.</li>
+              <li><b>Max dist (m)</b>: skips distant pairs entirely.</li>
+            </ul></p>
+            """
+
+            sna = """
+            <h3>SNA Metrics (Point Layer)</h3>
+            <p><b>Why use them?</b><br>
+            They help identify hubs, strategic intermediaries, isolation, and network fragmentation numerically.</p>
+            <ul>
+              <li><code>degree</code>: number of links.</li>
+              <li><code>component</code> / <code>comp_size</code>: disconnected sub-networks and their sizes.</li>
+              <li><code>closeness</code>: how near a node is to the rest of the network.</li>
+              <li><code>betweenness</code>: how strongly a node acts as a bridge between others.</li>
+            </ul>
+            """
+
+            refs = """
+            <h3>References (summary)</h3>
+            <ul>
+              <li>Proximity graphs: Delaunay (1934), Gabriel &amp; Sokal (1969), Toussaint (1980)</li>
+              <li>Archaeological network review: Brughmans &amp; Peeples (2017)</li>
+              <li>Visibility / visibility graphs: Gillings &amp; Wheatley (2001), Turner et al. (2001), Van Dyke et al. (2016)</li>
+            </ul>
+            """
+
+            body = vis + sna + ppa if mode == NETWORK_VISIBILITY else ppa + sna + vis
+        return "".join(
+            (
+                "<html><head><meta charset='utf-8'></head><body style='font-family:Sans-Serif;'>",
+                "<h2>Network Interpretation Guide</h2>",
+                "<p style='color:#444'>Tip: hover over each option to see a short explanation and reference note.</p>",
+                body,
+                refs,
+                "</body></html>",
+            )
+        )
+
         # Keep it practical: how to read the output layers/fields and when to use each option.
         ppa = """
         <h3>근접성 네트워크 (PPA)</h3>
@@ -677,13 +752,15 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
         else:
             body = ppa + sna + vis
 
-        return (
-            "<html><head><meta charset='utf-8'></head><body style='font-family:Sans-Serif;'>"
-            "<h2>네트워크 해석 가이드</h2>"
-            "<p style='color:#444'>Tip: 각 옵션 위에 마우스를 올리면 짧은 설명/참고문헌을 바로 볼 수 있어요.</p>"
-            + body
-            + refs
-            + "</body></html>"
+        return "".join(
+            (
+                "<html><head><meta charset='utf-8'></head><body style='font-family:Sans-Serif;'>",
+                "<h2>네트워크 해석 가이드</h2>",
+                "<p style='color:#444'>Tip: 각 옵션 위에 마우스를 올리면 짧은 설명/참고문헌을 바로 볼 수 있어요.</p>",
+                body,
+                refs,
+                "</body></html>",
+            )
         )
 
     def _show_interpretation_guide(self):
@@ -707,6 +784,10 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
             layout = QtWidgets.QVBoxLayout(dlg)
             browser = QtWidgets.QTextBrowser(dlg)
             browser.setOpenExternalLinks(True)
+            browser.setLineWrapMode(QtWidgets.QTextEdit.NoWrap)
+            browser.setWordWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
+            browser.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+            browser.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
             browser.setHtml(self._interpretation_guide_html())
             layout.addWidget(browser)
 
@@ -1305,10 +1386,7 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
         # Summary
         deg = self._degrees(n, edges)
         comps, comp_sizes = self._components(n, edges)
-        msg = (
-            f"완료: 노드 {n} / 간선 {len(edges)}  "
-            f"(평균 degree {float(sum(deg))/max(1,n):.2f}, components {len(comp_sizes)})"
-        )
+        msg = f"완료: 노드 {n} / 간선 {len(edges)}  " f"(평균 degree {float(sum(deg)) / max(1, n):.2f}, components {len(comp_sizes)})"
         log_message(f"PPA: {msg}  [method={method}]", level=Qgis.Info)
         push_message(self.iface, "PPA", msg, level=0, duration=7)
         self.accept()

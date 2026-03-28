@@ -165,9 +165,21 @@ def configure_api_key(parent: QtWidgets.QWidget, *, iface=None) -> Optional[str]
     if not ok:
         return None
 
-    api_key = str(key or "").strip()
-    if not api_key:
-        return None
+    normalized = normalize_model_name(raw_model)
+    replacement = get_model_replacement(raw_model)
+    if replacement:
+        if is_english_ui():
+            deprecated_note = _DEPRECATED_MODEL_NOTES.get(raw_model)
+            if deprecated_note:
+                note_en = (
+                    f"The Google changelog says it was retired on March 9, 2026 and "
+                    f"replaced by `{replacement}`."
+                )
+            else:
+                note_en = f"`{replacement}` is recommended."
+            return "warning", f"The current value `{raw_model}` is a legacy model ID. {note_en}"
+        note_ko = _DEPRECATED_MODEL_NOTES.get(raw_model) or f"`{replacement}` 사용을 권장합니다."
+        return "warning", f"현재 입력값 `{raw_model}`은 구형 ID입니다. {note_ko}"
 
     authm = _auth_manager()
     auth_cfg = _new_auth_config()

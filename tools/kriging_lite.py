@@ -483,7 +483,7 @@ def ordinary_kriging_lite_to_geotiff(
         if progress_cb:
             try:
                 pct = int((r + 1) * 100 / max(1, nrows))
-                progress_cb(pct, f"Kriging 계산 중… ({r+1}/{nrows})")
+                progress_cb(pct, f"Kriging 계산 중… ({r + 1}/{nrows})")
             except Exception:
                 pass
 

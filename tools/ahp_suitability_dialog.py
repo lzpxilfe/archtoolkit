@@ -421,6 +421,261 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
         except Exception:
             return None
 
+    def _selected_criterion_row(self) -> Optional[int]:
+        try:
+            rows = [idx.row() for idx in self.tblCriteria.selectionModel().selectedRows()]
+            if rows:
+                row = int(rows[0])
+                if 0 <= row < len(self._criteria):
+                    return row
+        except Exception:
+            pass
+        try:
+            row = int(self.tblCriteria.currentRow())
+            if 0 <= row < len(self._criteria):
+                return row
+        except Exception:
+            pass
+        return None
+
+    def _criterion_rows(self) -> List[Tuple[str, str]]:
+        rows: List[Tuple[str, str]] = []
+        for crit in self._criteria:
+            layer = self._criterion_layer(crit)
+            rows.append((str(crit.layer_id or ""), str(layer.name() if layer is not None else "(레이어 없음)")))
+        return rows
+
+    def _sanitize_hierarchy_config(self, config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        raw = dict(config if config is not None else self._hierarchy_config or {})
+        if not raw:
+            return {}
+
+        criteria_rows = self._criterion_rows()
+        assignments_raw = dict(raw.get("criterion_groups") or {})
+        group_pairs_raw = raw.get("group_pairs")
+        local_pairs_raw = dict(raw.get("local_pairs") or {})
+
+        assignments: Dict[str, str] = {}
+        for layer_id, label in criteria_rows:
+            group_name = str(assignments_raw.get(layer_id) or "").strip()
+            if not group_name:
+                group_name = str(label or layer_id or "기준").strip() or layer_id
+            assignments[layer_id] = group_name
+
+        groups: List[str] = []
+        for layer_id, _label in criteria_rows:
+            group_name = str(assignments.get(layer_id) or "").strip()
+            if group_name and group_name not in groups:
+                groups.append(group_name)
+
+        group_pairs = _sanitize_pair_values(group_pairs_raw, groups)
+        local_pairs: Dict[str, Dict[Tuple[str, str], float]] = {}
+        for group_name in groups:
+            member_ids = [layer_id for layer_id, _label in criteria_rows if assignments.get(layer_id) == group_name]
+            local_pairs[group_name] = _sanitize_pair_values(local_pairs_raw.get(group_name), member_ids)
+
+        summary = _compute_hierarchy_summary(
+            criteria_rows=criteria_rows,
+            criterion_groups=assignments,
+            group_pairs=group_pairs,
+            local_pairs=local_pairs,
+        )
+        return {
+            "criterion_groups": dict(assignments),
+            "group_order": list(groups),
+            "group_pairs": dict(group_pairs),
+            "local_pairs": {group: dict(values) for group, values in local_pairs.items()},
+            "computed": summary,
+        }
+
+    def _hierarchy_note(self, config: Optional[Dict[str, Any]] = None) -> str:
+        config0 = self._sanitize_hierarchy_config(config)
+        if not config0:
+            return ""
+        groups = list(config0.get("group_order") or [])
+        preview = " / ".join(groups[:4])
+        if len(groups) > 4:
+            preview = f"{preview} / ..."
+        if preview:
+            return f"{len(groups)} parent groups: {preview}" if is_english_ui() else f"{len(groups)}개 상위그룹: {preview}"
+        return "Hierarchical AHP" if is_english_ui() else "계층형 AHP"
+
+    def _apply_hierarchy_config(self, config: Optional[Dict[str, Any]], *, note_prefix: str = "") -> bool:
+        config0 = self._sanitize_hierarchy_config(config)
+        if not config0:
+            return False
+        summary = dict(config0.get("computed") or {})
+        pairwise = dict(summary.get("global_pairwise") or {})
+        self._hierarchy_config = config0
+        self._rebuild_pairwise_table(saved_pairs=pairwise)
+        note = self._hierarchy_note(config0)
+        if note_prefix:
+            note = f"{str(note_prefix).strip()} {note}".strip()
+        self._set_weight_input_mode("hierarchy", note)
+        return True
+
+    def _serialized_hierarchy_config(self) -> Optional[Dict[str, Any]]:
+        if not str(self._weight_input_mode or "").startswith("hierarchy"):
+            return None
+        config = self._sanitize_hierarchy_config(self._hierarchy_config)
+        if not config:
+            return None
+        summary = dict(config.get("computed") or {})
+        criteria_rows = dict(self._criterion_rows())
+        return {
+            "criterion_groups": [
+                {
+                    "layer_id": layer_id,
+                    "layer_name": criteria_rows.get(layer_id, ""),
+                    "group": group_name,
+                }
+                for layer_id, group_name in config.get("criterion_groups", {}).items()
+            ],
+            "group_order": list(config.get("group_order") or []),
+            "group_pairwise": [
+                {
+                    "left_group": str(key[0] or ""),
+                    "right_group": str(key[1] or ""),
+                    "value": float(value),
+                }
+                for key, value in sorted(dict(config.get("group_pairs") or {}).items())
+            ],
+            "local_pairwise": [
+                {
+                    "group": str(group_name or ""),
+                    "pairs": [
+                        {
+                            "left_layer_id": str(key[0] or ""),
+                            "left_layer_name": criteria_rows.get(str(key[0] or ""), ""),
+                            "right_layer_id": str(key[1] or ""),
+                            "right_layer_name": criteria_rows.get(str(key[1] or ""), ""),
+                            "value": float(value),
+                        }
+                        for key, value in sorted(dict(pairs or {}).items())
+                    ],
+                }
+                for group_name, pairs in dict(config.get("local_pairs") or {}).items()
+            ],
+            "group_weights": [
+                {
+                    "group": group_name,
+                    "weight": float(summary.get("group_weights", {}).get(group_name)),
+                    "local_consistency_ratio": summary.get("local_consistency_ratio", {}).get(group_name),
+                }
+                for group_name in summary.get("group_order") or []
+            ],
+            "group_level_consistency_ratio": summary.get("group_consistency_ratio"),
+            "global_weights": [
+                {
+                    "layer_id": layer_id,
+                    "layer_name": criteria_rows.get(layer_id, ""),
+                    "group": summary.get("criterion_groups", {}).get(layer_id),
+                    "weight": float(weight),
+                }
+                for layer_id, weight in sorted(dict(summary.get("global_weights") or {}).items())
+            ],
+        }
+
+    def _ensure_criterion_preference_defaults(self, crit: _Criterion) -> None:
+        try:
+            mn = float(crit.min_v) if crit.min_v is not None else None
+            mx = float(crit.max_v) if crit.max_v is not None else None
+        except Exception:
+            mn, mx = None, None
+        if mn is None or mx is None or (not math.isfinite(mn)) or (not math.isfinite(mx)):
+            return
+        if mx < mn:
+            mn, mx = mx, mn
+        span = float(mx - mn)
+        mode = str(crit.direction or "benefit")
+        if mode == "target":
+            target_v = crit.target_v
+            try:
+                target0 = float(target_v) if target_v is not None else None
+            except Exception:
+                target0 = None
+            if target0 is None or (not math.isfinite(target0)) or target0 < mn or target0 > mx:
+                crit.target_v = mn + (span / 2.0 if span > 0 else 0.0)
+        elif mode == "range":
+            pmin = crit.prefer_min
+            pmax = crit.prefer_max
+            try:
+                pmin0 = float(pmin) if pmin is not None else None
+                pmax0 = float(pmax) if pmax is not None else None
+            except Exception:
+                pmin0, pmax0 = None, None
+        invalid_range = any(
+            (
+                pmin0 is None,
+                pmax0 is None,
+                not math.isfinite(pmin0),
+                not math.isfinite(pmax0),
+                pmin0 >= pmax0,
+                pmin0 < mn,
+                pmax0 > mx,
+            )
+        )
+        if invalid_range:
+            if span > 0:
+                crit.prefer_min = mn + (span * 0.25)
+                crit.prefer_max = mn + (span * 0.75)
+            else:
+                crit.prefer_min = mn
+                crit.prefer_max = mx
+        elif mode == "reclass":
+            rows = crit.score_ranges or []
+            if not rows:
+                crit.score_ranges = [
+                    {
+                        "min": float(mn),
+                        "max": float(mx),
+                        "score": 1.0,
+                    }
+                ]
+
+    def _on_edit_selected_preference(self):
+        row = self._selected_criterion_row()
+        if row is None:
+            push_message(self.iface, "정보", "선호 설정을 바꿀 기준 레이어를 표에서 하나 선택하세요.", level=1, duration=5)
+            return
+        crit = self._criteria[row]
+        lyr = self._criterion_layer(crit)
+        if lyr is not None and (crit.min_v is None or crit.max_v is None):
+            mn, mx = self._compute_minmax_for_layer(lyr)
+            crit.min_v = mn
+            crit.max_v = mx
+        self._ensure_criterion_preference_defaults(crit)
+
+        if str(crit.direction or "benefit") == "reclass":
+            dlg = _CriterionReclassDialog(
+                layer_name=str(lyr.name() if lyr is not None else "(레이어 없음)"),
+                criterion=crit,
+                parent=self,
+            )
+            res = dlg.exec_() if hasattr(dlg, "exec_") else dlg.exec()
+            if res != QtWidgets.QDialog.Accepted:
+                return
+            crit.score_ranges = dlg.values()
+            self._refresh_criteria_table()
+            return
+
+        dlg = _CriterionPreferenceDialog(
+            layer_name=str(lyr.name() if lyr is not None else "(레이어 없음)"),
+            criterion=crit,
+            parent=self,
+        )
+        res = dlg.exec_() if hasattr(dlg, "exec_") else dlg.exec()
+        if res != QtWidgets.QDialog.Accepted:
+            return
+
+        values = dlg.values()
+        crit.direction = str(values.get("direction") or "benefit")
+        crit.target_v = float(values.get("target_v")) if values.get("target_v") is not None else None
+        crit.prefer_min = float(values.get("prefer_min")) if values.get("prefer_min") is not None else None
+        crit.prefer_max = float(values.get("prefer_max")) if values.get("prefer_max") is not None else None
+        self._ensure_criterion_preference_defaults(crit)
+        self._refresh_criteria_table()
+
     def _on_add_criterion(self):
         lyr = self.cmbRaster.currentLayer()
         if lyr is None or not isinstance(lyr, QgsRasterLayer):
@@ -687,6 +942,255 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
         if not path:
             return
         self.txtOut.setText(str(path))
+
+    def _processing_clip_raster_by_mask(
+        self,
+        *,
+        input_raster,
+        mask_layer: QgsVectorLayer,
+        out_path: str,
+    ) -> str:
+        processing.run(
+            "gdal:cliprasterbymasklayer",
+            {
+                "INPUT": input_raster,
+                "MASK": mask_layer,
+                "NODATA": -9999,
+                "DATA_TYPE": 6,  # Float32
+                "ALPHA_BAND": False,
+                "CROP_TO_CUTLINE": False,
+                "KEEP_RESOLUTION": True,
+                "OUTPUT": str(out_path),
+            },
+        )
+        return str(out_path)
+
+    def _constraint_summary(self) -> Dict[str, Any]:
+        layer = self.cmbConstraint.currentLayer()
+        if layer is None:
+            return {}
+        try:
+            layer_type = "raster" if isinstance(layer, QgsRasterLayer) else "vector"
+        except Exception:
+            layer_type = "layer"
+        return {
+            "layer_id": str(getattr(layer, "id", lambda: "")() or ""),
+            "layer_name": str(getattr(layer, "name", lambda: "")() or ""),
+            "layer_type": layer_type,
+            "mode": "keep mask > 0" if isinstance(layer, QgsRasterLayer) else "outside nodata",
+        }
+
+    def _extract_sample_point(self, feature) -> Optional[QgsPointXY]:
+        try:
+            geom = feature.geometry()
+        except Exception:
+            return None
+        if geom is None or geom.isEmpty():
+            return None
+        try:
+            if geom.isMultipart():
+                pts = geom.asMultiPoint()
+                if pts:
+                    return QgsPointXY(pts[0])
+            pt = geom.asPoint()
+            return QgsPointXY(pt)
+        except Exception:
+            try:
+                centroid = geom.centroid()
+                if centroid and (not centroid.isEmpty()):
+                    return QgsPointXY(centroid.asPoint())
+            except Exception:
+                return None
+        return None
+
+    def _quick_validate_output(self, raster_layer: QgsRasterLayer) -> Dict[str, Any]:
+        validation_layer = self.cmbValidation.currentLayer()
+        if validation_layer is None or not isinstance(validation_layer, QgsVectorLayer):
+            return {}
+        try:
+            if validation_layer.geometryType() != QgsWkbTypes.PointGeometry:
+                return {
+                    "layer_id": str(validation_layer.id() or ""),
+                    "layer_name": str(validation_layer.name() or ""),
+                    "error": "point_geometry_required",
+                }
+        except Exception:
+            return {}
+        if raster_layer is None or not isinstance(raster_layer, QgsRasterLayer) or (not raster_layer.isValid()):
+            return {}
+
+        try:
+            feats = (
+                validation_layer.selectedFeatures()
+                if self.chkValidationSelectedOnly.isChecked() and validation_layer.selectedFeatureCount() > 0
+                else validation_layer.getFeatures()
+            )
+        except Exception:
+            feats = validation_layer.getFeatures()
+
+        ct = None
+        try:
+            if validation_layer.crs() != raster_layer.crs():
+                ct = QgsCoordinateTransform(validation_layer.crs(), raster_layer.crs(), QgsProject.instance())
+        except Exception:
+            ct = None
+
+        values: List[float] = []
+        sampled = 0
+        for feat in feats:
+            pt = self._extract_sample_point(feat)
+            if pt is None:
+                continue
+            try:
+                if ct is not None:
+                    pt = ct.transform(pt)
+            except Exception:
+                continue
+            try:
+                sampled += 1
+                sample = raster_layer.dataProvider().sample(pt, 1)
+                if isinstance(sample, tuple):
+                    value = sample[0]
+                    ok = bool(sample[1]) if len(sample) > 1 else True
+                else:
+                    value = sample
+                    ok = value is not None
+                if not ok:
+                    continue
+                value_f = float(value)
+                if math.isfinite(value_f):
+                    values.append(value_f)
+            except Exception:
+                continue
+
+        scale_factor = 100.0 if self.chkScale100.isChecked() else 1.0
+        thresholds = (0.50 * scale_factor, 0.70 * scale_factor, 0.90 * scale_factor)
+        out: Dict[str, Any] = {
+            "layer_id": str(validation_layer.id() or ""),
+            "layer_name": str(validation_layer.name() or ""),
+            "selected_only": bool(self.chkValidationSelectedOnly.isChecked()),
+            "attempted_points": sampled,
+            "sample_count": len(values),
+            "scale": "0-100" if self.chkScale100.isChecked() else "0-1",
+        }
+        if not values:
+            out["error"] = "no_valid_samples"
+            return out
+
+        ordered = sorted(values)
+        n = len(ordered)
+        mid = n // 2
+        median = ordered[mid] if (n % 2) == 1 else (ordered[mid - 1] + ordered[mid]) / 2.0
+        out.update(
+            {
+                "min": ordered[0],
+                "max": ordered[-1],
+                "mean": sum(ordered) / float(n),
+                "median": median,
+                "hit_rate_ge_50": sum(1 for v in ordered if v >= thresholds[0]) / float(n),
+                "hit_rate_ge_70": sum(1 for v in ordered if v >= thresholds[1]) / float(n),
+                "hit_rate_ge_90": sum(1 for v in ordered if v >= thresholds[2]) / float(n),
+            }
+        )
+        return out
+
+    def _validated_score_ranges(self, crit: _Criterion) -> List[Dict[str, float]]:
+        rows_in = crit.score_ranges or []
+        rows: List[Dict[str, float]] = []
+        for row in rows_in:
+            try:
+                min_v = float(row.get("min"))
+                max_v = float(row.get("max"))
+                score = float(row.get("score"))
+            except Exception:
+                continue
+            if max_v < min_v:
+                min_v, max_v = max_v, min_v
+            if not math.isfinite(min_v) or not math.isfinite(max_v) or not math.isfinite(score):
+                continue
+            score = max(0.0, min(1.0, score))
+            rows.append({"min": min_v, "max": max_v, "score": score})
+        rows.sort(key=lambda d: (d["min"], d["max"]))
+        for idx in range(1, len(rows)):
+            prev = rows[idx - 1]
+            cur = rows[idx]
+            prev_exact = abs(float(prev["max"]) - float(prev["min"])) <= 1e-12
+            if cur["min"] < prev["max"] or (prev_exact and abs(float(cur["min"]) - float(prev["max"])) <= 1e-12):
+                raise Exception("구간 점수표에 서로 겹치는 구간이 있습니다. 범위를 다시 조정하세요.")
+        return rows
+
+    def _criterion_score_formula(self, crit: _Criterion, *, mn: float, mx: float) -> str:
+        mode = str(crit.direction or "benefit")
+        if mode == "cost":
+            return f"({mx} - A) / ({mx} - {mn})"
+        if mode == "target":
+            target = crit.target_v
+            try:
+                target0 = float(target) if target is not None else None
+            except Exception:
+                target0 = None
+            if target0 is None or (not math.isfinite(target0)) or target0 <= mn or target0 >= mx:
+                target0 = mn + ((mx - mn) / 2.0)
+            left_denom = float(target0 - mn)
+            right_denom = float(mx - target0)
+            if left_denom <= 0 or right_denom <= 0:
+                return f"(A - {mn}) / ({mx} - {mn})"
+            return (
+                f"((A <= {target0}) * ((A - {mn}) / ({target0} - {mn}))) + "
+                f"((A > {target0}) * (({mx} - A) / ({mx} - {target0})))"
+            )
+        if mode == "range":
+            try:
+                prefer_min = float(crit.prefer_min) if crit.prefer_min is not None else None
+                prefer_max = float(crit.prefer_max) if crit.prefer_max is not None else None
+            except Exception:
+                prefer_min, prefer_max = None, None
+        invalid_prefer = any(
+            (
+                prefer_min is None,
+                prefer_max is None,
+                not math.isfinite(prefer_min),
+                not math.isfinite(prefer_max),
+                prefer_min >= prefer_max,
+            )
+        )
+        if invalid_prefer:
+            prefer_min = mn + ((mx - mn) * 0.25)
+            prefer_max = mn + ((mx - mn) * 0.75)
+        if prefer_min <= mn and prefer_max >= mx:
+            return "A*0 + 1"
+        if prefer_min <= mn:
+            if prefer_max >= mx:
+                return "A*0 + 1"
+            return f"(({mx} - A) / ({mx} - {prefer_max})) * (A > {prefer_max}) + ((A <= {prefer_max}) * 1)"
+        if prefer_max >= mx:
+            if prefer_min <= mn:
+                return "A*0 + 1"
+            return f"((A - {mn}) / ({prefer_min} - {mn})) * (A < {prefer_min}) + ((A >= {prefer_min}) * 1)"
+        return (
+            f"((A < {prefer_min}) * ((A - {mn}) / ({prefer_min} - {mn}))) + "
+            f"(((A >= {prefer_min}) * (A <= {prefer_max})) * 1) + "
+            f"((A > {prefer_max}) * (({mx} - A) / ({mx} - {prefer_max})))"
+        )
+        if mode == "reclass":
+            rows = self._validated_score_ranges(crit)
+            if not rows:
+                return "A*0"
+            parts: List[str] = []
+            for idx, row in enumerate(rows):
+                lo = float(row["min"])
+                hi = float(row["max"])
+                score = float(row["score"])
+                if abs(hi - lo) <= 1e-12:
+                    parts.append(f"((A == {lo}) * {score})")
+                    continue
+                is_last = idx == (len(rows) - 1)
+                if is_last:
+                    parts.append(f"(((A >= {lo}) * (A <= {hi})) * {score})")
+                else:
+                    parts.append(f"(((A >= {lo}) * (A < {hi})) * {score})")
+            return " + ".join(parts) if parts else "A*0"
+        return f"(A - {mn}) / ({mx} - {mn})"
 
     def _processing_warp_to_reference(
         self,

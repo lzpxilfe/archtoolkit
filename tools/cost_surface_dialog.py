@@ -773,14 +773,16 @@ def _edge_cost(model_key, horiz_m, dz_m, model_params, *, cost_mode="time_s"):
     if model_key == MODEL_HERZOG_METABOLIC:
         # Based on the slope_cost implementation in Zoran Čučković's "Movement Analysis" QGIS plugin.
         # We normalize the factor so that slope=0 keeps the base speed.
-        den = (
-            1337.8 * slope_abs**6
-            + 278.19 * slope_abs**5
-            - 517.39 * slope_abs**4
-            - 78.199 * slope_abs**3
-            + 93.419 * slope_abs**2
-            + 19.825 * slope_abs
-            + 1.64
+        den = sum(
+            (
+                1337.8 * slope_abs**6,
+                278.19 * slope_abs**5,
+                -517.39 * slope_abs**4,
+                -78.199 * slope_abs**3,
+                93.419 * slope_abs**2,
+                19.825 * slope_abs,
+                1.64,
+            )
         )
         rel = 1.0 / max(1e-9, float(den))
         rel0 = 1.0 / 1.64
@@ -2510,9 +2512,9 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
             lcp_kcal = float(res.total_energy_kcal)
             lcp_detail = []
             if res.lcp_dist_m is not None and math.isfinite(res.lcp_dist_m):
-                lcp_detail.append(f"{res.lcp_dist_m/1000.0:.2f}km")
+                lcp_detail.append(f"{res.lcp_dist_m / 1000.0:.2f}km")
             if res.lcp_time_s is not None and math.isfinite(res.lcp_time_s):
-                lcp_detail.append(f"{res.lcp_time_s/60.0:.1f}분")
+                lcp_detail.append(f"{res.lcp_time_s / 60.0:.1f}{' min' if english else '분'}")
             lcp_txt = f"LCP {lcp_kcal:.0f}kcal"
             if lcp_detail:
                 lcp_txt = f"{lcp_txt}({', '.join(lcp_detail)})"
@@ -2521,10 +2523,10 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
                 straight_kcal = float(res.straight_energy_kcal)
                 straight_detail = []
                 if res.straight_dist_m is not None and math.isfinite(res.straight_dist_m):
-                    straight_detail.append(f"{res.straight_dist_m/1000.0:.2f}km")
+                    straight_detail.append(f"{res.straight_dist_m / 1000.0:.2f}km")
                 if res.straight_time_s is not None and math.isfinite(res.straight_time_s):
-                    straight_detail.append(f"{res.straight_time_s/60.0:.1f}분")
-                straight_txt = f"직선 {straight_kcal:.0f}kcal"
+                    straight_detail.append(f"{res.straight_time_s / 60.0:.1f}{' min' if english else '분'}")
+                straight_txt = f"{'Straight' if english else '직선'} {straight_kcal:.0f}kcal"
                 if straight_detail:
                     straight_txt = f"{straight_txt}({', '.join(straight_detail)})"
 
@@ -2536,28 +2538,33 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
         else:
             lcp_time_s = res.lcp_time_s if res.lcp_time_s is not None else res.total_cost_s
             if lcp_time_s is not None and math.isfinite(lcp_time_s):
-                summary = f"{summary} | LCP {float(lcp_time_s)/60.0:.1f}분"
+                summary = f"{summary} | LCP {float(lcp_time_s) / 60.0:.1f}{' min' if english else '분'}"
 
-            if (
-                res.straight_time_s is not None
-                and math.isfinite(res.straight_time_s)
-                and lcp_time_s is not None
-                and math.isfinite(lcp_time_s)
+            if all(
+                (
+                    res.straight_time_s is not None,
+                    math.isfinite(res.straight_time_s),
+                    lcp_time_s is not None,
+                    math.isfinite(lcp_time_s),
+                )
             ):
                 lcp_min = float(lcp_time_s) / 60.0
                 straight_min = float(res.straight_time_s) / 60.0
                 delta_min = straight_min - lcp_min
                 sign = "+" if delta_min >= 0 else "-"
-                if (
-                    res.straight_dist_m is not None
-                    and math.isfinite(res.straight_dist_m)
-                    and res.lcp_dist_m is not None
-                    and math.isfinite(res.lcp_dist_m)
+                if all(
+                    (
+                        res.straight_dist_m is not None,
+                        math.isfinite(res.straight_dist_m),
+                        res.lcp_dist_m is not None,
+                        math.isfinite(res.lcp_dist_m),
+                    )
                 ):
                     summary = (
-                        f"{summary}({res.lcp_dist_m/1000.0:.2f}km)"
-                        f" / 직선 {straight_min:.1f}분({res.straight_dist_m/1000.0:.2f}km)"
-                        f" (Δ {sign}{abs(delta_min):.1f}분)"
+                        f"{summary}({res.lcp_dist_m / 1000.0:.2f}km)"
+                        f" / {'Straight' if english else '직선'} {straight_min:.1f}{' min' if english else '분'}"
+                        f"({res.straight_dist_m / 1000.0:.2f}km)"
+                        f" (Δ {sign}{abs(delta_min):.1f}{' min' if english else '분'})"
                     )
                 else:
                     summary = f"{summary} / 직선 {straight_min:.1f}분 (Δ {sign}{abs(delta_min):.1f}분)"
@@ -3048,10 +3055,10 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
             def fmt_minutes(m):
                 m = float(m)
                 if m < 1.0:
-                    return f"{m*60.0:.0f}s"
+                    return f"{m * 60.0:.0f}s"
                 if m < 120.0:
                     return f"{m:.0f}min"
-                return f"{m/60.0:.1f}h"
+                return f"{m / 60.0:.1f}h"
 
             # Legend ticks in minutes (cost raster is stored in minutes)
             ticks = [0.0, vmax * 0.25, vmax * 0.5, vmax * 0.75, vmax]
@@ -3292,7 +3299,7 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
             target_d = float(i) * float(interval_m)
             nearest = min(profile, key=lambda p: abs(float(p[0]) - target_d))
             d_m, x, y, t_min, e_kcal = nearest
-            parts = [f"{d_m/1000.0:.1f}km", f"{t_min:.1f}분"]
+            parts = [f"{d_m / 1000.0:.1f}km", f"{t_min:.1f}{' min' if is_english_ui() else '분'}"]
             if e_kcal is not None:
                 parts.append(f"{e_kcal:.0f}kcal")
             label = " / ".join(parts)
