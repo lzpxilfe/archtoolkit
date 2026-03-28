@@ -461,10 +461,10 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
         color_ramp = QgsColorRampShader(min_val, max_val)
         color_ramp.setColorRampType(QgsColorRampShader.Discrete)
         items = [
-            QgsColorRampShader.ColorRampItem(min_val + (max_val-min_val)*0.0, QColor("#ffffcc"), "<= Min"),
-            QgsColorRampShader.ColorRampItem(min_val + (max_val-min_val)*0.25, QColor("#c2e699"), "Low"),
-            QgsColorRampShader.ColorRampItem(min_val + (max_val-min_val)*0.5, QColor("#78c679"), "Mid"),
-            QgsColorRampShader.ColorRampItem(min_val + (max_val-min_val)*0.75, QColor("#31a354"), "High"),
+            QgsColorRampShader.ColorRampItem(min_val + (max_val - min_val) * 0.0, QColor("#ffffcc"), "<= Min"),
+            QgsColorRampShader.ColorRampItem(min_val + (max_val - min_val) * 0.25, QColor("#c2e699"), "Low"),
+            QgsColorRampShader.ColorRampItem(min_val + (max_val - min_val) * 0.5, QColor("#78c679"), "Mid"),
+            QgsColorRampShader.ColorRampItem(min_val + (max_val - min_val) * 0.75, QColor("#31a354"), "High"),
             QgsColorRampShader.ColorRampItem(max_val, QColor("#006837"), "Max")
         ]
         color_ramp.setColorRampItemList(items)

@@ -327,13 +327,7 @@ def _mask_black_lines(r: np.ndarray, g: np.ndarray, b: np.ndarray) -> np.ndarray
     rr = r.astype(np.int16, copy=False)
     gg = g.astype(np.int16, copy=False)
     bb = b.astype(np.int16, copy=False)
-    return (
-        (rr < 75)
-        & (gg < 75)
-        & (bb < 75)
-        & (np.abs(rr - gg) < 15)
-        & (np.abs(gg - bb) < 15)
-    )
+    return (rr < 75) & (gg < 75) & (bb < 75) & (np.abs(rr - gg) < 15) & (np.abs(gg - bb) < 15)
 
 
 def _gdal_rasterize_wkt_mask(
@@ -1606,7 +1600,10 @@ value/class 래스터와 폴리곤을 생성합니다.
                     try:
                         total = int(transparent.size)
                         tr = int(np.count_nonzero(transparent))
-                        log_message(f"GeoChem: alpha transparent {tr:,}/{total:,} ({(tr/total*100.0):.2f}%)", level=Qgis.Info)
+                        log_message(
+                            f"GeoChem: alpha transparent {tr:,}/{total:,} ({(tr / total * 100.0):.2f}%)",
+                            level=Qgis.Info,
+                        )
                     except Exception:
                         pass
                 except Exception:
@@ -1632,7 +1629,10 @@ value/class 래스터와 폴리곤을 생성합니다.
             try:
                 total = int(out.size)
                 nd = int(np.count_nonzero(out == nodata_val))
-                log_message(f"GeoChem: nodata pixels {nd:,}/{total:,} ({(nd/total*100.0):.2f}%)", level=Qgis.Info)
+                log_message(
+                    f"GeoChem: nodata pixels {nd:,}/{total:,} ({(nd / total * 100.0):.2f}%)",
+                    level=Qgis.Info,
+                )
             except Exception:
                 pass
 
@@ -1660,7 +1660,10 @@ value/class 래스터와 폴리곤을 생성합니다.
                     try:
                         m = int(np.count_nonzero(mask))
                         t = int(mask.size)
-                        log_message(f"GeoChem: linework mask {m:,}/{t:,} ({(m/t*100.0):.2f}%)", level=Qgis.Info)
+                        log_message(
+                            f"GeoChem: linework mask {m:,}/{t:,} ({(m / t * 100.0):.2f}%)",
+                            level=Qgis.Info,
+                        )
                     except Exception:
                         pass
                     out = out.astype(np.float32, copy=False)
@@ -1685,7 +1688,7 @@ value/class 래스터와 폴리곤을 생성합니다.
                     total = int(out.size)
                     nd = int(np.count_nonzero(out == nodata_val))
                     log_message(
-                        f"GeoChem: nodata pixels after fill {nd:,}/{total:,} ({(nd/total*100.0):.2f}%)",
+                        f"GeoChem: nodata pixels after fill {nd:,}/{total:,} ({(nd / total * 100.0):.2f}%)",
                         level=Qgis.Info,
                     )
                 except Exception:
@@ -1711,7 +1714,7 @@ value/class 래스터와 폴리곤을 생성합니다.
                             total = int(mask_aoi.size)
                             inside = int(np.count_nonzero(mask_aoi))
                             log_message(
-                                f"GeoChem: AOI mask inside {inside:,}/{total:,} ({(inside/total*100.0):.2f}%)",
+                                f"GeoChem: AOI mask inside {inside:,}/{total:,} ({(inside / total * 100.0):.2f}%)",
                                 level=Qgis.Info,
                             )
                         except Exception:
@@ -1720,7 +1723,7 @@ value/class 래스터와 폴리곤을 생성합니다.
                             total2 = int(out.size)
                             nd2 = int(np.count_nonzero(out == nodata_val))
                             log_message(
-                                f"GeoChem: nodata pixels after AOI mask {nd2:,}/{total2:,} ({(nd2/total2*100.0):.2f}%)",
+                                f"GeoChem: nodata pixels after AOI mask {nd2:,}/{total2:,} ({(nd2 / total2 * 100.0):.2f}%)",
                                 level=Qgis.Info,
                             )
                         except Exception:
@@ -1753,7 +1756,7 @@ value/class 래스터와 폴리곤을 생성합니다.
             if need_class:
                 # 3) Class raster (optional output, required internally for polygonize)
                 breaks = _points_to_breaks(preset.points)
-                log_message(f"GeoChem: classify to {len(breaks)-1} bins…", level=Qgis.Info)
+                log_message(f"GeoChem: classify to {len(breaks) - 1} bins…", level=Qgis.Info)
                 cls = _classify_to_bins(values=out, breaks=breaks, nodata_class=0, nodata_value=float(nodata_val))
                 try:
                     flat = cls.ravel()

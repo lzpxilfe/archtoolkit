@@ -31,8 +31,7 @@ class ArchToolkitHelpDialog(QtWidgets.QDialog):
                 "help_dialog",
                 "hint_text",
                 default="이 도움말은 검색하고 복사할 수 있습니다.",
-            )
-            or ""
+            ) or ""
         ).strip()
         if hint_text:
             self.lblHint = QtWidgets.QLabel(tr(hint_text), self)
@@ -53,8 +52,7 @@ class ArchToolkitHelpDialog(QtWidgets.QDialog):
                     "help_dialog",
                     "search_placeholder",
                     default="도움말 검색...",
-                )
-                or "도움말 검색..."
+                ) or "도움말 검색..."
             )
         )
         self.btnSearchNext = QtWidgets.QPushButton(tr("다음"), self)
@@ -76,6 +74,10 @@ class ArchToolkitHelpDialog(QtWidgets.QDialog):
         self.browser = QtWidgets.QTextBrowser(self)
         # Keep help self-contained: don't launch the user's browser from inside QGIS.
         self.browser.setOpenExternalLinks(False)
+        self.browser.setLineWrapMode(QtWidgets.QTextEdit.NoWrap)
+        self.browser.setWordWrapMode(QtGui.QTextOption.WrapAtWordBoundaryOrAnywhere)
+        self.browser.setHorizontalScrollBarPolicy(QtWidgets.QAbstractScrollArea.ScrollBarAsNeeded)
+        self.browser.setVerticalScrollBarPolicy(QtWidgets.QAbstractScrollArea.ScrollBarAsNeeded)
         try:
             self.browser.setHtml(str(html or ""))
         except Exception:

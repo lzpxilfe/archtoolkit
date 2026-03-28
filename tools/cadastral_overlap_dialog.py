@@ -515,7 +515,7 @@ then creates a result layer that stores parcel area, area inside the AOI, and in
                     if use_en:
                         progress.setLabelText(f"Processing AOI {idx + 1}/{len(aoi_items)}... (fid={aoi_fid})")
                     else:
-                        progress.setLabelText(f"조사지역 {idx+1}/{len(aoi_items)} 처리 중... (fid={aoi_fid})")
+                        progress.setLabelText(f"조사지역 {idx + 1}/{len(aoi_items)} 처리 중... (fid={aoi_fid})")
                 except Exception:
                     pass
                 QtWidgets.QApplication.processEvents()

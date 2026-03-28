@@ -26,7 +26,7 @@ from osgeo import gdal
 
 from qgis.PyQt import QtWidgets, uic
 from qgis.PyQt.QtCore import Qt, QVariant
-from qgis.PyQt.QtGui import QColor, QIcon
+from qgis.PyQt.QtGui import QColor, QIcon, QTextOption
 from qgis.core import (
     Qgis,
     QgsApplication,
@@ -2207,18 +2207,20 @@ MST/k-NN/Hub 네트워크를 생성합니다.
             <p style='color:#444'>전체 참고문헌: <code>REFERENCES.md</code></p>
             """
 
-        return (
-            "<html><head><meta charset='utf-8'></head><body style='font-family:Sans-Serif;'>"
-            + hdr
-            + current
-            + what
-            + how
-            + params
-            + sna
-            + tips
-            + limits
-            + refs
-            + "</body></html>"
+        return "".join(
+            (
+                "<html><head><meta charset='utf-8'></head><body style='font-family:Sans-Serif;'>",
+                hdr,
+                current,
+                what,
+                how,
+                params,
+                sna,
+                tips,
+                limits,
+                refs,
+                "</body></html>",
+            )
         )
 
     def _show_interpretation_guide(self):
@@ -2242,6 +2244,10 @@ MST/k-NN/Hub 네트워크를 생성합니다.
             layout = QtWidgets.QVBoxLayout(dlg)
             browser = QtWidgets.QTextBrowser(dlg)
             browser.setOpenExternalLinks(True)
+            browser.setLineWrapMode(QtWidgets.QTextEdit.NoWrap)
+            browser.setWordWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
+            browser.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+            browser.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
             browser.setHtml(self._interpretation_guide_html())
             layout.addWidget(browser)
 
@@ -2743,12 +2749,11 @@ MST/k-NN/Hub 네트워크를 생성합니다.
             {"name": "star", "color": "255,200,0,230", "outline_color": "120,80,0,200", "size": "3.4"}
         )
         any_hub = any(bool(n.is_hub) for n in nodes)
+        hub_categories = [QgsRendererCategory(0, sym_site, "Site")]
+        if any_hub:
+            hub_categories.append(QgsRendererCategory(1, sym_hub, "Hub"))
         pt_layer.setRenderer(
-            QgsCategorizedSymbolRenderer(
-                "is_hub",
-                [QgsRendererCategory(0, sym_site, "Site")]
-                + ([QgsRendererCategory(1, sym_hub, "Hub")] if any_hub else []),
-            )
+            QgsCategorizedSymbolRenderer("is_hub", hub_categories),
         )
 
         # Edges

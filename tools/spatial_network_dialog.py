@@ -26,7 +26,7 @@ import processing
 
 from qgis.PyQt import QtWidgets, uic
 from qgis.PyQt.QtCore import Qt, QVariant
-from qgis.PyQt.QtGui import QColor, QIcon
+from qgis.PyQt.QtGui import QColor, QIcon, QTextOption
 from qgis.core import (
     Qgis,
     QgsCategorizedSymbolRenderer,
@@ -704,14 +704,16 @@ from a site layer.
             """
 
             body = vis + sna + ppa if mode == NETWORK_VISIBILITY else ppa + sna + vis
-            return (
-                "<html><head><meta charset='utf-8'></head><body style='font-family:Sans-Serif;'>"
-                "<h2>Network Interpretation Guide</h2>"
-                "<p style='color:#444'>Tip: hover over each option to see a short explanation and reference note.</p>"
-                + body
-                + refs
-                + "</body></html>"
+        return "".join(
+            (
+                "<html><head><meta charset='utf-8'></head><body style='font-family:Sans-Serif;'>",
+                "<h2>Network Interpretation Guide</h2>",
+                "<p style='color:#444'>Tip: hover over each option to see a short explanation and reference note.</p>",
+                body,
+                refs,
+                "</body></html>",
             )
+        )
 
         # Keep it practical: how to read the output layers/fields and when to use each option.
         ppa = """
@@ -782,13 +784,15 @@ from a site layer.
         else:
             body = ppa + sna + vis
 
-        return (
-            "<html><head><meta charset='utf-8'></head><body style='font-family:Sans-Serif;'>"
-            "<h2>네트워크 해석 가이드</h2>"
-            "<p style='color:#444'>Tip: 각 옵션 위에 마우스를 올리면 짧은 설명/참고문헌을 바로 볼 수 있어요.</p>"
-            + body
-            + refs
-            + "</body></html>"
+        return "".join(
+            (
+                "<html><head><meta charset='utf-8'></head><body style='font-family:Sans-Serif;'>",
+                "<h2>네트워크 해석 가이드</h2>",
+                "<p style='color:#444'>Tip: 각 옵션 위에 마우스를 올리면 짧은 설명/참고문헌을 바로 볼 수 있어요.</p>",
+                body,
+                refs,
+                "</body></html>",
+            )
         )
 
     def _show_interpretation_guide(self):
@@ -814,6 +818,10 @@ from a site layer.
             layout = QtWidgets.QVBoxLayout(dlg)
             browser = QtWidgets.QTextBrowser(dlg)
             browser.setOpenExternalLinks(True)
+            browser.setLineWrapMode(QtWidgets.QTextEdit.NoWrap)
+            browser.setWordWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
+            browser.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+            browser.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
             browser.setHtml(self._interpretation_guide_html())
             layout.addWidget(browser)
 
@@ -1412,10 +1420,7 @@ from a site layer.
         # Summary
         deg = self._degrees(n, edges)
         comps, comp_sizes = self._components(n, edges)
-        msg = (
-            f"완료: 노드 {n} / 간선 {len(edges)}  "
-            f"(평균 degree {float(sum(deg))/max(1, n):.2f}, components {len(comp_sizes)})"
-        )
+        msg = f"완료: 노드 {n} / 간선 {len(edges)}  " f"(평균 degree {float(sum(deg)) / max(1, n):.2f}, components {len(comp_sizes)})"
         log_message(f"PPA: {msg}  [method={method}]", level=Qgis.Info)
         push_message(self.iface, "PPA", msg, level=0, duration=7)
         self.accept()

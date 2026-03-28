@@ -282,8 +282,7 @@ class ProfileChartWidget(QWidget):
 
         # Check if mouse is in chart area
         if (
-            self.margin_left <= self.mouse_x <= self.margin_left + w
-            and self.margin_top <= self.mouse_y <= self.margin_top + h
+            self.margin_left <= self.mouse_x <= self.margin_left + w and self.margin_top <= self.mouse_y <= self.margin_top + h
         ):
 
             # Calculate distance at mouse position
@@ -1106,11 +1105,13 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
 
         try:
             if self.btnUseLastLength is not None:
-                can_use = (
-                    enabled
-                    and self._last_profile_length_m is not None
-                    and math.isfinite(self._last_profile_length_m)
-                    and self._last_profile_length_m > 0
+                last_len = self._last_profile_length_m
+                can_use = enabled and all(
+                    (
+                        last_len is not None,
+                        math.isfinite(last_len),
+                        last_len > 0,
+                    )
                 )
                 self.btnUseLastLength.setEnabled(bool(can_use))
         except Exception:
@@ -2575,7 +2576,7 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
         mean_abs_slope = ((ascent + descent) / total_d * 100.0) if total_d > 1e-9 else 0.0
 
         stats = (
-            f"총 거리: {total_d:.1f}m | 고도 범위: {min_e:.1f}m ~ {max_e:.1f}m (차: {max_e-min_e:.1f}m)"
+            f"총 거리: {total_d:.1f}m | 고도 범위: {min_e:.1f}m ~ {max_e:.1f}m (차: {max_e - min_e:.1f}m)"
             f" | 누적상승: {ascent:.1f}m | 누적하강: {descent:.1f}m"
             f" | 평균경사(|%|): {mean_abs_slope:.1f}% | 최대경사(|%|): {max_abs_slope:.1f}%"
         )

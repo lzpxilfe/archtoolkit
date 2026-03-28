@@ -120,14 +120,18 @@ def describe_model_status(
     normalized = normalize_model_name(raw_model)
     replacement = get_model_replacement(raw_model)
     if replacement:
-        note = _DEPRECATED_MODEL_NOTES.get(raw_model) or f"`{replacement}` 사용을 권장합니다."
         if is_english_ui():
-            note_en = (
-                _DEPRECATED_MODEL_NOTES.get(raw_model)
-                and f"The Google changelog says it was retired on March 9, 2026 and replaced by `{replacement}`."
-            ) or f"`{replacement}` is recommended."
+            deprecated_note = _DEPRECATED_MODEL_NOTES.get(raw_model)
+            if deprecated_note:
+                note_en = (
+                    f"The Google changelog says it was retired on March 9, 2026 and "
+                    f"replaced by `{replacement}`."
+                )
+            else:
+                note_en = f"`{replacement}` is recommended."
             return "warning", f"The current value `{raw_model}` is a legacy model ID. {note_en}"
-        return "warning", f"현재 입력값 `{raw_model}`은 구형 ID입니다. {note}"
+        note_ko = _DEPRECATED_MODEL_NOTES.get(raw_model) or f"`{replacement}` 사용을 권장합니다."
+        return "warning", f"현재 입력값 `{raw_model}`은 구형 ID입니다. {note_ko}"
 
     known = list(verified_models or get_known_models())
     is_stale = is_known_models_catalog_stale(verified_at)

@@ -55,6 +55,21 @@ from .utils import (
 )
 
 
+def _compact_str_list(value_list, *, include_none=False, lower=False):
+    """Normalize a config list by dropping blank values while optionally preserving None."""
+    out = []
+    for value in value_list or []:
+        if value is None:
+            if include_none:
+                out.append(None)
+            continue
+        text = str(value).strip()
+        if not text:
+            continue
+        out.append(text.lower() if lower else text)
+    return out
+
+
 PARENT_GROUP_NAME = get_output_group_name("geology", "ArchToolkit - Geology")
 GEOLOGY_EXTRACT_ROOT_NAME = str(
     get_plugin_config_value("geology_zip", "extract_root_name", default="ArchToolkit_KIGAM_Extract") or ""
@@ -65,11 +80,10 @@ GEOLOGY_EXTRACT_CLEANUP_DAYS = int(
 GEOLOGY_PROVIDER_ENCODING = str(
     get_plugin_config_value("geology_zip", "provider_encoding", default="cp949") or ""
 ).strip() or "cp949"
-GEOLOGY_CANDIDATE_ENCODINGS = [
-    (None if value is None else str(value).strip())
-    for value in (get_plugin_config_value("geology_zip", "candidate_encodings", default=["CP949", "EUC-KR", None, "UTF-8"]) or [])
-    if value is None or str(value).strip()
-]
+GEOLOGY_CANDIDATE_ENCODINGS = _compact_str_list(
+    get_plugin_config_value("geology_zip", "candidate_encodings", default=["CP949", "EUC-KR", None, "UTF-8"]),
+    include_none=True,
+)
 GEOLOGY_ENCODING_PREFERENCE = get_plugin_config_value(
     "geology_zip",
     "encoding_preference",
@@ -84,87 +98,59 @@ GEOLOGY_POINT_MARKER_SIZE = float(
 GEOLOGY_FILL_SYMBOL_WIDTH = float(
     get_plugin_config_value("geology_zip", "symbology", "polygon_fill_width", default=10.0) or 10.0
 )
-GEOLOGY_SYMBOL_PRIORITY_FIELDS = [
-    str(v).strip()
-    for v in (
-        get_plugin_config_value(
-            "geology_zip",
-            "symbology",
-            "symbol_priority_fields",
-            default=["LITHOIDX", "TYPE", "ASGN_CODE", "SIGN", "CODE", "AGEIDX"],
-        )
-        or []
+GEOLOGY_SYMBOL_PRIORITY_FIELDS = _compact_str_list(
+    get_plugin_config_value(
+        "geology_zip",
+        "symbology",
+        "symbol_priority_fields",
+        default=["LITHOIDX", "TYPE", "ASGN_CODE", "SIGN", "CODE", "AGEIDX"],
     )
-    if str(v or "").strip()
-]
-GEOLOGY_LABEL_FIELD_CANDIDATES = [
-    str(v).strip()
-    for v in (
-        get_plugin_config_value(
-            "geology_zip",
-            "symbology",
-            "label_field_candidates",
-            default=["LITHOIDX", "LITHONAME"],
-        )
-        or []
+)
+GEOLOGY_LABEL_FIELD_CANDIDATES = _compact_str_list(
+    get_plugin_config_value(
+        "geology_zip",
+        "symbology",
+        "label_field_candidates",
+        default=["LITHOIDX", "LITHONAME"],
     )
-    if str(v or "").strip()
-]
-GEOLOGY_FRAME_LAYER_KEYWORDS = [
-    str(v).strip().lower()
-    for v in (
-        get_plugin_config_value(
-            "geology_zip",
-            "symbology",
-            "frame_layer_keywords",
-            default=["frame"],
-        )
-        or []
-    )
-    if str(v or "").strip()
-]
-GEOLOGY_REFERENCE_HIDE_KEYWORDS = [
-    str(v).strip().lower()
-    for v in (
-        get_plugin_config_value(
-            "geology_zip",
-            "symbology",
-            "reference_hide_keywords",
-            default=["frame", "crosssection"],
-        )
-        or []
-    )
-    if str(v or "").strip()
-]
+)
+GEOLOGY_FRAME_LAYER_KEYWORDS = _compact_str_list(
+    get_plugin_config_value(
+        "geology_zip",
+        "symbology",
+        "frame_layer_keywords",
+        default=["frame"],
+    ),
+    lower=True,
+)
+GEOLOGY_REFERENCE_HIDE_KEYWORDS = _compact_str_list(
+    get_plugin_config_value(
+        "geology_zip",
+        "symbology",
+        "reference_hide_keywords",
+        default=["frame", "crosssection"],
+    ),
+    lower=True,
+)
 GEOLOGY_LITHO_LAYER_KEYWORD = str(
     get_plugin_config_value("geology_zip", "symbology", "litho_layer_keyword", default="litho") or ""
 ).strip().lower()
-GEOLOGY_RASTER_FIELD_PRIORITY = [
-    str(v).strip()
-    for v in (
-        get_plugin_config_value(
-            "geology_zip",
-            "raster",
-            "field_priority",
-            default=["LITHOIDX", "AGEIDX", "LITHONAME", "TYPE", "ASGN_CODE", "SIGN", "CODE"],
-        )
-        or []
+GEOLOGY_RASTER_FIELD_PRIORITY = _compact_str_list(
+    get_plugin_config_value(
+        "geology_zip",
+        "raster",
+        "field_priority",
+        default=["LITHOIDX", "AGEIDX", "LITHONAME", "TYPE", "ASGN_CODE", "SIGN", "CODE"],
     )
-    if str(v or "").strip()
-]
-GEOLOGY_NAME_FIELD_CANDIDATES = [
-    str(v).strip()
-    for v in (
-        get_plugin_config_value(
-            "geology_zip",
-            "raster",
-            "name_field_candidates",
-            default=["LITHONAME", "AGENAME", "NAME", "KOR_NAME", "ENG_NAME"],
-        )
-        or []
+)
+GEOLOGY_NAME_FIELD_CANDIDATES = _compact_str_list(
+    get_plugin_config_value(
+        "geology_zip",
+        "raster",
+        "name_field_candidates",
+        default=["LITHONAME", "AGENAME", "NAME", "KOR_NAME", "ENG_NAME"],
     )
-    if str(v or "").strip()
-]
+)
 GEOLOGY_UI_FONT_SIZE_MIN = int(get_plugin_config_value("geology_zip", "ui", "font_size_min", default=5) or 5)
 GEOLOGY_UI_FONT_SIZE_MAX = int(get_plugin_config_value("geology_zip", "ui", "font_size_max", default=50) or 50)
 GEOLOGY_UI_FONT_SIZE_DEFAULT = int(
@@ -236,16 +222,20 @@ def _meters_to_degrees(pixel_m: float, lat_deg: float) -> Tuple[float, float]:
 
     r = math.radians(lat)
     # Approx meters per degree (WGS84). Good enough for small extents / UX.
-    m_per_deg_lat = (
-        111132.92
-        - 559.82 * math.cos(2 * r)
-        + 1.175 * math.cos(4 * r)
-        - 0.0023 * math.cos(6 * r)
+    m_per_deg_lat = sum(
+        (
+            111132.92,
+            -559.82 * math.cos(2 * r),
+            1.175 * math.cos(4 * r),
+            -0.0023 * math.cos(6 * r),
+        )
     )
-    m_per_deg_lon = (
-        111412.84 * math.cos(r)
-        - 93.5 * math.cos(3 * r)
-        + 0.118 * math.cos(5 * r)
+    m_per_deg_lon = sum(
+        (
+            111412.84 * math.cos(r),
+            -93.5 * math.cos(3 * r),
+            0.118 * math.cos(5 * r),
+        )
     )
     if m_per_deg_lat <= 0 or m_per_deg_lon <= 0:
         return 0.0, 0.0
@@ -1246,11 +1236,9 @@ class GeologyZipDialog(QtWidgets.QDialog):
                     lname = str(layer.name() or "").lower()
                     fields_up = {str(f.name() or "").upper() for f in layer.fields()}
                     candidate_fields_up = {name.upper() for name in GEOLOGY_LABEL_FIELD_CANDIDATES}
-                    if (
-                        GEOLOGY_LITHO_LAYER_KEYWORD
-                        and GEOLOGY_LITHO_LAYER_KEYWORD not in lname
-                        and not any(name in fields_up for name in candidate_fields_up)
-                    ):
+                    has_keyword = GEOLOGY_LITHO_LAYER_KEYWORD and GEOLOGY_LITHO_LAYER_KEYWORD in lname
+                    has_candidate = any(name in fields_up for name in candidate_fields_up)
+                    if GEOLOGY_LITHO_LAYER_KEYWORD and not has_keyword and not has_candidate:
                         continue
                 except Exception:
                     continue

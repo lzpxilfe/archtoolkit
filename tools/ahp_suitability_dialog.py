@@ -2197,21 +2197,24 @@ Combines multiple environmental rasters with AHP (pairwise-comparison) weights t
                 pmax0 = float(pmax) if pmax is not None else None
             except Exception:
                 pmin0, pmax0 = None, None
-            if (
-                pmin0 is None
-                or pmax0 is None
-                or (not math.isfinite(pmin0))
-                or (not math.isfinite(pmax0))
-                or pmin0 >= pmax0
-                or pmin0 < mn
-                or pmax0 > mx
-            ):
-                if span > 0:
-                    crit.prefer_min = mn + (span * 0.25)
-                    crit.prefer_max = mn + (span * 0.75)
-                else:
-                    crit.prefer_min = mn
-                    crit.prefer_max = mx
+        invalid_range = any(
+            (
+                pmin0 is None,
+                pmax0 is None,
+                not math.isfinite(pmin0),
+                not math.isfinite(pmax0),
+                pmin0 >= pmax0,
+                pmin0 < mn,
+                pmax0 > mx,
+            )
+        )
+        if invalid_range:
+            if span > 0:
+                crit.prefer_min = mn + (span * 0.25)
+                crit.prefer_max = mn + (span * 0.75)
+            else:
+                crit.prefer_min = mn
+                crit.prefer_max = mx
         elif mode == "reclass":
             rows = crit.score_ranges or []
             if not rows:
@@ -3003,30 +3006,33 @@ Combines multiple environmental rasters with AHP (pairwise-comparison) weights t
                 prefer_max = float(crit.prefer_max) if crit.prefer_max is not None else None
             except Exception:
                 prefer_min, prefer_max = None, None
-            if (
-                prefer_min is None
-                or prefer_max is None
-                or (not math.isfinite(prefer_min))
-                or (not math.isfinite(prefer_max))
-                or prefer_min >= prefer_max
-            ):
-                prefer_min = mn + ((mx - mn) * 0.25)
-                prefer_max = mn + ((mx - mn) * 0.75)
-            if prefer_min <= mn and prefer_max >= mx:
-                return "A*0 + 1"
-            if prefer_min <= mn:
-                if prefer_max >= mx:
-                    return "A*0 + 1"
-                return f"(({mx} - A) / ({mx} - {prefer_max})) * (A > {prefer_max}) + ((A <= {prefer_max}) * 1)"
-            if prefer_max >= mx:
-                if prefer_min <= mn:
-                    return "A*0 + 1"
-                return f"((A - {mn}) / ({prefer_min} - {mn})) * (A < {prefer_min}) + ((A >= {prefer_min}) * 1)"
-            return (
-                f"((A < {prefer_min}) * ((A - {mn}) / ({prefer_min} - {mn}))) + "
-                f"(((A >= {prefer_min}) * (A <= {prefer_max})) * 1) + "
-                f"((A > {prefer_max}) * (({mx} - A) / ({mx} - {prefer_max})))"
+        invalid_prefer = any(
+            (
+                prefer_min is None,
+                prefer_max is None,
+                not math.isfinite(prefer_min),
+                not math.isfinite(prefer_max),
+                prefer_min >= prefer_max,
             )
+        )
+        if invalid_prefer:
+            prefer_min = mn + ((mx - mn) * 0.25)
+            prefer_max = mn + ((mx - mn) * 0.75)
+        if prefer_min <= mn and prefer_max >= mx:
+            return "A*0 + 1"
+        if prefer_min <= mn:
+            if prefer_max >= mx:
+                return "A*0 + 1"
+            return f"(({mx} - A) / ({mx} - {prefer_max})) * (A > {prefer_max}) + ((A <= {prefer_max}) * 1)"
+        if prefer_max >= mx:
+            if prefer_min <= mn:
+                return "A*0 + 1"
+            return f"((A - {mn}) / ({prefer_min} - {mn})) * (A < {prefer_min}) + ((A >= {prefer_min}) * 1)"
+        return (
+            f"((A < {prefer_min}) * ((A - {mn}) / ({prefer_min} - {mn}))) + "
+            f"(((A >= {prefer_min}) * (A <= {prefer_max})) * 1) + "
+            f"((A > {prefer_max}) * (({mx} - A) / ({mx} - {prefer_max})))"
+        )
         if mode == "reclass":
             rows = self._validated_score_ranges(crit)
             if not rows:

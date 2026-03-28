@@ -796,14 +796,14 @@ class AiAoiReportDialog(QtWidgets.QDialog):
         if scope == "group":
             group_path = self._get_target_group_path()
             if english:
+                no_group_text = "<span style='color:#8a4b00;'>No group has been selected yet.</span>"
                 lines.append(
-                    "Only the selected group will be scanned: "
-                    + (group_path or "<span style='color:#8a4b00;'>No group has been selected yet.</span>")
+                    f"Only the selected group will be scanned: {group_path or no_group_text}"
                 )
             else:
+                no_group_text = "<span style='color:#8a4b00;'>아직 그룹을 고르지 않았습니다.</span>"
                 lines.append(
-                    "선택 그룹만 스캔합니다: "
-                    + (group_path or "<span style='color:#8a4b00;'>아직 그룹을 고르지 않았습니다.</span>")
+                    f"선택 그룹만 스캔합니다: {group_path or no_group_text}"
                 )
         elif scope == "layers":
             ids, names = self._selected_layers_snapshot()
@@ -1429,14 +1429,12 @@ class AiAoiReportDialog(QtWidgets.QDialog):
             try:
                 fallback = ai_local_summarizer.generate_report(ctx)
                 if fallback:
-                    self.txtOutput.setPlainText(
-                        (
-                            tr("※ Gemini 호출 실패로 로컬 요약으로 대체했습니다.\n\n")
-                            if not english
-                            else "Note: Gemini failed, so the result was replaced with a local summary.\n\n"
-                        )
-                        + str(fallback)
+                    fallback_prefix = (
+                        tr("※ Gemini 호출 실패로 로컬 요약으로 대체했습니다.\\n\\n")
+                        if not english
+                        else "Note: Gemini failed, so the result was replaced with a local summary.\\n\\n"
                     )
+                    self.txtOutput.setPlainText(f"{fallback_prefix}{str(fallback)}")
                     self._last_report_text = str(fallback or "")
                     self._last_report_ctx_key = self._last_ctx_key
                     push_message(
