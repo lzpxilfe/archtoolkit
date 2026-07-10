@@ -265,6 +265,11 @@ Linux:   ~/.local/share/QGIS/QGIS3/profiles/default/python/plugins/ArchToolkit
 - [CONTRIBUTING.md](CONTRIBUTING.md): 기여 가이드
 
 ## ⭐ Citation & Star
+[![Cite this repository](https://img.shields.io/badge/Cite_this-repository-2ea44f?logo=github)](https://github.com/lzpxilfe/archtoolkit)
+[![Star this repository](https://img.shields.io/github/stars/lzpxilfe/archtoolkit?style=social)](https://github.com/lzpxilfe/archtoolkit)
+
+인용 메타데이터는 [CITATION.cff](CITATION.cff)에 보관합니다.
+
 
 이 플러그인이 유용했다면 GitHub Star를 눌러 주세요. 연구나 실무에서 사용했다면 아래 형태로 인용할 수 있습니다.
 
