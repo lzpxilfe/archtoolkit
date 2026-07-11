@@ -493,7 +493,8 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
             field_name = self.detect_code_field(sl)
             if not field_name: continue
             
-            query = f"\"{field_name}\" IN ({', '.join([f'\'{c}\'' for c in codes])})"
+            quoted_codes = ", ".join(["'{}'".format(c) for c in codes])
+            query = '"{}" IN ({})'.format(field_name, quoted_codes)
             request = QgsFeatureRequest().setFilterExpression(query)
             
             for feat in sl.getFeatures(request):

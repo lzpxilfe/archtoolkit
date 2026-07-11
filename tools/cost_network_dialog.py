@@ -74,6 +74,7 @@ from .utils import (
 )
 from .live_log_dialog import ensure_live_log_dialog
 from .help_dialog import show_help_dialog
+from .i18n import get_output_group_name
 
 
 FORM_CLASS, _ = uic.loadUiType(
@@ -1993,86 +1994,6 @@ MST/k-NN/Hub 네트워크를 생성합니다.
             + limits
             + refs
             + "</body></html>"
-        )
-
-    def _show_interpretation_guide(self):
-        try:
-            # Reuse if already open (prevents multiple floating dialogs).
-            if getattr(self, "_interpretGuideDialog", None) is not None:
-                try:
-                    if self._interpretGuideDialog.isVisible():
-                        self._interpretGuideBrowser.setHtml(self._interpretation_guide_html())
-                        self._interpretGuideDialog.raise_()
-                        self._interpretGuideDialog.activateWindow()
-                        return
-                except Exception:
-                    pass
-
-            params = """
-            <h3>3) 파라미터를 어떻게 잡나</h3>
-            <ul>
-              <li><code>후보 간선(k)</code>: 클수록 MST가 끊길 위험이 줄고 정확도가 올라가지만 계산이 느려집니다.</li>
-              <li><code>경로 버퍼(m)</code>: 0이면 DEM 전체에서 경로를 찾습니다(매우 느림). 너무 작으면 실제 우회로가 잘려 경로가 실패할 수 있습니다.</li>
-              <li><code>대각 이동</code>: 8방향 이동은 더 자연스러운 경로가 나올 수 있지만, 4방향보다 계산이 늘 수 있습니다.</li>
-              <li><code>MST 대칭화</code>: 경사 기반 비용은 A→B와 B→A가 다를 수 있어, MST는 ‘대칭 비용’이 필요합니다(평균/최소/최대).</li>
-            </ul>
-            """
-
-            sna = """
-            <h3>4) SNA 지표(노드 속성) 읽는 법</h3>
-            <p>SNA는 “선 몇 개”가 아니라 각 유적의 역할을 수치로 보여줍니다.
-            이 값들은 <b>선택한 네트워크 방식</b>(MST/k-NN/Hub)에 따라 달라집니다.</p>
-            <ul>
-              <li><code>degree</code>: 연결 수(많을수록 허브 후보).</li>
-              <li><code>component</code>/<code>comp_size</code>: 끊긴 덩어리(컴포넌트)와 그 크기.
-              컴포넌트가 많으면 <code>후보 k</code> 또는 <code>버퍼</code>를 늘려보세요.</li>
-              <li><code>closeness</code>(선택): 다른 노드까지의 “최단 비용 합”이 작을수록 큽니다(느릴 수 있음).</li>
-              <li><code>betweenness</code>(선택): 다른 노드 쌍의 최단 비용 경로를 “중개”하는 정도(매우 느릴 수 있음).</li>
-            </ul>
-            """
-
-            tips = """
-            <h3>5) 연구 팁(유형/위계)</h3>
-            <p>예: 왕성/빈전/고분군처럼 위계가 다른 폴리곤이 섞여 있다면,</p>
-            <ul>
-              <li>‘선택된 피처만’으로 조합을 바꿔 여러 번 실행하면 비교가 쉽습니다(왕성↔빈전, 빈전↔고분군 등).</li>
-              <li>또는 Hub 방식으로 “왕성”을 허브로 지정해 ‘중심-주변’ 가정을 시험할 수 있습니다.</li>
-            </ul>
-            """
-
-            limits = """
-            <h3>6) 한계와 주의</h3>
-            <ul>
-              <li>이 도구는 기본적으로 <b>DEM 경사</b>만 반영합니다. 도로/하천/토지피복/행정경계 같은 제약은 별도 입력이 없으면 고려되지 않습니다.</li>
-              <li>에너지(kcal) 모드는 Pandolf 모델에서 의미가 있으며, 모델/파라미터 설정에 따라 값이 크게 달라질 수 있습니다.</li>
-              <li>큰 데이터(예: 200개+)는 후보 k/버퍼 조절이 중요하며, SNA의 느린 지표는 자동 생략될 수 있습니다.</li>
-            </ul>
-            """
-
-            refs = """
-            <h3>참고(요약)</h3>
-            <ul>
-              <li>MST: Kruskal(1956), Prim(1957)</li>
-              <li>보행/비용모델: Tobler(1993), Naismith(1892), Conolly &amp; Lake(2006), Pandolf et al.(1977)</li>
-              <li>SNA: Freeman(1979), Wasserman &amp; Faust(1994), Brandes(2001)</li>
-            </ul>
-            <p style='color:#444'>전체 참고문헌: <code>REFERENCES.md</code></p>
-            """
-
-        return "".join(
-            (
-                "<html><head><meta charset='utf-8'></head><body style='font-family:Sans-Serif;'>",
-                hdr,
-                current,
-                what,
-                how,
-                params,
-                sna,
-                tips,
-                limits,
-                refs,
-                "</body></html>",
-            )
         )
 
     def _show_interpretation_guide(self):
