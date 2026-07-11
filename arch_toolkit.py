@@ -84,6 +84,14 @@ class ArchToolkit:
             )
             self.align_export_action.triggered.connect(self.run_align_export_tool)
 
+            # Covariate correlation / VIF report (multicollinearity check)
+            self.cov_report_action = QAction(
+                QIcon(terrain_icon),
+                u"변수 상관/VIF 리포트 (Correlation & VIF)",
+                self.iface.mainWindow(),
+            )
+            self.cov_report_action.triggered.connect(self.run_cov_report_tool)
+
             # AHP Suitability (Multi-criteria)
             ahp_icon = None
             for icon_name in ("AHP.png", "ahp.png", "terrain_icon.png"):
@@ -223,6 +231,7 @@ class ArchToolkit:
             self.iface.addPluginToMenu(self.menu_name, self.cad_overlap_action)
             self.iface.addPluginToMenu(self.menu_name, self.terrain_action)
             self.iface.addPluginToMenu(self.menu_name, self.align_export_action)
+            self.iface.addPluginToMenu(self.menu_name, self.cov_report_action)
             self.iface.addPluginToMenu(self.menu_name, self.ahp_action)
             self.iface.addPluginToMenu(self.menu_name, self.geochem_action)
             self.iface.addPluginToMenu(self.menu_name, self.geology_zip_action)
@@ -253,6 +262,7 @@ class ArchToolkit:
             self.tool_menu.addSeparator()
             self.tool_menu.addAction(self.terrain_action)
             self.tool_menu.addAction(self.align_export_action)
+            self.tool_menu.addAction(self.cov_report_action)
             self.tool_menu.addAction(self.ahp_action)
             self.tool_menu.addAction(self.geochem_action)
             self.tool_menu.addAction(self.geology_zip_action)
@@ -281,7 +291,7 @@ class ArchToolkit:
             # Keep references for cleanup
             self.actions = [
                 self.dem_action, self.contour_action, self.cad_overlap_action,
-                self.terrain_action, self.align_export_action, self.ahp_action,
+                self.terrain_action, self.align_export_action, self.cov_report_action, self.ahp_action,
                 self.geochem_action, self.geology_zip_action,
                 self.profile_action, self.cost_action, self.network_action,
                 self.spatial_network_action, self.style_action, self.drafting_action,
@@ -422,6 +432,16 @@ class ArchToolkit:
             dlg.exec_()
         except Exception as e:
             log_exception("Align & export tool error", e)
+            QMessageBox.critical(self.iface.mainWindow(), "오류", f"도구를 여는 중 오류가 발생했습니다: {str(e)}")
+
+    def run_cov_report_tool(self):
+        try:
+            from .tools.covariate_report_dialog import CovariateReportDialog
+
+            dlg = CovariateReportDialog(self.iface)
+            dlg.exec_()
+        except Exception as e:
+            log_exception("Covariate report tool error", e)
             QMessageBox.critical(self.iface.mainWindow(), "오류", f"도구를 여는 중 오류가 발생했습니다: {str(e)}")
 
     def run_profile_tool(self):
