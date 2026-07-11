@@ -58,7 +58,6 @@ from .utils import (
     push_message,
     restore_ui_focus,
     set_archtoolkit_layer_metadata,
-    transform_point,
 )
 from .live_log_dialog import ensure_live_log_dialog
 from .help_dialog import show_help_dialog
@@ -1568,7 +1567,6 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
     def _ppa_filter_gabriel(self, *, cand_edges: Set[Tuple[int, int]], coords: np.ndarray) -> Set[Tuple[int, int]]:
         """Gabriel graph filter (usually applied on Delaunay candidate edges)."""
         out: Set[Tuple[int, int]] = set()
-        n = int(coords.shape[0])
         eps = 1e-9
         for a, b in cand_edges:
             a = int(a)

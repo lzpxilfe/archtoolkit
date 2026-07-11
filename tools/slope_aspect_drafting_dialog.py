@@ -54,7 +54,6 @@ from qgis.core import (
     QgsProject,
     QgsProperty,
     QgsRendererCategory,
-    QgsSingleSymbolRenderer,
     QgsStyle,
     QgsSymbolLayer,
     QgsTextBufferSettings,

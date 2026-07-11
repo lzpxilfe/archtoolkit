@@ -435,12 +435,15 @@ class AlignExportDialog(QtWidgets.QDialog):
         restore_ui_focus(self)
 
     def _warp(self, src, out, px, extent_str, ref_crs, *, nearest: bool):
-        processing.run("gdal:warpreproject", {
+        # Categorical layers keep their input type (often Byte); forcing -9999 as
+        # NoData would be out of a Byte range and make gdalwarp fail. Let those
+        # inherit the source NoData; only continuous outputs get -9999.
+        params = {
             "INPUT": src,
             "SOURCE_CRS": None,
             "TARGET_CRS": ref_crs,
             "RESAMPLING": 0 if nearest else 1,  # 0=nearest, 1=bilinear
-            "NODATA": -9999,
+            "NODATA": None if nearest else -9999,
             "TARGET_RESOLUTION": px,
             "OPTIONS": "",
             "DATA_TYPE": 0,  # keep input type (0 = use input)
@@ -449,7 +452,8 @@ class AlignExportDialog(QtWidgets.QDialog):
             "MULTITHREADING": False,
             "EXTRA": "",
             "OUTPUT": out,
-        })
+        }
+        processing.run("gdal:warpreproject", params)
         return out
 
     def _write_manifest(self, export_dir, outputs):

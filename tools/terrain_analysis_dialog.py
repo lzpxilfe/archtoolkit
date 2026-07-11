@@ -659,7 +659,29 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                 f"((A>{tpi_mid_high})*(A<={tpi_high}))*5 + "
                 f"(A>{tpi_high})*6"
             )
-            
+
+            # Mask NoData: TPI/Slope NoData cells (e.g. edge -9999) otherwise satisfy
+            # A<tpi_low and get miscoloured as class 1 (valley). Zero them out and
+            # mark 0 as NoData (transparent) after the layer is created.
+            nd_a = nd_b = None
+            if gdal is not None:
+                try:
+                    _da = gdal.Open(tpi_path, gdal.GA_ReadOnly)
+                    nd_a = _da.GetRasterBand(1).GetNoDataValue() if _da else None
+                    _da = None
+                    _db = gdal.Open(slope_path, gdal.GA_ReadOnly)
+                    nd_b = _db.GetRasterBand(1).GetNoDataValue() if _db else None
+                    _db = None
+                except Exception:
+                    nd_a = nd_b = None
+            mask_expr = ""
+            if nd_a is not None:
+                mask_expr += f"*(A!={nd_a})"
+            if nd_b is not None:
+                mask_expr += f"*(B!={nd_b})"
+            if mask_expr:
+                calc_expr = f"({calc_expr}){mask_expr}"
+
             result = processing.run("gdal:rastercalculator", {
                 'INPUT_A': tpi_path, 'BAND_A': 1,
                 'INPUT_B': slope_path, 'BAND_B': 1,
@@ -685,6 +707,11 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                                 "tpi_high": float(tpi_high),
                             },
                         )
+                    except Exception:
+                        pass
+                    # Class 0 = masked NoData -> transparent
+                    try:
+                        layer.dataProvider().setNoDataValue(1, 0)
                     except Exception:
                         pass
                     QgsProject.instance().addMapLayer(layer)

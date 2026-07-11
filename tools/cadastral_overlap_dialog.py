@@ -25,7 +25,7 @@ from typing import Iterable, List, Optional, Tuple
 
 from qgis.PyQt import QtWidgets
 from qgis.PyQt.QtCore import Qt, QVariant
-from qgis.PyQt.QtGui import QColor, QIcon
+from qgis.PyQt.QtGui import QIcon
 from qgis.core import (
     Qgis,
     QgsCoordinateTransform,

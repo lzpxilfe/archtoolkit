@@ -26,7 +26,6 @@ from . import ai_gemini
 from . import ai_local_summarizer
 from .live_log_dialog import ensure_live_log_dialog
 from .utils import log_message, push_message, restore_ui_focus
-from .i18n import is_english_ui
 
 
 _SETTINGS_PREFIX = "ArchToolkit/ai/report"
