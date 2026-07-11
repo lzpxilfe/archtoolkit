@@ -256,6 +256,17 @@ class ArchToolkit:
             
             # Create Dropdown Menu
             self.tool_menu = QMenu(self.iface.mainWindow())
+            # Title header so the dropdown clearly reads "ArchToolkit" at the top
+            # (a disabled action renders as a non-clickable heading on all styles).
+            self.menu_title_action = self.tool_menu.addAction(QIcon(main_icon_path), u"ArchToolkit")
+            self.menu_title_action.setEnabled(False)
+            try:
+                title_font = self.menu_title_action.font()
+                title_font.setBold(True)
+                self.menu_title_action.setFont(title_font)
+            except Exception:
+                pass
+            self.tool_menu.addSeparator()
             self.tool_menu.addAction(self.dem_action)
             self.tool_menu.addAction(self.contour_action)
             self.tool_menu.addAction(self.cad_overlap_action)
