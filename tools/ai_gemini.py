@@ -11,15 +11,14 @@ Goals
 from __future__ import annotations
 
 import json
+import re
 from typing import Optional, Tuple
 
 from qgis.PyQt import QtWidgets
 from qgis.PyQt.QtCore import QEventLoop, QSettings, QTimer, QUrl
 from qgis.PyQt.QtNetwork import QNetworkRequest
 
-from qgis.core import Qgis
-
-from .utils import log_message, push_message
+from .utils import push_message
 
 
 _SETTINGS_PREFIX = "ArchToolkit/ai/gemini"
@@ -165,21 +164,11 @@ def configure_api_key(parent: QtWidgets.QWidget, *, iface=None) -> Optional[str]
     if not ok:
         return None
 
-    normalized = normalize_model_name(raw_model)
-    replacement = get_model_replacement(raw_model)
-    if replacement:
-        if is_english_ui():
-            deprecated_note = _DEPRECATED_MODEL_NOTES.get(raw_model)
-            if deprecated_note:
-                note_en = (
-                    f"The Google changelog says it was retired on March 9, 2026 and "
-                    f"replaced by `{replacement}`."
-                )
-            else:
-                note_en = f"`{replacement}` is recommended."
-            return "warning", f"The current value `{raw_model}` is a legacy model ID. {note_en}"
-        note_ko = _DEPRECATED_MODEL_NOTES.get(raw_model) or f"`{replacement}` 사용을 권장합니다."
-        return "warning", f"현재 입력값 `{raw_model}`은 구형 ID입니다. {note_ko}"
+    api_key = str(key or "").strip()
+    if not api_key:
+        if iface is not None:
+            push_message(iface, "정보", "API 키가 입력되지 않았습니다.", level=1, duration=4)
+        return None
 
     authm = _auth_manager()
     auth_cfg = _new_auth_config()
@@ -253,10 +242,14 @@ def generate_text(
         return None, "API key is missing"
 
     model = str(model or "").strip() or "gemini-1.5-flash"
+    if not re.match(r"^[A-Za-z0-9._-]{1,64}$", model):
+        return None, f"Invalid model name: {model}"
 
-    # API endpoint (Generative Language API)
+    # API endpoint (Generative Language API). The key is sent via the
+    # x-goog-api-key header, NOT the URL: Qt error strings include the full
+    # URL, so a query-string key would leak into logs and the UI.
     url = QUrl(
-        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
     )
 
     payload = {
@@ -291,6 +284,7 @@ def generate_text(
 
     req = QNetworkRequest(url)
     req.setHeader(QNetworkRequest.ContentTypeHeader, "application/json; charset=utf-8")
+    req.setRawHeader(b"x-goog-api-key", api_key.encode("utf-8"))
 
     try:
         reply = nam.post(req, data)
@@ -373,4 +367,3 @@ def explain_auth_manager_once() -> str:
         "네. 한 번 저장해두면(동일 QGIS 프로필 내) 다음부터는 authcfg id만 참조하므로 보통 다시 입력할 필요가 없습니다. "
         "다만 QGIS 인증 저장소(마스터 비밀번호)를 초기화/삭제하거나 다른 프로필을 쓰면 다시 설정해야 할 수 있습니다."
     )
-
