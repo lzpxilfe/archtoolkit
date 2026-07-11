@@ -48,6 +48,7 @@ from .utils import (
 )
 from .live_log_dialog import ensure_live_log_dialog
 from .help_dialog import show_help_dialog
+from .i18n import is_english_ui
 
 # Load the UI file
 FORM_CLASS, _ = uic.loadUiType(os.path.join(
@@ -4058,6 +4059,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
     
     def apply_frequency_style(self, layer, max_count):
         """Apply a standard color ramp (Viridis-like) for frequency count analysis"""
+        english = is_english_ui()
         shader = QgsRasterShader()
         color_ramp = QgsColorRampShader()
         color_ramp.setColorRampType(QgsColorRampShader.Interpolated)
@@ -4275,9 +4277,12 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             QColor(128, 0, 255, 200)  # 8: Purple
         ]
         
-        # Limit discrete entries to avoid lag (up to 128 combinations)
-        max_combinations = min(2**num_points, 128)
-        
+        # Limit discrete entries to avoid lag. With num_points <= 8 this covers
+        # every combination exactly; beyond that a catch-all item is appended
+        # below so high bit-flag values (>= max_combinations) still render
+        # instead of falling through the discrete ramp as transparent.
+        max_combinations = min(2**num_points, 256)
+
         for v in range(1, max_combinations):
             # Find which points see this pixel
             component_colors = []
@@ -4310,7 +4315,17 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                 mixed_color = QColor(avg_r, avg_g, avg_b, 200)
             
             colors.append(QgsColorRampShader.ColorRampItem(v, mixed_color, label))
-            
+
+        # Catch-all for bit-flag values beyond the enumerated range (num_points > 8),
+        # so pixels seen only by high-index observers are not rendered transparent.
+        max_value = 2**num_points - 1
+        if max_value >= max_combinations:
+            colors.append(
+                QgsColorRampShader.ColorRampItem(
+                    max_value, QColor(120, 120, 120, 200), "그 외 조합 (8개소 이상 포함)"
+                )
+            )
+
         color_ramp.setColorRampItemList(colors)
         shader.setRasterShaderFunction(color_ramp)
         
@@ -4491,6 +4506,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
     
     def create_higuchi_rings(self, center_point, center_crs, max_dist, dem_layer):
         """Create buffer rings showing Higuchi distance zones"""
+        english = is_english_ui()
         
         # Use DEM CRS instead of hardcoded EPSG:5186
         layer = QgsVectorLayer("LineString?crs=" + dem_layer.crs().authid(), "히구치_거리대", "memory")
@@ -4721,10 +4737,24 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         super().reject()
     
     def closeEvent(self, event):
-        """Clean up when dialog closes via X button"""
+        """Clean up when dialog closes via X button.
+
+        This dialog is a persistent instance reused across openings, so closing
+        via X must reset the same transient state that reject() clears; otherwise
+        points picked before closing leak into the next run (e.g. an invisible
+        multi-point set would be reused in run_multi_viewshed).
+        """
         self.point_marker.reset(QgsWkbTypes.PointGeometry)
         if self.original_tool:
             self.canvas.setMapTool(self.original_tool)
+        self.observer_points = []
+        self.observer_point = None
+        self.target_point = None
+        self.los_click_count = 0
+        self._reverse_target_geom = None
+        self._reverse_target_crs = None
+        self._reverse_target_layer_name = None
+        self._reverse_target_fid = None
         event.accept()
 
     def cleanup_for_unload(self):

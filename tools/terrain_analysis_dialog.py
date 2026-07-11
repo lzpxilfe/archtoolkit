@@ -564,6 +564,10 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
         5. 능선 평탄부 (Upland Flat): tpi_high/2 < TPI <= tpi_high
         6. 급경사 능선 (Steep Ridge): TPI > tpi_high
         """
+        # Assigned inside try; predefine so the finally-cleanup never hits
+        # an unbound name (which would mask the original error).
+        tpi_path = None
+        slope_path = None
         try:
             # 1. Generate TPI
             tpi_path = os.path.join(tempfile.gettempdir(), f'archtoolkit_tpi_temp_{run_id}.tif')

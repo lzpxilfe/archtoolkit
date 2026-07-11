@@ -425,7 +425,10 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
             return x, y
 
         feats = []
-        chunk_rows = 256
+        # Read in strips whose height is a multiple of step_cells so grid
+        # blocks stay aligned to the global grid; otherwise blocks starting
+        # near a strip boundary overlap blocks of the next strip.
+        chunk_rows = max(step_cells, (256 // step_cells) * step_cells if step_cells <= 256 else step_cells)
         for row0 in range(0, ysize, chunk_rows):
             rows_to_read = min(chunk_rows, ysize - row0)
             arr = band.ReadAsArray(0, row0, xsize, rows_to_read)
@@ -434,7 +437,7 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
 
             for dr in range(0, rows_to_read, step_cells):
                 row = row0 + dr
-                row2 = min(row + step_cells, ysize)
+                row2 = min(row + step_cells, row0 + rows_to_read)
                 if row2 <= row:
                     continue
                 for col in range(0, xsize, step_cells):

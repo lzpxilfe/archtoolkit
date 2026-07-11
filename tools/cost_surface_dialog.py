@@ -67,6 +67,7 @@ from .utils import (
 )
 from .live_log_dialog import ensure_live_log_dialog
 from .help_dialog import show_help_dialog
+from .i18n import is_english_ui
 
 
 FORM_CLASS, _ = uic.loadUiType(
@@ -939,7 +940,17 @@ def _dijkstra_full(
     cancel_check=None,
     progress_cb=None,
     friction=None,
+    reverse=False,
 ):
+    """Single-source shortest costs over the DEM grid.
+
+    reverse=False: dist[x] = cost(start_rc -> x).
+    reverse=True:  dist[x] = cost(x -> start_rc), computed on the reversed
+        graph by negating the elevation delta in the (anisotropic) edge cost.
+        Needed for least-cost corridors: corridor = cost(A->x) + cost(x->B),
+        and cost(x->B) != cost(B->x) for slope-asymmetric models (Tobler,
+        Naismith, Pandolf). For isotropic models the result is identical.
+    """
     rows, cols = dem.shape
     sr, sc = start_rc
     start_idx = sr * cols + sc
@@ -979,7 +990,10 @@ def _dijkstra_full(
                 continue
 
             dz = float(dem[nr, nc]) - z0
-            w = _edge_cost(model_key, horiz, dz, model_params, cost_mode=cost_mode)
+            # reverse=True relaxes the predecessor edge (neighbor -> current)
+            # so dist[x] becomes cost(x -> start_rc); its elevation delta is -dz.
+            edge_dz = -dz if reverse else dz
+            w = _edge_cost(model_key, horiz, edge_dz, model_params, cost_mode=cost_mode)
             if friction is not None and math.isfinite(w):
                 try:
                     f0 = float(friction[r, c])
@@ -1356,6 +1370,9 @@ class CostSurfaceWorker(QgsTask):
                     if has_end:
                         end_energy_j = float(dist_energy[end_rc[0] * cols + end_rc[1]])
             else:
+                # cost(x -> end) for every x, so the corridor sum
+                # cost(start -> x) + cost(x -> end) is correct for
+                # slope-asymmetric (anisotropic) cost models.
                 dist, prev = _dijkstra_full(
                     dem,
                     nodata_mask,
@@ -1369,6 +1386,7 @@ class CostSurfaceWorker(QgsTask):
                     cancel_check=cancel_check,
                     progress_cb=cb,
                     friction=friction,
+                    reverse=True,
                 )
                 if dist is None or prev is None:
                     return CostTaskResult(ok=False, message="작업이 취소되었습니다.")
@@ -2494,6 +2512,7 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
         self.btnClose.setEnabled(not running)
 
     def _handle_task_result(self, res: CostTaskResult):
+        english = is_english_ui()
         if not isinstance(res, CostTaskResult) or not res.ok:
             msg = getattr(res, "message", "") or "분석 실패"
             push_message(self.iface, "오류", msg, level=2, duration=8)
