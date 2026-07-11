@@ -92,6 +92,16 @@
         </property>
        </widget>
       </item>
+      <item>
+       <widget class="QCheckBox" name="chkCurvature">
+        <property name="text">
+         <string>곡률 Curvature (Zevenbergen &amp; Thorne 1987) - 종단/횡단</string>
+        </property>
+        <property name="toolTip">
+         <string>&lt;html&gt;&lt;b&gt;곡률 (Curvature)&lt;/b&gt;&lt;hr/&gt;&lt;i&gt;Zevenbergen, L. W., &amp; Thorne, C. R. (1987). Quantitative analysis of land surface topography. Earth Surface Processes and Landforms, 12(1), 47-56.&lt;/i&gt;&lt;br/&gt;&lt;br/&gt;종단곡률(profile): 경사 방향의 곡률 &amp;mdash; 침식/퇴적 경향.&lt;br/&gt;횡단곡률(plan): 등고선 방향의 곡률 &amp;mdash; 물의 수렴/발산.&lt;br/&gt;&lt;br/&gt;&lt;b&gt;고고학 활용:&lt;/b&gt;&lt;br/&gt;&#8226; 수렴+오목 = 물 모임(취수/침수 주의)&lt;br/&gt;&#8226; 발산+볼록 = 능선/노출(가시/방어)&lt;/html&gt;</string>
+        </property>
+       </widget>
+      </item>
      </layout>
     </widget>
    </item>

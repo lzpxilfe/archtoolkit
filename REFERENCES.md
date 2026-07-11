@@ -131,6 +131,13 @@
 **Wilson et al. Geomorphometry:**
 > Wilson, J.P., & Gallant, J.C. (2000). "Terrain Analysis: Principles and Applications." *John Wiley & Sons*.
 
+## 곡률 Curvature (종단/횡단)
+
+**Zevenbergen & Thorne 곡률 (2차 다항식 적합):**
+> Zevenbergen, L.W., & Thorne, C.R. (1987). "Quantitative analysis of land surface topography." *Earth Surface Processes and Landforms*, 12(1), pp. 47-56.
+
+부호 규약(ArchToolkit 구현, 수치 검증됨): 종단(profile) 음(−)=볼록(침식 경향)/양(+)=오목(퇴적 경향); 횡단(plan) 음(−)=수렴(물 모임)/양(+)=발산(능선).
+
 ## MaxEnt (Maximum Entropy) / 예측모델링
 
 **최대 엔트로피 기반 종 분포/입지 예측모델링:**

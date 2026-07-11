@@ -23,6 +23,16 @@ User-configurable parameters for TPI radius, TPI thresholds, and Slope Position
 import os
 import tempfile
 import uuid
+
+try:
+    import numpy as np
+except Exception:  # pragma: no cover - QGIS ships NumPy; guard anyway
+    np = None
+try:
+    from osgeo import gdal
+except Exception:  # pragma: no cover
+    gdal = None
+
 from qgis.PyQt import uic
 from qgis.PyQt import QtWidgets
 from qgis.PyQt.QtGui import QColor
@@ -31,12 +41,15 @@ from qgis.core import (
     QgsRasterShader, QgsColorRampShader, QgsSingleBandPseudoColorRenderer
 )
 import processing
-from .utils import cleanup_files, push_message, restore_ui_focus, set_archtoolkit_layer_metadata
+from .utils import (
+    cleanup_files, log_message, push_message, restore_ui_focus, set_archtoolkit_layer_metadata,
+)
 from .live_log_dialog import ensure_live_log_dialog
 from .help_dialog import show_help_dialog
 
-# This tool uses only QGIS built-in libraries and GDAL processing algorithms.
-# No external plugins or libraries (like numpy, matplotlib) are required.
+# This tool uses QGIS built-in GDAL processing algorithms. The curvature
+# analysis additionally uses NumPy + GDAL (both ship with QGIS - no extra
+# install), per DEVELOPMENT.md.
 
 FORM_CLASS, _ = uic.loadUiType(os.path.join(
     os.path.dirname(__file__), 'terrain_analysis_dialog_base.ui'))
@@ -177,8 +190,16 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
             plugin_dir = os.path.dirname(os.path.dirname(__file__))
             html = (
                 "<h2>지형 분석 (Terrain Analysis)</h2>"
-                "<p>DEM에서 지형 지표를 계산하고(경사/사면방향/TRI/TPI/Roughness/Slope Position) "
+                "<p>DEM에서 지형 지표를 계산하고(경사/사면방향/TRI/TPI/Roughness/Slope Position/곡률) "
                 "분류·스타일을 적용합니다.</p>"
+                "<h3>곡률 (Zevenbergen &amp; Thorne 1987)</h3>"
+                "<ul>"
+                "<li><b>종단(profile)</b>: 경사 방향 곡률. <b>음(−)=볼록</b>(경사 가속→침식 경향), "
+                "<b>양(+)=오목</b>(감속→퇴적 경향).</li>"
+                "<li><b>횡단(plan)</b>: 등고선 방향 곡률. <b>음(−)=수렴</b>(곡저·물 모임), "
+                "<b>양(+)=발산</b>(능선·분산).</li>"
+                "<li>실행 후 <b>해석 요약</b>(볼록/평탄/오목·수렴/평탄/발산 면적 %)을 로그와 메시지바에 표시합니다.</li>"
+                "</ul>"
                 "<h3>출력</h3>"
                 "<ul>"
                 "<li>선택한 지표별 래스터 레이어</li>"
@@ -290,8 +311,9 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
             return
         
         has_any = any([self.chkSlope.isChecked(), self.chkAspect.isChecked(),
-                       self.chkTRI.isChecked(), self.chkTPI.isChecked(), 
-                       self.chkRoughness.isChecked(), self.chkSlopePosition.isChecked()])
+                       self.chkTRI.isChecked(), self.chkTPI.isChecked(),
+                       self.chkRoughness.isChecked(), self.chkSlopePosition.isChecked(),
+                       (hasattr(self, "chkCurvature") and self.chkCurvature.isChecked())])
         if not has_any:
             push_message(self.iface, "오류", "분석 유형을 선택해주세요", level=2)
             restore_ui_focus(self)
@@ -419,7 +441,11 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
             # Slope Position - Weiss (2001) 6-class with user thresholds
             if self.chkSlopePosition.isChecked():
                 self.run_slope_position_analysis(dem_source, slope_threshold, tpi_low, tpi_high, results, run_id)
-            
+
+            # Curvature - Zevenbergen & Thorne (1987): profile + plan + interpretation
+            if hasattr(self, "chkCurvature") and self.chkCurvature.isChecked():
+                self.run_curvature_analysis(dem_layer, dem_source, results, run_id)
+
             if results:
                 push_message(self.iface, "완료", f"분석 완료: {', '.join(results)}", level=0)
                 success = True
@@ -662,3 +688,181 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
             self.iface.messageBar().pushMessage("경고", f"지형분류 분석 오류: {str(e)}", level=1)
         finally:
             cleanup_files([tpi_path, slope_path])
+
+    def run_curvature_analysis(self, dem_layer, dem_source, results, run_id):
+        """Profile & plan curvature (Zevenbergen & Thorne 1987) + interpretation.
+
+        Sign convention (numerically verified against synthetic surfaces):
+        - profile: (-) 볼록 convex, 경사 가속 → 침식 경향 / (+) 오목 concave, 감속 → 퇴적 경향
+        - plan:    (-) 수렴 convergent, 곡저·물 모임 / (+) 발산 divergent, 능선·분산
+
+        This produces not just rasters but an interpretation summary (area % of
+        convex/flat/concave and convergent/flat/divergent) so the result reads
+        as an analysis, not a bare covariate.
+        """
+        if np is None or gdal is None:
+            push_message(self.iface, "경고", "곡률 분석에는 NumPy/GDAL이 필요합니다(QGIS 기본 포함).", level=1)
+            return
+        try:
+            src = str(dem_source or "").split("|", 1)[0].strip()
+            ds = gdal.Open(src, gdal.GA_ReadOnly)
+            if ds is None:
+                push_message(self.iface, "경고", "DEM을 GDAL로 열 수 없습니다(곡률).", level=1)
+                return
+            band = ds.GetRasterBand(1)
+            z = band.ReadAsArray().astype("float64")
+            gt = ds.GetGeoTransform()
+            proj = ds.GetProjection()
+            nodata = band.GetNoDataValue()
+            ds = None
+            if z is None or z.ndim != 2:
+                push_message(self.iface, "경고", "DEM 배열을 읽을 수 없습니다(곡률).", level=1)
+                return
+
+            cell = (abs(float(gt[1])) + abs(float(gt[5]))) / 2.0
+            if cell <= 0:
+                push_message(self.iface, "경고", "DEM 픽셀 크기를 확인할 수 없습니다(곡률).", level=1)
+                return
+
+            valid = np.isfinite(z)
+            if nodata is not None:
+                valid &= (z != nodata)
+
+            profile, plan = self._zt_curvature(z, cell)
+
+            # NoData where any 3x3 neighbour is invalid, plus the 1-px border.
+            inv = ~valid
+            inv_any = (
+                inv
+                | np.roll(inv, 1, 0) | np.roll(inv, -1, 0)
+                | np.roll(inv, 1, 1) | np.roll(inv, -1, 1)
+                | np.roll(np.roll(inv, 1, 0), 1, 1) | np.roll(np.roll(inv, 1, 0), -1, 1)
+                | np.roll(np.roll(inv, -1, 0), 1, 1) | np.roll(np.roll(inv, -1, 0), -1, 1)
+            )
+            border = np.zeros(z.shape, dtype=bool)
+            border[0, :] = border[-1, :] = border[:, 0] = border[:, -1] = True
+            out_mask = inv_any | border
+            nd = -9999.0
+            for arr in (profile, plan):
+                arr[out_mask] = nd
+
+            good = ~out_mask
+            prof_path = os.path.join(tempfile.gettempdir(), f'archtoolkit_curv_profile_{run_id}.tif')
+            plan_path = os.path.join(tempfile.gettempdir(), f'archtoolkit_curv_plan_{run_id}.tif')
+            self._write_geotiff(prof_path, profile.astype("float32"), gt, proj, nd)
+            self._write_geotiff(plan_path, plan.astype("float32"), gt, proj, nd)
+
+            for path, name, kind, arr, neg_lab, pos_lab in (
+                (prof_path, "곡률-종단 profile (Zevenbergen & Thorne 1987)", "curvature_profile",
+                 profile, "볼록 convex (침식)", "오목 concave (퇴적)"),
+                (plan_path, "곡률-횡단 plan (Zevenbergen & Thorne 1987)", "curvature_plan",
+                 plan, "수렴 convergent (물모임)", "발산 divergent (능선)"),
+            ):
+                layer = QgsRasterLayer(path, name)
+                if not layer.isValid():
+                    continue
+                try:
+                    set_archtoolkit_layer_metadata(
+                        layer, tool_id="terrain_analysis", run_id=str(run_id),
+                        kind=kind, units="1/m",
+                        params={"method": "Zevenbergen & Thorne 1987", "cell_size": float(cell)},
+                    )
+                except Exception:
+                    pass
+                QgsProject.instance().addMapLayer(layer)
+                self._apply_diverging_style(layer, arr[good], neg_lab, pos_lab)
+
+            self._log_curvature_summary(profile[good], plan[good])
+            results.append("곡률")
+        except Exception as e:
+            push_message(self.iface, "경고", f"곡률 분석 오류: {str(e)}", level=1)
+
+    def _zt_curvature(self, z, cell):
+        """Zevenbergen & Thorne (1987) profile/plan curvature. See run_curvature_analysis
+        for the (verified) sign convention."""
+        Z2 = np.roll(z, 1, 0)
+        Z8 = np.roll(z, -1, 0)
+        Z4 = np.roll(z, 1, 1)
+        Z6 = np.roll(z, -1, 1)
+        Z1 = np.roll(np.roll(z, 1, 0), 1, 1)
+        Z3 = np.roll(np.roll(z, 1, 0), -1, 1)
+        Z7 = np.roll(np.roll(z, -1, 0), 1, 1)
+        Z9 = np.roll(np.roll(z, -1, 0), -1, 1)
+        Z5 = z
+        L2 = cell * cell
+        D = ((Z4 + Z6) / 2.0 - Z5) / L2
+        E = ((Z2 + Z8) / 2.0 - Z5) / L2
+        F = (-Z1 + Z3 + Z7 - Z9) / (4.0 * L2)
+        G = (-Z4 + Z6) / (2.0 * cell)
+        H = (Z2 - Z8) / (2.0 * cell)
+        denom = G * G + H * H
+        small = denom < 1e-12
+        ds = np.where(small, 1.0, denom)
+        profile = np.where(small, 0.0, 2.0 * (D * G * G + E * H * H + F * G * H) / ds)
+        plan = np.where(small, 0.0, -2.0 * (D * H * H + E * G * G - F * G * H) / ds)
+        return profile, plan
+
+    def _write_geotiff(self, out_path, arr, gt, proj, nodata):
+        driver = gdal.GetDriverByName("GTiff")
+        rows, cols = arr.shape
+        ds = driver.Create(out_path, cols, rows, 1, gdal.GDT_Float32, ["COMPRESS=LZW"])
+        ds.SetGeoTransform(gt)
+        if proj:
+            ds.SetProjection(proj)
+        b = ds.GetRasterBand(1)
+        b.SetNoDataValue(float(nodata))
+        b.WriteArray(arr)
+        b.FlushCache()
+        ds = None
+
+    def _apply_diverging_style(self, layer, valid_values, neg_label, pos_label):
+        """Blue-white-red diverging ramp, symmetric about 0 (2/98 percentile range).
+
+        neg_label / pos_label describe what negative / positive values mean for
+        THIS raster (profile and plan have different meanings for the same sign).
+        """
+        try:
+            if valid_values.size:
+                absmax = float(np.nanpercentile(np.abs(valid_values), 98))
+            else:
+                absmax = 1.0
+            if not np.isfinite(absmax) or absmax <= 0:
+                absmax = 1.0
+            ramp = QgsColorRampShader()
+            ramp.setColorRampType(QgsColorRampShader.Interpolated)
+            ramp.setColorRampItemList([
+                QgsColorRampShader.ColorRampItem(-absmax, QColor('#2166ac'), f"{-absmax:.4f} ({neg_label})"),
+                QgsColorRampShader.ColorRampItem(0.0, QColor('#f7f7f7'), "0 (평탄)"),
+                QgsColorRampShader.ColorRampItem(absmax, QColor('#b2182b'), f"{absmax:.4f} ({pos_label})"),
+            ])
+            shader = QgsRasterShader()
+            shader.setRasterShaderFunction(ramp)
+            renderer = QgsSingleBandPseudoColorRenderer(layer.dataProvider(), 1, shader)
+            renderer.setClassificationMin(-absmax)
+            renderer.setClassificationMax(absmax)
+            layer.setRenderer(renderer)
+            layer.triggerRepaint()
+        except Exception:
+            pass
+
+    def _log_curvature_summary(self, profile_valid, plan_valid):
+        """Emit an interpretation (area % per curvature class) to the live log + message bar."""
+        try:
+            if profile_valid.size == 0:
+                return
+            eps_p = max(1e-9, 0.1 * float(np.std(profile_valid)))
+            eps_c = max(1e-9, 0.1 * float(np.std(plan_valid)))
+            convex = float(np.mean(profile_valid < -eps_p) * 100.0)
+            concave = float(np.mean(profile_valid > eps_p) * 100.0)
+            flat_p = max(0.0, 100.0 - convex - concave)
+            diverg = float(np.mean(plan_valid > eps_c) * 100.0)
+            converg = float(np.mean(plan_valid < -eps_c) * 100.0)
+            flat_c = max(0.0, 100.0 - diverg - converg)
+            msg = (
+                f"곡률 해석 — 종단: 볼록(침식) {convex:.1f}% / 평탄 {flat_p:.1f}% / 오목(퇴적) {concave:.1f}% | "
+                f"횡단: 수렴(물모임) {converg:.1f}% / 평탄 {flat_c:.1f}% / 발산(능선) {diverg:.1f}%"
+            )
+            log_message(msg)
+            push_message(self.iface, "곡률 해석", msg, level=0, duration=12)
+        except Exception:
+            pass
