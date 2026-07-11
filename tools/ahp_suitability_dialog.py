@@ -630,6 +630,9 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
         self.tblCriteria.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
         self.tblCriteria.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
         self.tblCriteria.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        # Double-click a criterion row to edit its scoring preference
+        # (benefit/cost/target/range/reclass).
+        self.tblCriteria.cellDoubleClicked.connect(lambda *a: self._on_edit_selected_preference())
         vcrit.addWidget(self.tblCriteria, 1)
 
         layout.addWidget(grp_crit, 1)

@@ -2559,25 +2559,21 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
             if lcp_time_s is not None and math.isfinite(lcp_time_s):
                 summary = f"{summary} | LCP {float(lcp_time_s) / 60.0:.1f}{' min' if english else '분'}"
 
-            if all(
-                (
-                    res.straight_time_s is not None,
-                    math.isfinite(res.straight_time_s),
-                    lcp_time_s is not None,
-                    math.isfinite(lcp_time_s),
-                )
+            if (
+                res.straight_time_s is not None
+                and math.isfinite(res.straight_time_s)
+                and lcp_time_s is not None
+                and math.isfinite(lcp_time_s)
             ):
                 lcp_min = float(lcp_time_s) / 60.0
                 straight_min = float(res.straight_time_s) / 60.0
                 delta_min = straight_min - lcp_min
                 sign = "+" if delta_min >= 0 else "-"
-                if all(
-                    (
-                        res.straight_dist_m is not None,
-                        math.isfinite(res.straight_dist_m),
-                        res.lcp_dist_m is not None,
-                        math.isfinite(res.lcp_dist_m),
-                    )
+                if (
+                    res.straight_dist_m is not None
+                    and math.isfinite(res.straight_dist_m)
+                    and res.lcp_dist_m is not None
+                    and math.isfinite(res.lcp_dist_m)
                 ):
                     summary = (
                         f"{summary}({res.lcp_dist_m / 1000.0:.2f}km)"

@@ -261,8 +261,8 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         
         if hasattr(self, "spinLineMaxPoints"):
             self.spinLineMaxPoints.setValue(50)
-        if hasattr(self, "spinMaxPoints"):
-            self.spinMaxPoints.setValue(50)
+        if hasattr(self, "spinLineMaxPoints"):
+            self.spinLineMaxPoints.setValue(50)
 
         # Fix Maximum Distance limit to allow > 2500m
         if hasattr(self, "spinMaxDistance"):
@@ -2240,9 +2240,9 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                 max_points = int(self.spinLineMaxPoints.value())
             except Exception:
                 pass
-        elif hasattr(self, "spinMaxPoints"):
+        elif hasattr(self, "spinLineMaxPoints"):
             try:
-                max_points = int(self.spinMaxPoints.value())
+                max_points = int(self.spinLineMaxPoints.value())
             except Exception:
                 pass
         return max(1, max_points)
@@ -3739,10 +3739,10 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
 
         # Robust point management for cumulative analysis
         total_needed = len(points)
-        # Use UI spinMaxPoints value, default 50
+        # Use UI spinLineMaxPoints value, default 50
         MAX_POINTS = 50
-        if hasattr(self, 'spinMaxPoints'):
-            MAX_POINTS = self.spinMaxPoints.value() 
+        if hasattr(self, 'spinLineMaxPoints'):
+            MAX_POINTS = self.spinLineMaxPoints.value()
         
         if total_needed > MAX_POINTS:
             from qgis.PyQt.QtWidgets import QMessageBox
