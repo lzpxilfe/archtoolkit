@@ -200,6 +200,12 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                 "<b>양(+)=발산</b>(능선·분산).</li>"
                 "<li>실행 후 <b>해석 요약</b>(볼록/평탄/오목·수렴/평탄/발산 면적 %)을 로그와 메시지바에 표시합니다.</li>"
                 "</ul>"
+                "<h3>사면 파생 (모델용)</h3>"
+                "<ul>"
+                "<li><b>북향성</b>=cos(aspect), <b>동향성</b>=sin(aspect): 원형인 사면방향을 모델에 바로 쓰는 연속값으로.</li>"
+                "<li><b>TRASP</b>(Roberts &amp; Cooper 1989): 0=북동(서늘/습) ~ 1=남서(따뜻/건조) 일사 프록시.</li>"
+                "<li>실행 후 TRASP/북향 우세 등 <b>해석 요약</b>을 표시합니다.</li>"
+                "</ul>"
                 "<h3>출력</h3>"
                 "<ul>"
                 "<li>선택한 지표별 래스터 레이어</li>"
@@ -313,7 +319,8 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
         has_any = any([self.chkSlope.isChecked(), self.chkAspect.isChecked(),
                        self.chkTRI.isChecked(), self.chkTPI.isChecked(),
                        self.chkRoughness.isChecked(), self.chkSlopePosition.isChecked(),
-                       (hasattr(self, "chkCurvature") and self.chkCurvature.isChecked())])
+                       (hasattr(self, "chkCurvature") and self.chkCurvature.isChecked()),
+                       (hasattr(self, "chkAspectDeriv") and self.chkAspectDeriv.isChecked())])
         if not has_any:
             push_message(self.iface, "오류", "분석 유형을 선택해주세요", level=2)
             restore_ui_focus(self)
@@ -445,6 +452,10 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
             # Curvature - Zevenbergen & Thorne (1987): profile + plan + interpretation
             if hasattr(self, "chkCurvature") and self.chkCurvature.isChecked():
                 self.run_curvature_analysis(dem_layer, dem_source, results, run_id)
+
+            # Aspect derivatives - northness/eastness/TRASP (model-ready aspect)
+            if hasattr(self, "chkAspectDeriv") and self.chkAspectDeriv.isChecked():
+                self.run_aspect_derivatives(dem_layer, dem_source, results, run_id)
 
             if results:
                 push_message(self.iface, "완료", f"분석 완료: {', '.join(results)}", level=0)
@@ -864,5 +875,136 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
             )
             log_message(msg)
             push_message(self.iface, "곡률 해석", msg, level=0, duration=12)
+        except Exception:
+            pass
+
+    def run_aspect_derivatives(self, dem_layer, dem_source, results, run_id):
+        """Model-ready aspect transforms: northness, eastness, TRASP + interpretation.
+
+        Raw aspect is circular (0-360 deg) and unusable in most models. These
+        continuous transforms fix that and carry ecological meaning:
+        - northness = cos(aspect)  (+1 북향 ~ -1 남향)
+        - eastness  = sin(aspect)  (+1 동향 ~ -1 서향)
+        - TRASP (Roberts & Cooper 1989) = (1 - cos(aspect-30 deg))/2
+          0 = 북동(서늘/습), 1 = 남서(따뜻/건조); flat = 0.5 (neutral)
+        Flat cells: northness/eastness = 0.
+        """
+        if np is None or gdal is None:
+            push_message(self.iface, "경고", "사면 파생에는 NumPy/GDAL이 필요합니다(QGIS 기본 포함).", level=1)
+            return
+        aspect_path = None
+        try:
+            src = str(dem_source or "").split("|", 1)[0].strip()
+            aspect_path = os.path.join(tempfile.gettempdir(), f'archtoolkit_aspderiv_asp_{run_id}.tif')
+            processing.run("gdal:aspect", {
+                'INPUT': src, 'BAND': 1, 'TRIG_ANGLE': False, 'ZERO_FLAT': False,
+                'COMPUTE_EDGES': True, 'ZEVENBERGEN': False, 'OUTPUT': aspect_path,
+            })
+            ads = gdal.Open(aspect_path, gdal.GA_ReadOnly)
+            if ads is None:
+                push_message(self.iface, "경고", "사면방향 계산 실패(사면 파생).", level=1)
+                return
+            aband = ads.GetRasterBand(1)
+            aspect = aband.ReadAsArray().astype("float64")
+            gt = ads.GetGeoTransform()
+            proj = ads.GetProjection()
+            a_nd = aband.GetNoDataValue()
+            ads = None
+
+            # flat cells: GDAL emits a negative NoData for flats
+            flat = (aspect < 0)
+            if a_nd is not None:
+                flat |= (aspect == a_nd)
+            defined = ~flat
+            nd = -9999.0
+            rad = np.radians(aspect)
+
+            def _make(fn, flat_value):
+                arr = np.full(aspect.shape, nd, dtype="float32")
+                arr[defined] = fn(rad[defined]).astype("float32") if callable(fn) else fn[defined].astype("float32")
+                arr[flat] = flat_value
+                return arr
+
+            north = _make(np.cos, 0.0)
+            east = _make(np.sin, 0.0)
+            trasp_full = (1.0 - np.cos(np.radians(aspect - 30.0))) / 2.0
+            trasp = np.full(aspect.shape, nd, dtype="float32")
+            trasp[defined] = trasp_full[defined].astype("float32")
+            trasp[flat] = 0.5
+
+            specs = [
+                ("northness", "북향성 northness = cos(aspect)", north, "diverging",
+                 "남향 south (-1)", "북향 north (+1)"),
+                ("eastness", "동향성 eastness = sin(aspect)", east, "diverging",
+                 "서향 west (-1)", "동향 east (+1)"),
+                ("trasp", "TRASP 일사프록시 (Roberts & Cooper 1989)", trasp, "sequential",
+                 "서늘/습 (0)", "따뜻/건조 (1)"),
+            ]
+            for key, name, arr, style, neg_lab, pos_lab in specs:
+                path = os.path.join(tempfile.gettempdir(), f'archtoolkit_aspderiv_{key}_{run_id}.tif')
+                self._write_geotiff(path, arr, gt, proj, nd)
+                layer = QgsRasterLayer(path, name)
+                if not layer.isValid():
+                    continue
+                try:
+                    set_archtoolkit_layer_metadata(
+                        layer, tool_id="terrain_analysis", run_id=str(run_id),
+                        kind=key, units="index",
+                        params={"source": "aspect", "flat_handling": "north/east=0, TRASP=0.5"},
+                    )
+                except Exception:
+                    pass
+                QgsProject.instance().addMapLayer(layer)
+                valid_vals = arr[arr != nd]
+                if style == "diverging":
+                    self._apply_diverging_style(layer, valid_vals, neg_lab, pos_lab)
+                else:
+                    self._apply_sequential_style(layer, 0.0, 1.0, neg_lab, pos_lab)
+
+            self._log_aspect_summary(north, east, trasp, nd)
+            results.append("사면파생")
+        except Exception as e:
+            push_message(self.iface, "경고", f"사면 파생 오류: {str(e)}", level=1)
+        finally:
+            cleanup_files([aspect_path])
+
+    def _apply_sequential_style(self, layer, vmin, vmax, min_label, max_label):
+        """Cool-to-warm sequential ramp for 0..1 style indices (e.g., TRASP)."""
+        try:
+            ramp = QgsColorRampShader()
+            ramp.setColorRampType(QgsColorRampShader.Interpolated)
+            mid = (vmin + vmax) / 2.0
+            ramp.setColorRampItemList([
+                QgsColorRampShader.ColorRampItem(vmin, QColor('#2c7bb6'), f"{vmin:.2f} ({min_label})"),
+                QgsColorRampShader.ColorRampItem(mid, QColor('#ffffbf'), f"{mid:.2f}"),
+                QgsColorRampShader.ColorRampItem(vmax, QColor('#d7191c'), f"{vmax:.2f} ({max_label})"),
+            ])
+            shader = QgsRasterShader()
+            shader.setRasterShaderFunction(ramp)
+            renderer = QgsSingleBandPseudoColorRenderer(layer.dataProvider(), 1, shader)
+            renderer.setClassificationMin(vmin)
+            renderer.setClassificationMax(vmax)
+            layer.setRenderer(renderer)
+            layer.triggerRepaint()
+        except Exception:
+            pass
+
+    def _log_aspect_summary(self, north, east, trasp, nd):
+        try:
+            tv = trasp[trasp != nd]
+            nv = north[north != nd]
+            if tv.size == 0:
+                return
+            warm = float(np.mean(tv > 0.6) * 100.0)
+            cool = float(np.mean(tv < 0.4) * 100.0)
+            neutral = max(0.0, 100.0 - warm - cool)
+            north_pct = float(np.mean(nv > 0.3) * 100.0)
+            south_pct = float(np.mean(nv < -0.3) * 100.0)
+            msg = (
+                f"사면 파생 해석 — TRASP: 따뜻/건조 {warm:.1f}% / 중간 {neutral:.1f}% / 서늘/습 {cool:.1f}% | "
+                f"북향 우세 {north_pct:.1f}% · 남향 우세 {south_pct:.1f}% (평균 TRASP {float(np.mean(tv)):.2f})"
+            )
+            log_message(msg)
+            push_message(self.iface, "사면 파생 해석", msg, level=0, duration=12)
         except Exception:
             pass

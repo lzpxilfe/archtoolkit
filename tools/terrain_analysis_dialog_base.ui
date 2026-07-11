@@ -102,6 +102,16 @@
         </property>
        </widget>
       </item>
+      <item>
+       <widget class="QCheckBox" name="chkAspectDeriv">
+        <property name="text">
+         <string>사면 파생 Aspect derivatives - 북향성/동향성/TRASP</string>
+        </property>
+        <property name="toolTip">
+         <string>&lt;html&gt;&lt;b&gt;사면 파생 (Aspect derivatives)&lt;/b&gt;&lt;hr/&gt;원형(0~360°)인 사면방향을 예측모델에 바로 쓸 수 있는 연속 변수로 변환합니다.&lt;br/&gt;&lt;br/&gt;&#8226; &lt;b&gt;북향성 northness&lt;/b&gt; = cos(aspect): +1 북향 ~ &#8722;1 남향&lt;br/&gt;&#8226; &lt;b&gt;동향성 eastness&lt;/b&gt; = sin(aspect): +1 동향 ~ &#8722;1 서향&lt;br/&gt;&#8226; &lt;b&gt;TRASP&lt;/b&gt; (Roberts &amp; Cooper 1989): 0=북동(서늘/습) ~ 1=남서(따뜻/건조)&lt;br/&gt;&lt;br/&gt;&lt;i&gt;평탄지는 northness/eastness=0, TRASP=0.5(중립).&lt;/i&gt;&lt;/html&gt;</string>
+        </property>
+       </widget>
+      </item>
      </layout>
     </widget>
    </item>
