@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
 from typing import Optional
 
-from qgis.PyQt import QtWidgets
+from qgis.PyQt import QtGui, QtWidgets
+
+from .i18n import get_plugin_config_value, tr
 
 
 class ArchToolkitHelpDialog(QtWidgets.QDialog):

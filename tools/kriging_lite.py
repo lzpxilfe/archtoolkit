@@ -474,8 +474,9 @@ def ordinary_kriging_lite_to_geotiff(
             zhat = float(lam.dot(dz))
             pred[r, c] = float(zhat)
 
-            # OK variance (best-effort)
-            vv = float(params.partial_sill + params.nugget) - float(lam.dot(cvec)) + float(mu)
+            # OK variance: sigma^2 = C(0) - lam.c - mu for the augmented system
+            # [C 1; 1' 0][lam; mu] = [c; 1] assembled above (Cressie 1993).
+            vv = float(params.partial_sill + params.nugget) - float(lam.dot(cvec)) - float(mu)
             if vv < 0:
                 vv = 0.0
             varr[r, c] = float(vv)

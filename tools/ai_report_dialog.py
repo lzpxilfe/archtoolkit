@@ -26,6 +26,7 @@ from . import ai_gemini
 from . import ai_local_summarizer
 from .live_log_dialog import ensure_live_log_dialog
 from .utils import log_message, push_message, restore_ui_focus
+from .i18n import is_english_ui
 
 
 _SETTINGS_PREFIX = "ArchToolkit/ai/report"
@@ -988,87 +989,6 @@ class AiAoiReportDialog(QtWidgets.QDialog):
 
         self._set_busy_state(True, message="AOI 컨텍스트 수집 중… 잠시만 기다려주세요.")
         try:
-            try:
-                text = ai_local_summarizer.generate_report(ctx)
-            except Exception as e:
-                push_message(
-                    self.iface,
-                    "Error" if english else "오류",
-                    f"{'Local summary generation failed' if english else '로컬 요약 생성 실패'}: {e}",
-                    level=2,
-                    duration=8,
-                )
-                return
-
-            self.txtOutput.setPlainText(text or "")
-            self._last_report_text = str(text or "")
-            self._last_report_ctx_key = self._last_ctx_key
-            push_message(
-                self.iface,
-                "AI Summary" if english else "AI 요약",
-                "Done (local summary)" if english else "완료 (로컬)",
-                level=0,
-                duration=4,
-            )
-            return
-
-        prompt = self._build_prompt(ctx)
-
-        push_message(
-            self.iface,
-            "AI Summary" if english else "AI 요약",
-            "Calling Gemini... (sending only data summaries and layer names)"
-            if english
-            else "Gemini 호출 중…(데이터 요약/레이어명만 전송)",
-            level=0,
-            duration=5,
-        )
-        self.setEnabled(False)
-        QtWidgets.QApplication.setOverrideCursor(Qt.WaitCursor)
-        try:
-            text, api_err = ai_gemini.generate_text(
-                api_key=str(api_key or ""),
-                model=str(model or ""),
-                prompt=prompt,
-                temperature=0.2,
-                max_output_tokens=1400,
-                timeout_ms=45000,
-            )
-        finally:
-            QtWidgets.QApplication.restoreOverrideCursor()
-            self.setEnabled(True)
-
-        if api_err:
-            log_message(f"Gemini error: {api_err}", level=2)
-            push_message(
-                self.iface,
-                "Error" if english else "오류",
-                f"{'Gemini call failed' if english else 'Gemini 호출 실패'}: {api_err}",
-                level=2,
-                duration=10,
-            )
-            # Fallback to local report so user still gets something usable.
-            try:
-                fallback = ai_local_summarizer.generate_report(ctx)
-                if fallback:
-                    fallback_prefix = (
-                        tr("※ Gemini 호출 실패로 로컬 요약으로 대체했습니다.\\n\\n")
-                        if not english
-                        else "Note: Gemini failed, so the result was replaced with a local summary.\\n\\n"
-                    )
-                    self.txtOutput.setPlainText(f"{fallback_prefix}{str(fallback)}")
-                    self._last_report_text = str(fallback or "")
-                    self._last_report_ctx_key = self._last_ctx_key
-                    push_message(
-                        self.iface,
-                        "AI Summary" if english else "AI 요약",
-                        "Replaced with local summary" if english else "로컬 요약으로 대체 완료",
-                        level=1,
-                        duration=6,
-                    )
-            except Exception:
-                pass
-
             push_message(self.iface, "AI 요약", "AOI 주변 레이어 요약 생성 중…", level=0, duration=4)
             ctx, err = self._get_or_build_ctx(max_layers=40, prompt_select_layers=True)
             if err or not ctx:

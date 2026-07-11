@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  static-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install linters
+        run: python -m pip install --upgrade flake8 pyflakes
+
+      # Blocking set: syntax errors (E9) and undefined names (F82).
+      # This is exactly what would have caught the missing helper module.
+      - name: flake8 (blocking - syntax + undefined names)
+        run: flake8 --select=E9,F63,F7,F82 --show-source .
+
+      # Non-blocking: surfaces pre-existing style debt without failing the build.
+      - name: flake8 (full project config, informational)
+        continue-on-error: true
+        run: flake8 .
+
+      - name: Static smoke test
+        run: python tests/check_static.py

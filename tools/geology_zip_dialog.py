@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import tempfile
+import time
 import zipfile
 import csv
 import math
@@ -40,6 +41,7 @@ from qgis.core import (
 )
 
 from .help_dialog import show_help_dialog
+from .i18n import get_output_group_name, get_plugin_config_value
 from .live_log_dialog import ensure_live_log_dialog
 from .utils import (
     log_message,
@@ -237,12 +239,61 @@ def _meters_to_degrees(pixel_m: float, lat_deg: float) -> Tuple[float, float]:
     return (m / m_per_deg_lon), (m / m_per_deg_lat)
 
 class KigamZipProcessor:
+    # Guard rails against malformed/malicious ZIPs (zip bombs).
+    MAX_ZIP_ENTRIES = 5000
+    MAX_TOTAL_UNCOMPRESSED = 2 * 1024 ** 3  # 2 GiB
+    MAX_COMPRESSION_RATIO = 200.0
+
     def __init__(self):
-        self.extract_root = os.path.join(tempfile.gettempdir(), "ArchToolkit_KIGAM_Extract")
+        root_name = GEOLOGY_EXTRACT_ROOT_NAME or "ArchToolkit_KIGAM_Extract"
+        base = ""
+        try:
+            from qgis.core import QgsApplication
+
+            base = str(QgsApplication.qgisSettingsDirPath() or "")
+        except Exception:
+            base = ""
+        if base:
+            # User-profile directory: private to this user (unlike the shared
+            # system temp dir) and survives reboots, so layer sources in saved
+            # projects keep working.
+            self.extract_root = os.path.join(base, "ArchToolkit", root_name)
+        else:
+            self.extract_root = tempfile.mkdtemp(prefix=f"{root_name}_")
         try:
             os.makedirs(self.extract_root, exist_ok=True)
         except Exception:
             pass
+        self._cleanup_old_extracts()
+
+    def _cleanup_old_extracts(self) -> None:
+        """Remove extraction folders older than GEOLOGY_EXTRACT_CLEANUP_DAYS."""
+        try:
+            days = max(1, int(GEOLOGY_EXTRACT_CLEANUP_DAYS))
+            cutoff = time.time() - days * 86400
+            for name in os.listdir(self.extract_root):
+                path = os.path.join(self.extract_root, name)
+                try:
+                    if os.path.isdir(path) and (not os.path.islink(path)) and os.path.getmtime(path) < cutoff:
+                        shutil.rmtree(path, ignore_errors=True)
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+    def _zip_bomb_reason(self, infos) -> str:
+        if len(infos) > self.MAX_ZIP_ENTRIES:
+            return f"항목이 너무 많습니다({len(infos):,}개 > {self.MAX_ZIP_ENTRIES:,}개)"
+        total = 0
+        for info in infos:
+            size = int(getattr(info, "file_size", 0) or 0)
+            total += size
+            compressed = int(getattr(info, "compress_size", 0) or 0)
+            if size > 10 * 1024 ** 2 and compressed > 0 and (size / compressed) > self.MAX_COMPRESSION_RATIO:
+                return f"압축비가 비정상적으로 높습니다({info.filename})"
+        if total > self.MAX_TOTAL_UNCOMPRESSED:
+            return f"압축 해제 용량이 너무 큽니다({total / 1024 ** 2:,.0f} MB)"
+        return ""
 
     def process_zip(
         self,
@@ -258,15 +309,27 @@ class KigamZipProcessor:
         extract_dir = os.path.join(self.extract_root, zip_basename)
 
         try:
-            if os.path.exists(extract_dir):
+            if os.path.islink(extract_dir):
+                os.unlink(extract_dir)
+            elif os.path.exists(extract_dir):
                 shutil.rmtree(extract_dir)
-            os.makedirs(extract_dir, exist_ok=True)
+            os.makedirs(extract_dir)
         except Exception:
-            pass
+            # Could not reclaim the folder - extract into a fresh unique one.
+            try:
+                extract_dir = tempfile.mkdtemp(prefix=f"{zip_basename}_", dir=self.extract_root)
+            except Exception as e:
+                log_message(f"KIGAM 추출 폴더 생성 실패: {e}", level=Qgis.Warning)
+                return []
 
-        # Extract ZIP
+        # Extract ZIP (with zip-bomb guard; stdlib extractall already
+        # sanitizes absolute paths and '..' components).
         try:
             with zipfile.ZipFile(zip_path, "r") as zip_ref:
+                reason = self._zip_bomb_reason(zip_ref.infolist())
+                if reason:
+                    log_message(f"KIGAM ZIP 추출 중단: {reason}", level=Qgis.Warning)
+                    return []
                 zip_ref.extractall(extract_dir)
         except Exception as e:
             log_message(f"KIGAM ZIP 추출 실패: {e}", level=Qgis.Warning)

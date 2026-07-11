@@ -32,6 +32,7 @@ from qgis.PyQt.QtGui import QColor, QIcon
 from qgis.core import (
     QgsColorRampShader,
     QgsCoordinateTransform,
+    QgsPointXY,
     QgsProject,
     QgsRasterBandStats,
     QgsRasterLayer,
@@ -45,6 +46,7 @@ from qgis.gui import QgsMapLayerComboBox
 
 from .live_log_dialog import ensure_live_log_dialog
 from .help_dialog import show_help_dialog
+from .i18n import is_english_ui
 from .utils import (
     get_archtoolkit_layer_metadata,
     log_exception,
@@ -157,10 +159,14 @@ def _aoi_extent_in_crs(aoi_layer: QgsVectorLayer, *, selected_only: bool, dst_cr
 @dataclass
 class _Criterion:
     layer_id: str
-    direction: str  # "benefit" or "cost"
+    direction: str  # "benefit", "cost", "target", "range" or "reclass"
     min_v: Optional[float] = None
     max_v: Optional[float] = None
     weight: Optional[float] = None
+    target_v: Optional[float] = None
+    prefer_min: Optional[float] = None
+    prefer_max: Optional[float] = None
+    score_ranges: Optional[List[Dict[str, float]]] = None
 
 
 def _ahp_weights_from_matrix(mat: "np.ndarray") -> Tuple[List[float], float, float]:
@@ -201,14 +207,330 @@ def _ahp_weights_from_matrix(mat: "np.ndarray") -> Tuple[List[float], float, flo
     return w, float(lam), float(cr)
 
 
+def _sanitize_pair_values(pairs_raw: Any, keys: List[str]) -> Dict[Tuple[str, str], float]:
+    """Normalize pairwise comparison values to {(a, b): ratio} with a before b in `keys` order.
+
+    Accepts either a dict keyed by (a, b) tuples/lists, or a list of dicts like
+    {"left_group"/"left_layer_id": ..., "right_group"/"right_layer_id": ..., "value": ...}
+    (the serialized JSON form). Pairs referencing unknown keys are dropped and
+    values are clamped to the Saaty scale [1/9, 9]. Missing pairs default to 1.
+    """
+    order = {str(k): i for i, k in enumerate(keys or [])}
+    out: Dict[Tuple[str, str], float] = {}
+
+    def _put(a: Any, b: Any, v: Any) -> None:
+        a0 = str(a or "").strip()
+        b0 = str(b or "").strip()
+        if a0 not in order or b0 not in order or a0 == b0:
+            return
+        try:
+            v0 = float(v)
+        except Exception:
+            return
+        if not math.isfinite(v0) or v0 <= 0:
+            return
+        if order[a0] > order[b0]:
+            a0, b0 = b0, a0
+            v0 = 1.0 / v0
+        v0 = max(1.0 / 9.0, min(9.0, v0))
+        out[(a0, b0)] = float(v0)
+
+    if isinstance(pairs_raw, dict):
+        for key, value in pairs_raw.items():
+            if isinstance(key, (tuple, list)) and len(key) == 2:
+                _put(key[0], key[1], value)
+    elif isinstance(pairs_raw, (list, tuple)):
+        for item in pairs_raw:
+            if not isinstance(item, dict):
+                continue
+            left = item.get("left_group", item.get("left_layer_id"))
+            right = item.get("right_group", item.get("right_layer_id"))
+            _put(left, right, item.get("value"))
+
+    for i, a in enumerate(keys or []):
+        for b in list(keys or [])[i + 1:]:
+            out.setdefault((str(a), str(b)), 1.0)
+    return out
+
+
+def _matrix_from_pairs(keys: List[str], pairs: Dict[Tuple[str, str], float]) -> Optional["np.ndarray"]:
+    n = int(len(keys or []))
+    if n <= 0 or np is None:
+        return None
+    mat = np.ones((n, n), dtype=float)
+    index = {str(k): i for i, k in enumerate(keys)}
+    for (a, b), v in (pairs or {}).items():
+        ia = index.get(str(a))
+        ib = index.get(str(b))
+        if ia is None or ib is None or ia == ib:
+            continue
+        try:
+            v0 = float(v)
+        except Exception:
+            continue
+        if not math.isfinite(v0) or v0 <= 0:
+            continue
+        mat[ia, ib] = v0
+        mat[ib, ia] = 1.0 / v0
+    return mat
+
+
+def _compute_hierarchy_summary(
+    *,
+    criteria_rows: List[Tuple[str, str]],
+    criterion_groups: Dict[str, str],
+    group_pairs: Dict[Tuple[str, str], float],
+    local_pairs: Dict[str, Dict[Tuple[str, str], float]],
+) -> Dict[str, Any]:
+    """Compute hierarchical AHP weights (group level x local level).
+
+    Returns group weights, per-group local weights/CR, global per-criterion
+    weights (group weight x local weight) and a synthesized `global_pairwise`
+    dict {(id_i, id_j): w_i / w_j} that can seed the flat pairwise table.
+    """
+    ids = [str(layer_id) for layer_id, _label in (criteria_rows or [])]
+    groups: List[str] = []
+    for layer_id in ids:
+        g = str(criterion_groups.get(layer_id) or "").strip()
+        if g and g not in groups:
+            groups.append(g)
+
+    group_weights: Dict[str, float] = {}
+    group_cr: Optional[float] = None
+    mat_g = _matrix_from_pairs(groups, group_pairs or {})
+    if mat_g is not None:
+        w_g, _lam, cr0 = _ahp_weights_from_matrix(mat_g)
+        group_weights = {g: float(w) for g, w in zip(groups, w_g)}
+        group_cr = float(cr0) if math.isfinite(float(cr0)) else None
+    elif groups:
+        group_weights = {g: 1.0 / float(len(groups)) for g in groups}
+
+    local_weights: Dict[str, Dict[str, float]] = {}
+    local_cr: Dict[str, Optional[float]] = {}
+    for g in groups:
+        member_ids = [layer_id for layer_id in ids if str(criterion_groups.get(layer_id) or "") == g]
+        if not member_ids:
+            continue
+        mat_l = _matrix_from_pairs(member_ids, (local_pairs or {}).get(g) or {})
+        if mat_l is not None:
+            w_l, _lam_l, cr_l = _ahp_weights_from_matrix(mat_l)
+            local_weights[g] = {m: float(w) for m, w in zip(member_ids, w_l)}
+            local_cr[g] = float(cr_l) if math.isfinite(float(cr_l)) else None
+        else:
+            local_weights[g] = {m: 1.0 / float(len(member_ids)) for m in member_ids}
+            local_cr[g] = None
+
+    global_weights: Dict[str, float] = {}
+    for layer_id in ids:
+        g = str(criterion_groups.get(layer_id) or "").strip()
+        gw = float(group_weights.get(g, 0.0))
+        lw = float(local_weights.get(g, {}).get(layer_id, 0.0))
+        global_weights[layer_id] = gw * lw
+
+    total = sum(global_weights.values())
+    if total > 0:
+        global_weights = {k: v / total for k, v in global_weights.items()}
+
+    global_pairwise: Dict[Tuple[str, str], float] = {}
+    for i, a in enumerate(ids):
+        for b in ids[i + 1:]:
+            wa = float(global_weights.get(a, 0.0))
+            wb = float(global_weights.get(b, 0.0))
+            ratio = (wa / wb) if wb > 0 else 1.0
+            if not math.isfinite(ratio) or ratio <= 0:
+                ratio = 1.0
+            global_pairwise[(a, b)] = max(1.0 / 9.0, min(9.0, ratio))
+
+    return {
+        "group_order": list(groups),
+        "group_weights": group_weights,
+        "group_consistency_ratio": group_cr,
+        "local_weights": local_weights,
+        "local_consistency_ratio": local_cr,
+        "criterion_groups": dict(criterion_groups or {}),
+        "global_weights": global_weights,
+        "global_pairwise": global_pairwise,
+    }
+
+
+class _CriterionPreferenceDialog(QtWidgets.QDialog):
+    """Per-criterion scoring preference editor (benefit/cost/target/range/reclass)."""
+
+    _MODES = [
+        ("Benefit(값↑ 좋음)", "benefit"),
+        ("Cost(값↓ 좋음)", "cost"),
+        ("Target(특정 값 선호)", "target"),
+        ("Range(구간 선호)", "range"),
+        ("Reclass(구간 점수표)", "reclass"),
+    ]
+
+    def __init__(self, *, layer_name: str, criterion: _Criterion, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"선호 설정 - {layer_name}")
+
+        layout = QtWidgets.QVBoxLayout(self)
+        form = QtWidgets.QFormLayout()
+
+        self.cmbMode = QtWidgets.QComboBox(self)
+        for label, value in self._MODES:
+            self.cmbMode.addItem(label, value)
+        idx = self.cmbMode.findData(str(criterion.direction or "benefit"))
+        if idx >= 0:
+            self.cmbMode.setCurrentIndex(idx)
+        form.addRow("점수 방식:", self.cmbMode)
+
+        def _spin(value: Optional[float]) -> QtWidgets.QDoubleSpinBox:
+            sp = QtWidgets.QDoubleSpinBox(self)
+            sp.setRange(-1e12, 1e12)
+            sp.setDecimals(6)
+            try:
+                if value is not None and math.isfinite(float(value)):
+                    sp.setValue(float(value))
+            except Exception:
+                pass
+            return sp
+
+        self.spinTarget = _spin(criterion.target_v)
+        form.addRow("Target 값:", self.spinTarget)
+        self.spinPreferMin = _spin(criterion.prefer_min)
+        form.addRow("선호 구간 최소:", self.spinPreferMin)
+        self.spinPreferMax = _spin(criterion.prefer_max)
+        form.addRow("선호 구간 최대:", self.spinPreferMax)
+
+        hint = QtWidgets.QLabel(
+            "Target: 값이 목표에 가까울수록 1점, 멀수록 0점.\n"
+            "Range: 선호 구간 안은 1점, 밖은 경계에서 멀수록 0점.\n"
+            "Reclass: 확인 후 구간 점수표 편집 창이 열립니다."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color:#455a64;")
+
+        layout.addLayout(form)
+        layout.addWidget(hint)
+
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel, parent=self
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self.cmbMode.currentIndexChanged.connect(self._sync_enabled)
+        self._sync_enabled()
+
+    def _sync_enabled(self, _=None):
+        mode = str(self.cmbMode.currentData() or "benefit")
+        self.spinTarget.setEnabled(mode == "target")
+        self.spinPreferMin.setEnabled(mode == "range")
+        self.spinPreferMax.setEnabled(mode == "range")
+
+    def values(self) -> Dict[str, Any]:
+        mode = str(self.cmbMode.currentData() or "benefit")
+        out: Dict[str, Any] = {"direction": mode, "target_v": None, "prefer_min": None, "prefer_max": None}
+        if mode == "target":
+            out["target_v"] = float(self.spinTarget.value())
+        elif mode == "range":
+            out["prefer_min"] = float(self.spinPreferMin.value())
+            out["prefer_max"] = float(self.spinPreferMax.value())
+        return out
+
+
+class _CriterionReclassDialog(QtWidgets.QDialog):
+    """Interval -> score (0-1) table editor for "reclass" criteria."""
+
+    def __init__(self, *, layer_name: str, criterion: _Criterion, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"구간 점수표 - {layer_name}")
+        self.resize(420, 360)
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.addWidget(QtWidgets.QLabel("각 구간 [min, max]에 부여할 점수(0~1)를 입력하세요. 구간은 겹치면 안 됩니다."))
+
+        self.table = QtWidgets.QTableWidget(self)
+        self.table.setColumnCount(3)
+        self.table.setHorizontalHeaderLabels(["min", "max", "score(0~1)"])
+        self.table.horizontalHeader().setStretchLastSection(True)
+        layout.addWidget(self.table, 1)
+
+        rows = list(criterion.score_ranges or [])
+        if not rows:
+            mn = criterion.min_v if criterion.min_v is not None else 0.0
+            mx = criterion.max_v if criterion.max_v is not None else 1.0
+            rows = [{"min": float(mn), "max": float(mx), "score": 1.0}]
+        for row in rows:
+            self._append_row(row.get("min"), row.get("max"), row.get("score"))
+
+        btn_row = QtWidgets.QHBoxLayout()
+        btn_add = QtWidgets.QPushButton("행 추가", self)
+        btn_add.clicked.connect(lambda: self._append_row(None, None, None))
+        btn_del = QtWidgets.QPushButton("선택 행 삭제", self)
+        btn_del.clicked.connect(self._remove_selected_rows)
+        btn_row.addWidget(btn_add)
+        btn_row.addWidget(btn_del)
+        btn_row.addStretch(1)
+        layout.addLayout(btn_row)
+
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel, parent=self
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _append_row(self, mn, mx, score):
+        r = int(self.table.rowCount())
+        self.table.insertRow(r)
+        for col, value in enumerate((mn, mx, score)):
+            text = "" if value is None else str(value)
+            self.table.setItem(r, col, QtWidgets.QTableWidgetItem(text))
+
+    def _remove_selected_rows(self):
+        rows = sorted({idx.row() for idx in self.table.selectionModel().selectedRows()}, reverse=True)
+        if not rows:
+            row = int(self.table.currentRow())
+            rows = [row] if row >= 0 else []
+        for r in rows:
+            if 0 <= r < self.table.rowCount():
+                self.table.removeRow(r)
+
+    def values(self) -> List[Dict[str, float]]:
+        out: List[Dict[str, float]] = []
+        for r in range(int(self.table.rowCount())):
+            try:
+                mn = float(self.table.item(r, 0).text())
+                mx = float(self.table.item(r, 1).text())
+                score = float(self.table.item(r, 2).text())
+            except Exception:
+                continue
+            if not (math.isfinite(mn) and math.isfinite(mx) and math.isfinite(score)):
+                continue
+            if mx < mn:
+                mn, mx = mx, mn
+            out.append({"min": mn, "max": mx, "score": max(0.0, min(1.0, score))})
+        return out
+
+
 class AhpSuitabilityDialog(QtWidgets.QDialog):
     def __init__(self, iface, parent=None):
         super().__init__(parent)
         self.iface = iface
         self._criteria: List[_Criterion] = []
         self._pairwise: Dict[Tuple[int, int], float] = {}
+        self._hierarchy_config: Dict[str, Any] = {}
+        self._weight_input_mode: str = "flat"
+        self._weight_input_note: str = ""
         self._setup_ui()
         self._rebuild_pairwise_table()
+
+    def _set_weight_input_mode(self, mode: str, note: str = "") -> None:
+        """Track how weights were provided ("flat" pairwise table or "hierarchy")."""
+        self._weight_input_mode = str(mode or "flat")
+        self._weight_input_note = str(note or "")
+        try:
+            if self._weight_input_note:
+                self.lblConsistency.setToolTip(self._weight_input_note)
+        except Exception:
+            pass
 
     def _setup_ui(self):
         self.setWindowTitle("AHP 입지적합도 (Suitability) - ArchToolkit")
@@ -604,24 +926,23 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
                 pmax0 = float(pmax) if pmax is not None else None
             except Exception:
                 pmin0, pmax0 = None, None
-        invalid_range = any(
-            (
-                pmin0 is None,
-                pmax0 is None,
-                not math.isfinite(pmin0),
-                not math.isfinite(pmax0),
-                pmin0 >= pmax0,
-                pmin0 < mn,
-                pmax0 > mx,
+            # `or` short-circuits so isfinite() never sees None.
+            invalid_range = (
+                pmin0 is None
+                or pmax0 is None
+                or not math.isfinite(pmin0)
+                or not math.isfinite(pmax0)
+                or pmin0 >= pmax0
+                or pmin0 < mn
+                or pmax0 > mx
             )
-        )
-        if invalid_range:
-            if span > 0:
-                crit.prefer_min = mn + (span * 0.25)
-                crit.prefer_max = mn + (span * 0.75)
-            else:
-                crit.prefer_min = mn
-                crit.prefer_max = mx
+            if invalid_range:
+                if span > 0:
+                    crit.prefer_min = mn + (span * 0.25)
+                    crit.prefer_max = mn + (span * 0.75)
+                else:
+                    crit.prefer_min = mn
+                    crit.prefer_max = mx
         elif mode == "reclass":
             rows = crit.score_ranges or []
             if not rows:
@@ -749,9 +1070,31 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
 
         self._update_consistency_and_weights()
 
-    def _rebuild_pairwise_table(self):
+    def _rebuild_pairwise_table(self, saved_pairs: Optional[Dict[Tuple[str, str], float]] = None):
         n = int(len(self._criteria))
         self._pairwise = {(i, j): 1.0 for i in range(n) for j in range(i + 1, n)}
+
+        # Optionally seed values from a {(layer_id_a, layer_id_b): ratio} dict
+        # (e.g. the global pairwise synthesized from a hierarchical AHP config).
+        if saved_pairs:
+            id_to_idx = {str(c.layer_id): i for i, c in enumerate(self._criteria)}
+            for key, value in dict(saved_pairs).items():
+                if not (isinstance(key, (tuple, list)) and len(key) == 2):
+                    continue
+                ia = id_to_idx.get(str(key[0]))
+                ib = id_to_idx.get(str(key[1]))
+                if ia is None or ib is None or ia == ib:
+                    continue
+                try:
+                    v = float(value)
+                except Exception:
+                    continue
+                if not math.isfinite(v) or v <= 0:
+                    continue
+                if ia > ib:
+                    ia, ib = ib, ia
+                    v = 1.0 / v
+                self._pairwise[(ia, ib)] = float(v)
 
         self.tblPairwise.clear()
         self.tblPairwise.setRowCount(n)
@@ -778,7 +1121,18 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
                     cmb = QtWidgets.QComboBox()
                     for label, val in _SCALE_OPTIONS:
                         cmb.addItem(label, float(val))
-                    cmb.setCurrentIndex(8)  # "1"
+                    # Select the scale option nearest to the (possibly seeded) value.
+                    try:
+                        v_saved = float(self._pairwise.get((i, j), 1.0))
+                        best_k, best_d = 8, None
+                        for k in range(cmb.count()):
+                            d = abs(float(cmb.itemData(k)) - v_saved)
+                            if best_d is None or d < best_d:
+                                best_k, best_d = k, d
+                        cmb.setCurrentIndex(int(best_k))
+                        self._pairwise[(i, j)] = float(cmb.currentData() or 1.0)
+                    except Exception:
+                        cmb.setCurrentIndex(8)  # "1"
 
                     def _on_changed(_=None, row=i, col=j, w=cmb):
                         try:
@@ -795,6 +1149,15 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
                     item = QtWidgets.QTableWidgetItem("1")
                     item.setFlags(item.flags() & ~Qt.ItemIsEnabled)
                     self.tblPairwise.setItem(i, j, item)
+
+        # Reciprocal cells are plain items created above; sync them to the
+        # (possibly seeded) upper-triangle values once the grid exists.
+        for (pi, pj), pv in dict(self._pairwise).items():
+            try:
+                if abs(float(pv) - 1.0) > 1e-12:
+                    self._set_reciprocal_cell(int(pi), int(pj), float(pv))
+            except Exception:
+                continue
 
         try:
             self.tblPairwise.resizeColumnsToContents()
@@ -966,7 +1329,9 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
         return str(out_path)
 
     def _constraint_summary(self) -> Dict[str, Any]:
-        layer = self.cmbConstraint.currentLayer()
+        # The constraint-layer picker is not part of the current UI yet.
+        combo = getattr(self, "cmbConstraint", None)
+        layer = combo.currentLayer() if combo is not None else None
         if layer is None:
             return {}
         try:
@@ -1004,7 +1369,9 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
         return None
 
     def _quick_validate_output(self, raster_layer: QgsRasterLayer) -> Dict[str, Any]:
-        validation_layer = self.cmbValidation.currentLayer()
+        # The validation-layer picker is not part of the current UI yet.
+        combo = getattr(self, "cmbValidation", None)
+        validation_layer = combo.currentLayer() if combo is not None else None
         if validation_layer is None or not isinstance(validation_layer, QgsVectorLayer):
             return {}
         try:
@@ -1022,7 +1389,8 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
         try:
             feats = (
                 validation_layer.selectedFeatures()
-                if self.chkValidationSelectedOnly.isChecked() and validation_layer.selectedFeatureCount() > 0
+                if bool(getattr(self, "chkValidationSelectedOnly", None) and self.chkValidationSelectedOnly.isChecked())
+                and validation_layer.selectedFeatureCount() > 0
                 else validation_layer.getFeatures()
             )
         except Exception:
@@ -1068,7 +1436,7 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
         out: Dict[str, Any] = {
             "layer_id": str(validation_layer.id() or ""),
             "layer_name": str(validation_layer.name() or ""),
-            "selected_only": bool(self.chkValidationSelectedOnly.isChecked()),
+            "selected_only": bool(getattr(self, "chkValidationSelectedOnly", None) and self.chkValidationSelectedOnly.isChecked()),
             "attempted_points": sampled,
             "sample_count": len(values),
             "scale": "0-100" if self.chkScale100.isChecked() else "0-1",
@@ -1145,33 +1513,32 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
                 prefer_max = float(crit.prefer_max) if crit.prefer_max is not None else None
             except Exception:
                 prefer_min, prefer_max = None, None
-        invalid_prefer = any(
-            (
-                prefer_min is None,
-                prefer_max is None,
-                not math.isfinite(prefer_min),
-                not math.isfinite(prefer_max),
-                prefer_min >= prefer_max,
+            # `or` short-circuits so isfinite() never sees None.
+            invalid_prefer = (
+                prefer_min is None
+                or prefer_max is None
+                or not math.isfinite(prefer_min)
+                or not math.isfinite(prefer_max)
+                or prefer_min >= prefer_max
             )
-        )
-        if invalid_prefer:
-            prefer_min = mn + ((mx - mn) * 0.25)
-            prefer_max = mn + ((mx - mn) * 0.75)
-        if prefer_min <= mn and prefer_max >= mx:
-            return "A*0 + 1"
-        if prefer_min <= mn:
-            if prefer_max >= mx:
+            if invalid_prefer:
+                prefer_min = mn + ((mx - mn) * 0.25)
+                prefer_max = mn + ((mx - mn) * 0.75)
+            if prefer_min <= mn and prefer_max >= mx:
                 return "A*0 + 1"
-            return f"(({mx} - A) / ({mx} - {prefer_max})) * (A > {prefer_max}) + ((A <= {prefer_max}) * 1)"
-        if prefer_max >= mx:
             if prefer_min <= mn:
-                return "A*0 + 1"
-            return f"((A - {mn}) / ({prefer_min} - {mn})) * (A < {prefer_min}) + ((A >= {prefer_min}) * 1)"
-        return (
-            f"((A < {prefer_min}) * ((A - {mn}) / ({prefer_min} - {mn}))) + "
-            f"(((A >= {prefer_min}) * (A <= {prefer_max})) * 1) + "
-            f"((A > {prefer_max}) * (({mx} - A) / ({mx} - {prefer_max})))"
-        )
+                if prefer_max >= mx:
+                    return "A*0 + 1"
+                return f"(({mx} - A) / ({mx} - {prefer_max})) * (A > {prefer_max}) + ((A <= {prefer_max}) * 1)"
+            if prefer_max >= mx:
+                if prefer_min <= mn:
+                    return "A*0 + 1"
+                return f"((A - {mn}) / ({prefer_min} - {mn})) * (A < {prefer_min}) + ((A >= {prefer_min}) * 1)"
+            return (
+                f"((A < {prefer_min}) * ((A - {mn}) / ({prefer_min} - {mn}))) + "
+                f"(((A >= {prefer_min}) * (A <= {prefer_max})) * 1) + "
+                f"((A > {prefer_max}) * (({mx} - A) / ({mx} - {prefer_max})))"
+            )
         if mode == "reclass":
             rows = self._validated_score_ranges(crit)
             if not rows:
