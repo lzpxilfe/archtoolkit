@@ -62,6 +62,7 @@ from .utils import (
 )
 from .live_log_dialog import ensure_live_log_dialog
 from .help_dialog import show_help_dialog
+from .i18n import is_english_ui
 
 
 FORM_CLASS, _ = uic.loadUiType(

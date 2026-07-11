@@ -46,6 +46,7 @@ from .live_log_dialog import ensure_live_log_dialog
 from .utils import log_message, push_message, restore_ui_focus
 from .utils import set_archtoolkit_layer_metadata
 from .help_dialog import show_help_dialog
+from .i18n import is_english_ui
 
 
 def _safe_make_valid(geom: QgsGeometry) -> QgsGeometry:
@@ -266,6 +267,7 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
                 return 0.0
 
     def run(self):
+        use_en = is_english_ui()
         cad = self._validate_layer(self.cmbCadastral.currentLayer(), name="지적도")
         if cad is None:
             return

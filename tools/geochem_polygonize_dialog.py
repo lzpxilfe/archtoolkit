@@ -69,6 +69,7 @@ from .utils import (
 )
 from .live_log_dialog import ensure_live_log_dialog
 from .help_dialog import show_help_dialog
+from .i18n import get_output_group_name
 
 
 PARENT_GROUP_NAME = get_output_group_name("geochem", "ArchToolkit - GeoChem")
