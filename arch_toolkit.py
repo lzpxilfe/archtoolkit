@@ -76,13 +76,13 @@ class ArchToolkit:
             self.terrain_action = QAction(QIcon(terrain_icon), u"지형 분석 (Terrain Analysis)", self.iface.mainWindow())
             self.terrain_action.triggered.connect(self.run_terrain_tool)
 
-            # Batch DEM Covariate Generator (predictive-modeling variable stack)
-            self.covariates_action = QAction(
+            # Align & Export Analysis Stack (compose existing analysis outputs for modelling)
+            self.align_export_action = QAction(
                 QIcon(terrain_icon),
-                u"DEM 파생 변수 일괄 생성 (Batch DEM Covariates)",
+                u"분석 결과 정렬/내보내기 (Align & Export Stack)",
                 self.iface.mainWindow(),
             )
-            self.covariates_action.triggered.connect(self.run_covariates_tool)
+            self.align_export_action.triggered.connect(self.run_align_export_tool)
 
             # AHP Suitability (Multi-criteria)
             ahp_icon = None
@@ -222,7 +222,7 @@ class ArchToolkit:
             self.iface.addPluginToMenu(self.menu_name, self.contour_action)
             self.iface.addPluginToMenu(self.menu_name, self.cad_overlap_action)
             self.iface.addPluginToMenu(self.menu_name, self.terrain_action)
-            self.iface.addPluginToMenu(self.menu_name, self.covariates_action)
+            self.iface.addPluginToMenu(self.menu_name, self.align_export_action)
             self.iface.addPluginToMenu(self.menu_name, self.ahp_action)
             self.iface.addPluginToMenu(self.menu_name, self.geochem_action)
             self.iface.addPluginToMenu(self.menu_name, self.geology_zip_action)
@@ -252,7 +252,7 @@ class ArchToolkit:
             self.tool_menu.addAction(self.cad_overlap_action)
             self.tool_menu.addSeparator()
             self.tool_menu.addAction(self.terrain_action)
-            self.tool_menu.addAction(self.covariates_action)
+            self.tool_menu.addAction(self.align_export_action)
             self.tool_menu.addAction(self.ahp_action)
             self.tool_menu.addAction(self.geochem_action)
             self.tool_menu.addAction(self.geology_zip_action)
@@ -281,7 +281,7 @@ class ArchToolkit:
             # Keep references for cleanup
             self.actions = [
                 self.dem_action, self.contour_action, self.cad_overlap_action,
-                self.terrain_action, self.covariates_action, self.ahp_action,
+                self.terrain_action, self.align_export_action, self.ahp_action,
                 self.geochem_action, self.geology_zip_action,
                 self.profile_action, self.cost_action, self.network_action,
                 self.spatial_network_action, self.style_action, self.drafting_action,
@@ -414,14 +414,14 @@ class ArchToolkit:
             log_exception("AHP tool error", e)
             QMessageBox.critical(self.iface.mainWindow(), "오류", f"도구를 여는 중 오류가 발생했습니다: {str(e)}")
 
-    def run_covariates_tool(self):
+    def run_align_export_tool(self):
         try:
-            from .tools.dem_covariates_dialog import DemCovariatesDialog
+            from .tools.align_export_dialog import AlignExportDialog
 
-            dlg = DemCovariatesDialog(self.iface)
+            dlg = AlignExportDialog(self.iface)
             dlg.exec_()
         except Exception as e:
-            log_exception("DEM covariates tool error", e)
+            log_exception("Align & export tool error", e)
             QMessageBox.critical(self.iface.mainWindow(), "오류", f"도구를 여는 중 오류가 발생했습니다: {str(e)}")
 
     def run_profile_tool(self):
