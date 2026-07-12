@@ -175,6 +175,8 @@ def _reference_sites_lines(ctx: Dict[str, Any]) -> List[str]:
         }.get(rel, rel or "-")
         dist = _fmt_float(d.get("distance_to_aoi_m"), digits=1)
         dc = _fmt_float(d.get("distance_to_aoi_centroid_m"), digits=1)
+        comp = str(d.get("compass_from_aoi") or "").strip()
+        comp_txt = f", 방위={comp}" if comp else ""
         extra = []
         if "overlap_aoi_area_m2" in d:
             extra.append(f"AOI중첩면적={_fmt_float(d.get('overlap_aoi_area_m2'), digits=1)}㎡")
@@ -203,11 +205,123 @@ def _reference_sites_lines(ctx: Dict[str, Any]) -> List[str]:
                 f"({ _fmt_float(d.get('outside_aoi_length_pct'), digits=1) }%)"
             )
         suffix = f" / {', '.join(extra)}" if extra else ""
-        out.append(f"  - {name}: {rel_ko}, AOI경계거리={dist}m, AOI중심거리={dc}m{suffix}")
+        out.append(f"  - {name}: {rel_ko}{comp_txt}, AOI경계거리={dist}m, AOI중심거리={dc}m{suffix}")
 
     if bool(ref.get("truncated")):
         out.append("- (표시 개수 제한으로 일부 유적은 생략됨)")
     return out
+
+
+def _distance_phrase(dist_m: Any) -> str:
+    try:
+        d = float(dist_m)
+    except Exception:
+        return ""
+    if not math.isfinite(d):
+        return ""
+    if d <= 0.5:
+        return "AOI에 접함"
+    if d < 1000:
+        return f"약 {d:,.0f} m"
+    return f"약 {d/1000.0:,.1f} km"
+
+
+_RELATION_KO = {
+    "inside_aoi": "AOI 내부",
+    "crosses_aoi_boundary": "AOI 경계 걸침",
+    "inside_buffer_only": "버퍼 내부",
+    "crosses_buffer_boundary": "버퍼 경계 걸침",
+    "outside_buffer": "버퍼 밖",
+}
+
+
+def _narrative_lines(ctx: Dict[str, Any]) -> List[str]:
+    """Rule-based Korean prose using direction/distance/relation - a readable
+    executive summary, not a bullet dump."""
+    aoi = ctx.get("aoi") or {}
+    layers = ctx.get("layers") or []
+    aoi_name = str(aoi.get("layer_name") or "").strip() or "(이름 없음)"
+    aoi_area = aoi.get("area_m2")
+    radius_m = ctx.get("radius_m")
+
+    n_vec = sum(1 for lyr in layers if str(lyr.get("type") or "") == "vector")
+    n_ras = sum(1 for lyr in layers if str(lyr.get("type") or "") == "raster")
+    total_feats = 0
+    for lyr in layers:
+        try:
+            total_feats += int(((lyr.get("stats") or {}).get("features")) or 0)
+        except Exception:
+            pass
+
+    lines: List[str] = []
+    area_txt = _fmt_float(aoi_area, digits=0)
+    rad_txt = _fmt_float(radius_m, digits=0)
+    s1 = (
+        f"이번 요약은 조사지역 `{aoi_name}`"
+        + (f"(면적 약 {area_txt} ㎡)" if area_txt != "-" else "")
+        + f"을(를) 중심으로 반경 {rad_txt} m 범위를 대상으로 합니다. "
+        + f"해당 범위와 겹치는 레이어는 총 {_fmt_int(len(layers))}개"
+        + f"(벡터 {n_vec}, 래스터 {n_ras})이며, "
+        + f"벡터 피처는 대략 {_fmt_int(total_feats)}개가 확인됩니다."
+    )
+    lines.append(s1)
+
+    # Reference-site relations with direction and distance.
+    ref = ctx.get("reference_sites") or {}
+    if isinstance(ref, dict) and ref:
+        counts = ref.get("counts") or {}
+        items = [d for d in (ref.get("items") or []) if isinstance(d, dict)]
+        feature_count = int(ref.get("feature_count") or 0)
+        inside = int(counts.get("inside_or_overlap_aoi") or 0)
+        buf_only = int(counts.get("inside_buffer_only") or 0)
+
+        s2 = (
+            f"주변 유적 레이어에서 관계가 계산된 유적은 총 {_fmt_int(feature_count)}개로, "
+            f"이 중 AOI 내부/중첩 {_fmt_int(inside)}개, 버퍼 내부(외곽) {_fmt_int(buf_only)}개입니다."
+        )
+        lines.append(s2)
+
+        # Nearest site: name, distance, direction.
+        ranked = sorted(
+            items,
+            key=lambda d: (
+                float(d.get("distance_to_aoi_m")) if d.get("distance_to_aoi_m") is not None else float("inf")
+            ),
+        )
+        if ranked:
+            nearest = ranked[0]
+            nm = str(nearest.get("name") or "").strip() or "(이름 없음)"
+            dphrase = _distance_phrase(nearest.get("distance_to_aoi_m"))
+            comp = str(nearest.get("compass_from_aoi") or "").strip()
+            rel = _RELATION_KO.get(str(nearest.get("relation") or ""), "")
+            bits = [f"가장 가까운 유적은 `{nm}`"]
+            if comp:
+                bits.append(f"AOI 중심 기준 {comp}쪽")
+            if dphrase == "AOI에 접함":
+                bits.append("AOI 경계에 접함")
+            elif dphrase:
+                bits.append(f"AOI 경계에서 {dphrase} 거리")
+            if rel:
+                bits.append(f"관계: {rel}")
+            lines.append(", ".join(bits) + "에 위치합니다.")
+
+            # Direction distribution among buffered sites.
+            dir_tally: Dict[str, int] = {}
+            for d in ranked:
+                c = str(d.get("compass_from_aoi") or "").strip()
+                if not c:
+                    continue
+                if str(d.get("relation") or "") == "outside_buffer":
+                    continue
+                dir_tally[c] = dir_tally.get(c, 0) + 1
+            if dir_tally:
+                top_dirs = sorted(dir_tally.items(), key=lambda kv: kv[1], reverse=True)[:2]
+                dirs_txt = "·".join([f"{k}({v})" for k, v in top_dirs])
+                lines.append(f"반경 내 유적은 주로 {dirs_txt} 방향에 분포합니다.")
+    else:
+        lines.append("추가 유적(관계 분석) 레이어는 사용되지 않았습니다.")
+
+    return lines
 
 
 def generate_report(ctx: Dict[str, Any]) -> str:
@@ -246,6 +360,17 @@ def generate_report(ctx: Dict[str, Any]) -> str:
     out: List[str] = []
     out.append("# AI 조사요약 (무료/로컬)")
     out.append("")
+
+    # 0) Auto narrative (rule-based prose: direction / distance / relation)
+    out.append("## 요약 서술(자동 생성)")
+    try:
+        for s in _narrative_lines(ctx):
+            if s and s.strip():
+                out.append(s.strip())
+                out.append("")
+    except Exception:
+        out.append("(자동 서술 생성 실패 — 아래 세부 통계를 참고하세요.)")
+        out.append("")
 
     # 1) Overview
     out.append("## 1) 개요")

@@ -27,7 +27,7 @@ except Exception:  # pragma: no cover
 
 import processing
 from qgis.PyQt import QtWidgets
-from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtCore import Qt, QTimer
 from qgis.PyQt.QtGui import QColor, QIcon
 from qgis.core import (
     QgsColorRampShader,
@@ -1044,6 +1044,9 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
             cmb = QtWidgets.QComboBox()
             cmb.addItem("Benefit(값↑)", "benefit")
             cmb.addItem("Cost(값↓)", "cost")
+            cmb.addItem("Target(목표값)", "target")
+            cmb.addItem("Range(선호구간)", "range")
+            cmb.addItem("Reclass(구간재분류)", "reclass")
             try:
                 idx = cmb.findData(str(crit.direction or "benefit"))
                 if idx >= 0:
@@ -1054,8 +1057,28 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
             def _on_dir_changed(_=None, row=i, w=cmb):
                 try:
                     v = str(w.currentData() or "benefit")
-                    if 0 <= int(row) < len(self._criteria):
-                        self._criteria[int(row)].direction = v
+                    if not (0 <= int(row) < len(self._criteria)):
+                        return
+                    crit_row = self._criteria[int(row)]
+                    crit_row.direction = v
+                    # Modes beyond benefit/cost need per-criterion parameters
+                    # (target value, preferred range, reclass breaks). Seed sane
+                    # defaults now, and open the editor so the user can tune them.
+                    if v in ("target", "range", "reclass"):
+                        lyr_row = self._criterion_layer(crit_row)
+                        if lyr_row is not None and (crit_row.min_v is None or crit_row.max_v is None):
+                            mn_r, mx_r = self._compute_minmax_for_layer(lyr_row)
+                            crit_row.min_v = mn_r
+                            crit_row.max_v = mx_r
+                        self._ensure_criterion_preference_defaults(crit_row)
+                        try:
+                            self.tblCriteria.selectRow(int(row))
+                        except Exception:
+                            pass
+                        # Defer to the next event-loop tick: opening the editor
+                        # rebuilds this table, which would delete the combo whose
+                        # signal we are still inside (crash risk on some Qt builds).
+                        QTimer.singleShot(0, self._on_edit_selected_preference)
                 except Exception:
                     pass
 
@@ -1655,6 +1678,14 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
         if layer is None or not layer.isValid():
             return None
 
+        # Mark the masked sentinel as NoData so non-overlap areas render transparent.
+        try:
+            nd = getattr(self, "_suitability_nodata", None)
+            if nd is not None:
+                layer.dataProvider().setNoDataValue(1, float(nd))
+        except Exception:
+            pass
+
         try:
             params = {
                 "criteria": [
@@ -1828,7 +1859,20 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
             push_message(self.iface, "AHP", "래스터 정규화/가중합 계산 중…", level=0, duration=6)
 
             align = bool(self.chkAlignToFirst.isChecked())
-            acc_path = None
+            acc_path = None       # weighted-score accumulator
+            vacc_path = None      # validity accumulator: 1 only where EVERY layer is valid
+            nodata_sentinel = -9999.0
+
+            def _nodata_of(path):
+                try:
+                    probe = QgsRasterLayer(str(path), "nd_probe")
+                    if probe.isValid():
+                        nd = probe.dataProvider().sourceNoDataValue(1)
+                        if nd is not None and math.isfinite(float(nd)):
+                            return float(nd)
+                except Exception:
+                    pass
+                return None
 
             for idx, c in enumerate(self._criteria):
                 lyr = self._criterion_layer(c)
@@ -1859,21 +1903,25 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
                 if mn is None or mx is None or (not math.isfinite(mn)) or (not math.isfinite(mx)):
                     raise Exception(f"min/max 통계가 없습니다: {lyr.name()}")
 
+                # NoData mask term: 1 where valid, 0 where NoData. Prevents -9999
+                # cells from polluting the weighted sum where rasters don't overlap.
+                nd = _nodata_of(in_path)
+                valid_term = f"(A != {nd})" if nd is not None else "(A*0 + 1)"
+
                 denom = float(mx - mn)
                 if (not math.isfinite(denom)) or denom == 0:
-                    norm_path = _tmp(f"norm_{idx}")
-                    self._processing_raster_calc(input_a=in_path, formula="A*0", out_path=norm_path)
+                    score_formula = "(A*0)"
                 else:
-                    if str(c.direction or "benefit") == "cost":
-                        formula = f"({mx} - A) / ({mx} - {mn})"
-                    else:
-                        formula = f"(A - {mn}) / ({mx} - {mn})"
-                    norm_path = _tmp(f"norm_{idx}")
-                    self._processing_raster_calc(input_a=in_path, formula=formula, out_path=norm_path)
+                    # Honour the criterion's scoring mode (benefit/cost/target/range/reclass).
+                    score_formula = f"({self._criterion_score_formula(c, mn=mn, mx=mx)})"
 
                 w0 = float(c.weight) if c.weight is not None else (1.0 / float(n))
                 weighted_path = _tmp(f"w_{idx}")
-                self._processing_raster_calc(input_a=norm_path, formula=f"A * {w0}", out_path=weighted_path)
+                self._processing_raster_calc(
+                    input_a=in_path,
+                    formula=f"({score_formula} * {valid_term}) * {w0}",
+                    out_path=weighted_path,
+                )
 
                 if acc_path is None:
                     acc_path = weighted_path
@@ -1884,6 +1932,18 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
                     _safe_rm(weighted_path)
                     acc_path = new_acc
 
+                # accumulate validity (product of per-layer valid masks)
+                if vacc_path is None:
+                    vpath = _tmp(f"v_{idx}")
+                    self._processing_raster_calc(input_a=in_path, formula=valid_term, out_path=vpath)
+                    vacc_path = vpath
+                else:
+                    new_v = _tmp(f"v_{idx}")
+                    combine = f"A * (B != {nd})" if nd is not None else "A"
+                    self._processing_raster_calc(input_a=vacc_path, input_b=in_path, formula=combine, out_path=new_v)
+                    _safe_rm(vacc_path)
+                    vacc_path = new_v
+
             if acc_path is None:
                 raise Exception("가중합 결과를 생성할 수 없습니다.")
 
@@ -1892,6 +1952,17 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
                 self._processing_raster_calc(input_a=acc_path, formula="A * 100.0", out_path=scaled)
                 _safe_rm(acc_path)
                 acc_path = scaled
+
+            # Mask NoData: keep value where all layers valid, else the sentinel.
+            if vacc_path is not None:
+                masked = _tmp("masked")
+                self._processing_raster_calc(
+                    input_a=acc_path, input_b=vacc_path,
+                    formula=f"A * B + ({nodata_sentinel}) * (1 - B)", out_path=masked,
+                )
+                _safe_rm(acc_path)
+                acc_path = masked
+                self._suitability_nodata = nodata_sentinel
 
             final_path = out_path_user
             if os.path.abspath(acc_path) != os.path.abspath(final_path):

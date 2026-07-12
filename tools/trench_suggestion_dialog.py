@@ -17,7 +17,6 @@ from qgis.PyQt.QtGui import QIcon
 from qgis.core import (
     Qgis,
     QgsCoordinateTransform,
-    QgsDistanceArea,
     QgsFeature,
     QgsFeatureRequest,
     QgsField,
@@ -52,22 +51,55 @@ from .utils import (
     set_archtoolkit_layer_metadata,
 )
 
-_GRAVE_KEYWORDS = (
-    "묘",
+# Korean grave/tomb terms. Bare "묘" (1 char) is deliberately excluded: it is a
+# frequent substring of unrelated words (묘목=seedling, 묘사=description,
+# 교묘=cunning) and would produce false "grave" hits. Only specific 2+ char
+# compounds are matched. English terms are matched on word boundaries so
+# "grave" does not fire on "gravel".
+_GRAVE_KW_KO = (
     "무덤",
     "분묘",
     "묘지",
     "묘역",
     "봉분",
-    "고분",
     "고분군",
+    "고분",
+)
+_GRAVE_KW_EN = (
     "tomb",
     "grave",
     "burial",
     "cemetery",
 )
+# Korean compounds that contain a grave term as a substring but are NOT graves.
+_GRAVE_KO_FALSE = (
+    "고분자",  # polymer / macromolecule
+)
 
 _CODE_RE = re.compile(r"\b([A-Z][0-9]{7,8})\b")
+
+
+def _text_has_grave_keyword(text: str) -> bool:
+    """Word-aware grave-term test for mixed Korean/English legend text.
+
+    Korean has no reliable word boundaries, so we match specific multi-char
+    compounds as substrings while stripping out known false-positive words
+    first. English terms use regex word boundaries.
+    """
+    if not text:
+        return False
+    s = str(text)
+    scrubbed = s
+    for bad in _GRAVE_KO_FALSE:
+        scrubbed = scrubbed.replace(bad, "")
+    for kw in _GRAVE_KW_KO:
+        if kw in scrubbed:
+            return True
+    low = s.lower()
+    for kw in _GRAVE_KW_EN:
+        if re.search(r"\b" + re.escape(kw) + r"\b", low):
+            return True
+    return False
 
 
 def _safe_float(v, default=None):
@@ -215,6 +247,13 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
 
         self.cmbAhp = QgsMapLayerComboBox(grp_in)
         self.cmbAhp.setFilters(ras_filter)
+        # Optional input: default to "no layer" so the AHP raster is only used
+        # when the user explicitly picks it (otherwise the DEM would be auto-selected).
+        try:
+            self.cmbAhp.setAllowEmptyLayer(True)
+            self.cmbAhp.setCurrentIndex(0)
+        except Exception:
+            pass
         form_in.addRow("AHP 적합도 래스터(선택):", self.cmbAhp)
         layout.addWidget(grp_in)
 
@@ -248,6 +287,10 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
         self.spinMinSpacing.setDecimals(1)
         self.spinMinSpacing.setValue(6.0)
         self.spinMinSpacing.setSuffix(" m")
+        self.spinMinSpacing.setToolTip(
+            "선택된 트렌치 사이의 최소 '가장자리 간격'(edge-to-edge)입니다. "
+            "트렌치 길이가 길수록 실제 중심 간 거리는 자동으로 더 벌어집니다."
+        )
 
         self.spinInsidePct = QtWidgets.QDoubleSpinBox()
         self.spinInsidePct.setRange(10.0, 100.0)
@@ -283,6 +326,11 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
         except Exception:
             vec_filter = QgsMapLayerProxyModel.VectorLayer
         self.cmbRefSites.setFilters(vec_filter)
+        try:
+            self.cmbRefSites.setAllowEmptyLayer(True)
+            self.cmbRefSites.setCurrentIndex(0)
+        except Exception:
+            pass
         form_ctx.addRow("주변 유적 레이어(선택):", self.cmbRefSites)
 
         self.spinRefRadius = QtWidgets.QDoubleSpinBox()
@@ -298,6 +346,11 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
 
         self.cmbTopo = QgsMapLayerComboBox(grp_ctx)
         self.cmbTopo.setFilters(vec_filter)
+        try:
+            self.cmbTopo.setAllowEmptyLayer(True)
+            self.cmbTopo.setCurrentIndex(0)
+        except Exception:
+            pass
         self.cmbTopo.layerChanged.connect(self._on_topo_layer_changed)
         form_ctx.addRow("수치지형도 벡터(선택):", self.cmbTopo)
 
@@ -493,10 +546,7 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
             if not vals:
                 continue
             row_txt = " ".join(vals)
-            row_low = row_txt.lower()
-            has_ko_kw = any((kw in row_txt) for kw in _GRAVE_KEYWORDS if re.search(r"[가-힣]", kw))
-            has_en_kw = any((kw in row_low) for kw in _GRAVE_KEYWORDS if (not re.search(r"[가-힣]", kw)))
-            if not (has_ko_kw or has_en_kw):
+            if not _text_has_grave_keyword(row_txt):
                 continue
             for v in vals:
                 for m in _CODE_RE.findall(str(v).upper()):
@@ -610,16 +660,7 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
             pass
         if not txts:
             return False
-        joined = " ".join(txts)
-        joined_low = joined.lower()
-        for kw in _GRAVE_KEYWORDS:
-            if re.search(r"[가-힣]", kw):
-                if kw in joined:
-                    return True
-            else:
-                if kw in joined_low:
-                    return True
-        return False
+        return _text_has_grave_keyword(" ".join(txts))
 
     def _build_reference_index(self, layer: Optional[QgsVectorLayer], *, aoi_geom: QgsGeometry, aoi_crs):
         idx = QgsSpatialIndex()
@@ -682,9 +723,14 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
         aoi_crs,
         grave_buffer_m: float,
         use_avoid: bool,
-    ) -> Optional[QgsGeometry]:
+    ) -> Tuple[Optional[QgsGeometry], int]:
+        """Return (avoidance_union, matched_feature_count).
+
+        The count is reported to the user so an "avoidance enabled but 0 features
+        matched" outcome is stated honestly instead of implying graves were dodged.
+        """
         if (not use_avoid) or topo_layer is None or (not isinstance(topo_layer, QgsVectorLayer)):
-            return None
+            return None, 0
         grave_codes = self._load_grave_codes_from_hidden()
         code_field = self._pick_code_field(topo_layer)
         req = QgsFeatureRequest()
@@ -717,18 +763,158 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
                 pass
             geoms.append(g)
 
+        count = len(geoms)
         if not geoms:
-            return None
+            return None, 0
         try:
-            return geoms[0] if len(geoms) == 1 else QgsGeometry.unaryUnion(geoms)
+            union = geoms[0] if count == 1 else QgsGeometry.unaryUnion(geoms)
         except Exception:
             try:
-                out = geoms[0]
+                union = geoms[0]
                 for g in geoms[1:]:
-                    out = out.combine(g)
-                return out
+                    union = union.combine(g)
             except Exception:
+                union = None
+        return union, count
+
+    def _dem_pixel_size(self, dem_layer: QgsRasterLayer) -> float:
+        try:
+            px = float(dem_layer.rasterUnitsPerPixelX())
+            if math.isfinite(px) and px > 0:
+                return px
+        except Exception:
+            pass
+        return 1.0
+
+    def _default_bearing_from_aoi(self, aoi_geom: QgsGeometry) -> float:
+        """Long-axis bearing of the AOI (deg, [0,180)) as a flat-terrain fallback.
+
+        On flat ground aspect is meaningless, so trenches align to the AOI's
+        principal axis, which gives the best areal coverage.
+        """
+        try:
+            res = aoi_geom.orientedMinimumBoundingBox()
+            # QGIS returns (geometry, area, angle, width, height); angle is the
+            # rotation of the box in degrees (clockwise from horizontal/east).
+            if res is not None and len(res) >= 5:
+                angle = float(res[2])
+                width = float(res[3])
+                height = float(res[4])
+                # Bearing (from north, clockwise) of the *longer* side.
+                if width >= height:
+                    bearing = (90.0 - angle) % 180.0
+                else:
+                    bearing = (90.0 - angle + 90.0) % 180.0
+                if math.isfinite(bearing):
+                    return bearing
+        except Exception:
+            pass
+        return 0.0
+
+    def _footprint_downslope_bearing(
+        self,
+        *,
+        aspect_layer: QgsRasterLayer,
+        slope_layer: QgsRasterLayer,
+        pt: QgsPointXY,
+        src_crs,
+        radius_m: float,
+    ) -> Tuple[Optional[float], float]:
+        """Slope-weighted circular mean of aspect over the trench footprint.
+
+        A single-cell aspect sample is noisy; averaging aspect across the footprint
+        (weighted by slope, so near-flat cells barely contribute) yields a stable
+        downslope direction. Returns (downslope_bearing_deg or None, coherence R in
+        [0,1]). None bearing / low R signals flat/incoherent terrain -> use fallback.
+        """
+        r = max(1.0, float(radius_m))
+        # Rosette: centre + one ring of 8 points at the footprint radius. Enough to
+        # average out single-cell aspect noise without an expensive sample count.
+        offsets: List[Tuple[float, float]] = [(0.0, 0.0)]
+        for k in range(8):
+            a = math.radians(45.0 * k)
+            offsets.append((r * math.cos(a), r * math.sin(a)))
+
+        sum_e = 0.0
+        sum_n = 0.0
+        w_total = 0.0
+        cx = float(pt.x())
+        cy = float(pt.y())
+        for dx, dy in offsets:
+            sp = QgsPointXY(cx + dx, cy + dy)
+            asp = self._sample_raster_value(aspect_layer, sp, src_crs)
+            slp = self._sample_raster_value(slope_layer, sp, src_crs)
+            if asp is None or slp is None:
+                continue
+            if asp < 0.0 or asp > 360.0 or slp < 0.0 or slp > 90.0:
+                continue
+            w = max(0.0, float(slp))
+            if w <= 0.0:
+                continue
+            ar = math.radians(float(asp))
+            # Aspect: degrees clockwise from north. East=sin, North=cos.
+            sum_e += w * math.sin(ar)
+            sum_n += w * math.cos(ar)
+            w_total += w
+
+        if w_total <= 0.0:
+            return None, 0.0
+        mag = math.hypot(sum_e, sum_n)
+        coherence = mag / w_total if w_total > 0 else 0.0
+        if mag <= 1e-9:
+            return None, float(coherence)
+        bearing = math.degrees(math.atan2(sum_e, sum_n)) % 360.0
+        return float(bearing), float(coherence)
+
+    def _clip_dem_to_aoi(
+        self,
+        *,
+        dem_layer: QgsRasterLayer,
+        aoi_geom: QgsGeometry,
+        aoi_crs,
+        buffer_m: float,
+        out_path: str,
+    ) -> Optional[str]:
+        """Clip the DEM to the AOI bounding box + buffer so slope/aspect are
+        computed on a small window (faster, fewer edge artifacts). Returns the
+        clipped path, or None on failure (caller falls back to the full DEM)."""
+        try:
+            g = _transform_geom(aoi_geom, aoi_crs, dem_layer.crs())
+            if g is None or g.isEmpty():
                 return None
+            bb = g.boundingBox()
+            bb.grow(max(1.0, float(buffer_m)))
+            # Intersect with the DEM extent to avoid requesting data outside coverage.
+            dem_ext = dem_layer.extent()
+            xmin = max(bb.xMinimum(), dem_ext.xMinimum())
+            ymin = max(bb.yMinimum(), dem_ext.yMinimum())
+            xmax = min(bb.xMaximum(), dem_ext.xMaximum())
+            ymax = min(bb.yMaximum(), dem_ext.yMaximum())
+            if not (xmax > xmin and ymax > ymin):
+                return None
+            crs_authid = str(dem_layer.crs().authid() or "")
+            projwin = f"{xmin},{xmax},{ymin},{ymax}"
+            if crs_authid:
+                projwin = f"{projwin} [{crs_authid}]"
+            processing.run(
+                "gdal:cliprasterbyextent",
+                {
+                    "INPUT": dem_layer.source(),
+                    "PROJWIN": projwin,
+                    "OVERCRS": False,
+                    "NODATA": None,
+                    "OPTIONS": "",
+                    "DATA_TYPE": 0,
+                    "OUTPUT": out_path,
+                },
+            )
+            if os.path.exists(out_path):
+                probe = QgsRasterLayer(out_path, "clip_probe")
+                if probe.isValid():
+                    return out_path
+        except Exception:
+            return None
+        return None
 
     def _aoi_extent_in_raster_crs(self, aoi_geom: QgsGeometry, *, aoi_crs, raster: QgsRasterLayer):
         if raster is None or not isinstance(raster, QgsRasterLayer):
@@ -802,16 +988,33 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
             return
 
         run_id = new_run_id("trench_suggestion")
+        tmp_clip = os.path.join(tempfile.gettempdir(), f"archtoolkit_trench_demclip_{run_id}.tif")
         tmp_aspect = os.path.join(tempfile.gettempdir(), f"archtoolkit_trench_aspect_{run_id}.tif")
         tmp_slope = os.path.join(tempfile.gettempdir(), f"archtoolkit_trench_slope_{run_id}.tif")
-        temp_files = [tmp_aspect, tmp_slope]
+        temp_files = [tmp_clip, tmp_aspect, tmp_slope]
 
         try:
+            # Clip the DEM to AOI + margin so slope/aspect run on a small window.
+            # Margin covers the footprint-aspect rosette plus a couple of cells for
+            # edge continuity. Falls back to the full DEM if clipping fails.
+            pixel = self._dem_pixel_size(dem_layer)
+            clip_buffer = max(float(trench_length), float(grid_step)) + 4.0 * float(pixel)
+            self._set_busy("DEM를 AOI 범위로 클립 중…")
+            dem_src = self._clip_dem_to_aoi(
+                dem_layer=dem_layer,
+                aoi_geom=aoi_geom,
+                aoi_crs=aoi_layer.crs(),
+                buffer_m=clip_buffer,
+                out_path=tmp_clip,
+            )
+            if not dem_src:
+                dem_src = dem_layer.source()
+
             self._set_busy("DEM 파생 레이어(경사/사면방향) 계산 중…")
             processing.run(
                 "gdal:aspect",
                 {
-                    "INPUT": dem_layer.source(),
+                    "INPUT": dem_src,
                     "BAND": 1,
                     "TRIG_ANGLE": False,
                     "ZERO_FLAT": True,
@@ -823,7 +1026,7 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
             processing.run(
                 "gdal:slope",
                 {
-                    "INPUT": dem_layer.source(),
+                    "INPUT": dem_src,
                     "BAND": 1,
                     "SCALE": 1,
                     "AS_PERCENT": False,
@@ -839,13 +1042,24 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
 
             self._set_busy("주변 유적 인덱스/무덤 회피 마스크 준비 중…")
             ref_idx, ref_geoms = self._build_reference_index(ref_layer, aoi_geom=aoi_geom, aoi_crs=aoi_layer.crs())
-            grave_union = self._build_grave_avoid_union(
+            grave_union, grave_count = self._build_grave_avoid_union(
                 topo_layer=topo_layer,
                 aoi_geom=aoi_geom,
                 aoi_crs=aoi_layer.crs(),
                 grave_buffer_m=grave_buffer_m,
                 use_avoid=use_avoid,
             )
+            # Honest reporting of what avoidance actually did.
+            if use_avoid:
+                if topo_layer is None:
+                    log_message("무덤 회피: 수치지형도 레이어 미지정 → 회피 미적용", level=Qgis.Warning)
+                elif grave_count <= 0:
+                    log_message(
+                        "무덤 회피: 조건에 맞는 무덤/분묘 피처 0건 → 회피 대상 없음(제외된 후보 없음)",
+                        level=Qgis.Info,
+                    )
+                else:
+                    log_message(f"무덤 회피: 무덤/분묘 피처 {grave_count}건을 회피 대상으로 반영", level=Qgis.Info)
 
             ahp_min = None
             ahp_max = None
@@ -867,13 +1081,68 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
                     ahp_min = None
                     ahp_max = None
 
-            da = QgsDistanceArea()
-            try:
-                da.setSourceCrs(aoi_layer.crs(), QgsProject.instance().transformContext())
-            except Exception:
-                pass
+            # Effective weights: drop the weight of any input that was not supplied
+            # so it stops acting as a constant offset (previously an absent AHP/ref
+            # layer still contributed a flat 0.5 * weight to every candidate).
+            ahp_available = bool(
+                ahp_layer is not None and isinstance(ahp_layer, QgsRasterLayer) and ahp_layer.isValid()
+            )
+            ref_available = bool(ref_geoms)
+            we_ahp = w_ahp if ahp_available else 0.0
+            we_ref = w_ref if ref_available else 0.0
+            we_slope = w_slope
+            if (we_ahp + we_ref + we_slope) <= 0:
+                we_slope = 1.0
+            excluded = []
+            if not ahp_available and w_ahp > 0:
+                excluded.append("AHP")
+            if not ref_available and w_ref > 0:
+                excluded.append("유적근접")
+            if excluded:
+                log_message(
+                    "입력 미지정으로 가중치에서 제외 후 재정규화: " + ", ".join(excluded),
+                    level=Qgis.Info,
+                )
 
+            default_bearing = self._default_bearing_from_aoi(aoi_geom)
+            flat_slope_thresh = 1.0  # deg; below this, aspect direction is meaningless
+            foot_radius = max(float(trench_length) * 0.5, float(pixel) * 2.0)
+
+            # Coarsen the candidate grid so the AOI *interior* fits within the eval
+            # budget. This replaces the old scan that stopped after max_eval cells of
+            # the bounding box - which silently truncated coverage to one corner.
             bbox = aoi_geom.boundingBox()
+            bb_w = max(1e-6, float(bbox.width()))
+            bb_h = max(1e-6, float(bbox.height()))
+            try:
+                aoi_area = float(aoi_geom.area())
+            except Exception:
+                aoi_area = bb_w * bb_h
+            frac = min(1.0, max(1e-3, aoi_area / max(1e-9, bb_w * bb_h)))
+
+            def _grid_counts(step):
+                nx = int(bb_w / step) + 1
+                ny = int(bb_h / step) + 1
+                bpts = nx * ny
+                return bpts * frac, bpts
+
+            orig_step = grid_step
+            interior_est, bbox_points = _grid_counts(grid_step)
+            if interior_est > max_eval:
+                grid_step = grid_step * math.sqrt(interior_est / float(max_eval))
+                interior_est, bbox_points = _grid_counts(grid_step)
+            BBOX_CEIL = 600_000
+            if bbox_points > BBOX_CEIL:
+                grid_step = grid_step * math.sqrt(bbox_points / float(BBOX_CEIL))
+                interior_est, bbox_points = _grid_counts(grid_step)
+            if grid_step > orig_step * 1.001:
+                log_message(
+                    f"AOI가 넓어 후보 격자를 {orig_step:.1f}m→{grid_step:.1f}m로 확대하여 "
+                    "AOI 전체를 잘림 없이 커버합니다.",
+                    level=Qgis.Info,
+                )
+            hard_cap = int(max(bbox_points * 2, max_eval * 4))
+
             x0 = float(bbox.xMinimum()) + grid_step * 0.5
             y0 = float(bbox.yMinimum()) + grid_step * 0.5
             xmax = float(bbox.xMaximum())
@@ -882,33 +1151,51 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
             candidates = []
             scanned = 0
             kept = 0
+            iters = 0
+            truncated = False
 
             x = x0
-            while x <= xmax and scanned < max_eval:
+            while x <= xmax:
+                if truncated:
+                    break
                 y = y0
-                while y <= ymax and scanned < max_eval:
-                    scanned += 1
+                while y <= ymax:
+                    iters += 1
+                    if iters > hard_cap:
+                        truncated = True
+                        break
                     pt = QgsPointXY(x, y)
                     pt_geom = QgsGeometry.fromPointXY(pt)
                     if not aoi_geom.contains(pt_geom):
                         y += grid_step
                         continue
 
-                    aspect = self._sample_raster_value(aspect_layer, pt, aoi_layer.crs())
+                    scanned += 1
                     slope = self._sample_raster_value(slope_layer, pt, aoi_layer.crs())
-                    if aspect is None or slope is None:
-                        y += grid_step
-                        continue
-                    # Guard against nodata/invalid ranges from derived rasters.
-                    if (aspect < 0.0) or (aspect > 360.0) or (slope < 0.0) or (slope > 90.0):
+                    if slope is None or slope < 0.0 or slope > 90.0:
                         y += grid_step
                         continue
                     if slope > slope_max:
                         y += grid_step
                         continue
 
-                    contour_bearing = (aspect + 90.0) % 180.0
-                    bearing = contour_bearing if orient_mode == "parallel" else (aspect % 180.0)
+                    # Stable orientation from footprint-averaged aspect, with a
+                    # flat-terrain fallback to the AOI long axis.
+                    asp_bear, coherence = self._footprint_downslope_bearing(
+                        aspect_layer=aspect_layer,
+                        slope_layer=slope_layer,
+                        pt=pt,
+                        src_crs=aoi_layer.crs(),
+                        radius_m=foot_radius,
+                    )
+                    is_flat = (asp_bear is None) or (coherence < 0.25) or (slope < flat_slope_thresh)
+                    if is_flat:
+                        bearing = float(default_bearing) % 180.0
+                    elif orient_mode == "parallel":
+                        bearing = (float(asp_bear) + 90.0) % 180.0
+                    else:
+                        bearing = float(asp_bear) % 180.0
+
                     trench_geom = _rect_geom_from_center(
                         pt, length_m=trench_length, width_m=trench_width, bearing_deg=bearing
                     )
@@ -935,27 +1222,42 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
                         except Exception:
                             pass
 
-                    ahp_val = self._sample_raster_value(ahp_layer, pt, aoi_layer.crs()) if ahp_layer else None
+                    ahp_val = self._sample_raster_value(ahp_layer, pt, aoi_layer.crs()) if ahp_available else None
                     if ahp_val is not None and ahp_min is not None and ahp_max is not None and ahp_max > ahp_min:
                         ahp_score = max(0.0, min(1.0, (ahp_val - ahp_min) / (ahp_max - ahp_min)))
                     elif ahp_val is not None:
                         ahp_score = max(0.0, min(1.0, ahp_val))
                     else:
-                        ahp_score = 0.5
+                        ahp_score = 0.0
 
-                    ref_dist = self._nearest_reference_distance(ref_idx, ref_geoms, pt) if ref_geoms else None
-                    ref_score = 0.5 if ref_dist is None else max(
-                        0.0, min(1.0, 1.0 - (float(ref_dist) / max(1.0, ref_radius_m)))
-                    )
+                    if ref_available:
+                        ref_dist = self._nearest_reference_distance(ref_idx, ref_geoms, pt)
+                        ref_score = 0.0 if ref_dist is None else max(
+                            0.0, min(1.0, 1.0 - (float(ref_dist) / max(1.0, ref_radius_m)))
+                        )
+                    else:
+                        ref_dist = None
+                        ref_score = 0.0
 
                     slope_score = max(0.0, min(1.0, 1.0 - (float(slope) / max(1.0, slope_max))))
-                    total = (w_ahp * ahp_score + w_ref * ref_score + w_slope * slope_score) / w_sum
+
+                    # Per-cell renormalization: skip the AHP term where this cell is
+                    # NoData so a valid cell is never penalized by a missing value.
+                    cw_ahp = we_ahp if ahp_val is not None else 0.0
+                    cw_ref = we_ref
+                    cw_slope = we_slope
+                    cw_sum = cw_ahp + cw_ref + cw_slope
+                    if cw_sum <= 0:
+                        cw_slope = 1.0
+                        cw_sum = 1.0
+                    total = (cw_ahp * ahp_score + cw_ref * ref_score + cw_slope * slope_score) / cw_sum
+
                     candidates.append(
                         {
                             "point": pt,
                             "geom": trench_geom,
                             "bearing_deg": float(bearing),
-                            "mode": orient_mode,
+                            "mode": ("flat" if is_flat else orient_mode),
                             "inside_ratio": float(inside_ratio),
                             "slope_deg": float(slope),
                             "ahp_val": ahp_val,
@@ -969,6 +1271,13 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
                     y += grid_step
                 x += grid_step
 
+            if truncated:
+                log_message(
+                    f"안전 상한({hard_cap} 반복)에 도달하여 스캔을 종료했습니다. "
+                    "격자 간격을 넓히거나 AOI를 줄이면 전체를 커버할 수 있습니다.",
+                    level=Qgis.Warning,
+                )
+
             if not candidates:
                 push_message(
                     self.iface,
@@ -979,45 +1288,53 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
                 )
                 return
 
-            self._set_busy("상위 후보 선별 중…")
-            candidates.sort(key=lambda d: float(d.get("score", 0.0)), reverse=True)
-            selected = []
-            selected_centers: List[QgsPointXY] = []
+            self._set_busy("커버리지 우선 후보 선별 중…")
+            # Coverage-first selection: partition the AOI into ~want_n cells and pick
+            # in round-robin (best per cell each pass) so trenches spread across the
+            # AOI instead of clustering in the single highest-scoring corner.
+            cov_cell = max(float(grid_step), math.sqrt(max(1.0, aoi_area) / max(1, want_n)))
+            buckets: Dict[Tuple[int, int], List[dict]] = {}
+            for cand in candidates:
+                p = cand.get("point")
+                key = (int((float(p.x()) - x0) // cov_cell), int((float(p.y()) - y0) // cov_cell))
+                buckets.setdefault(key, []).append(cand)
+            for b in buckets.values():
+                b.sort(key=lambda d: float(d.get("score", 0.0)), reverse=True)
+            bucket_order = sorted(buckets.values(), key=lambda b: float(b[0].get("score", 0.0)), reverse=True)
+
+            selected: List[dict] = []
             selected_geoms: List[QgsGeometry] = []
 
-            for cand in candidates:
-                if len(selected) >= want_n:
-                    break
-                pt = cand.get("point")
-                g = cand.get("geom")
-                if pt is None or g is None:
-                    continue
-
-                conflict = False
-                if min_spacing > 0:
-                    for spt in selected_centers:
-                        try:
-                            d = float(da.measureLine(pt, spt))
-                        except Exception:
-                            d = float(QgsGeometry.fromPointXY(pt).distance(QgsGeometry.fromPointXY(spt)))
-                        if d < min_spacing:
-                            conflict = True
-                            break
-                if conflict:
-                    continue
+            def _conflicts(g: QgsGeometry) -> bool:
                 for sg in selected_geoms:
                     try:
                         if g.intersects(sg):
-                            conflict = True
-                            break
+                            return True
+                        if min_spacing > 0 and float(g.distance(sg)) < min_spacing:
+                            return True
                     except Exception:
                         continue
-                if conflict:
-                    continue
+                return False
 
-                selected.append(cand)
-                selected_centers.append(pt)
-                selected_geoms.append(g)
+            ptrs = [0] * len(bucket_order)
+            progress = True
+            while len(selected) < want_n and progress:
+                progress = False
+                for bi, b in enumerate(bucket_order):
+                    if len(selected) >= want_n:
+                        break
+                    j = ptrs[bi]
+                    while j < len(b):
+                        cand = b[j]
+                        g = cand.get("geom")
+                        j += 1
+                        if g is None or _conflicts(g):
+                            continue
+                        selected.append(cand)
+                        selected_geoms.append(g)
+                        progress = True
+                        break
+                    ptrs[bi] = j
 
             if not selected:
                 push_message(self.iface, "정보", "중복/간격 필터 후 남은 후보가 없습니다.", level=1, duration=6)
@@ -1104,17 +1421,24 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
                     "count_requested": want_n,
                     "count_selected": len(selected),
                     "grid_step_m": grid_step,
+                    "grid_step_requested_m": orig_step,
                     "min_spacing_m": min_spacing,
+                    "min_spacing_semantics": "edge_to_edge",
                     "inside_min_ratio": inside_min_ratio,
                     "orientation_mode": orient_mode,
                     "grave_avoid": bool(use_avoid),
+                    "grave_matched_features": int(grave_count),
                     "grave_buffer_m": grave_buffer_m,
                     "ref_radius_m": ref_radius_m,
                     "max_slope_deg": slope_max,
-                    "weights": {"ahp": w_ahp, "ref": w_ref, "slope": w_slope},
+                    "weights_requested": {"ahp": w_ahp, "ref": w_ref, "slope": w_slope},
+                    "weights_effective": {"ahp": we_ahp, "ref": we_ref, "slope": we_slope},
+                    "ahp_used": bool(ahp_available),
+                    "ref_used": bool(ref_available),
                     "aoi_features": int(aoi_n),
                     "candidates_scanned": int(scanned),
                     "candidates_kept": int(kept),
+                    "scan_truncated": bool(truncated),
                     "hidden_xls_loaded": bool(len(self._load_grave_codes_from_hidden()) > 0),
                 },
             )
@@ -1138,18 +1462,31 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
             run_grp.insertLayer(0, trench_layer)
             run_grp.insertLayer(1, center_layer)
 
+            if use_avoid:
+                if topo_layer is None:
+                    avoid_note = " (무덤 회피: 지형도 미지정으로 미적용)"
+                elif grave_count <= 0:
+                    avoid_note = " (무덤 회피: 대상 0건)"
+                else:
+                    avoid_note = f" (무덤 회피: {grave_count}건 반영)"
+            else:
+                avoid_note = ""
+            shortfall = ""
+            if len(selected) < want_n:
+                shortfall = f" 요청 {want_n}개 중 {len(selected)}개만 조건을 만족했습니다."
             push_message(
                 self.iface,
                 "완료",
                 (
-                    f"트렌치 후보 {len(selected)}개를 생성했습니다. "
+                    f"트렌치 후보 {len(selected)}개를 생성했습니다.{shortfall}{avoid_note} "
                     "결과는 조사 보조용 제안이며, 최종 판단은 현장 조사자가 수행해야 합니다."
                 ),
                 level=0,
                 duration=8,
             )
             log_message(
-                f"TrenchSuggestion done: selected={len(selected)} scanned={scanned} kept={kept} run_id={run_id}",
+                f"TrenchSuggestion done: selected={len(selected)} scanned={scanned} kept={kept} "
+                f"grave_matched={grave_count} truncated={truncated} run_id={run_id}",
                 level=Qgis.Info,
             )
             self.accept()

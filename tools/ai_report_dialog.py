@@ -736,6 +736,36 @@ class AiAoiReportDialog(QtWidgets.QDialog):
         s = " ".join(s.split())
         return (s or fallback)[:80]
 
+    def _project_layers_signature(self):
+        """Sorted tuple of all project layer ids. Invalidates the context cache
+        when layers are added/removed (e.g. after running a new analysis) so the
+        summary never silently reflects a stale project state."""
+        try:
+            return tuple(sorted(str(k) for k in QgsProject.instance().mapLayers().keys()))
+        except Exception:
+            return ()
+
+    def _aoi_signature(self, aoi_layer):
+        """Feature count + rounded extent of the AOI layer. Invalidates the cache
+        when the AOI geometry is edited/moved (extent changes)."""
+        cnt = -1
+        ext = None
+        try:
+            cnt = int(aoi_layer.featureCount())
+        except Exception:
+            cnt = -1
+        try:
+            e = aoi_layer.extent()
+            ext = (
+                round(float(e.xMinimum()), 3),
+                round(float(e.yMinimum()), 3),
+                round(float(e.xMaximum()), 3),
+                round(float(e.yMaximum()), 3),
+            )
+        except Exception:
+            ext = None
+        return (cnt, ext)
+
     def _make_ctx_key(
         self,
         *,
@@ -771,6 +801,8 @@ class AiAoiReportDialog(QtWidgets.QDialog):
             aoi_id,
             bool(selected_only),
             aoi_selection_sig,
+            self._aoi_signature(aoi_layer),
+            self._project_layers_signature(),
             r0,
             bool(only_arch),
             bool(exclude_styling),
@@ -868,22 +900,66 @@ class AiAoiReportDialog(QtWidgets.QDialog):
         if self._last_ctx is not None and self._last_ctx_key == key:
             return self._last_ctx, None
 
-        ctx, err = ai_aoi_summary.build_aoi_context(
-            aoi_layer=aoi_layer,
-            selected_only=selected_only,
-            radius_m=radius_m,
-            only_archtoolkit_layers=only_arch,
-            exclude_styling_layers=exclude_styling,
-            layer_ids=layer_ids,
-            group_path_prefix=target_group or None,
-            reference_layer=reference_layer,
-            reference_selected_only=reference_selected_only,
-            reference_name_field=reference_name_field,
-            reference_max_features=reference_max_features,
-            max_layers=int(max_layers),
-        )
+        def _build(arch_flag):
+            return ai_aoi_summary.build_aoi_context(
+                aoi_layer=aoi_layer,
+                selected_only=selected_only,
+                radius_m=radius_m,
+                only_archtoolkit_layers=arch_flag,
+                exclude_styling_layers=exclude_styling,
+                layer_ids=layer_ids,
+                group_path_prefix=target_group or None,
+                reference_layer=reference_layer,
+                reference_selected_only=reference_selected_only,
+                reference_name_field=reference_name_field,
+                reference_max_features=reference_max_features,
+                max_layers=int(max_layers),
+            )
+
+        ctx, err = _build(only_arch)
         if err:
             return None, err
+
+        # Relax the "ArchToolkit results only" filter when it finds nothing (e.g.
+        # the user hasn't run an analysis yet): auto-widen to all AOI-overlapping
+        # layers so the summary is still useful instead of empty.
+        if (
+            only_arch
+            and scope == "auto"
+            and ctx is not None
+            and not (ctx.get("layers") or [])
+        ):
+            ctx2, err2 = _build(False)
+            if (not err2) and ctx2 and (ctx2.get("layers") or []):
+                ctx = ctx2
+                key = self._make_ctx_key(
+                    aoi_layer=aoi_layer,
+                    selected_only=selected_only,
+                    aoi_selection_sig=aoi_selection_sig,
+                    radius_m=radius_m,
+                    only_arch=False,
+                    exclude_styling=exclude_styling,
+                    scope=scope,
+                    target_group=target_group,
+                    layer_ids=layer_ids,
+                    reference_layer_id=reference_layer_id,
+                    reference_selected_only=reference_selected_only,
+                    reference_selection_sig=reference_selection_sig,
+                    reference_name_field=reference_name_field,
+                    reference_max_features=reference_max_features,
+                    max_layers=max_layers,
+                )
+                try:
+                    push_message(
+                        self.iface,
+                        "AI 요약",
+                        "ArchToolkit 결과 레이어가 없어 프로젝트 전체 레이어로 자동 확장했습니다.",
+                        level=0,
+                        duration=6,
+                    )
+                except Exception:
+                    pass
+
         if ctx:
             self._last_ctx = ctx
             self._last_ctx_key = key
@@ -951,16 +1027,29 @@ class AiAoiReportDialog(QtWidgets.QDialog):
             push_message(self.iface, "AI 요약", "Gemini 호출 중…(데이터 요약/레이어명만 전송)", level=0, duration=5)
             QtWidgets.QApplication.setOverrideCursor(Qt.WaitCursor)
             try:
-                text, api_err = ai_gemini.generate_text(
+                text, api_err, used_model = ai_gemini.generate_text_with_fallback(
                     api_key=str(api_key or ""),
                     model=str(model or ""),
                     prompt=prompt,
                     temperature=0.2,
-                    max_output_tokens=1400,
+                    max_output_tokens=4096,
                     timeout_ms=45000,
                 )
             finally:
                 QtWidgets.QApplication.restoreOverrideCursor()
+
+            # Reflect the model that actually answered (a fallback may differ).
+            if used_model:
+                try:
+                    self._last_model = str(used_model)
+                    if str(used_model) != str(model or ""):
+                        log_message(f"Gemini fallback model used: {used_model}")
+                except Exception:
+                    pass
+
+            # An empty/whitespace response is a failure, not a silent success.
+            if (not api_err) and (not str(text or "").strip()):
+                api_err = "빈 응답(생성된 텍스트 없음). 모델/키/네트워크를 확인하세요."
 
             if api_err:
                 log_message(f"Gemini error: {api_err}", level=2)
@@ -969,11 +1058,13 @@ class AiAoiReportDialog(QtWidgets.QDialog):
                 self._set_busy_message("Gemini 실패 → 로컬 요약으로 대체 중…")
                 try:
                     fallback = ai_local_summarizer.generate_report(ctx)
-                    if fallback:
+                    if fallback and str(fallback).strip():
                         self.txtOutput.setPlainText(
                             "※ Gemini 호출 실패로 로컬 요약으로 대체했습니다.\n\n" + str(fallback)
                         )
                         self._last_report_text = str(fallback or "")
+                        # Provider now reflects reality: local, not gemini.
+                        self._last_provider = "local"
                         push_message(self.iface, "AI 요약", "로컬 요약으로 대체 완료", level=1, duration=6)
                 except Exception:
                     pass
