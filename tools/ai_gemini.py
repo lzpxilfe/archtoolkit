@@ -23,6 +23,12 @@ from .utils import push_message
 
 _SETTINGS_PREFIX = "ArchToolkit/ai/gemini"
 
+# The gemini-1.5-* family was retired in 2026 (generateContent returns 404).
+# Default to a current model and keep an ordered fallback list for when the
+# primary model id is unavailable in the caller's API project/region.
+DEFAULT_MODEL = "gemini-2.5-flash"
+FALLBACK_MODELS = ("gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.5-flash-lite")
+
 
 def _settings_get(key: str, default=None):
     try:
@@ -38,8 +44,11 @@ def _settings_set(key: str, value) -> None:
         pass
 
 
-def get_configured_model(default: str = "gemini-1.5-flash") -> str:
+def get_configured_model(default: str = DEFAULT_MODEL) -> str:
     v = str(_settings_get("model", default) or "").strip()
+    # Silently migrate the retired 1.5 family to the current default.
+    if v.startswith("gemini-1.5") or v.startswith("gemini-1.0") or v.startswith("gemini-pro"):
+        return default
     return v or default
 
 
@@ -241,7 +250,7 @@ def generate_text(
     if not api_key:
         return None, "API key is missing"
 
-    model = str(model or "").strip() or "gemini-1.5-flash"
+    model = str(model or "").strip() or DEFAULT_MODEL
     if not re.match(r"^[A-Za-z0-9._-]{1,64}$", model):
         return None, f"Invalid model name: {model}"
 
@@ -359,6 +368,57 @@ def generate_text(
         return None, f"No text parts in response: {raw[:500]}"
     except Exception as e:
         return None, f"Failed to parse response: {e}"
+
+
+def _is_model_unavailable_error(err: Optional[str]) -> bool:
+    low = str(err or "").lower()
+    return any(
+        k in low
+        for k in ("not found", "404", "is not supported", "does not exist", "not available", "unavailable")
+    )
+
+
+def generate_text_with_fallback(
+    *,
+    api_key: str,
+    model: str,
+    prompt: str,
+    temperature: float = 0.2,
+    max_output_tokens: int = 1024,
+    timeout_ms: int = 45000,
+) -> Tuple[Optional[str], Optional[str], str]:
+    """Like generate_text, but retries with FALLBACK_MODELS when the primary
+    model id is unavailable (e.g. a retired model returning 404).
+
+    Returns (text, error_message, used_model). `used_model` is the id that
+    actually produced the text (or the last one attempted on failure), so the
+    caller can update its "provider" display when a fallback kicks in.
+    """
+    seq = [str(model or "").strip() or DEFAULT_MODEL]
+    for m in FALLBACK_MODELS:
+        if m and m not in seq:
+            seq.append(m)
+
+    last_err: Optional[str] = None
+    used = seq[0]
+    for m in seq:
+        used = m
+        text, err = generate_text(
+            api_key=api_key,
+            model=m,
+            prompt=prompt,
+            temperature=temperature,
+            max_output_tokens=max_output_tokens,
+            timeout_ms=timeout_ms,
+        )
+        if text is not None and str(text).strip():
+            return text, None, m
+        last_err = err or "empty response"
+        # Only keep trying other models when this one is unavailable; for auth
+        # errors, quota, safety blocks, etc. retrying a sibling model won't help.
+        if not _is_model_unavailable_error(err):
+            break
+    return None, last_err, used
 
 
 def explain_auth_manager_once() -> str:

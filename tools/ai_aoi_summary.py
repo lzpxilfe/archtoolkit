@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 try:
@@ -74,6 +75,90 @@ _NUMERIC_FIELD_CANDIDATES = (
     "in_aoi_m2",
     "in_aoi_pct",
 )
+
+# Field names that are numeric but carry no analytical meaning (ids, keys).
+_ID_FIELD_RE = re.compile(
+    r"^(fid|gid|id|oid|objectid|osm_id|uid|uuid|no|번호|일련번호|.*_id|.*_fid|.*_no)$",
+    re.IGNORECASE,
+)
+
+# Hints that a string field is a category worth histogramming (EN + KO).
+_CATEGORICAL_HINTS = (
+    "class", "type", "category", "code", "grade", "kind", "group", "zone", "use",
+    "지목", "분류", "종류", "구분", "유형", "코드", "명칭", "등급", "용도", "구역", "구조",
+)
+
+_NUMERIC_QVARIANTS = (
+    QVariant.Int,
+    QVariant.UInt,
+    QVariant.LongLong,
+    QVariant.ULongLong,
+    QVariant.Double,
+)
+
+
+def _classify_fields(layer, *, max_numeric: int = 12):
+    """Auto-select fields by their actual type instead of a name whitelist.
+
+    Returns (numeric_field_names, categorical_field_name). Numeric fields are
+    real numeric columns (excluding id/key-like names); the categorical field is
+    the best string column for a value histogram (Korean category fields
+    included), preferring name hints and legacy tool outputs.
+    """
+    numeric: List[str] = []
+    categorical: Optional[str] = None
+    try:
+        fields = list(layer.fields())
+    except Exception:
+        fields = []
+
+    string_candidates: List[str] = []
+    for f in fields:
+        try:
+            name = str(f.name() or "")
+            ftype = f.type()
+        except Exception:
+            continue
+        if not name:
+            continue
+        if ftype in _NUMERIC_QVARIANTS:
+            if _ID_FIELD_RE.match(name):
+                continue
+            numeric.append(name)
+        elif ftype == QVariant.String:
+            string_candidates.append(name)
+
+    # Order numeric fields: semantically-known (whitelist) first, then the rest.
+    known = [c for c in _NUMERIC_FIELD_CANDIDATES if c in numeric]
+    rest = [c for c in numeric if c not in known]
+    numeric_ordered = (known + rest)[: int(max_numeric)]
+
+    # Categorical: legacy tool fields first, then a hinted string field.
+    for legacy in ("class_id", "Layer", "element"):
+        if legacy in string_candidates:
+            categorical = legacy
+            break
+    if categorical is None:
+        for name in string_candidates:
+            low = name.lower()
+            if any(h in low or h in name for h in _CATEGORICAL_HINTS):
+                categorical = name
+                break
+
+    return numeric_ordered, categorical
+
+
+_COMPASS_8_KO = ("북", "북동", "동", "남동", "남", "남서", "서", "북서")
+
+
+def _compass8_ko(bearing_deg) -> str:
+    """8-point Korean compass label for a compass bearing (deg, 0=north, CW)."""
+    try:
+        b = float(bearing_deg) % 360.0
+    except Exception:
+        return ""
+    idx = int((b + 22.5) // 45.0) % 8
+    return _COMPASS_8_KO[idx]
 
 
 def _split_qgis_source_path(src: str) -> str:
@@ -280,22 +365,11 @@ def _vector_layer_stats_in_geom(
     n = 0
     scanned = 0
 
-    # Lightweight field-aware summaries (optional)
-    field_names = []
-    try:
-        field_names = [f.name() for f in layer.fields()]
-    except Exception:
-        field_names = []
+    # Auto-select fields by actual type (numeric stats + one categorical column),
+    # including Korean category fields - not just a fixed English name whitelist.
+    num_fields, hist_field = _classify_fields(layer)
+    hist = {} if hist_field else None
 
-    hist = None
-    hist_field = None
-    for cand in ("class_id", "Layer", "element"):
-        if cand in field_names:
-            hist_field = cand
-            hist = {}
-            break
-
-    num_fields = [c for c in _NUMERIC_FIELD_CANDIDATES if c in field_names]
     num_acc: Dict[str, Dict[str, Any]] = {}
     for f in num_fields:
         num_acc[str(f)] = {"sum": 0.0, "min": float("inf"), "max": float("-inf"), "n": 0}
@@ -648,6 +722,8 @@ def _reference_sites_summary(
             dist_to_buffer = None
 
         dist_to_centroid = None
+        bearing_from_aoi_deg = None
+        compass_from_aoi = None
         if aoi_centroid_pt is not None:
             try:
                 rp = _extract_representative_point(g)
@@ -655,6 +731,13 @@ def _reference_sites_summary(
                     d0 = float(da.measureLine(aoi_centroid_pt, rp))
                     if math.isfinite(d0):
                         dist_to_centroid = d0
+                    # Compass bearing AOI-centroid -> site (both in projected AOI CRS).
+                    dx = float(rp.x()) - float(aoi_centroid_pt.x())
+                    dy = float(rp.y()) - float(aoi_centroid_pt.y())
+                    if abs(dx) > 1e-9 or abs(dy) > 1e-9:
+                        b = math.degrees(math.atan2(dx, dy)) % 360.0
+                        bearing_from_aoi_deg = float(b)
+                        compass_from_aoi = _compass8_ko(b)
             except Exception:
                 dist_to_centroid = None
 
@@ -753,6 +836,8 @@ def _reference_sites_summary(
             "distance_to_aoi_m": dist_to_aoi,
             "distance_to_buffer_m": dist_to_buffer,
             "distance_to_aoi_centroid_m": dist_to_centroid,
+            "bearing_from_aoi_deg": bearing_from_aoi_deg,
+            "compass_from_aoi": compass_from_aoi,
         }
         try:
             item["wkb"] = QgsWkbTypes.displayString(layer.wkbType())
@@ -885,17 +970,21 @@ def _raster_stats_in_geom(
         ds = None
         return None
 
-    # Downsample if too big
-    step = 1
+    # Downsample DURING the read via buf_xsize/buf_ysize so GDAL never allocates
+    # the full native-resolution window. A large AOI over a high-res DEM could be
+    # tens of millions of pixels (hundreds of MB to GBs) if read at full size.
+    bw, bh = int(w), int(h)
     try:
         if int(w) * int(h) > int(max_pixels):
-            step = int(math.ceil(math.sqrt((w * h) / float(max_pixels))))
-            step = max(1, step)
+            scale = math.sqrt((float(w) * float(h)) / float(max_pixels))
+            if scale > 1.0:
+                bw = max(1, int(math.floor(float(w) / scale)))
+                bh = max(1, int(math.floor(float(h) / scale)))
     except Exception:
-        step = 1
+        bw, bh = int(w), int(h)
 
     try:
-        arr = band.ReadAsArray(x0, y0, w, h)
+        arr = band.ReadAsArray(x0, y0, w, h, buf_xsize=bw, buf_ysize=bh)
     except Exception:
         ds = None
         return None
@@ -906,20 +995,23 @@ def _raster_stats_in_geom(
 
     try:
         arr = arr.astype(np.float32, copy=False)
-        if step > 1:
-            arr = arr[::step, ::step]
     except Exception:
         pass
 
-    # Rasterize polygon mask into the same window
+    # Rasterize polygon mask into the same (possibly downsampled) window. The
+    # pixel size scales by w/read_width so the mask aligns with the read buffer.
     try:
+        rw = int(arr.shape[1]) if arr.ndim >= 2 else int(bw)
+        rh = int(arr.shape[0]) if arr.ndim >= 2 else int(bh)
+        sx = float(w) / float(rw) if rw > 0 else 1.0
+        sy = float(h) / float(rh) if rh > 0 else 1.0
         win_gt = (
             gt[0] + x0 * gt[1] + y0 * gt[2],
-            gt[1] * step,
-            gt[2] * step,
+            gt[1] * sx,
+            gt[2] * sy,
             gt[3] + x0 * gt[4] + y0 * gt[5],
-            gt[4] * step,
-            gt[5] * step,
+            gt[4] * sx,
+            gt[5] * sy,
         )
 
         rdrv = gdal.GetDriverByName("MEM")
