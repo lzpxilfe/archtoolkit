@@ -14,7 +14,6 @@ Exit code is non-zero if any file fails, so it doubles as a CI gate.
 
 from __future__ import annotations
 
-import ast
 import os
 import sys
 from typing import List, Tuple

@@ -103,7 +103,14 @@ def _collect_point_samples(
     if layer.geometryType() != QgsWkbTypes.PointGeometry:
         raise ValueError("Kriging requires a point layer")
 
-    field_name = (value_field or "").strip() or _auto_value_field(layer)
+    # "__geom_z__" is a sentinel (from the DEM generator UI) meaning "use the
+    # geometry's Z coordinate", not an attribute field name.
+    field_name = (value_field or "").strip()
+    use_geom_z = (field_name == "__geom_z__")
+    if use_geom_z:
+        field_name = ""
+    elif not field_name:
+        field_name = _auto_value_field(layer)
 
     sums: Dict[Tuple[float, float], float] = {}
     counts: Dict[Tuple[float, float], int] = {}
@@ -129,18 +136,22 @@ def _collect_point_samples(
             continue
 
         z = None
-        if field_name:
+        if not use_geom_z and field_name:
             try:
                 z = _as_float(feat[field_name])
             except Exception:
                 z = None
         if z is None:
-            # Fallback: geometry Z (3D points)
+            # Geometry Z (3D points). QgsPointXY (from asPoint()) has no z();
+            # read the vertex, which is a QgsPoint carrying Z (NaN if 2D).
             try:
-                z = _as_float(pt.z())
+                vtx = geom.vertexAt(0)
+                zz = vtx.z()
+                z = _as_float(zz)
             except Exception:
                 z = None
-        if z is None:
+        # reject None and NaN
+        if z is None or z != z:
             continue
 
         key = (round(x, dedup_round), round(y, dedup_round))

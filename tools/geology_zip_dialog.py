@@ -711,9 +711,8 @@ class GeologyZipDialog(QtWidgets.QDialog):
             self.txtZip.setText(path)
 
     def _browse_out_file(self):
-        ext = self.cmbFormat.currentData() or "tif"
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self, "래스터 저장", "", f"GeoTIFF (*.tif);;ASCII Grid (*.asc)"
+            self, "래스터 저장", "", "GeoTIFF (*.tif);;ASCII Grid (*.asc)"
         )
         if path:
             self.txtOutFile.setText(path)

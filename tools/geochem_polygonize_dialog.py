@@ -39,7 +39,7 @@ from osgeo import gdal, ogr
 
 import processing
 from qgis.PyQt import QtWidgets
-from qgis.PyQt.QtCore import Qt, QVariant
+from qgis.PyQt.QtCore import QVariant
 from qgis.PyQt.QtGui import QColor, QIcon, QImage
 from qgis.core import (
     Qgis,
@@ -60,7 +60,6 @@ from qgis.core import (
 from qgis.gui import QgsMapLayerComboBox
 
 from .utils import (
-    is_metric_crs,
     log_exception,
     log_message,
     push_message,

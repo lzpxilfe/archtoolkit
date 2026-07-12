@@ -23,6 +23,16 @@ User-configurable parameters for TPI radius, TPI thresholds, and Slope Position
 import os
 import tempfile
 import uuid
+
+try:
+    import numpy as np
+except Exception:  # pragma: no cover - QGIS ships NumPy; guard anyway
+    np = None
+try:
+    from osgeo import gdal
+except Exception:  # pragma: no cover
+    gdal = None
+
 from qgis.PyQt import uic
 from qgis.PyQt import QtWidgets
 from qgis.PyQt.QtGui import QColor
@@ -31,12 +41,15 @@ from qgis.core import (
     QgsRasterShader, QgsColorRampShader, QgsSingleBandPseudoColorRenderer
 )
 import processing
-from .utils import cleanup_files, push_message, restore_ui_focus, set_archtoolkit_layer_metadata
+from .utils import (
+    cleanup_files, log_message, push_message, restore_ui_focus, set_archtoolkit_layer_metadata,
+)
 from .live_log_dialog import ensure_live_log_dialog
 from .help_dialog import show_help_dialog
 
-# This tool uses only QGIS built-in libraries and GDAL processing algorithms.
-# No external plugins or libraries (like numpy, matplotlib) are required.
+# This tool uses QGIS built-in GDAL processing algorithms. The curvature
+# analysis additionally uses NumPy + GDAL (both ship with QGIS - no extra
+# install), per DEVELOPMENT.md.
 
 FORM_CLASS, _ = uic.loadUiType(os.path.join(
     os.path.dirname(__file__), 'terrain_analysis_dialog_base.ui'))
@@ -177,8 +190,22 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
             plugin_dir = os.path.dirname(os.path.dirname(__file__))
             html = (
                 "<h2>지형 분석 (Terrain Analysis)</h2>"
-                "<p>DEM에서 지형 지표를 계산하고(경사/사면방향/TRI/TPI/Roughness/Slope Position) "
+                "<p>DEM에서 지형 지표를 계산하고(경사/사면방향/TRI/TPI/Roughness/Slope Position/곡률) "
                 "분류·스타일을 적용합니다.</p>"
+                "<h3>곡률 (Zevenbergen &amp; Thorne 1987)</h3>"
+                "<ul>"
+                "<li><b>종단(profile)</b>: 경사 방향 곡률. <b>음(−)=볼록</b>(경사 가속→침식 경향), "
+                "<b>양(+)=오목</b>(감속→퇴적 경향).</li>"
+                "<li><b>횡단(plan)</b>: 등고선 방향 곡률. <b>음(−)=수렴</b>(곡저·물 모임), "
+                "<b>양(+)=발산</b>(능선·분산).</li>"
+                "<li>실행 후 <b>해석 요약</b>(볼록/평탄/오목·수렴/평탄/발산 면적 %)을 로그와 메시지바에 표시합니다.</li>"
+                "</ul>"
+                "<h3>사면 파생 (모델용)</h3>"
+                "<ul>"
+                "<li><b>북향성</b>=cos(aspect), <b>동향성</b>=sin(aspect): 원형인 사면방향을 모델에 바로 쓰는 연속값으로.</li>"
+                "<li><b>TRASP</b>(Roberts &amp; Cooper 1989): 0=북동(서늘/습) ~ 1=남서(따뜻/건조) 일사 프록시.</li>"
+                "<li>실행 후 TRASP/북향 우세 등 <b>해석 요약</b>을 표시합니다.</li>"
+                "</ul>"
                 "<h3>출력</h3>"
                 "<ul>"
                 "<li>선택한 지표별 래스터 레이어</li>"
@@ -290,8 +317,10 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
             return
         
         has_any = any([self.chkSlope.isChecked(), self.chkAspect.isChecked(),
-                       self.chkTRI.isChecked(), self.chkTPI.isChecked(), 
-                       self.chkRoughness.isChecked(), self.chkSlopePosition.isChecked()])
+                       self.chkTRI.isChecked(), self.chkTPI.isChecked(),
+                       self.chkRoughness.isChecked(), self.chkSlopePosition.isChecked(),
+                       (hasattr(self, "chkCurvature") and self.chkCurvature.isChecked()),
+                       (hasattr(self, "chkAspectDeriv") and self.chkAspectDeriv.isChecked())])
         if not has_any:
             push_message(self.iface, "오류", "분석 유형을 선택해주세요", level=2)
             restore_ui_focus(self)
@@ -419,7 +448,15 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
             # Slope Position - Weiss (2001) 6-class with user thresholds
             if self.chkSlopePosition.isChecked():
                 self.run_slope_position_analysis(dem_source, slope_threshold, tpi_low, tpi_high, results, run_id)
-            
+
+            # Curvature - Zevenbergen & Thorne (1987): profile + plan + interpretation
+            if hasattr(self, "chkCurvature") and self.chkCurvature.isChecked():
+                self.run_curvature_analysis(dem_layer, dem_source, results, run_id)
+
+            # Aspect derivatives - northness/eastness/TRASP (model-ready aspect)
+            if hasattr(self, "chkAspectDeriv") and self.chkAspectDeriv.isChecked():
+                self.run_aspect_derivatives(dem_layer, dem_source, results, run_id)
+
             if results:
                 push_message(self.iface, "완료", f"분석 완료: {', '.join(results)}", level=0)
                 success = True
@@ -622,7 +659,29 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                 f"((A>{tpi_mid_high})*(A<={tpi_high}))*5 + "
                 f"(A>{tpi_high})*6"
             )
-            
+
+            # Mask NoData: TPI/Slope NoData cells (e.g. edge -9999) otherwise satisfy
+            # A<tpi_low and get miscoloured as class 1 (valley). Zero them out and
+            # mark 0 as NoData (transparent) after the layer is created.
+            nd_a = nd_b = None
+            if gdal is not None:
+                try:
+                    _da = gdal.Open(tpi_path, gdal.GA_ReadOnly)
+                    nd_a = _da.GetRasterBand(1).GetNoDataValue() if _da else None
+                    _da = None
+                    _db = gdal.Open(slope_path, gdal.GA_ReadOnly)
+                    nd_b = _db.GetRasterBand(1).GetNoDataValue() if _db else None
+                    _db = None
+                except Exception:
+                    nd_a = nd_b = None
+            mask_expr = ""
+            if nd_a is not None:
+                mask_expr += f"*(A!={nd_a})"
+            if nd_b is not None:
+                mask_expr += f"*(B!={nd_b})"
+            if mask_expr:
+                calc_expr = f"({calc_expr}){mask_expr}"
+
             result = processing.run("gdal:rastercalculator", {
                 'INPUT_A': tpi_path, 'BAND_A': 1,
                 'INPUT_B': slope_path, 'BAND_B': 1,
@@ -650,6 +709,11 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                         )
                     except Exception:
                         pass
+                    # Class 0 = masked NoData -> transparent
+                    try:
+                        layer.dataProvider().setNoDataValue(1, 0)
+                    except Exception:
+                        pass
                     QgsProject.instance().addMapLayer(layer)
                     self.apply_style(layer, self.SLOPE_POSITION_CLASSES, 6)
                     results.append("지형분류")
@@ -662,3 +726,312 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
             self.iface.messageBar().pushMessage("경고", f"지형분류 분석 오류: {str(e)}", level=1)
         finally:
             cleanup_files([tpi_path, slope_path])
+
+    def run_curvature_analysis(self, dem_layer, dem_source, results, run_id):
+        """Profile & plan curvature (Zevenbergen & Thorne 1987) + interpretation.
+
+        Sign convention (numerically verified against synthetic surfaces):
+        - profile: (-) 볼록 convex, 경사 가속 → 침식 경향 / (+) 오목 concave, 감속 → 퇴적 경향
+        - plan:    (-) 수렴 convergent, 곡저·물 모임 / (+) 발산 divergent, 능선·분산
+
+        This produces not just rasters but an interpretation summary (area % of
+        convex/flat/concave and convergent/flat/divergent) so the result reads
+        as an analysis, not a bare covariate.
+        """
+        if np is None or gdal is None:
+            push_message(self.iface, "경고", "곡률 분석에는 NumPy/GDAL이 필요합니다(QGIS 기본 포함).", level=1)
+            return
+        try:
+            src = str(dem_source or "").split("|", 1)[0].strip()
+            ds = gdal.Open(src, gdal.GA_ReadOnly)
+            if ds is None:
+                push_message(self.iface, "경고", "DEM을 GDAL로 열 수 없습니다(곡률).", level=1)
+                return
+            band = ds.GetRasterBand(1)
+            z = band.ReadAsArray().astype("float64")
+            gt = ds.GetGeoTransform()
+            proj = ds.GetProjection()
+            nodata = band.GetNoDataValue()
+            ds = None
+            if z is None or z.ndim != 2:
+                push_message(self.iface, "경고", "DEM 배열을 읽을 수 없습니다(곡률).", level=1)
+                return
+
+            cell = (abs(float(gt[1])) + abs(float(gt[5]))) / 2.0
+            if cell <= 0:
+                push_message(self.iface, "경고", "DEM 픽셀 크기를 확인할 수 없습니다(곡률).", level=1)
+                return
+
+            valid = np.isfinite(z)
+            if nodata is not None:
+                valid &= (z != nodata)
+
+            profile, plan = self._zt_curvature(z, cell)
+
+            # NoData where any 3x3 neighbour is invalid, plus the 1-px border.
+            inv = ~valid
+            inv_any = (
+                inv
+                | np.roll(inv, 1, 0) | np.roll(inv, -1, 0)
+                | np.roll(inv, 1, 1) | np.roll(inv, -1, 1)
+                | np.roll(np.roll(inv, 1, 0), 1, 1) | np.roll(np.roll(inv, 1, 0), -1, 1)
+                | np.roll(np.roll(inv, -1, 0), 1, 1) | np.roll(np.roll(inv, -1, 0), -1, 1)
+            )
+            border = np.zeros(z.shape, dtype=bool)
+            border[0, :] = border[-1, :] = border[:, 0] = border[:, -1] = True
+            out_mask = inv_any | border
+            nd = -9999.0
+            for arr in (profile, plan):
+                arr[out_mask] = nd
+
+            good = ~out_mask
+            prof_path = os.path.join(tempfile.gettempdir(), f'archtoolkit_curv_profile_{run_id}.tif')
+            plan_path = os.path.join(tempfile.gettempdir(), f'archtoolkit_curv_plan_{run_id}.tif')
+            self._write_geotiff(prof_path, profile.astype("float32"), gt, proj, nd)
+            self._write_geotiff(plan_path, plan.astype("float32"), gt, proj, nd)
+
+            for path, name, kind, arr, neg_lab, pos_lab in (
+                (prof_path, "곡률-종단 profile (Zevenbergen & Thorne 1987)", "curvature_profile",
+                 profile, "볼록 convex (침식)", "오목 concave (퇴적)"),
+                (plan_path, "곡률-횡단 plan (Zevenbergen & Thorne 1987)", "curvature_plan",
+                 plan, "수렴 convergent (물모임)", "발산 divergent (능선)"),
+            ):
+                layer = QgsRasterLayer(path, name)
+                if not layer.isValid():
+                    continue
+                try:
+                    set_archtoolkit_layer_metadata(
+                        layer, tool_id="terrain_analysis", run_id=str(run_id),
+                        kind=kind, units="1/m",
+                        params={"method": "Zevenbergen & Thorne 1987", "cell_size": float(cell)},
+                    )
+                except Exception:
+                    pass
+                QgsProject.instance().addMapLayer(layer)
+                self._apply_diverging_style(layer, arr[good], neg_lab, pos_lab)
+
+            self._log_curvature_summary(profile[good], plan[good])
+            results.append("곡률")
+        except Exception as e:
+            push_message(self.iface, "경고", f"곡률 분석 오류: {str(e)}", level=1)
+
+    def _zt_curvature(self, z, cell):
+        """Zevenbergen & Thorne (1987) profile/plan curvature. See run_curvature_analysis
+        for the (verified) sign convention."""
+        Z2 = np.roll(z, 1, 0)
+        Z8 = np.roll(z, -1, 0)
+        Z4 = np.roll(z, 1, 1)
+        Z6 = np.roll(z, -1, 1)
+        Z1 = np.roll(np.roll(z, 1, 0), 1, 1)
+        Z3 = np.roll(np.roll(z, 1, 0), -1, 1)
+        Z7 = np.roll(np.roll(z, -1, 0), 1, 1)
+        Z9 = np.roll(np.roll(z, -1, 0), -1, 1)
+        Z5 = z
+        L2 = cell * cell
+        D = ((Z4 + Z6) / 2.0 - Z5) / L2
+        E = ((Z2 + Z8) / 2.0 - Z5) / L2
+        F = (-Z1 + Z3 + Z7 - Z9) / (4.0 * L2)
+        G = (-Z4 + Z6) / (2.0 * cell)
+        H = (Z2 - Z8) / (2.0 * cell)
+        denom = G * G + H * H
+        small = denom < 1e-12
+        ds = np.where(small, 1.0, denom)
+        profile = np.where(small, 0.0, 2.0 * (D * G * G + E * H * H + F * G * H) / ds)
+        plan = np.where(small, 0.0, -2.0 * (D * H * H + E * G * G - F * G * H) / ds)
+        return profile, plan
+
+    def _write_geotiff(self, out_path, arr, gt, proj, nodata):
+        driver = gdal.GetDriverByName("GTiff")
+        rows, cols = arr.shape
+        ds = driver.Create(out_path, cols, rows, 1, gdal.GDT_Float32, ["COMPRESS=LZW"])
+        ds.SetGeoTransform(gt)
+        if proj:
+            ds.SetProjection(proj)
+        b = ds.GetRasterBand(1)
+        b.SetNoDataValue(float(nodata))
+        b.WriteArray(arr)
+        b.FlushCache()
+        ds = None
+
+    def _apply_diverging_style(self, layer, valid_values, neg_label, pos_label):
+        """Blue-white-red diverging ramp, symmetric about 0 (2/98 percentile range).
+
+        neg_label / pos_label describe what negative / positive values mean for
+        THIS raster (profile and plan have different meanings for the same sign).
+        """
+        try:
+            if valid_values.size:
+                absmax = float(np.nanpercentile(np.abs(valid_values), 98))
+            else:
+                absmax = 1.0
+            if not np.isfinite(absmax) or absmax <= 0:
+                absmax = 1.0
+            ramp = QgsColorRampShader()
+            ramp.setColorRampType(QgsColorRampShader.Interpolated)
+            ramp.setColorRampItemList([
+                QgsColorRampShader.ColorRampItem(-absmax, QColor('#2166ac'), f"{-absmax:.4f} ({neg_label})"),
+                QgsColorRampShader.ColorRampItem(0.0, QColor('#f7f7f7'), "0 (평탄)"),
+                QgsColorRampShader.ColorRampItem(absmax, QColor('#b2182b'), f"{absmax:.4f} ({pos_label})"),
+            ])
+            shader = QgsRasterShader()
+            shader.setRasterShaderFunction(ramp)
+            renderer = QgsSingleBandPseudoColorRenderer(layer.dataProvider(), 1, shader)
+            renderer.setClassificationMin(-absmax)
+            renderer.setClassificationMax(absmax)
+            layer.setRenderer(renderer)
+            layer.triggerRepaint()
+        except Exception:
+            pass
+
+    def _log_curvature_summary(self, profile_valid, plan_valid):
+        """Emit an interpretation (area % per curvature class) to the live log + message bar."""
+        try:
+            if profile_valid.size == 0:
+                return
+            eps_p = max(1e-9, 0.1 * float(np.std(profile_valid)))
+            eps_c = max(1e-9, 0.1 * float(np.std(plan_valid)))
+            convex = float(np.mean(profile_valid < -eps_p) * 100.0)
+            concave = float(np.mean(profile_valid > eps_p) * 100.0)
+            flat_p = max(0.0, 100.0 - convex - concave)
+            diverg = float(np.mean(plan_valid > eps_c) * 100.0)
+            converg = float(np.mean(plan_valid < -eps_c) * 100.0)
+            flat_c = max(0.0, 100.0 - diverg - converg)
+            msg = (
+                f"곡률 해석 — 종단: 볼록(침식) {convex:.1f}% / 평탄 {flat_p:.1f}% / 오목(퇴적) {concave:.1f}% | "
+                f"횡단: 수렴(물모임) {converg:.1f}% / 평탄 {flat_c:.1f}% / 발산(능선) {diverg:.1f}%"
+            )
+            log_message(msg)
+            push_message(self.iface, "곡률 해석", msg, level=0, duration=12)
+        except Exception:
+            pass
+
+    def run_aspect_derivatives(self, dem_layer, dem_source, results, run_id):
+        """Model-ready aspect transforms: northness, eastness, TRASP + interpretation.
+
+        Raw aspect is circular (0-360 deg) and unusable in most models. These
+        continuous transforms fix that and carry ecological meaning:
+        - northness = cos(aspect)  (+1 북향 ~ -1 남향)
+        - eastness  = sin(aspect)  (+1 동향 ~ -1 서향)
+        - TRASP (Roberts & Cooper 1989) = (1 - cos(aspect-30 deg))/2
+          0 = 북동(서늘/습), 1 = 남서(따뜻/건조); flat = 0.5 (neutral)
+        Flat cells: northness/eastness = 0.
+        """
+        if np is None or gdal is None:
+            push_message(self.iface, "경고", "사면 파생에는 NumPy/GDAL이 필요합니다(QGIS 기본 포함).", level=1)
+            return
+        aspect_path = None
+        try:
+            src = str(dem_source or "").split("|", 1)[0].strip()
+            aspect_path = os.path.join(tempfile.gettempdir(), f'archtoolkit_aspderiv_asp_{run_id}.tif')
+            processing.run("gdal:aspect", {
+                'INPUT': src, 'BAND': 1, 'TRIG_ANGLE': False, 'ZERO_FLAT': False,
+                'COMPUTE_EDGES': True, 'ZEVENBERGEN': False, 'OUTPUT': aspect_path,
+            })
+            ads = gdal.Open(aspect_path, gdal.GA_ReadOnly)
+            if ads is None:
+                push_message(self.iface, "경고", "사면방향 계산 실패(사면 파생).", level=1)
+                return
+            aband = ads.GetRasterBand(1)
+            aspect = aband.ReadAsArray().astype("float64")
+            gt = ads.GetGeoTransform()
+            proj = ads.GetProjection()
+            a_nd = aband.GetNoDataValue()
+            ads = None
+
+            # flat cells: GDAL emits a negative NoData for flats
+            flat = (aspect < 0)
+            if a_nd is not None:
+                flat |= (aspect == a_nd)
+            defined = ~flat
+            nd = -9999.0
+            rad = np.radians(aspect)
+
+            def _make(fn, flat_value):
+                arr = np.full(aspect.shape, nd, dtype="float32")
+                arr[defined] = fn(rad[defined]).astype("float32") if callable(fn) else fn[defined].astype("float32")
+                arr[flat] = flat_value
+                return arr
+
+            north = _make(np.cos, 0.0)
+            east = _make(np.sin, 0.0)
+            trasp_full = (1.0 - np.cos(np.radians(aspect - 30.0))) / 2.0
+            trasp = np.full(aspect.shape, nd, dtype="float32")
+            trasp[defined] = trasp_full[defined].astype("float32")
+            trasp[flat] = 0.5
+
+            specs = [
+                ("northness", "북향성 northness = cos(aspect)", north, "diverging",
+                 "남향 south (-1)", "북향 north (+1)"),
+                ("eastness", "동향성 eastness = sin(aspect)", east, "diverging",
+                 "서향 west (-1)", "동향 east (+1)"),
+                ("trasp", "TRASP 일사프록시 (Roberts & Cooper 1989)", trasp, "sequential",
+                 "서늘/습 (0)", "따뜻/건조 (1)"),
+            ]
+            for key, name, arr, style, neg_lab, pos_lab in specs:
+                path = os.path.join(tempfile.gettempdir(), f'archtoolkit_aspderiv_{key}_{run_id}.tif')
+                self._write_geotiff(path, arr, gt, proj, nd)
+                layer = QgsRasterLayer(path, name)
+                if not layer.isValid():
+                    continue
+                try:
+                    set_archtoolkit_layer_metadata(
+                        layer, tool_id="terrain_analysis", run_id=str(run_id),
+                        kind=key, units="index",
+                        params={"source": "aspect", "flat_handling": "north/east=0, TRASP=0.5"},
+                    )
+                except Exception:
+                    pass
+                QgsProject.instance().addMapLayer(layer)
+                valid_vals = arr[arr != nd]
+                if style == "diverging":
+                    self._apply_diverging_style(layer, valid_vals, neg_lab, pos_lab)
+                else:
+                    self._apply_sequential_style(layer, 0.0, 1.0, neg_lab, pos_lab)
+
+            self._log_aspect_summary(north, east, trasp, nd)
+            results.append("사면파생")
+        except Exception as e:
+            push_message(self.iface, "경고", f"사면 파생 오류: {str(e)}", level=1)
+        finally:
+            cleanup_files([aspect_path])
+
+    def _apply_sequential_style(self, layer, vmin, vmax, min_label, max_label):
+        """Cool-to-warm sequential ramp for 0..1 style indices (e.g., TRASP)."""
+        try:
+            ramp = QgsColorRampShader()
+            ramp.setColorRampType(QgsColorRampShader.Interpolated)
+            mid = (vmin + vmax) / 2.0
+            ramp.setColorRampItemList([
+                QgsColorRampShader.ColorRampItem(vmin, QColor('#2c7bb6'), f"{vmin:.2f} ({min_label})"),
+                QgsColorRampShader.ColorRampItem(mid, QColor('#ffffbf'), f"{mid:.2f}"),
+                QgsColorRampShader.ColorRampItem(vmax, QColor('#d7191c'), f"{vmax:.2f} ({max_label})"),
+            ])
+            shader = QgsRasterShader()
+            shader.setRasterShaderFunction(ramp)
+            renderer = QgsSingleBandPseudoColorRenderer(layer.dataProvider(), 1, shader)
+            renderer.setClassificationMin(vmin)
+            renderer.setClassificationMax(vmax)
+            layer.setRenderer(renderer)
+            layer.triggerRepaint()
+        except Exception:
+            pass
+
+    def _log_aspect_summary(self, north, east, trasp, nd):
+        try:
+            tv = trasp[trasp != nd]
+            nv = north[north != nd]
+            if tv.size == 0:
+                return
+            warm = float(np.mean(tv > 0.6) * 100.0)
+            cool = float(np.mean(tv < 0.4) * 100.0)
+            neutral = max(0.0, 100.0 - warm - cool)
+            north_pct = float(np.mean(nv > 0.3) * 100.0)
+            south_pct = float(np.mean(nv < -0.3) * 100.0)
+            msg = (
+                f"사면 파생 해석 — TRASP: 따뜻/건조 {warm:.1f}% / 중간 {neutral:.1f}% / 서늘/습 {cool:.1f}% | "
+                f"북향 우세 {north_pct:.1f}% · 남향 우세 {south_pct:.1f}% (평균 TRASP {float(np.mean(tv)):.2f})"
+            )
+            log_message(msg)
+            push_message(self.iface, "사면 파생 해석", msg, level=0, duration=12)
+        except Exception:
+            pass

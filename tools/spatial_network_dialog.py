@@ -58,7 +58,6 @@ from .utils import (
     push_message,
     restore_ui_focus,
     set_archtoolkit_layer_metadata,
-    transform_point,
 )
 from .live_log_dialog import ensure_live_log_dialog
 from .help_dialog import show_help_dialog
@@ -673,16 +672,16 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
             """
 
             body = vis + sna + ppa if mode == NETWORK_VISIBILITY else ppa + sna + vis
-        return "".join(
-            (
-                "<html><head><meta charset='utf-8'></head><body style='font-family:Sans-Serif;'>",
-                "<h2>Network Interpretation Guide</h2>",
-                "<p style='color:#444'>Tip: hover over each option to see a short explanation and reference note.</p>",
-                body,
-                refs,
-                "</body></html>",
+            return "".join(
+                (
+                    "<html><head><meta charset='utf-8'></head><body style='font-family:Sans-Serif;'>",
+                    "<h2>Network Interpretation Guide</h2>",
+                    "<p style='color:#444'>Tip: hover over each option to see a short explanation and reference note.</p>",
+                    body,
+                    refs,
+                    "</body></html>",
+                )
             )
-        )
 
         # Keep it practical: how to read the output layers/fields and when to use each option.
         ppa = """
@@ -1568,7 +1567,6 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
     def _ppa_filter_gabriel(self, *, cand_edges: Set[Tuple[int, int]], coords: np.ndarray) -> Set[Tuple[int, int]]:
         """Gabriel graph filter (usually applied on Delaunay candidate edges)."""
         out: Set[Tuple[int, int]] = set()
-        n = int(coords.shape[0])
         eps = 1e-9
         for a, b in cand_edges:
             a = int(a)

@@ -385,6 +385,11 @@ class ProfileChartWidget(QWidget):
         if not self.data:
             painter.drawText(QRectF(0, 0, width, height), Qt.AlignCenter, "데이터가 없습니다.")
             return
+        # Guard against a zero-length profile line (identical start/end): total_d==0
+        # would make visible_range 0 and divide-by-zero in the sample loop below.
+        if not self.total_d or self.total_d <= 0:
+            painter.drawText(QRectF(0, 0, width, height), Qt.AlignCenter, "단면 길이가 0입니다.")
+            return
 
         painter.setRenderHint(QPainter.Antialiasing)
         
