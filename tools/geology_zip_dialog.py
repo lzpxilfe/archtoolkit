@@ -273,11 +273,15 @@ class KigamZipProcessor:
         try:
             days = max(1, int(GEOLOGY_EXTRACT_CLEANUP_DAYS))
             cutoff = time.time() - days * 86400
-            in_use = self._extract_dirs_in_use()
+            # Normalize both sides: _extract_dirs_in_use() returns abspath-based
+            # paths, so comparing against a raw os.path.join(extract_root, name)
+            # missed matches (mixed separators / case on Windows) and reaped
+            # project-referenced extracts anyway.
+            in_use = {os.path.normcase(os.path.abspath(p)) for p in self._extract_dirs_in_use()}
             for name in os.listdir(self.extract_root):
                 path = os.path.join(self.extract_root, name)
                 try:
-                    if path in in_use:
+                    if os.path.normcase(os.path.abspath(path)) in in_use:
                         self._touch_extract_dir(path)
                         continue
                     if os.path.isdir(path) and (not os.path.islink(path)) and os.path.getmtime(path) < cutoff:
@@ -292,11 +296,11 @@ class KigamZipProcessor:
         project — these must never be reaped, whatever their age."""
         used = set()
         try:
-            root = os.path.abspath(self.extract_root)
+            root = os.path.normcase(os.path.abspath(self.extract_root))
             for lyr in QgsProject.instance().mapLayers().values():
                 try:
                     src = str(lyr.source() or "").split("|", 1)[0]
-                    src = os.path.abspath(src)
+                    src = os.path.normcase(os.path.abspath(src))
                     if src.startswith(root + os.sep):
                         rel = os.path.relpath(src, root)
                         top = rel.split(os.sep, 1)[0]
@@ -1044,7 +1048,10 @@ class GeologyZipDialog(QtWidgets.QDialog):
                 try:
                     transform = QgsCoordinateTransform(lyr.crs(), target_crs, QgsProject.instance())
                 except Exception:
-                    transform = None
+                    # Can't reproject this layer — skip it rather than merge its
+                    # features untransformed (mixed CRS → misplaced polygons).
+                    log_message(f"좌표계 변환 실패로 레이어 제외: {lyr.name()}", level=Qgis.Warning)
+                    continue
 
             for f in lyr.getFeatures():
                 try:
@@ -1052,7 +1059,9 @@ class GeologyZipDialog(QtWidgets.QDialog):
                     if geom is None or geom.isEmpty():
                         continue
                     if transform is not None:
-                        geom.transform(transform)
+                        # transform() returns a status code, not an exception.
+                        if geom.transform(transform) != 0:
+                            continue
                     val = f[field_name]
                     if val is None or str(val).strip() == "":
                         continue

@@ -743,11 +743,17 @@ class CostNetworkWorker(QgsTask):
 
                 ax, ay = coords[a, 0], coords[a, 1]
                 bx, by = coords[b, 0], coords[b, 1]
-                minx = min(ax, bx) - self.pair_buffer_m
-                maxx = max(ax, bx) + self.pair_buffer_m
-                miny = min(ay, by) - self.pair_buffer_m
-                maxy = max(ay, by) + self.pair_buffer_m
-                xoff, yoff, win_xsize, win_ysize = _bbox_window(gt, xsize, ysize, minx, miny, maxx, maxy)
+                # Same buffer=0 -> full-DEM-window rule as the candidate loop,
+                # otherwise this MST detailed-path recompute reintroduces the
+                # terrain-blind 1-cell strip for nodes sharing an x or y.
+                if self.pair_buffer_m <= 0:
+                    xoff, yoff, win_xsize, win_ysize = 0, 0, int(xsize), int(ysize)
+                else:
+                    minx = min(ax, bx) - self.pair_buffer_m
+                    maxx = max(ax, bx) + self.pair_buffer_m
+                    miny = min(ay, by) - self.pair_buffer_m
+                    maxy = max(ay, by) + self.pair_buffer_m
+                    xoff, yoff, win_xsize, win_ysize = _bbox_window(gt, xsize, ysize, minx, miny, maxx, maxy)
                 dem = band.ReadAsArray(xoff, yoff, win_xsize, win_ysize)
                 if dem is None:
                     continue

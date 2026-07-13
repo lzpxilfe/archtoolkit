@@ -603,7 +603,16 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             # 3. Position and Settings
             annotation.setMapPosition(point)
             annotation.setHasFixedMapPosition(True)
-            annotation.setFrameSizeQt(QtCore.QSizeF(30, 20)) # Width, Height
+            # QgsAnnotation has no setFrameSizeQt (only setFrameSizeMm in 3.40);
+            # the old call raised AttributeError, silently caught, so the
+            # numbered observer labels never appeared. Size in millimeters.
+            try:
+                annotation.setFrameSizeMm(QtCore.QSizeF(12, 8))
+            except Exception:
+                try:
+                    annotation.setFrameSize(QtCore.QSizeF(30, 20))
+                except Exception:
+                    pass
             
             # Simple offset to top-right
             annotation.setRelativePosition(QtCore.QPointF(0.5, 0.5))
@@ -3706,17 +3715,30 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             pts_for_geom = list(self.drawn_line_points)
             if getattr(self, 'is_line_closed', False):
                 pts_for_geom.append(self.drawn_line_points[0])
-            
+
             line_geom = QgsGeometry.fromPolylineXY(pts_for_geom)
+            # `interval` is meters but the drawn points are in canvas CRS —
+            # measure/interpolate in the (metric-guarded) DEM CRS, else a
+            # geographic canvas yields ~2 points for the whole perimeter.
+            emit_crs = canvas_crs
+            try:
+                if canvas_crs != dem_layer.crs():
+                    xform = QgsCoordinateTransform(canvas_crs, dem_layer.crs(), QgsProject.instance())
+                    line_geom = QgsGeometry(line_geom)
+                    line_geom.transform(xform)
+                    emit_crs = dem_layer.crs()
+            except Exception:
+                emit_crs = canvas_crs
+
             length = line_geom.length()
-            
+
             if length > 0:
                 num_pts = max(1, int(length / interval))
                 for i in range(num_pts + 1):
                     frac = i / num_pts if num_pts > 0 else 0
                     pt = line_geom.interpolate(frac * length)
                     if pt and not pt.isEmpty():
-                        points.append((pt.asPoint(), canvas_crs))
+                        points.append((pt.asPoint(), emit_crs))
                         weights.append(1.0)
         
         # 2. Add points from layer if selected

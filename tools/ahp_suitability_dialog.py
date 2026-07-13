@@ -2021,6 +2021,31 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
                 _safe_rm(acc_path)
                 acc_path = scaled
 
+            # "AOI 범위로 자르기": the warp only honours extent_str inside the
+            # align branch, so with align OFF the accumulator still covers the
+            # full raster grid. Clip the final result to the AOI extent here so
+            # the checkbox works regardless of the align setting.
+            if extent_str and not align:
+                clipped = _tmp("clip")
+                try:
+                    projwin = extent_str
+                    if extent_crs:
+                        projwin = f"{extent_str} [{extent_crs}]"
+                    processing.run("gdal:cliprasterbyextent", {
+                        "INPUT": acc_path,
+                        "PROJWIN": projwin,
+                        "OVERCRS": False,
+                        "NODATA": nodata_sentinel,
+                        "OPTIONS": "",
+                        "DATA_TYPE": 0,
+                        "OUTPUT": clipped,
+                    })
+                    if os.path.exists(clipped):
+                        _safe_rm(acc_path)
+                        acc_path = clipped
+                except Exception as _e:
+                    log_exception("AHP AOI clip (non-align) failed", _e)
+
             self._suitability_nodata = nodata_sentinel
 
             final_path = out_path_user

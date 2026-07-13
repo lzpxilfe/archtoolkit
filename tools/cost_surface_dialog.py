@@ -1307,11 +1307,14 @@ class CostSurfaceWorker(QgsTask):
                     scale = 1.0
 
                 mult = fr.astype(np.float32, copy=True)
-                invalid = ~np.isfinite(mult)
                 mult = mult * float(scale)
-                # NoData cells are neutral (1.0) as the tooltip promises —
-                # set AFTER scaling so they don't become `scale` instead.
-                mult[invalid] = 1.0
+                # Neutralize (1.0) both NoData/NaN AND non-positive values.
+                # gdal.Warp fills the window area not covered by a smaller
+                # friction raster with 0 (no dstNodata set), and a 0/negative
+                # multiplier is degenerate — without this those cells clip to
+                # 0.0001 and become ~10,000x cheaper than everything else.
+                mult[~np.isfinite(mult)] = 1.0
+                mult[mult <= 0.0] = 1.0
                 mult = np.clip(mult, 0.0001, 1.0e6).astype(np.float32, copy=False)
                 friction *= mult
 
