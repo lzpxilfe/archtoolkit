@@ -21,7 +21,7 @@ from qgis.PyQt import uic
 from qgis.PyQt import QtWidgets
 from qgis.PyQt.QtWidgets import QTableWidgetItem, QCheckBox, QWidget, QHBoxLayout, QFileDialog, QListWidgetItem
 from qgis.PyQt.QtCore import Qt, QSize
-from qgis.core import QgsFeatureRequest, QgsProject, QgsVectorLayer
+from qgis.core import QgsProject, QgsVectorLayer
 from qgis.PyQt.QtGui import QIcon
 import processing
 import tempfile
@@ -821,13 +821,29 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
                 merged_layer = QgsVectorLayer(temp_merged, "merged", "ogr")
             else:
                 # NEVER filter the user's own project layer in place:
-                # setSubsetString would permanently overwrite their canvas
-                # filter (and destroy any subset they had set themselves).
+                # setSubsetString would permanently overwrite their canvas filter.
                 # Work on an independent handle to the same source instead.
                 src0 = selected_layers[0]
-                merged_layer = QgsVectorLayer(src0.source(), "dem_input", src0.providerType())
-                if not merged_layer.isValid():
-                    merged_layer = src0.materialize(QgsFeatureRequest())
+                ptype = str(src0.providerType() or "")
+                if ptype in ("ogr", "gdal", "delimitedtext", "spatialite"):
+                    # File/DB-backed: source() reloads the real features.
+                    merged_layer = QgsVectorLayer(src0.source(), "dem_input", ptype)
+                    if not merged_layer.isValid():
+                        merged_layer = None
+                else:
+                    merged_layer = None
+                if merged_layer is None or not merged_layer.isValid() or merged_layer.featureCount() == 0:
+                    # Memory/scratch/virtual layers: source() is a schema-only
+                    # URI with NO features, so QgsVectorLayer(source) would build
+                    # an empty layer and silently produce an empty DEM. Export to
+                    # a real file so the interpolation reads actual geometry.
+                    temp_merged = os.path.join(tempfile.gettempdir(), f'archtoolkit_singlesrc_{uuid.uuid4().hex[:8]}.gpkg')
+                    save_res = processing.run("native:savefeatures", {"INPUT": src0, "OUTPUT": temp_merged})
+                    out_path = temp_merged
+                    if isinstance(save_res, dict) and save_res.get("OUTPUT"):
+                        out_path = str(save_res.get("OUTPUT"))
+                    temp_merged = out_path
+                    merged_layer = QgsVectorLayer(out_path, "dem_input", "ogr")
 
             if not merged_layer or not merged_layer.isValid():
                 push_message(self.iface, "오류", "레이어 병합에 실패했습니다.", level=2)
