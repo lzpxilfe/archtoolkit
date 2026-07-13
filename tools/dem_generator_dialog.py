@@ -837,13 +837,13 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
                     # URI with NO features, so QgsVectorLayer(source) would build
                     # an empty layer and silently produce an empty DEM. Export to
                     # a real file so the interpolation reads actual geometry.
+                    # Keep temp_merged as the PLAIN path for the finally-block
+                    # cleanup; savefeatures' OUTPUT may be a '|layername='-suffixed
+                    # URI that os.path.exists() would miss (temp-file leak).
                     temp_merged = os.path.join(tempfile.gettempdir(), f'archtoolkit_singlesrc_{uuid.uuid4().hex[:8]}.gpkg')
                     save_res = processing.run("native:savefeatures", {"INPUT": src0, "OUTPUT": temp_merged})
-                    out_path = temp_merged
-                    if isinstance(save_res, dict) and save_res.get("OUTPUT"):
-                        out_path = str(save_res.get("OUTPUT"))
-                    temp_merged = out_path
-                    merged_layer = QgsVectorLayer(out_path, "dem_input", "ogr")
+                    load_src = str(save_res.get("OUTPUT")) if (isinstance(save_res, dict) and save_res.get("OUTPUT")) else temp_merged
+                    merged_layer = QgsVectorLayer(load_src, "dem_input", "ogr")
 
             if not merged_layer or not merged_layer.isValid():
                 push_message(self.iface, "오류", "레이어 병합에 실패했습니다.", level=2)
