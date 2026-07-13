@@ -400,7 +400,9 @@ def get_archtoolkit_layer_metadata(layer) -> dict:
 # Hints that an ArchToolkit raster holds nominal class codes (not continuous
 # values). Shared by align/export (nearest-resampling) and the covariate report
 # (excludes them from Pearson/VIF) so the two definitions cannot drift apart.
-_CATEGORICAL_KIND_HINTS = ("class", "category", "categor", "litho", "age", "geolog", "slope_position")
+# Bare "age" is deliberately excluded: it substring-matches unrelated kinds
+# (drainage/average/image). Specific multi-char hints only.
+_CATEGORICAL_KIND_HINTS = ("class", "category", "categor", "litho", "geolog", "slope_position")
 
 
 def is_categorical_raster_meta(meta: dict) -> bool:

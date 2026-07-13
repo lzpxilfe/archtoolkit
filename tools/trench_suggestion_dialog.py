@@ -686,9 +686,14 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
                 grow = float(radius_m or 0.0)
                 try:
                     if grow > 0 and layer.crs().isGeographic():
-                        grow = grow / 111320.0  # meters -> degrees for a geographic layer
+                        # meters -> degrees. Longitude degrees shrink by cos(lat),
+                        # so divide by the SMALLER (cos-scaled) meters-per-degree
+                        # to OVER-grow rather than miss features east/west.
+                        lat = abs(float(bb.center().y()))
+                        cos_lat = max(0.2, math.cos(math.radians(min(85.0, lat))))
+                        grow = grow / (111320.0 * cos_lat)
                 except Exception:
-                    pass
+                    grow = float(radius_m or 0.0) / 111320.0
                 if grow > 0:
                     bb.grow(grow)
                 req.setFilterRect(bb)
