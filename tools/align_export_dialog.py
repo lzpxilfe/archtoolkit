@@ -32,8 +32,8 @@ Design
   size), with optional AOI clip and pixel-size override.
 - Categorical outputs (by ArchToolkit metadata kind) resample with nearest
   neighbour; continuous outputs use bilinear.
-- Runs synchronously with a cancelable progress dialog (no processing.run off
-  the GUI thread).
+- Runs each GDAL warp through QGIS' task manager so the progress dialog stays
+  responsive and cancellation reaches the active subprocess.
 """
 
 from __future__ import annotations
@@ -41,16 +41,19 @@ from __future__ import annotations
 import csv
 import json
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import List, Optional
 
-import processing
 from qgis.PyQt import QtWidgets
-from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtCore import QEventLoop, Qt
 from qgis.PyQt.QtGui import QIcon
 from qgis.core import (
     Qgis,
+    QgsApplication,
     QgsCoordinateTransform,
+    QgsProcessingAlgRunnerTask,
+    QgsProcessingContext,
+    QgsProcessingFeedback,
     QgsProject,
     QgsRasterLayer,
     QgsRectangle,
@@ -59,6 +62,7 @@ from qgis.core import (
 )
 from qgis.gui import QgsMapLayerComboBox
 
+from .atomic_output import cleanup_staging_dir, create_staging_dir, publish_staging_dir
 from .help_dialog import show_help_dialog
 from .live_log_dialog import ensure_live_log_dialog
 from .utils import (
@@ -79,6 +83,18 @@ class _Cancelled(Exception):
     pass
 
 
+class _ErrorTrackingFeedback(QgsProcessingFeedback):
+    """Capture provider-reported errors which do not always fail a task."""
+
+    def __init__(self):
+        super().__init__()
+        self.errors: List[str] = []
+
+    def reportError(self, error, fatalError=False):
+        self.errors.append(str(error))
+        super().reportError(error, fatalError)
+
+
 @dataclass
 class _Item:
     layer_id: str
@@ -87,15 +103,6 @@ class _Item:
     kind: str
     units: str
     categorical: bool
-
-
-@dataclass
-class _Result:
-    ok: bool = False
-    message: str = ""
-    outputs: List[dict] = field(default_factory=list)
-    export_dir: str = ""
-    run_id: str = ""
 
 
 def _safe_key(name: str, used: set) -> str:
@@ -159,7 +166,7 @@ class AlignExportDialog(QtWidgets.QDialog):
         self.setWindowTitle("분석 결과 정렬/내보내기 (Align & Export Stack)")
         try:
             plugin_dir = os.path.dirname(os.path.dirname(__file__))
-            for name in ("terrain_icon.png", "icon.png"):
+            for name in ("align_export_icon.xpm", "terrain_icon.png", "icon.png"):
                 p = os.path.join(plugin_dir, name)
                 if os.path.exists(p):
                     self.setWindowIcon(QIcon(p))
@@ -229,7 +236,7 @@ class AlignExportDialog(QtWidgets.QDialog):
         fout.addRow("", self.chkAddToProject)
         rr = QtWidgets.QHBoxLayout()
         self.txtExport = QtWidgets.QLineEdit()
-        self.txtExport.setPlaceholderText("(비우면 임시 폴더; 지정하면 GeoTIFF 스택+manifest 저장)")
+        self.txtExport.setPlaceholderText("GeoTIFF 스택과 manifest를 저장할 폴더(필수)")
         self.btnBrowse = QtWidgets.QPushButton("찾기…")
         self.btnBrowse.clicked.connect(self._on_browse)
         rr.addWidget(self.txtExport, 1)
@@ -345,12 +352,20 @@ class AlignExportDialog(QtWidgets.QDialog):
             return
 
         export_dir = str(self.txtExport.text() or "").strip()
-        if export_dir:
-            try:
-                os.makedirs(export_dir, exist_ok=True)
-            except Exception as e:
-                push_message(self.iface, "오류", f"내보내기 폴더를 만들 수 없습니다: {e}", level=2, duration=7)
-                return
+        if not export_dir:
+            push_message(
+                self.iface,
+                "오류",
+                "완성된 결과를 보관할 내보내기 폴더를 지정하세요.",
+                level=2,
+                duration=7,
+            )
+            return
+        try:
+            os.makedirs(export_dir, exist_ok=True)
+        except Exception as e:
+            push_message(self.iface, "오류", f"내보내기 폴더를 만들 수 없습니다: {e}", level=2, duration=7)
+            return
 
         px = float(self.spinPixel.value())
         if px <= 0:
@@ -379,6 +394,14 @@ class AlignExportDialog(QtWidgets.QDialog):
         except Exception:
             pass
 
+        try:
+            staging_dir = create_staging_dir(export_dir, run_id, purpose="align")
+        except Exception as e:
+            log_exception("Align staging directory error", e)
+            push_message(self.iface, "오류", f"임시 출력 폴더를 만들 수 없습니다: {e}", level=2, duration=8)
+            restore_ui_focus(self)
+            return
+
         progress = QtWidgets.QProgressDialog("래스터 정렬 중…", "취소", 0, len(items), self)
         progress.setWindowModality(Qt.WindowModal)
         progress.setMinimumDuration(0)
@@ -390,27 +413,68 @@ class AlignExportDialog(QtWidgets.QDialog):
         self.btnRun.setEnabled(False)
         try:
             for idx, item in enumerate(items):
+                QtWidgets.QApplication.processEvents()
                 if progress.wasCanceled():
-                    break
+                    raise _Cancelled()
                 progress.setLabelText(f"정렬 중: {item.name} ({idx + 1}/{len(items)})")
                 progress.setValue(idx)
                 QtWidgets.QApplication.processEvents()
+                if progress.wasCanceled():
+                    raise _Cancelled()
                 src_layer = QgsProject.instance().mapLayer(item.layer_id)
                 if src_layer is None:
-                    continue
+                    raise RuntimeError(f"입력 레이어를 찾을 수 없습니다: {item.name}")
                 src = str(src_layer.source() or "").split("|", 1)[0].strip()
-                out_path = (os.path.join(export_dir, f"{item.key}.tif") if export_dir
-                            else os.path.join(_tmpdir(), f"archtoolkit_align_{run_id}_{item.key}.tif"))
-                try:
-                    self._warp(src, out_path, px, extent_str, ref_crs, nearest=item.categorical)
-                    outputs.append({
-                        "key": item.key, "path": out_path, "source": item.name,
-                        "kind": item.kind, "units": item.units,
-                        "resampling": "nearest" if item.categorical else "bilinear",
-                    })
-                except Exception as e:
-                    log_exception(f"Align failed for {item.name}", e)
-            progress.setValue(len(items))
+                if not src:
+                    raise RuntimeError(f"입력 경로를 확인할 수 없습니다: {item.name}")
+                out_path = os.path.join(staging_dir, f"{item.key}.tif")
+                self._warp(
+                    src,
+                    out_path,
+                    px,
+                    extent_str,
+                    ref_crs,
+                    nearest=item.categorical,
+                    progress=progress,
+                )
+                QtWidgets.QApplication.processEvents()
+                if progress.wasCanceled():
+                    raise _Cancelled()
+                if not os.path.isfile(out_path):
+                    raise RuntimeError(f"정렬 출력이 생성되지 않았습니다: {item.name}")
+                self._validate_warp_output(out_path, item.name, ref_crs)
+                outputs.append({
+                    "key": item.key, "path": out_path, "source": item.name,
+                    "kind": item.kind, "units": item.units,
+                    "resampling": "nearest" if item.categorical else "bilinear",
+                })
+                progress.setValue(idx + 1)
+            if len(outputs) != len(items):
+                raise RuntimeError(f"정렬 결과 수가 입력과 다릅니다: {len(outputs)}/{len(items)}")
+        except _Cancelled:
+            try:
+                cleanup_staging_dir(staging_dir)
+            except Exception as cleanup_error:
+                log_exception("Align cancellation cleanup error", cleanup_error)
+            push_message(
+                self.iface,
+                "정렬/내보내기",
+                "취소됨: 부분 결과를 게시하거나 프로젝트에 추가하지 않았습니다.",
+                level=1,
+                duration=8,
+            )
+            log_message(f"Align & export cancelled (run {run_id})", level=Qgis.Warning)
+            restore_ui_focus(self)
+            return
+        except Exception as e:
+            try:
+                cleanup_staging_dir(staging_dir)
+            except Exception as cleanup_error:
+                log_exception("Align failure cleanup error", cleanup_error)
+            log_exception("Align & export failed", e)
+            push_message(self.iface, "오류", f"정렬/내보내기에 실패했습니다: {e}", level=2, duration=10)
+            restore_ui_focus(self)
+            return
         finally:
             self.btnRun.setEnabled(True)
             try:
@@ -418,37 +482,57 @@ class AlignExportDialog(QtWidgets.QDialog):
             except Exception:
                 pass
 
-        if not outputs:
-            push_message(self.iface, "오류", "정렬된 결과가 없습니다.", level=2, duration=8)
+        grid = {
+            "crs": str(ref.crs().authid() or ""),
+            "pixel_size": px,
+            "extent": extent_str,
+            "continuous_nodata": -9999,
+            "run_id": run_id,
+        }
+        try:
+            self._write_manifest(
+                staging_dir,
+                outputs,
+                grid=grid,
+            )
+            final_dir = publish_staging_dir(
+                staging_dir,
+                export_dir,
+                f"aligned_stack_{run_id}",
+            )
+            for output in outputs:
+                output["path"] = os.path.join(final_dir, os.path.basename(output["path"]))
+        except Exception as e:
+            try:
+                cleanup_staging_dir(staging_dir)
+            except Exception:
+                pass
+            log_exception("Align output publication error", e)
+            push_message(self.iface, "오류", f"완성된 결과를 게시하지 못했습니다: {e}", level=2, duration=10)
             restore_ui_focus(self)
             return
 
-        if export_dir:
-            self._write_manifest(
-                export_dir,
-                outputs,
-                grid={
-                    "crs": str(ref.crs().authid() or ""),
-                    "pixel_size": px,
-                    "extent": extent_str,
-                    "continuous_nodata": -9999,
-                    "run_id": run_id,
-                },
-            )
+        layer_add_error = None
         if self.chkAddToProject.isChecked():
             try:
                 self._add_layers(outputs, run_id)
             except Exception as e:
                 log_exception("Add aligned layers error", e)
+                layer_add_error = e
 
         msg = f"완료: {len(outputs)}개 정렬"
-        if export_dir:
-            msg += f" → {export_dir}"
-        push_message(self.iface, "정렬/내보내기", msg, level=0, duration=8)
-        log_message(f"Align & export done: {len(outputs)} rasters (run {run_id})", level=Qgis.Info)
+        msg += f" → {final_dir}"
+        if layer_add_error is not None:
+            msg += " (파일은 완성됐지만 프로젝트 추가에 실패했습니다)"
+        level = 1 if layer_add_error is not None else 0
+        push_message(self.iface, "정렬/내보내기", msg, level=level, duration=10)
+        log_level = Qgis.Warning if layer_add_error is not None else Qgis.Info
+        log_message(f"Align & export done: {len(outputs)} rasters (run {run_id})", level=log_level)
         restore_ui_focus(self)
 
-    def _warp(self, src, out, px, extent_str, ref_crs, *, nearest: bool):
+    def _warp(self, src, out, px, extent_str, ref_crs, *, nearest: bool, progress):
+        if progress.wasCanceled():
+            raise _Cancelled()
         # Categorical layers keep their input type (often Byte) and inherit the
         # source NoData (nearest resampling preserves codes). Continuous layers
         # are forced to Float32 so the -9999 NoData is always representable —
@@ -469,52 +553,123 @@ class AlignExportDialog(QtWidgets.QDialog):
             "EXTRA": "",
             "OUTPUT": out,
         }
-        processing.run("gdal:warpreproject", params)
+        algorithm = QgsApplication.processingRegistry().algorithmById("gdal:warpreproject")
+        if algorithm is None:
+            raise RuntimeError("QGIS GDAL 정렬 알고리즘(gdal:warpreproject)을 찾을 수 없습니다.")
+
+        context = QgsProcessingContext()
+        context.setProject(QgsProject.instance())
+        feedback = _ErrorTrackingFeedback()
+        task = QgsProcessingAlgRunnerTask(algorithm, params, context, feedback)
+        loop = QEventLoop(self)
+        state = {"finished": False, "successful": False, "results": {}}
+
+        def _finished(successful, results):
+            state["finished"] = True
+            state["successful"] = bool(successful)
+            state["results"] = dict(results or {})
+            loop.quit()
+
+        def _cancel_active_warp():
+            feedback.cancel()
+            task.cancel()
+
+        task.executed.connect(_finished)
+        progress.canceled.connect(_cancel_active_warp)
+        try:
+            task_id = QgsApplication.taskManager().addTask(task)
+            if not task_id:
+                raise RuntimeError("GDAL 정렬 작업을 QGIS 작업 관리자에 등록하지 못했습니다.")
+            loop.exec_()
+        finally:
+            try:
+                progress.canceled.disconnect(_cancel_active_warp)
+            except Exception:
+                pass
+
+        if progress.wasCanceled() or feedback.isCanceled() or task.algorithmCanceled():
+            raise _Cancelled()
+        if feedback.errors:
+            details = " | ".join(feedback.errors[-3:])
+            raise RuntimeError(f"GDAL 정렬 오류: {details[:1200]}")
+        if not state["finished"] or not state["successful"]:
+            raise RuntimeError("GDAL 정렬 작업이 정상적으로 완료되지 않았습니다.")
+        result_path = str(state["results"].get("OUTPUT") or "")
+        if result_path and os.path.realpath(result_path) != os.path.realpath(out):
+            raise RuntimeError(f"GDAL 출력 경로가 요청과 다릅니다: {result_path}")
         return out
 
-    def _write_manifest(self, export_dir, outputs, grid=None):
-        try:
-            # Reference grid → its own JSON sidecar so the CSV's first row is the
-            # real column header (a bare `pandas.read_csv` / csv.DictReader used
-            # to mis-parse a leading `# reference_grid` comment row as the header).
-            if grid:
-                try:
-                    with open(os.path.join(export_dir, "aligned_stack_grid.json"), "w", encoding="utf-8") as gf:
-                        json.dump(dict(grid), gf, ensure_ascii=False, indent=2)
-                except Exception as e:
-                    log_exception("Align grid sidecar write error", e)
+    def _validate_warp_output(self, path, source_name, expected_crs):
+        layer = QgsRasterLayer(path, "ArchToolkit alignment validation")
+        if not layer.isValid():
+            raise RuntimeError(f"정렬 결과를 열 수 없습니다: {source_name}")
+        if layer.bandCount() < 1 or layer.width() < 1 or layer.height() < 1:
+            raise RuntimeError(f"정렬 결과 격자가 비어 있습니다: {source_name}")
+        actual_crs = str(layer.crs().authid() or "")
+        if expected_crs and actual_crs and actual_crs != expected_crs:
+            raise RuntimeError(
+                f"정렬 결과 CRS가 기준과 다릅니다: {source_name} ({actual_crs} != {expected_crs})"
+            )
+        provider = layer.dataProvider()
+        if provider is None:
+            raise RuntimeError(f"정렬 결과 데이터 공급자를 열 수 없습니다: {source_name}")
+        sample_width = min(32, layer.width())
+        sample_height = min(32, layer.height())
+        block = provider.block(1, layer.extent(), sample_width, sample_height)
+        if block is None or not block.isValid():
+            raise RuntimeError(f"정렬 결과 픽셀을 읽을 수 없습니다: {source_name}")
 
-            path = os.path.join(export_dir, "aligned_stack_manifest.csv")
-            with open(path, "w", newline="", encoding="utf-8-sig") as f:
-                w = csv.writer(f)
-                w.writerow(["variable", "file", "source_layer", "kind", "units", "resampling"])
-                for o in outputs:
-                    w.writerow([o["key"], os.path.basename(o["path"]), o["source"],
-                                o["kind"], o["units"], o["resampling"]])
-        except Exception as e:
-            log_exception("Align manifest write error", e)
+    def _write_manifest(self, export_dir, outputs, grid=None):
+        # Reference grid → its own JSON sidecar so the CSV's first row is the
+        # real column header (a bare `pandas.read_csv` / csv.DictReader used
+        # to mis-parse a leading `# reference_grid` comment row as the header).
+        if grid:
+            with open(os.path.join(export_dir, "aligned_stack_grid.json"), "w", encoding="utf-8") as gf:
+                json.dump(dict(grid), gf, ensure_ascii=False, indent=2)
+
+        path = os.path.join(export_dir, "aligned_stack_manifest.csv")
+        with open(path, "w", newline="", encoding="utf-8-sig") as f:
+            w = csv.writer(f)
+            w.writerow(["variable", "file", "source_layer", "kind", "units", "resampling"])
+            for o in outputs:
+                w.writerow([o["key"], os.path.basename(o["path"]), o["source"],
+                            o["kind"], o["units"], o["resampling"]])
 
     def _add_layers(self, outputs, run_id):
         project = QgsProject.instance()
         root = project.layerTreeRoot()
-        parent = root.findGroup(PARENT_GROUP_NAME) or root.insertGroup(0, PARENT_GROUP_NAME)
+        layers = []
+        for o in outputs:
+            lyr = QgsRasterLayer(o["path"], f"{o['source']} (정렬)")
+            if not lyr.isValid():
+                raise RuntimeError(f"정렬 결과 레이어를 열 수 없습니다: {o['path']}")
+            set_archtoolkit_layer_metadata(
+                lyr, tool_id="align_export", run_id=run_id,
+                kind=o["kind"] or "aligned", units=o["units"],
+                params={"variable": o["key"], "source_layer": o["source"],
+                        "resampling": o["resampling"]},
+            )
+            layers.append(lyr)
+
+        parent = root.findGroup(PARENT_GROUP_NAME)
+        parent_created = parent is None
+        if parent is None:
+            parent = root.insertGroup(0, PARENT_GROUP_NAME)
         group = parent.insertGroup(0, f"정렬_{run_id}")
         group.setExpanded(False)
-        for o in outputs:
-            try:
-                lyr = QgsRasterLayer(o["path"], f"{o['source']} (정렬)")
-                if not lyr.isValid():
-                    continue
-                set_archtoolkit_layer_metadata(
-                    lyr, tool_id="align_export", run_id=run_id,
-                    kind=o["kind"] or "aligned", units=o["units"],
-                    params={"variable": o["key"], "source_layer": o["source"],
-                            "resampling": o["resampling"]},
-                )
+        added_ids = []
+        try:
+            for lyr in layers:
                 project.addMapLayer(lyr, False)
+                added_ids.append(lyr.id())
                 group.insertLayer(0, lyr)
-            except Exception:
-                continue
+        except Exception:
+            for layer_id in added_ids:
+                project.removeMapLayer(layer_id)
+            parent.removeChildNode(group)
+            if parent_created:
+                root.removeChildNode(parent)
+            raise
 
     def _on_help(self):
         html = (
@@ -526,8 +681,8 @@ class AlignExportDialog(QtWidgets.QDialog):
             "<ol>"
             "<li><b>기준 래스터</b>를 고릅니다(그 격자에 모두 맞춰집니다). 필요하면 픽셀 크기/AOI로 조정.</li>"
             "<li><b>정렬할 래스터</b>를 체크합니다. ArchToolkit 분석 결과는 자동 체크됩니다.</li>"
-            "<li>필요하면 <b>내보내기 폴더</b>를 지정합니다(→ <code>&lt;변수&gt;.tif</code> + "
-            "<code>aligned_stack_manifest.csv</code>).</li>"
+            "<li><b>내보내기 폴더</b>를 지정합니다. 결과는 실행별 "
+            "<code>aligned_stack_&lt;run_id&gt;</code> 폴더에 GeoTIFF와 manifest로 함께 게시됩니다.</li>"
             "</ol>"
             "<h4>리샘플</h4>"
             "<p>범주형 결과(지질/등급 등, 메타데이터 <code>kind</code> 기준)는 최근접(nearest), "
@@ -539,8 +694,3 @@ class AlignExportDialog(QtWidgets.QDialog):
             show_help_dialog(parent=self, title="정렬/내보내기 도움말", html=html, plugin_dir=plugin_dir)
         except Exception:
             pass
-
-
-def _tmpdir() -> str:
-    import tempfile
-    return tempfile.gettempdir()

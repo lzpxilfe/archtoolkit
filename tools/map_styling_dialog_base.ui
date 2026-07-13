@@ -80,7 +80,7 @@
       <item>
        <widget class="QCheckBox" name="chkRoads">
         <property name="text">
-         <string>🛣️ 도로 (Roads): 등급별(고속/국도/지방도) 선폭 및 색상 적용</string>
+         <string>도로 (Roads): 등급별(고속/국도/지방도) 선폭 및 색상 적용</string>
         </property>
         <property name="checked">
          <bool>true</bool>
@@ -90,7 +90,7 @@
       <item>
        <widget class="QCheckBox" name="chkRivers">
         <property name="text">
-         <string>💧 하천/수계 (Rivers): 유역 규모에 따른 위계 표현</string>
+         <string>하천/수계 (Rivers): 유역 규모에 따른 위계 표현</string>
         </property>
         <property name="checked">
          <bool>true</bool>
@@ -100,7 +100,7 @@
       <item>
        <widget class="QCheckBox" name="chkBuildings">
         <property name="text">
-         <string>🏠 건물 (Buildings): 입체감 부여 및 그림자 효과</string>
+         <string>건물 (Buildings): 입체감 부여 및 그림자 효과</string>
         </property>
         <property name="checked">
          <bool>true</bool>
@@ -156,7 +156,7 @@
       <item>
        <widget class="QCheckBox" name="chkDemStyling">
         <property name="text">
-         <string>🏔️ 배경 지형 스타일링 적용 (음영기복 + 고도채색)</string>
+         <string>배경 지형 스타일링 적용 (음영기복 + 고도채색)</string>
         </property>
        </widget>
       </item>
@@ -225,7 +225,7 @@
       <item>
        <widget class="QPushButton" name="btnExportPreset">
         <property name="text">
-         <string>📦 QML/프리셋 내보내기...</string>
+         <string>QML/프리셋 내보내기...</string>
         </property>
        </widget>
       </item>
@@ -254,7 +254,7 @@
      <item>
       <widget class="QPushButton" name="btnApply">
        <property name="text">
-        <string>✨ 스타일 적용 (Apply Styling)</string>
+        <string>스타일 적용 (Apply Styling)</string>
        </property>
        <property name="styleSheet">
         <string>padding: 10px 20px; font-weight: bold; background-color: #ec407a; color: white; border-radius: 4px;</string>

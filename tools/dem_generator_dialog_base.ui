@@ -72,7 +72,7 @@
         <item>
          <widget class="QPushButton" name="btnLoadDxf">
           <property name="text">
-           <string>📁 DXF 파일(여러 개 가능) 불러오기...</string>
+           <string>DXF 파일(여러 개 가능) 불러오기...</string>
           </property>
           <property name="styleSheet">
            <string>font-weight: bold; padding: 5px 15px;</string>
@@ -113,7 +113,7 @@
       <item>
        <widget class="QPushButton" name="btnRefreshLayers">
         <property name="text">
-         <string>🔄 레이어 목록 새로고침</string>
+         <string>레이어 목록 새로고침</string>
         </property>
        </widget>
       </item>
@@ -184,7 +184,7 @@
       <item row="3" column="0" colspan="2">
        <widget class="QLabel" name="lblInterpDesc">
         <property name="text">
-         <string>💡 TIN (Triangulated Irregular Network): 불규칙 삼각망 보간법 [Delaunay, 1934]</string>
+         <string>TIN (Triangulated Irregular Network): 불규칙 삼각망 보간법 [Delaunay, 1934]</string>
         </property>
         <property name="styleSheet">
          <string>background-color: #fff3e0; padding: 8px; border-radius: 3px; font-style: italic;</string>
@@ -222,7 +222,7 @@
    <item>
     <widget class="QPushButton" name="btnRun">
      <property name="text">
-      <string>🚀 DEM 생성 시작</string>
+      <string>DEM 생성 시작</string>
      </property>
      <property name="styleSheet">
       <string>padding: 12px; font-size: 11pt; font-weight: bold; background-color: #4caf50; color: white; border-radius: 5px;</string>

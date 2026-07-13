@@ -82,7 +82,7 @@
       <item>
        <widget class="QPushButton" name="btnRefreshLayers">
         <property name="text">
-         <string>🔄 레이어 목록 새로고침</string>
+         <string>레이어 목록 새로고침</string>
         </property>
        </widget>
       </item>
@@ -137,7 +137,7 @@
       <item>
        <widget class="QPushButton" name="btnResetFilter">
         <property name="text">
-         <string>↩️ 필터 초기화 (원래 상태로)</string>
+         <string>필터 초기화 (원래 상태로)</string>
         </property>
        </widget>
       </item>

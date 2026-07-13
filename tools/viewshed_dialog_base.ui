@@ -163,7 +163,7 @@
         <item>
          <widget class="QPushButton" name="btnSelectPoint">
           <property name="text">
-           <string>🖱️ 관측점 지정하기</string>
+           <string>관측점 지정하기</string>
           </property>
          </widget>
         </item>
@@ -541,7 +541,7 @@
    <item>
     <widget class="QLabel" name="lblLayerHint">
      <property name="text">
-      <string>💡 레이어 선택 시: 포인트 피처의 위치에서 가시권을 계산합니다.</string>
+      <string>레이어 선택 시: 포인트 피처의 위치에서 가시권을 계산합니다.</string>
      </property>
      <property name="wordWrap">
       <bool>true</bool>

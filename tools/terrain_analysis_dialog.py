@@ -150,7 +150,7 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
         
         # Advanced settings toggle - EXPANDED by default (user request)
         self.widgetAdvanced.setVisible(True)
-        self.btnAdvanced.setText("⚙ 고급 설정 ▲")
+        self.btnAdvanced.setText("고급 설정 ▲")
         self.btnAdvanced.clicked.connect(self.toggle_advanced)
         
         # Auto-SD checkbox connection and initial state
@@ -239,9 +239,9 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
         is_visible = self.widgetAdvanced.isVisible()
         self.widgetAdvanced.setVisible(not is_visible)
         if is_visible:
-            self.btnAdvanced.setText("⚙ 고급 설정 ▼")
+            self.btnAdvanced.setText("고급 설정 ▼")
         else:
-            self.btnAdvanced.setText("⚙ 고급 설정 ▲")
+            self.btnAdvanced.setText("고급 설정 ▲")
     
     def get_selected_classification(self):
         if self.radioKorean.isChecked():

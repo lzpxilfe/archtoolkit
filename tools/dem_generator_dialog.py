@@ -50,22 +50,22 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
         'TIN - Linear (선형)': {
             'algorithm': 'qgis:tininterpolation',
             'method': 0,
-            'desc': '💡 삼각망 기반 선형 보간. 등고선 데이터에 적합 [Delaunay, 1934]'
+            'desc': '삼각망 기반 선형 보간. 등고선 데이터에 적합 [Delaunay, 1934]'
         },
         'TIN - Clough-Tocher (곡면)': {
             'algorithm': 'qgis:tininterpolation',
             'method': 1,
-            'desc': '💡 삼각망 기반 곡면 보간. 부드러운 지형 표현 [Clough & Tocher, 1965]'
+            'desc': '삼각망 기반 곡면 보간. 부드러운 지형 표현 [Clough & Tocher, 1965]'
         },
         'IDW (역거리 가중치)': {
             'algorithm': 'qgis:idwinterpolation',
             'method': None,
-            'desc': '💡 포인트 데이터에 적합, 등고선에는 비추천 [Shepard, 1968]'
+            'desc': '포인트 데이터에 적합, 등고선에는 비추천 [Shepard, 1968]'
         },
         'Kriging (Lite, Ordinary)': {
             'algorithm': 'archtoolkit:kriging_lite',
             'method': None,
-            'desc': '💡 포인트 기반 Ordinary Kriging(Lite). 자동 파라미터 + 예측 DEM + 분산(_variance.tif) 출력. 미터 단위 투영 CRS 권장 [Matheron, 1963; Cressie, 1993]'
+            'desc': '포인트 기반 Ordinary Kriging(Lite). 자동 파라미터 + 예측 DEM + 분산(_variance.tif) 출력. 미터 단위 투영 CRS 권장 [Matheron, 1963; Cressie, 1993]'
         }
     }
     
@@ -388,9 +388,9 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
     def setup_layer_table(self):
         """Setup the layer selection table with predefined DXF layers"""
         self.tblLayers.setColumnCount(4)
-        self.tblLayers.setHorizontalHeaderLabels(['✓', '코드', '명칭', '설명'])
+        self.tblLayers.setHorizontalHeaderLabels(['선택', '코드', '명칭', '설명'])
         self.tblLayers.horizontalHeader().setStretchLastSection(True)
-        self.tblLayers.setColumnWidth(0, 30)
+        self.tblLayers.setColumnWidth(0, 52)
         self.tblLayers.setColumnWidth(1, 80)
         self.tblLayers.setColumnWidth(2, 100)
         
@@ -1060,8 +1060,6 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
             if temp_merged and os.path.exists(temp_merged):
                 from .utils import cleanup_files
                 cleanup_files([temp_merged])
-
-
 
 
 

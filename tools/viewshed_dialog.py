@@ -710,13 +710,13 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             self.cmbObserverLayer.setFilters(self._mlpm_filter.LineLayer | self._mlpm_filter.PolygonLayer)
             
             if self.radioFromLayer.isChecked():
-                self.btnSelectPoint.setText("🖱️ 추가 관측점 클릭 (선택사항)")
+                self.btnSelectPoint.setText("추가 관측점 클릭 (선택사항)")
                 if hasattr(self, 'lblLayerHint'):
-                    self.lblLayerHint.setText("💡 성곽(Polygon)이나 도로(Line) 레이어를 선택하세요.")
+                    self.lblLayerHint.setText("성곽(Polygon)이나 도로(Line) 레이어를 선택하세요.")
             else:
-                self.btnSelectPoint.setText("🖱️ 지도에서 경로(둘레) 그리기")
+                self.btnSelectPoint.setText("지도에서 경로(둘레) 그리기")
                 if hasattr(self, 'lblLayerHint'):
-                    self.lblLayerHint.setText("💡 시작점 클릭 후 경로를 그리세요 (시작점 재클릭 시 자동 닫힘).")
+                    self.lblLayerHint.setText("시작점 클릭 후 경로를 그리세요 (시작점 재클릭 시 자동 닫힘).")
             
             if hasattr(self, 'lblLayerHint'):
                 self.lblLayerHint.setVisible(True)
@@ -725,17 +725,17 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         elif self.radioSinglePoint.isChecked():
             self.radioClickMap.setEnabled(True)
             self.groupObserver.setTitle("3. 관측점 설정")
-            self.btnSelectPoint.setText("🖱️ 지도에서 관측점 선택")
+            self.btnSelectPoint.setText("지도에서 관측점 선택")
             if hasattr(self, 'lblLayerHint'):
-                self.lblLayerHint.setText("💡 레이어 선택 시: 피처의 중심점(Centroid)에서 가시권을 계산합니다.")
+                self.lblLayerHint.setText("레이어 선택 시: 피처의 중심점(Centroid)에서 가시권을 계산합니다.")
                 self.lblLayerHint.setVisible(self.radioFromLayer.isChecked())
         
         elif is_multi_mode:
             self.radioClickMap.setEnabled(True)
             self.groupObserver.setTitle("3. 관측점 설정 (다중 선택)")
-            self.btnSelectPoint.setText("🖱️ 추가 관측점 클릭")
+            self.btnSelectPoint.setText("추가 관측점 클릭")
             if hasattr(self, 'lblLayerHint'):
-                self.lblLayerHint.setText("💡 레이어의 포인트 + 지도 클릭을 함께 사용할 수 있습니다.")
+                self.lblLayerHint.setText("레이어의 포인트 + 지도 클릭을 함께 사용할 수 있습니다.")
                 self.lblLayerHint.setVisible(self.radioFromLayer.isChecked())
         
         elif is_los_mode:
@@ -743,7 +743,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             self.radioClickMap.setChecked(True)
             self.radioFromLayer.setEnabled(False)  # LOS는 지도 클릭만
             self.groupObserver.setTitle("3. 가시선 설정")
-            self.btnSelectPoint.setText("🖱️ 관측점 → 대상점 순서로 클릭")
+            self.btnSelectPoint.setText("관측점 → 대상점 순서로 클릭")
             self.observer_point = None
             self.target_point = None
             self.los_click_count = 0
@@ -757,7 +757,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         elif is_reverse_mode:
             self.radioClickMap.setEnabled(True)
             self.groupObserver.setTitle("3. 대상물 위치 설정")
-            self.btnSelectPoint.setText("🖱️ 지도에서 대상물/영역 지정")
+            self.btnSelectPoint.setText("지도에서 대상물/영역 지정")
             if hasattr(self, 'lblLayerHint'):
                 self.lblLayerHint.setText(
                     "팁: 점=1회 클릭 후 우클릭/Enter로 완료, 폴리곤=여러 점(3점 이상) 찍고 우클릭/Enter로 완료.\n"
@@ -769,7 +769,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         else:
             self.radioClickMap.setEnabled(True)
             self.groupObserver.setTitle("3. 관측점 설정")
-            self.btnSelectPoint.setText("🖱️ 지도에서 위치 선택")
+            self.btnSelectPoint.setText("지도에서 위치 선택")
         
         # Reset layer selection radio for non-LOS modes
         if not is_los_mode:
@@ -1121,7 +1121,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             # Show message and continue adding
             self.iface.messageBar().pushMessage(
                 "다중점 가시권", 
-                f"▶ 점 {count} 추가됨. 계속 클릭하거나 ESC로 완료", 
+                f"점 {count} 추가됨. 계속 클릭하거나 ESC로 완료",
                 level=0
             )
             # Don't return to dialog yet - let user add more points
@@ -3854,7 +3854,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             msg = QMessageBox(self)
             msg.setIcon(QMessageBox.Warning)
             msg.setWindowTitle("관측점 개수 경고")
-            msg.setText(f"⚠️ 전체 분석에 {total_needed}개의 관측점이 포함되어 있습니다.\n"
+            msg.setText(f"전체 분석에 {total_needed}개의 관측점이 포함되어 있습니다.\n"
                        f"성능을 위해 기본적으로 {MAX_POINTS}개로 제한됩니다.")
             msg.setInformativeText(f"고해상도 DEM과 많은 관측점은 수 분 이상 소요될 수 있습니다.\n\n"
                                   f"• 예(Yes): {MAX_POINTS}개로 축소하여 안전하게 진행\n"
@@ -5768,4 +5768,3 @@ class ViewshedProfilerDialog(QDialog):
             from qgis.PyQt.QtWidgets import QMessageBox
 
             QMessageBox.information(self, "저장 완료", f"프로파일 이미지 저장: {filename}")
-

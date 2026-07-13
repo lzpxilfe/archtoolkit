@@ -65,10 +65,10 @@
       <item>
        <widget class="QCheckBox" name="chkSlopePosition">
         <property name="text">
-         <string>지형분류 (Weiss 6단계) - 곡저/평지/사면/능선 ★</string>
+         <string>지형분류 (Weiss 6단계) - 곡저/평지/사면/능선 (추천)</string>
         </property>
         <property name="toolTip">
-         <string>&lt;html&gt;&lt;b&gt;Weiss 6단계 지형분류 (Landform Classification)&lt;/b&gt;&lt;hr/&gt;&lt;i&gt;Weiss, A. (2001). Topographic Position and Landforms Analysis.&lt;/i&gt;&lt;br/&gt;&lt;br/&gt;TPI와 경사도를 조합하여 지형을 6가지로 자동 분류합니다:&lt;br/&gt;&lt;br/&gt;1. 깊은 곡저 (Incised Valley)&lt;br/&gt;2. 곡저/하상 (Valley Floor)&lt;br/&gt;3. 평지/단구 (Flat or Terrace)&lt;br/&gt;4. 중간 사면 (Mid Slope)&lt;br/&gt;5. 능선 평탄부 (Upland Flat)&lt;br/&gt;6. 급경사 능선 (Steep Ridge)&lt;br/&gt;&lt;br/&gt;&lt;b&gt;★ 추천: 유적 입지 분석에 가장 유용한 지표입니다.&lt;/b&gt;&lt;/html&gt;</string>
+         <string>&lt;html&gt;&lt;b&gt;Weiss 6단계 지형분류 (Landform Classification)&lt;/b&gt;&lt;hr/&gt;&lt;i&gt;Weiss, A. (2001). Topographic Position and Landforms Analysis.&lt;/i&gt;&lt;br/&gt;&lt;br/&gt;TPI와 경사도를 조합하여 지형을 6가지로 자동 분류합니다:&lt;br/&gt;&lt;br/&gt;1. 깊은 곡저 (Incised Valley)&lt;br/&gt;2. 곡저/하상 (Valley Floor)&lt;br/&gt;3. 평지/단구 (Flat or Terrace)&lt;br/&gt;4. 중간 사면 (Mid Slope)&lt;br/&gt;5. 능선 평탄부 (Upland Flat)&lt;br/&gt;6. 급경사 능선 (Steep Ridge)&lt;br/&gt;&lt;br/&gt;&lt;b&gt;(추천) 유적 입지 분석에 가장 유용한 지표입니다.&lt;/b&gt;&lt;/html&gt;</string>
         </property>
        </widget>
       </item>
@@ -170,7 +170,7 @@
    <item>
     <widget class="QPushButton" name="btnAdvanced">
      <property name="text">
-      <string>⚙ 고급 설정 ▼</string>
+      <string>고급 설정 ▼</string>
      </property>
      <property name="checkable">
       <bool>true</bool>
@@ -186,7 +186,7 @@
       <item>
        <widget class="QCheckBox" name="chkAutoSD">
         <property name="text">
-         <string>✅ 자동 표준편차(SD) 적용 (Weiss 2001 권장)</string>
+         <string>자동 표준편차(SD) 적용 (Weiss 2001 권장)</string>
         </property>
         <property name="checked">
          <bool>true</bool>

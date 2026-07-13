@@ -15,6 +15,28 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Unit tests (stdlib-only foundation)
+        run: |
+          python -m unittest tests.test_atomic_output -v
+          python -m unittest tests.test_align_export_qgis -v
+          python -m unittest tests.test_release_identity -v
+          python -m unittest tests.test_ui_assets -v
+
+      - name: Release identity
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" == "tag" && "${GITHUB_REF_NAME}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            tag_date="$(git for-each-ref --format='%(taggerdate:short)' "refs/tags/${GITHUB_REF_NAME}")"
+            if [[ -z "${tag_date}" ]]; then
+              tag_date="$(git show -s --format=%cs "${GITHUB_REF_NAME}^{commit}")"
+            fi
+            python scripts/check_release_identity.py \
+              --release-tag "${GITHUB_REF_NAME}" \
+              --release-date "${tag_date}"
+          else
+            python scripts/check_release_identity.py
+          fi
+
       - name: Install linters
         run: python -m pip install --upgrade flake8 pyflakes
 

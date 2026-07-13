@@ -75,7 +75,7 @@
       <item>
        <widget class="QPushButton" name="btnDrawLine">
         <property name="text">
-         <string>✏️ 지도에 단면선 그리기</string>
+         <string>지도에 단면선 그리기</string>
         </property>
         <property name="styleSheet">
          <string>font-weight: bold; background-color: #ff9800; color: white; padding: 5px 10px;</string>
@@ -125,7 +125,7 @@
      <item>
       <widget class="QPushButton" name="btnExportCsv">
        <property name="text">
-        <string>💾 CSV 데이터 저장</string>
+        <string>CSV 데이터 저장</string>
        </property>
        <property name="enabled">
         <bool>false</bool>
@@ -135,7 +135,7 @@
      <item>
       <widget class="QPushButton" name="btnExportImage">
        <property name="text">
-        <string>🖼️ 이미지 저장</string>
+        <string>이미지 저장</string>
        </property>
        <property name="enabled">
         <bool>false</bool>

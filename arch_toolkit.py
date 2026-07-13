@@ -77,8 +77,9 @@ class ArchToolkit:
             self.terrain_action.triggered.connect(self.run_terrain_tool)
 
             # Align & Export Analysis Stack (compose existing analysis outputs for modelling)
+            align_export_icon = os.path.join(plugin_dir, 'align_export_icon.xpm')
             self.align_export_action = QAction(
-                QIcon(terrain_icon),
+                QIcon(align_export_icon),
                 u"분석 결과 정렬/내보내기 (Align & Export Stack)",
                 self.iface.mainWindow(),
             )
