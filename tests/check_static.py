@@ -5,8 +5,11 @@
 Catches the class of defects that shipped in 0.1.2 - undefined names
 (missing helper module / stray variables) and syntax errors - by:
 
-  1. byte-compiling every plugin .py file (SyntaxError / IndentationError), and
-  2. running pyflakes to flag undefined names (F821) and other blockers.
+  1. byte-compiling every plugin .py file (SyntaxError / IndentationError),
+  2. running pyflakes to flag undefined names (F821) and other blockers, and
+  3. resolving every RELATIVE import to a file on disk (pyflakes/flake8 do
+     not resolve modules, so a deleted/renamed tools/*.py used to keep CI
+     green while the menu entry crashed at click time).
 
 Run locally:   python tests/check_static.py
 Exit code is non-zero if any file fails, so it doubles as a CI gate.
@@ -14,6 +17,7 @@ Exit code is non-zero if any file fails, so it doubles as a CI gate.
 
 from __future__ import annotations
 
+import ast
 import os
 import sys
 from typing import List, Tuple
@@ -45,8 +49,8 @@ def _compile_all(paths: List[str]) -> List[Tuple[str, str]]:
 
 
 def _pyflakes_all(paths: List[str]) -> Tuple[List[str], bool]:
-    """Return (messages, ran). Prefers pyflakes; falls back to a minimal
-    undefined-name check via the stdlib if pyflakes is unavailable."""
+    """Return (messages, ran). Compile-only when pyflakes is unavailable
+    (a warning is printed; there is no stdlib undefined-name fallback)."""
     try:
         from pyflakes.api import check
         from pyflakes.reporter import Reporter
@@ -66,6 +70,53 @@ def _pyflakes_all(paths: List[str]) -> Tuple[List[str], bool]:
         return [], False
 
 
+def _relative_import_errors(paths: List[str]) -> List[Tuple[str, str]]:
+    """Resolve `from .x import y` / `from ..pkg.mod import y` to files on disk.
+
+    Static linters never resolve modules, so a missing tools/*.py is invisible
+    to them. This walks each file's AST and demands that every relative import
+    target exists as <target>.py or <target>/__init__.py.
+    """
+    errors: List[Tuple[str, str]] = []
+    for path in paths:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                tree = ast.parse(f.read(), filename=path)
+        except Exception:
+            continue  # compile errors are reported by _compile_all
+        pkg_dir = os.path.dirname(path)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ImportFrom) or not node.level:
+                continue
+            # level=1 -> current package dir, level=2 -> parent, ...
+            base = pkg_dir
+            for _ in range(node.level - 1):
+                base = os.path.dirname(base)
+            parts = (node.module or "").split(".") if node.module else []
+            target = os.path.join(base, *parts) if parts else base
+            ok = (
+                os.path.isfile(target + ".py")
+                or os.path.isfile(os.path.join(target, "__init__.py"))
+            )
+            if not parts:
+                # from . import a, b  -> each alias must be a module or defined
+                # in the package __init__; require module file OR __init__.py.
+                has_init = os.path.isfile(os.path.join(base, "__init__.py"))
+                for alias in node.names:
+                    mod_ok = (
+                        os.path.isfile(os.path.join(base, alias.name + ".py"))
+                        or os.path.isdir(os.path.join(base, alias.name))
+                        or has_init
+                    )
+                    if not mod_ok:
+                        errors.append((path, f"relative import target missing: .{alias.name} (line {node.lineno})"))
+                continue
+            if not ok:
+                dotted = "." * node.level + (node.module or "")
+                errors.append((path, f"relative import target missing: {dotted} (line {node.lineno})"))
+    return errors
+
+
 def main() -> int:
     paths = _iter_py_files()
     print(f"[check_static] scanning {len(paths)} Python files under {REPO_ROOT}")
@@ -82,7 +133,11 @@ def main() -> int:
         print("  [warn] pyflakes not installed; ran compile-only checks "
               "(install pyflakes/flake8 for undefined-name detection)")
 
-    failed = bool(compile_errors) or bool(flake_msgs)
+    import_errors = _relative_import_errors(paths)
+    for path, msg in import_errors:
+        print(f"  IMPORT FAIL {os.path.relpath(path, REPO_ROOT)}: {msg}")
+
+    failed = bool(compile_errors) or bool(flake_msgs) or bool(import_errors)
     if failed:
         print("[check_static] FAILED")
         return 1

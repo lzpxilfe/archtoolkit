@@ -67,13 +67,27 @@ def _compact_str_list(value_list, *, include_none=False, lower=False):
     return out
 
 
+def _cfg_int(*keys, default):
+    """int() of a config value that NEVER raises at import time — a bad
+    config.json entry (e.g. "14d") must not take down tool registration."""
+    try:
+        return int(get_plugin_config_value(*keys, default=default) or default)
+    except Exception:
+        return int(default)
+
+
+def _cfg_float(*keys, default):
+    try:
+        return float(get_plugin_config_value(*keys, default=default) or default)
+    except Exception:
+        return float(default)
+
+
 PARENT_GROUP_NAME = get_output_group_name("geology", "ArchToolkit - Geology")
 GEOLOGY_EXTRACT_ROOT_NAME = str(
     get_plugin_config_value("geology_zip", "extract_root_name", default="ArchToolkit_KIGAM_Extract") or ""
 ).strip() or "ArchToolkit_KIGAM_Extract"
-GEOLOGY_EXTRACT_CLEANUP_DAYS = int(
-    get_plugin_config_value("geology_zip", "extract_cleanup_days", default=14) or 14
-)
+GEOLOGY_EXTRACT_CLEANUP_DAYS = _cfg_int("geology_zip", "extract_cleanup_days", default=90)
 GEOLOGY_PROVIDER_ENCODING = str(
     get_plugin_config_value("geology_zip", "provider_encoding", default="cp949") or ""
 ).strip() or "cp949"
@@ -89,12 +103,8 @@ GEOLOGY_ENCODING_PREFERENCE = get_plugin_config_value(
 GEOLOGY_QML_WRITE_ENCODING = str(
     get_plugin_config_value("geology_zip", "qml_write_encoding", default="UTF-8") or ""
 ).strip() or "UTF-8"
-GEOLOGY_POINT_MARKER_SIZE = float(
-    get_plugin_config_value("geology_zip", "symbology", "point_marker_size", default=6.0) or 6.0
-)
-GEOLOGY_FILL_SYMBOL_WIDTH = float(
-    get_plugin_config_value("geology_zip", "symbology", "polygon_fill_width", default=10.0) or 10.0
-)
+GEOLOGY_POINT_MARKER_SIZE = _cfg_float("geology_zip", "symbology", "point_marker_size", default=6.0)
+GEOLOGY_FILL_SYMBOL_WIDTH = _cfg_float("geology_zip", "symbology", "polygon_fill_width", default=10.0)
 GEOLOGY_SYMBOL_PRIORITY_FIELDS = _compact_str_list(
     get_plugin_config_value(
         "geology_zip",
@@ -148,30 +158,16 @@ GEOLOGY_NAME_FIELD_CANDIDATES = _compact_str_list(
         default=["LITHONAME", "AGENAME", "NAME", "KOR_NAME", "ENG_NAME"],
     )
 )
-GEOLOGY_UI_FONT_SIZE_MIN = int(get_plugin_config_value("geology_zip", "ui", "font_size_min", default=5) or 5)
-GEOLOGY_UI_FONT_SIZE_MAX = int(get_plugin_config_value("geology_zip", "ui", "font_size_max", default=50) or 50)
-GEOLOGY_UI_FONT_SIZE_DEFAULT = int(
-    get_plugin_config_value("geology_zip", "ui", "font_size_default", default=10) or 10
-)
-GEOLOGY_UI_PIXEL_MIN = float(get_plugin_config_value("geology_zip", "ui", "pixel_size_min", default=0.1) or 0.1)
-GEOLOGY_UI_PIXEL_MAX = float(
-    get_plugin_config_value("geology_zip", "ui", "pixel_size_max", default=10000.0) or 10000.0
-)
-GEOLOGY_UI_PIXEL_DEFAULT = float(
-    get_plugin_config_value("geology_zip", "ui", "pixel_size_default", default=10.0) or 10.0
-)
-GEOLOGY_UI_NODATA_MIN = float(
-    get_plugin_config_value("geology_zip", "ui", "nodata_min", default=-9999999.0) or -9999999.0
-)
-GEOLOGY_UI_NODATA_MAX = float(
-    get_plugin_config_value("geology_zip", "ui", "nodata_max", default=9999999.0) or 9999999.0
-)
-GEOLOGY_UI_NODATA_DECIMALS = int(
-    get_plugin_config_value("geology_zip", "ui", "nodata_decimals", default=2) or 2
-)
-GEOLOGY_UI_NODATA_DEFAULT = float(
-    get_plugin_config_value("geology_zip", "ui", "nodata_default", default=-9999.0) or -9999.0
-)
+GEOLOGY_UI_FONT_SIZE_MIN = _cfg_int("geology_zip", "ui", "font_size_min", default=5)
+GEOLOGY_UI_FONT_SIZE_MAX = _cfg_int("geology_zip", "ui", "font_size_max", default=50)
+GEOLOGY_UI_FONT_SIZE_DEFAULT = _cfg_int("geology_zip", "ui", "font_size_default", default=10)
+GEOLOGY_UI_PIXEL_MIN = _cfg_float("geology_zip", "ui", "pixel_size_min", default=0.1)
+GEOLOGY_UI_PIXEL_MAX = _cfg_float("geology_zip", "ui", "pixel_size_max", default=10000.0)
+GEOLOGY_UI_PIXEL_DEFAULT = _cfg_float("geology_zip", "ui", "pixel_size_default", default=10.0)
+GEOLOGY_UI_NODATA_MIN = _cfg_float("geology_zip", "ui", "nodata_min", default=-9999999.0)
+GEOLOGY_UI_NODATA_MAX = _cfg_float("geology_zip", "ui", "nodata_max", default=9999999.0)
+GEOLOGY_UI_NODATA_DECIMALS = _cfg_int("geology_zip", "ui", "nodata_decimals", default=2)
+GEOLOGY_UI_NODATA_DEFAULT = _cfg_float("geology_zip", "ui", "nodata_default", default=-9999.0)
 
 
 def _safe_name(name: str) -> str:
@@ -267,19 +263,69 @@ class KigamZipProcessor:
         self._cleanup_old_extracts()
 
     def _cleanup_old_extracts(self) -> None:
-        """Remove extraction folders older than GEOLOGY_EXTRACT_CLEANUP_DAYS."""
+        """Remove extraction folders older than GEOLOGY_EXTRACT_CLEANUP_DAYS.
+
+        The mtime of a folder is refreshed (touched) every time its layers are
+        loaded, so extracts referenced by projects the user still opens never
+        expire — cleanup only reaps folders untouched for the full window.
+        (Deleting by creation age broke every saved project after 2 weeks.)
+        """
         try:
             days = max(1, int(GEOLOGY_EXTRACT_CLEANUP_DAYS))
             cutoff = time.time() - days * 86400
+            in_use = self._extract_dirs_in_use()
             for name in os.listdir(self.extract_root):
                 path = os.path.join(self.extract_root, name)
                 try:
+                    if path in in_use:
+                        self._touch_extract_dir(path)
+                        continue
                     if os.path.isdir(path) and (not os.path.islink(path)) and os.path.getmtime(path) < cutoff:
                         shutil.rmtree(path, ignore_errors=True)
                 except Exception:
                     continue
         except Exception:
             pass
+
+    def _extract_dirs_in_use(self) -> set:
+        """Top-level extract folders referenced by any layer in the CURRENT
+        project — these must never be reaped, whatever their age."""
+        used = set()
+        try:
+            root = os.path.abspath(self.extract_root)
+            for lyr in QgsProject.instance().mapLayers().values():
+                try:
+                    src = str(lyr.source() or "").split("|", 1)[0]
+                    src = os.path.abspath(src)
+                    if src.startswith(root + os.sep):
+                        rel = os.path.relpath(src, root)
+                        top = rel.split(os.sep, 1)[0]
+                        used.add(os.path.join(root, top))
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return used
+
+    @staticmethod
+    def _touch_extract_dir(path: str) -> None:
+        """Refresh mtime so _cleanup_old_extracts treats the folder as in use."""
+        try:
+            os.utime(path, None)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _safe_extract_basename(zip_path: str) -> str:
+        """Whitelist-sanitized folder name from the ZIP filename.
+
+        A zip named '.. .zip' would otherwise map to '<root>/.. ' which Windows
+        normalizes to the PARENT directory — and the pre-extract rmtree would
+        then recursively delete everything above the extract root.
+        """
+        base = os.path.splitext(os.path.basename(str(zip_path or "")))[0]
+        safe = re.sub(r"[^A-Za-z0-9가-힣_\-]+", "_", base).strip("._- ")
+        return safe or "kigam_zip"
 
     def _zip_bomb_reason(self, infos) -> str:
         if len(infos) > self.MAX_ZIP_ENTRIES:
@@ -305,7 +351,7 @@ class KigamZipProcessor:
         apply_labels: bool = True,
         run_id: str,
     ) -> List[QgsVectorLayer]:
-        zip_basename = os.path.splitext(os.path.basename(zip_path))[0]
+        zip_basename = self._safe_extract_basename(zip_path)
         extract_dir = os.path.join(self.extract_root, zip_basename)
 
         try:
@@ -331,6 +377,7 @@ class KigamZipProcessor:
                     log_message(f"KIGAM ZIP 추출 중단: {reason}", level=Qgis.Warning)
                     return []
                 zip_ref.extractall(extract_dir)
+            self._touch_extract_dir(extract_dir)
         except Exception as e:
             log_message(f"KIGAM ZIP 추출 실패: {e}", level=Qgis.Warning)
             return []
@@ -1088,6 +1135,36 @@ class GeologyZipDialog(QtWidgets.QDialog):
         pixel_size: float,
         nodata: float,
     ) -> str:
+        # The AAIGrid (.asc) driver is CreateCopy-only, but gdal_rasterize needs
+        # a Create-capable driver — a direct .asc output has never worked.
+        # Rasterize to GTiff first, then translate to .asc (the format MaxEnt
+        # actually consumes).
+        if str(out_path or "").lower().endswith(".asc"):
+            tmp_tif = os.path.join(
+                tempfile.gettempdir(), f"atk_kigam_asc_{new_run_id('kigam')}.tif"
+            )
+            tif_path = self._rasterize_layer(layer, field_name, tmp_tif, pixel_size, nodata)
+            try:
+                processing.run("gdal:translate", {
+                    "INPUT": tif_path,
+                    "TARGET_CRS": None,
+                    "NODATA": float(nodata),
+                    "COPY_SUBDATASETS": False,
+                    "OPTIONS": "",
+                    "EXTRA": "-of AAIGrid",
+                    "DATA_TYPE": 0,
+                    "OUTPUT": out_path,
+                })
+            finally:
+                try:
+                    if os.path.exists(tif_path):
+                        os.remove(tif_path)
+                except Exception:
+                    pass
+            if not os.path.exists(out_path):
+                raise RuntimeError("ASCII Grid(.asc) 변환에 실패했습니다. GeoTIFF 형식을 사용해보세요.")
+            return out_path
+
         rect = None
         try:
             rect = layer.extent()

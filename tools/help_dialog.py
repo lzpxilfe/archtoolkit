@@ -2,6 +2,7 @@
 from typing import Optional
 
 from qgis.PyQt import QtGui, QtWidgets
+from qgis.PyQt.QtCore import Qt
 
 from .i18n import get_plugin_config_value, tr
 
@@ -71,10 +72,11 @@ class ArchToolkitHelpDialog(QtWidgets.QDialog):
         self.browser = QtWidgets.QTextBrowser(self)
         # Keep help self-contained: don't launch the user's browser from inside QGIS.
         self.browser.setOpenExternalLinks(False)
-        self.browser.setLineWrapMode(QtWidgets.QTextEdit.NoWrap)
+        self.browser.setLineWrapMode(QtWidgets.QTextEdit.WidgetWidth)
         self.browser.setWordWrapMode(QtGui.QTextOption.WrapAtWordBoundaryOrAnywhere)
-        self.browser.setHorizontalScrollBarPolicy(QtWidgets.QAbstractScrollArea.ScrollBarAsNeeded)
-        self.browser.setVerticalScrollBarPolicy(QtWidgets.QAbstractScrollArea.ScrollBarAsNeeded)
+        # ScrollBarAsNeeded lives on Qt, not QAbstractScrollArea.
+        self.browser.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.browser.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         try:
             self.browser.setHtml(str(html or ""))
         except Exception:
@@ -99,6 +101,41 @@ class ArchToolkitHelpDialog(QtWidgets.QDialog):
             QtWidgets.QApplication.clipboard().setText(self.browser.toPlainText())
         except Exception:
             pass
+
+    def _find_next(self):
+        self._find(backward=False)
+
+    def _find_prev(self):
+        self._find(backward=True)
+
+    def _find(self, *, backward: bool):
+        needle = str(self.txtSearch.text() or "").strip()
+        if not needle:
+            self._clear_search()
+            return
+        flags = QtGui.QTextDocument.FindFlags()
+        if backward:
+            flags |= QtGui.QTextDocument.FindBackward
+        found = self.browser.find(needle, flags)
+        if not found:
+            # Wrap around: retry from the start (or end for backward search).
+            cursor = self.browser.textCursor()
+            cursor.movePosition(
+                QtGui.QTextCursor.End if backward else QtGui.QTextCursor.Start
+            )
+            self.browser.setTextCursor(cursor)
+            found = self.browser.find(needle, flags)
+        if found:
+            self.lblSearchStatus.setText("")
+        else:
+            self.lblSearchStatus.setText(tr("검색 결과가 없습니다."))
+
+    def _clear_search(self):
+        self.txtSearch.clear()
+        self.lblSearchStatus.setText("")
+        cursor = self.browser.textCursor()
+        cursor.clearSelection()
+        self.browser.setTextCursor(cursor)
 
 
 def show_help_dialog(*, parent, title: str, html: str, plugin_dir: Optional[str] = None) -> None:

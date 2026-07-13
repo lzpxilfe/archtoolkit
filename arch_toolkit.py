@@ -225,6 +225,19 @@ class ArchToolkit:
             self.viewshed_action = QAction(QIcon(viewshed_icon), u"가시권 분석 (Viewshed Analysis)", self.iface.mainWindow())
             self.viewshed_action.triggered.connect(self.run_viewshed_tool)
 
+            # Track actions BEFORE any menu/toolbar registration: if a later
+            # step throws, unload() can still remove what was already added
+            # (previously self.actions stayed empty and menu entries dangled).
+            self.actions = [
+                self.dem_action, self.contour_action, self.cad_overlap_action,
+                self.terrain_action, self.align_export_action, self.cov_report_action, self.ahp_action,
+                self.geochem_action, self.geology_zip_action,
+                self.profile_action, self.cost_action, self.network_action,
+                self.spatial_network_action, self.style_action, self.drafting_action,
+                self.trench_action, self.viewshed_action,
+                self.ai_report_action,
+            ]
+
             # 2. Add to Plugin Menu
             self.iface.addPluginToMenu(self.menu_name, self.dem_action)
             self.iface.addPluginToMenu(self.menu_name, self.contour_action)
@@ -299,17 +312,9 @@ class ArchToolkit:
             
             self.toolbar.addWidget(tool_button)
             
-            # Keep references for cleanup
-            self.actions = [
-                self.dem_action, self.contour_action, self.cad_overlap_action,
-                self.terrain_action, self.align_export_action, self.cov_report_action, self.ahp_action,
-                self.geochem_action, self.geology_zip_action,
-                self.profile_action, self.cost_action, self.network_action,
-                self.spatial_network_action, self.style_action, self.drafting_action,
-                self.trench_action, self.viewshed_action,
-                self.ai_report_action,
-                self.main_action
-            ]
+            # main_action joins the cleanup list last (tool actions were
+            # already tracked before menu registration above).
+            self.actions.append(self.main_action)
         except Exception as e:
             log_exception("ArchToolkit initGui error", e)
             QMessageBox.critical(self.iface.mainWindow(), "ArchToolkit 로드 오류", f"플러그인을 초기화하는 중 오류가 발생했습니다: {str(e)}")
@@ -387,6 +392,29 @@ class ArchToolkit:
             except Exception:
                 pass
             self.toolbar = None
+
+        # The dropdown menu, its title action and every QAction are parented to
+        # mainWindow(), so they survive unload unless explicitly deleted — each
+        # reload otherwise accumulates a QMenu + ~20 QActions whose signal
+        # connections keep the stale plugin instance (and modules) alive.
+        try:
+            if getattr(self, "tool_menu", None) is not None:
+                self.tool_menu.deleteLater()
+                self.tool_menu = None
+        except Exception:
+            pass
+        try:
+            if getattr(self, "menu_title_action", None) is not None:
+                self.menu_title_action.deleteLater()
+                self.menu_title_action = None
+        except Exception:
+            pass
+        for action in list(self.actions or []):
+            try:
+                action.deleteLater()
+            except Exception:
+                pass
+        self.actions = []
 
     def run_dem_tool(self):
         try:

@@ -114,32 +114,29 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
         {'max': 360, 'label': 'NW-N | 315~360° | 북서~북', 'color': '#7f00ff'},
     ]
     
-    # TRI - Riley et al. (1999) - Blue to Red (default values)
-    TRI_CLASSES = [
-        {'max': 2, 'label': 'I | 0~2 | 평탄', 'color': '#2166ac'},
-        {'max': 5, 'label': 'II | 2~5 | 거의평탄', 'color': '#67a9cf'},
-        {'max': 10, 'label': 'III | 5~10 | 약간거침', 'color': '#f7f7f7'},
-        {'max': 20, 'label': 'IV | 10~20 | 중간', 'color': '#ef8a62'},
-        {'max': 500, 'label': 'V | 20+ | 험준', 'color': '#b2182b'},
-    ]
-    
-    # Weiss (2001) 6-class Slope Position Classification
+    # Weiss (2001) 6-class Slope Position Classification.
+    # Labels follow Weiss's own class names: classes 2/5 are Lower/Upper Slope
+    # (no flatness test applies to them) — calling them "valley floor"/"upland
+    # flat" previously invited wrong archaeological readings.
     SLOPE_POSITION_CLASSES = [
         {'max': 1, 'label': '1 | 깊은 곡저 (Incised Valley)', 'color': '#08306b'},
-        {'max': 2, 'label': '2 | 곡저/하상 (Valley Floor)', 'color': '#2171b5'},
+        {'max': 2, 'label': '2 | 하부 사면 (Lower Slope)', 'color': '#2171b5'},
         {'max': 3, 'label': '3 | 평지/단구 (Flat or Terrace)', 'color': '#f7f7f7'},
         {'max': 4, 'label': '4 | 중간 사면 (Mid Slope)', 'color': '#fee391'},
-        {'max': 5, 'label': '5 | 능선 평탄부 (Upland Flat)', 'color': '#ec7014'},
+        {'max': 5, 'label': '5 | 상부 사면 (Upper Slope)', 'color': '#ec7014'},
         {'max': 6, 'label': '6 | 급경사 능선 (Steep Ridge)', 'color': '#8c2d04'},
     ]
-    
-    # Roughness - Wilson (2000) - Greens to Purple
+
+    # Roughness - Wilson (2000) - Greens to Purple.
+    # The last break is inf: QGIS Discrete shaders render values above the last
+    # entry as TRANSPARENT, so a finite 500 cap made extreme cells invisible
+    # while the legend claimed "15m+".
     ROUGHNESS_CLASSES = [
         {'max': 1, 'label': '평탄 | 0~1m', 'color': '#d9f0d3'},
         {'max': 3, 'label': '미세거침 | 1~3m', 'color': '#a6dba0'},
         {'max': 6, 'label': '중간거침 | 3~6m', 'color': '#5aae61'},
         {'max': 15, 'label': '험준 | 6~15m', 'color': '#c2a5cf'},
-        {'max': 500, 'label': '극도험준 | 15m+', 'color': '#762a83'},
+        {'max': float('inf'), 'label': '극도험준 | 15m+', 'color': '#762a83'},
     ]
     
     def __init__(self, iface, parent=None):
@@ -257,11 +254,14 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
             return 'llobera'
     
     def get_tpi_classes(self, threshold):
-        """Generate TPI classification classes based on user threshold"""
+        """Generate TPI classification classes based on user threshold.
+
+        Last break is inf: Discrete shaders render values past the final entry
+        as transparent, so a finite cap would hide extreme ridges."""
         return [
             {'max': -threshold, 'label': f'골짜기 | <-{threshold:.2f}', 'color': '#2166ac'},
             {'max': threshold, 'label': f'평지 | -{threshold:.2f}~+{threshold:.2f}', 'color': '#f7f7f7'},
-            {'max': 500, 'label': f'능선 | >+{threshold:.2f}', 'color': '#8b4513'},
+            {'max': float('inf'), 'label': f'능선 | >+{threshold:.2f}', 'color': '#8b4513'},
         ]
     
     def get_tri_classes(self, max_rugged):
@@ -282,7 +282,7 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
             {'max': t2, 'label': f'II | {t1:.0f}~{t2:.0f} | 거의평탄', 'color': '#67a9cf'},
             {'max': t3, 'label': f'III | {t2:.0f}~{t3:.0f} | 약간거침', 'color': '#f7f7f7'},
             {'max': t4, 'label': f'IV | {t3:.0f}~{t4:.0f} | 중간', 'color': '#ef8a62'},
-            {'max': 500, 'label': f'V | {t4:.0f}+ | 험준', 'color': '#b2182b'},
+            {'max': float('inf'), 'label': f'V | {t4:.0f}+ | 험준', 'color': '#b2182b'},
         ]
     
     def apply_style(self, layer, classes, max_val):
@@ -325,6 +325,24 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
             push_message(self.iface, "오류", "분석 유형을 선택해주세요", level=2)
             restore_ui_focus(self)
             return
+
+        # gdal:slope/aspect run with SCALE=1 and the curvature kernel takes cell
+        # size from the geotransform: on a geographic (degree) DEM every output
+        # would be silently, plausibly wrong (slope ~89.9° everywhere).
+        try:
+            if dem_layer.crs().isGeographic():
+                push_message(
+                    self.iface,
+                    "오류",
+                    "DEM이 지리좌표계(위경도)입니다. 미터 단위 투영 좌표계로 재투영 후 사용하세요. "
+                    "(위경도 DEM에서는 경사/곡률 값이 전부 왜곡됩니다)",
+                    level=2,
+                    duration=9,
+                )
+                restore_ui_focus(self)
+                return
+        except Exception:
+            pass
 
         # Live log window (non-modal) so users can see progress in real time.
         ensure_live_log_dialog(self.iface, owner=self, show=True, clear=True)
@@ -514,7 +532,7 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                     'NODATA': None,
                     'TARGET_RESOLUTION': new_res,
                     'OPTIONS': '',
-                    'DATA_TYPE': 0,
+                    'DATA_TYPE': 6,  # Float32: keep the focal mean fractional (Int16 DEMs truncate)
                     'TARGET_EXTENT': None,
                     'TARGET_EXTENT_CRS': None,
                     'MULTITHREADING': False,
@@ -535,20 +553,24 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                     'NODATA': None,
                     'TARGET_RESOLUTION': pixel_size_x,
                     'OPTIONS': '',
-                    'DATA_TYPE': 0,
+                    'DATA_TYPE': 6,  # Float32
                     'TARGET_EXTENT': extent_str,
                     'TARGET_EXTENT_CRS': dem_layer.crs().authid(),
                     'MULTITHREADING': False,
                     'EXTRA': '',
                     'OUTPUT': mean_approx
                 })
-                
-                # Step 3: Calculate TPI = DEM - Mean
+
+                # Step 3: Calculate TPI = DEM - Mean.
+                # NO_DATA makes gdal_calc propagate DEM NoData into the output
+                # instead of computing (-9999)-(-9999)=0 and classifying the
+                # collar outside a clipped DEM as "flat terrain".
                 if os.path.exists(mean_approx):
                     processing.run("gdal:rastercalculator", {
                         'INPUT_A': dem_source, 'BAND_A': 1,
                         'INPUT_B': mean_approx, 'BAND_B': 1,
                         'FORMULA': 'A - B',
+                        'NO_DATA': -9999.0,
                         'OUTPUT': output,
                         'RTYPE': 5  # Float32
                     })
@@ -561,7 +583,12 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
             
             # Apply classification with user threshold
             tpi_classes = self.get_tpi_classes(threshold)
-            layer_name = f"TPI (창:{window_size}x{window_size}, 임계값:±{threshold:.2f})"
+            if radius > 1:
+                # Honest label: the custom radius is a block-average + bilinear
+                # approximation at scale ~radius cells, not a true (2r+1)² focal mean.
+                layer_name = f"TPI (근사 반경≈{radius}셀, 임계값:±{threshold:.2f})"
+            else:
+                layer_name = f"TPI (창:{window_size}x{window_size}, 임계값:±{threshold:.2f})"
             layer = QgsRasterLayer(output, layer_name)
             
             if layer.isValid():
@@ -748,7 +775,21 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                 push_message(self.iface, "경고", "DEM을 GDAL로 열 수 없습니다(곡률).", level=1)
                 return
             band = ds.GetRasterBand(1)
-            z = band.ReadAsArray().astype("float64")
+            # Memory guard: the kernel keeps ~18 full-size arrays alive; at
+            # float32 that's ~72 B/px, so cap the pixel count instead of letting
+            # a merged LiDAR DEM freeze QGIS. 120M px ≈ 9 GB peak.
+            npx = int(ds.RasterXSize) * int(ds.RasterYSize)
+            if npx > 120_000_000:
+                push_message(
+                    self.iface,
+                    "경고",
+                    f"DEM이 너무 큽니다({npx:,} 픽셀). 곡률 분석은 1.2억 픽셀 이하로 클립/리샘플 후 실행하세요.",
+                    level=1,
+                    duration=9,
+                )
+                ds = None
+                return
+            z = band.ReadAsArray().astype("float32")
             gt = ds.GetGeoTransform()
             proj = ds.GetProjection()
             nodata = band.GetNoDataValue()
@@ -932,17 +973,52 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                 push_message(self.iface, "경고", "사면방향 계산 실패(사면 파생).", level=1)
                 return
             aband = ads.GetRasterBand(1)
-            aspect = aband.ReadAsArray().astype("float64")
+            npx = int(ads.RasterXSize) * int(ads.RasterYSize)
+            if npx > 120_000_000:
+                push_message(
+                    self.iface,
+                    "경고",
+                    f"DEM이 너무 큽니다({npx:,} 픽셀). 사면 파생은 1.2억 픽셀 이하로 클립/리샘플 후 실행하세요.",
+                    level=1,
+                    duration=9,
+                )
+                ads = None
+                return
+            aspect = aband.ReadAsArray().astype("float32")
             gt = ads.GetGeoTransform()
             proj = ads.GetProjection()
             a_nd = aband.GetNoDataValue()
             ads = None
 
-            # flat cells: GDAL emits a negative NoData for flats
-            flat = (aspect < 0)
+            # gdaldem aspect (ZERO_FLAT=False) writes the same sentinel for
+            # true flats AND for DEM NoData. Read the source DEM's validity so
+            # NoData stays NoData instead of being fabricated as "neutral".
+            dem_valid = None
+            try:
+                dds = gdal.Open(src, gdal.GA_ReadOnly)
+                if dds is not None:
+                    dband = dds.GetRasterBand(1)
+                    d_nd = dband.GetNoDataValue()
+                    zarr = dband.ReadAsArray()
+                    if zarr is not None and zarr.shape == aspect.shape:
+                        dem_valid = np.isfinite(zarr)
+                        if d_nd is not None:
+                            dem_valid &= (zarr != d_nd)
+                    del zarr
+                    dds = None
+            except Exception:
+                dem_valid = None
+
+            undefined_aspect = (aspect < 0)
             if a_nd is not None:
-                flat |= (aspect == a_nd)
-            defined = ~flat
+                undefined_aspect |= (aspect == a_nd)
+            if dem_valid is not None:
+                invalid = ~dem_valid                    # DEM NoData → output NoData
+                flat = undefined_aspect & dem_valid     # true flats → neutral value
+            else:
+                invalid = np.zeros(aspect.shape, dtype=bool)
+                flat = undefined_aspect
+            defined = ~(undefined_aspect | invalid)
             nd = -9999.0
             rad = np.radians(aspect)
 
@@ -954,9 +1030,8 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
 
             north = _make(np.cos, 0.0)
             east = _make(np.sin, 0.0)
-            trasp_full = (1.0 - np.cos(np.radians(aspect - 30.0))) / 2.0
             trasp = np.full(aspect.shape, nd, dtype="float32")
-            trasp[defined] = trasp_full[defined].astype("float32")
+            trasp[defined] = ((1.0 - np.cos(np.radians(aspect[defined] - 30.0))) / 2.0).astype("float32")
             trasp[flat] = 0.5
 
             specs = [

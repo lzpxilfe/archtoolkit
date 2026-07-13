@@ -42,6 +42,7 @@ from .help_dialog import show_help_dialog
 from .live_log_dialog import ensure_live_log_dialog
 from .utils import (
     cleanup_files,
+    get_archtoolkit_layer_metadata,
     is_metric_crs,
     log_exception,
     log_message,
@@ -64,6 +65,10 @@ _GRAVE_KW_KO = (
     "봉분",
     "고분군",
     "고분",
+    "왕릉",
+    "능묘",
+    "가족묘",
+    "공동묘",
 )
 _GRAVE_KW_EN = (
     "tomb",
@@ -97,8 +102,11 @@ def _text_has_grave_keyword(text: str) -> bool:
             return True
     low = s.lower()
     for kw in _GRAVE_KW_EN:
-        if re.search(r"\b" + re.escape(kw) + r"\b", low):
+        # `s?` covers plurals ("tombs", "graves"); "cemeteries" needs its own stem.
+        if re.search(r"\b" + re.escape(kw) + r"s?\b", low):
             return True
+    if re.search(r"\bcemeteries\b", low):
+        return True
     return False
 
 
@@ -794,17 +802,21 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
         """
         try:
             res = aoi_geom.orientedMinimumBoundingBox()
-            # QGIS returns (geometry, area, angle, width, height); angle is the
-            # rotation of the box in degrees (clockwise from horizontal/east).
+            # QGIS returns (geometry, area, angle, width, height). Per the QGIS
+            # implementation (QgsGeometryUtilsBase::lineAngle = -atan2+π/2, i.e.
+            # a compass bearing clockwise from NORTH), `angle` is already the
+            # bearing of the box's LONG side, and width <= height is guaranteed
+            # (the C++ swaps dimensions and adds 90° when needed).
             if res is not None and len(res) >= 5:
                 angle = float(res[2])
                 width = float(res[3])
                 height = float(res[4])
-                # Bearing (from north, clockwise) of the *longer* side.
-                if width >= height:
-                    bearing = (90.0 - angle) % 180.0
+                if width <= height:
+                    bearing = angle % 180.0
                 else:
-                    bearing = (90.0 - angle + 90.0) % 180.0
+                    # Defensive: shouldn't occur with current QGIS, but if the
+                    # convention ever flips, the long side is 90° off `angle`.
+                    bearing = (angle + 90.0) % 180.0
                 if math.isfinite(bearing):
                     return bearing
         except Exception:
@@ -883,7 +895,15 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
             if g is None or g.isEmpty():
                 return None
             bb = g.boundingBox()
-            bb.grow(max(1.0, float(buffer_m)))
+            # buffer_m is meters; convert to DEM CRS units (degrees for a
+            # geographic DEM) so the margin isn't 111 km per "meter".
+            grow_units = max(1.0, float(buffer_m))
+            try:
+                if dem_layer.crs().isGeographic():
+                    grow_units = float(buffer_m) / 111320.0
+            except Exception:
+                pass
+            bb.grow(max(1e-9, grow_units))
             # Intersect with the DEM extent to avoid requesting data outside coverage.
             dem_ext = dem_layer.extent()
             xmin = max(bb.xMinimum(), dem_ext.xMinimum())
@@ -954,6 +974,21 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
         if dem_layer is None or not isinstance(dem_layer, QgsRasterLayer):
             push_message(self.iface, "오류", "DEM 래스터를 선택하세요.", level=2, duration=7)
             return
+        # gdal:slope runs with SCALE=1: a geographic (degree) DEM would yield
+        # ~90° slopes everywhere and every candidate would fail the slope filter
+        # with a misleading "조건 완화" message. Reject it up front instead.
+        try:
+            if dem_layer.crs().isGeographic():
+                push_message(
+                    self.iface,
+                    "오류",
+                    "DEM이 지리좌표계(위경도)입니다. 미터 단위 투영 좌표계로 재투영한 DEM을 사용하세요.",
+                    level=2,
+                    duration=9,
+                )
+                return
+        except Exception:
+            pass
 
         ahp_layer = self.cmbAhp.currentLayer()
         if ahp_layer is not None and (not isinstance(ahp_layer, QgsRasterLayer)):
@@ -1087,6 +1122,14 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
             ahp_available = bool(
                 ahp_layer is not None and isinstance(ahp_layer, QgsRasterLayer) and ahp_layer.isValid()
             )
+            # The AHP tool tags its output with units "0-100" when scaled.
+            ahp_units_0_100 = False
+            if ahp_available:
+                try:
+                    meta = get_archtoolkit_layer_metadata(ahp_layer) or {}
+                    ahp_units_0_100 = str(meta.get("units") or "") == "0-100"
+                except Exception:
+                    ahp_units_0_100 = False
             ref_available = bool(ref_geoms)
             we_ahp = w_ahp if ahp_available else 0.0
             we_ref = w_ref if ref_available else 0.0
@@ -1154,6 +1197,24 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
             iters = 0
             truncated = False
 
+            # Prepared geometry engine: containment over hundreds of thousands
+            # of grid points is ~10-100x faster than QgsGeometry.contains, and
+            # the loop stays responsive via periodic processEvents.
+            aoi_engine = None
+            try:
+                aoi_engine = QgsGeometry.createGeometryEngine(aoi_geom.constGet())
+                aoi_engine.prepareGeometry()
+            except Exception:
+                aoi_engine = None
+
+            def _pt_in_aoi(pt_geom0):
+                if aoi_engine is not None:
+                    try:
+                        return bool(aoi_engine.contains(pt_geom0.constGet()))
+                    except Exception:
+                        pass
+                return bool(aoi_geom.contains(pt_geom0))
+
             x = x0
             while x <= xmax:
                 if truncated:
@@ -1164,9 +1225,11 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
                     if iters > hard_cap:
                         truncated = True
                         break
+                    if iters % 5000 == 0:
+                        self._set_busy(f"후보 스캔 중… ({kept}개 확보)")
                     pt = QgsPointXY(x, y)
                     pt_geom = QgsGeometry.fromPointXY(pt)
-                    if not aoi_geom.contains(pt_geom):
+                    if not _pt_in_aoi(pt_geom):
                         y += grid_step
                         continue
 
@@ -1226,7 +1289,11 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
                     if ahp_val is not None and ahp_min is not None and ahp_max is not None and ahp_max > ahp_min:
                         ahp_score = max(0.0, min(1.0, (ahp_val - ahp_min) / (ahp_max - ahp_min)))
                     elif ahp_val is not None:
-                        ahp_score = max(0.0, min(1.0, ahp_val))
+                        # Stats fallback (constant raster / stats failure): honour
+                        # the AHP tool's own 0-100 output option before clamping,
+                        # else every cell of a 0-100 raster clamps to 1.0.
+                        v0 = float(ahp_val) / 100.0 if ahp_units_0_100 else float(ahp_val)
+                        ahp_score = max(0.0, min(1.0, v0))
                     else:
                         ahp_score = 0.0
 

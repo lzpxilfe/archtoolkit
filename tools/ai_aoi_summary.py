@@ -76,9 +76,13 @@ _NUMERIC_FIELD_CANDIDATES = (
     "in_aoi_pct",
 )
 
-# Field names that are numeric but carry no analytical meaning (ids, keys).
+# Field names that are numeric but carry no analytical meaning: ids/keys,
+# sequence counters, the 19-digit Korean cadastral PNU, per-feature RGB colour
+# columns (terrain profile), and graph component indices — their mean/min/max
+# would read as pseudo-analytics in the report and the Gemini prompt.
 _ID_FIELD_RE = re.compile(
-    r"^(fid|gid|id|oid|objectid|osm_id|uid|uuid|no|번호|일련번호|.*_id|.*_fid|.*_no)$",
+    r"^(fid|gid|id|oid|objectid|osm_id|uid|uuid|no|idx|index|seq|rank|pnu|r|g|b"
+    r"|component|번호|일련번호|.*_id|.*_fid|.*_no|.*_idx)$",
     re.IGNORECASE,
 )
 

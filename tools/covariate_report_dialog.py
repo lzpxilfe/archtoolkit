@@ -132,6 +132,11 @@ def _compute_vif(matrix):
     ones = np.ones((n, 1))
     for i in range(k):
         y = matrix[:, i]
+        # A (near-)constant column has no variance to explain: VIF is
+        # undefined, not "1.0 = fine". NaN renders as "계산불가" downstream.
+        if float(np.std(y)) < 1e-12:
+            vifs.append(float("nan"))
+            continue
         cols = [ones] + [matrix[:, j:j + 1] for j in range(k) if j != i]
         others = np.hstack(cols)
         try:
@@ -244,12 +249,26 @@ class CovariateReportDialog(QtWidgets.QDialog):
                 continue
             meta = get_archtoolkit_layer_metadata(lyr) or {}
             is_arch = bool(meta.get("tool_id") or meta.get("kind"))
+            # Pearson/VIF on nominal class codes is statistically meaningless —
+            # don't auto-check categorical rasters (geology, slope-position,
+            # geochem class), and say why in the label.
+            kind0 = str(meta.get("kind") or "").lower()
+            units0 = str(meta.get("units") or "").lower()
+            tool0 = str(meta.get("tool_id") or "").lower()
+            is_categorical = (
+                units0 in ("class", "classes", "category")
+                or "class" in kind0
+                or "slope_position" in kind0
+                or "geology" in tool0
+            )
             label = lyr.name() + (f"   [{meta.get('tool_id')}/{meta.get('kind')}]" if is_arch else "")
+            if is_categorical:
+                label += "  (범주형 — 상관/VIF 부적합)"
             item = QtWidgets.QListWidgetItem(label)
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-            item.setCheckState(Qt.Checked if is_arch else Qt.Unchecked)
+            item.setCheckState(Qt.Checked if (is_arch and not is_categorical) else Qt.Unchecked)
             item.setData(Qt.UserRole, lyr.id())
-            item.setData(Qt.UserRole + 1, bool(is_arch))
+            item.setData(Qt.UserRole + 1, bool(is_arch and not is_categorical))
             self.listLayers.addItem(item)
         if self.listLayers.count() == 0:
             item = QtWidgets.QListWidgetItem("(프로젝트에 래스터 레이어가 없습니다)")

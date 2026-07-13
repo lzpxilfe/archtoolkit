@@ -4,7 +4,11 @@ Kriging (Lite) implementation for ArchToolkit.
 
 - Goal: provide an Ordinary Kriging workflow without external providers
   (SAGA/GRASS) and without extra Python dependencies beyond numpy.
-- Scope: "Lite" = automatic variogram parameters + local neighborhood kriging.
+- Scope: "Lite" = HEURISTIC variogram parameters + local neighborhood kriging.
+  No empirical variogram is fitted: the model is fixed to exponential, the
+  nugget is 5% of sample variance, and the range is 3x the median
+  nearest-neighbour spacing. No anisotropy. The variance raster is therefore
+  assumption-driven — treat it as a relative (not calibrated) uncertainty map.
 
 This is intentionally conservative and best-effort:
 - Uses nearest N points per grid cell (fast enough for moderate grids).
@@ -53,7 +57,13 @@ def _as_float(value) -> Optional[float]:
 
 
 def _auto_value_field(layer: QgsVectorLayer) -> Optional[str]:
-    """Pick a likely numeric field name (best-effort)."""
+    """Pick a likely elevation field by NAME only.
+
+    Deliberately does NOT fall back to "first numeric field": that silently
+    kriged id/serial columns (a DEM of feature IDs). When no elevation-named
+    field exists the caller falls back to geometry Z, and 2D layers without one
+    fail loudly instead of interpolating garbage.
+    """
     if layer is None:
         return None
 
@@ -66,6 +76,8 @@ def _auto_value_field(layer: QgsVectorLayer) -> Optional[str]:
         "ELEV",
         "height",
         "HEIGHT",
+        "표고",
+        "고도",
         "z",
         "Z",
     ]
@@ -74,17 +86,6 @@ def _auto_value_field(layer: QgsVectorLayer) -> Optional[str]:
             idx = layer.fields().indexFromName(name)
             if idx >= 0:
                 return name
-    except Exception:
-        pass
-
-    # Fallback: first numeric field
-    try:
-        for f in layer.fields():
-            try:
-                if f.isNumeric():
-                    return f.name()
-            except Exception:
-                continue
     except Exception:
         pass
     return None
@@ -116,7 +117,10 @@ def _collect_point_samples(
     counts: Dict[Tuple[float, float], int] = {}
     coords: Dict[Tuple[float, float], Tuple[float, float]] = {}
 
-    # Gather samples (deduplicate by rounded XY)
+    # Gather samples (deduplicate by rounded XY). Iterating vertices() handles
+    # both Point and MultiPoint layers (asPoint() raised on multipoints, which
+    # silently skipped every feature and ended in "Not enough valid points").
+    use_field = bool((not use_geom_z) and field_name)
     for feat in layer.getFeatures():
         try:
             geom = feat.geometry()
@@ -125,39 +129,40 @@ def _collect_point_samples(
         if geom is None or geom.isEmpty():
             continue
 
+        field_z = None
+        if use_field:
+            try:
+                field_z = _as_float(feat[field_name])
+            except Exception:
+                field_z = None
+
         try:
-            pt = geom.asPoint()
+            vertices = list(geom.vertices())
         except Exception:
-            continue
+            vertices = []
 
-        x = _as_float(getattr(pt, "x", lambda: None)())
-        y = _as_float(getattr(pt, "y", lambda: None)())
-        if x is None or y is None:
-            continue
+        for vtx in vertices:
+            x = _as_float(vtx.x())
+            y = _as_float(vtx.y())
+            if x is None or y is None:
+                continue
 
-        z = None
-        if not use_geom_z and field_name:
-            try:
-                z = _as_float(feat[field_name])
-            except Exception:
-                z = None
-        if z is None:
-            # Geometry Z (3D points). QgsPointXY (from asPoint()) has no z();
-            # read the vertex, which is a QgsPoint carrying Z (NaN if 2D).
-            try:
-                vtx = geom.vertexAt(0)
-                zz = vtx.z()
-                z = _as_float(zz)
-            except Exception:
-                z = None
-        # reject None and NaN
-        if z is None or z != z:
-            continue
+            if use_field:
+                # An explicitly (or auto-)selected field is the single source
+                # of truth: rows with NULL/invalid values are SKIPPED, never
+                # silently mixed with geometry Z (possibly different units).
+                z = field_z
+            else:
+                # Geometry Z (3D points): vertices are QgsPoint carrying Z
+                # (NaN when the layer is 2D — rejected by _as_float).
+                z = _as_float(vtx.z())
+            if z is None or z != z:
+                continue
 
-        key = (round(x, dedup_round), round(y, dedup_round))
-        coords[key] = (x, y)
-        sums[key] = float(sums.get(key, 0.0)) + float(z)
-        counts[key] = int(counts.get(key, 0)) + 1
+            key = (round(x, dedup_round), round(y, dedup_round))
+            coords[key] = (x, y)
+            sums[key] = float(sums.get(key, 0.0)) + float(z)
+            counts[key] = int(counts.get(key, 0)) + 1
 
     points_xy: List[Tuple[float, float]] = []
     values: List[float] = []

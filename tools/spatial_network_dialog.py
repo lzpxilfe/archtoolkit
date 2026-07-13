@@ -657,7 +657,9 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
             <ul>
               <li><code>degree</code>: number of links.</li>
               <li><code>component</code> / <code>comp_size</code>: disconnected sub-networks and their sizes.</li>
-              <li><code>closeness</code>: how near a node is to the rest of the network.</li>
+              <li><code>closeness</code>: how near a node is to the rest of the network
+                  (Wasserman&ndash;Faust corrected: scores are scaled by the share of the
+                  network the node can reach, so isolated pairs no longer score highest).</li>
               <li><code>betweenness</code>: how strongly a node acts as a bridge between others.</li>
             </ul>
             """
@@ -732,7 +734,9 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
         <ul>
           <li><code>degree</code>: 연결 수(많을수록 ‘허브’ 후보).</li>
           <li><code>component</code>/<code>comp_size</code>: 네트워크가 몇 덩어리로 끊기는지, 각 덩어리의 크기.</li>
-          <li><code>closeness</code>: 전체에 ‘가까운’ 정도(노드가 많으면 느릴 수 있음).</li>
+          <li><code>closeness</code>: 전체에 ‘가까운’ 정도. Wasserman–Faust 보정 적용:
+              도달 가능한 노드 비율(r/(n−1))을 곱해, 고립된 소규모 컴포넌트가
+              만점을 받는 왜곡을 제거했습니다. (노드가 많으면 느릴 수 있음)</li>
           <li><code>betweenness</code>: 다른 노드 사이를 ‘중개’하는 정도(매우 느릴 수 있어 큰 데이터는 자동 스킵될 수 있음).</li>
         </ul>
         """
@@ -1645,6 +1649,18 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                 f"SNA: advanced metrics skipped (n={n} too large). Use smaller selection or disable advanced metrics.",
                 level=Qgis.Warning,
             )
+            # The user explicitly checked these boxes — tell them visibly, not
+            # just in the message log, that the fields will be missing.
+            try:
+                push_message(
+                    self.iface,
+                    "경고",
+                    f"노드가 많아(n={n}>500) Closeness/Betweenness 계산을 건너뛰었습니다. 결과에 해당 필드가 없습니다.",
+                    level=1,
+                    duration=8,
+                )
+            except Exception:
+                pass
             compute_closeness = False
             compute_betweenness = False
 
@@ -1771,7 +1787,13 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
             project.addMapLayer(layer)
 
     def _closeness_centrality(self, *, n: int, adj: List[List[int]]) -> List[float]:
+        """Closeness with the Wasserman–Faust component-size correction:
+        (r/Σd)·(r/(n−1)). Without it a node in an isolated 2-node pair scores
+        the maximum 1.0, which is backwards for the disconnected graphs
+        (threshold/LOS) this tool routinely produces."""
         out = [0.0] * int(n)
+        if n <= 1:
+            return out
         for s in range(int(n)):
             dist = [-1] * int(n)
             dist[s] = 0
@@ -1786,7 +1808,8 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
             if not reachable:
                 out[s] = 0.0
             else:
-                out[s] = float(len(reachable)) / float(sum(reachable))
+                r = float(len(reachable))
+                out[s] = (r / float(sum(reachable))) * (r / float(n - 1))
         return out
 
     def _betweenness_centrality(self, *, n: int, adj: List[List[int]]) -> List[float]:

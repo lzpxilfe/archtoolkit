@@ -1792,8 +1792,26 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
                     if value is None and results_dict:
                         # Fallback: get first available band value
                         value = list(results_dict.values())[0]
-                    
-                    if value is not None and value != dem_layer.dataProvider().sourceNoDataValue(1):
+
+                    # NoData handling: exact float equality misses the float32
+                    # round-trip of sentinels like -3.4e38 (leaked into charts
+                    # as elevation), and NaN passed entirely (NaN != x is
+                    # always True) — blanking the min/max scale. Use a finite
+                    # check plus a relative-tolerance NoData comparison.
+                    ok_val = False
+                    if value is not None:
+                        try:
+                            fv = float(value)
+                            if math.isfinite(fv):
+                                nd = dem_layer.dataProvider().sourceNoDataValue(1)
+                                if nd is None or not math.isfinite(float(nd)):
+                                    ok_val = True
+                                else:
+                                    ndf = float(nd)
+                                    ok_val = not math.isclose(fv, ndf, rel_tol=1e-6, abs_tol=1e-6)
+                        except (TypeError, ValueError):
+                            ok_val = False
+                    if ok_val:
                         dist = fraction * total_distance_m
                         self.profile_data.append({
                             'distance': dist,
@@ -2512,6 +2530,10 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
                 stats += f" | AOI 구간: {inside:.1f}m"
         except Exception:
             pass
+        # Disclose the chart smoothing: the curve is a ±3-sample moving average
+        # while these stats (and CSV/hover) use raw samples — undisclosed, the
+        # drawn peak visibly disagreeing with "최대" reads as a bug.
+        stats += " | 차트 곡선: ±3점 이동평균(통계/CSV는 원시값)"
         self.lblStats.setText(stats)
 
     def export_csv(self):
@@ -2762,41 +2784,46 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
         self._overlay_selection_handler = None
         self._profile_layer_id = None
         self._layer_tree_view = None
-        self._cleanup()
-     
-    def _cleanup(self):
-        """Internal cleanup method - removes rubber bands and restores map tool.
+        self._cleanup(remove_from_scene=True)
+
+    def _cleanup(self, remove_from_scene: bool = False):
+        """Internal cleanup - hides rubber bands and restores the map tool.
+
+        remove_from_scene must stay False for ordinary close/ESC: this dialog
+        is a reused singleton, and a QgsRubberBand removed from the canvas
+        scene is never re-added by show() — the draw preview and hover marker
+        would be invisible for every later session until QGIS restarts. Scene
+        removal is only correct on plugin unload.
 
         Note: saved profile line layers are kept (multi-profile library).
         """
         try:
-            # Clear rubber bands completely
+            # Clear rubber bands (reset+hide is enough between sessions)
             if hasattr(self, 'rubber_band') and self.rubber_band:
                 self.rubber_band.reset(QgsWkbTypes.LineGeometry)
                 self.rubber_band.hide()
-                # Try to remove from canvas scene
-                if self.canvas and self.canvas.scene():
+                if remove_from_scene and self.canvas and self.canvas.scene():
                     try:
                         self.canvas.scene().removeItem(self.rubber_band)
                     except Exception:
                         pass
-            
+
             if hasattr(self, 'hover_marker') and self.hover_marker:
                 self.hover_marker.reset(QgsWkbTypes.PointGeometry)
                 self.hover_marker.hide()
-                if self.canvas and self.canvas.scene():
+                if remove_from_scene and self.canvas and self.canvas.scene():
                     try:
                         self.canvas.scene().removeItem(self.hover_marker)
                     except Exception:
                         pass
-             
+
             # Restore original map tool
             if hasattr(self, 'original_tool') and self.original_tool:
                 try:
                     self.canvas.setMapTool(self.original_tool)
                 except Exception:
                     pass
-            
+
             # Refresh canvas
             if self.canvas:
                 self.canvas.refresh()

@@ -37,9 +37,15 @@ from qgis.core import (
     QgsWkbTypes, QgsFeatureRequest,
     QgsSingleBandPseudoColorRenderer, QgsRasterShader, QgsColorRampShader,
     QgsSingleBandGrayRenderer, QgsHillshadeRenderer,
-    QgsRasterBandStats, QgsLayerTreeLayer
+    QgsRasterBandStats, QgsLayerTreeLayer, QgsCoordinateTransform
 )
-from .utils import new_run_id, restore_ui_focus, push_message, set_archtoolkit_layer_metadata
+from .utils import (
+    get_archtoolkit_layer_metadata,
+    new_run_id,
+    push_message,
+    restore_ui_focus,
+    set_archtoolkit_layer_metadata,
+)
 from .help_dialog import show_help_dialog
 
 FORM_CLASS, _ = uic.loadUiType(os.path.join(
@@ -320,43 +326,57 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
                         'style_func': self.style_building_layer,
                     })
 
-                # 2.1 Create Vector Group
+                # 2.1 Create Vector Group. Re-run safety: the previous group
+                # must be torn down properly — dropping the node without
+                # deregistering plugin layers orphaned them, and source layers
+                # whose only tree node lived inside the group vanished from the
+                # layer panel permanently.
                 vector_group_name = "Style: 도면 데이터"
                 root = QgsProject.instance().layerTreeRoot()
                 vec_group = root.findGroup(vector_group_name)
                 if vec_group:
-                    root.removeChildNode(vec_group)
+                    self._teardown_style_group(vec_group, root)
                 vec_group = root.insertGroup(0, vector_group_name) # Always top for vector data
 
+                created_any = False
                 for task in tasks:
                     aggregated_layer = self.aggregate_features(source_layers, task.get('codes', []), task['name'], task.get("dest_geom", "line"))
                     if aggregated_layer:
                         # Add directly to group (layer was added with addMapLayer(False))
                         layer_node = QgsLayerTreeLayer(aggregated_layer)
                         vec_group.insertChildNode(0, layer_node)  # Insert at top
-                        
+
                         # Apply style
                         task['style_func'](aggregated_layer, 'Layer')
                         results.append(task['name'].replace("Style: ", ""))
+                        created_any = True
 
+                # 3. Move source layers into a hidden sub-group — but ONLY when
+                # something was actually created. A no-op run must not make the
+                # user's layers disappear behind an unchecked group.
+                if created_any:
+                    source_group_name = "원본 레이어 (숨김)"
+                    source_sub_group = vec_group.addGroup(source_group_name)
 
-                # 3. Move source layers into a hidden sub-group for unified control
-                source_group_name = "원본 레이어 (숨김)"
-                source_sub_group = vec_group.addGroup(source_group_name)
-                
-                for sl in source_layers:
-                    sl_node = root.findLayer(sl.id())
-                    if sl_node:
-                        # Clone and move to sub-group
-                        new_node = QgsLayerTreeLayer(sl)
-                        source_sub_group.addChildNode(new_node)
-                        # Remove from original location
-                        parent = sl_node.parent()
-                        if parent:
-                            parent.removeChildNode(sl_node)
-                
-                # Hide the source sub-group
-                source_sub_group.setItemVisibilityChecked(False)
+                    for sl in source_layers:
+                        sl_node = root.findLayer(sl.id())
+                        if sl_node:
+                            # Clone and move to sub-group
+                            new_node = QgsLayerTreeLayer(sl)
+                            source_sub_group.addChildNode(new_node)
+                            # Remove from original location
+                            parent = sl_node.parent()
+                            if parent:
+                                parent.removeChildNode(sl_node)
+
+                    # Hide the source sub-group
+                    source_sub_group.setItemVisibilityChecked(False)
+                else:
+                    # Nothing created: drop the empty group we just made.
+                    try:
+                        root.removeChildNode(vec_group)
+                    except Exception:
+                        pass
 
             # Final message
             if results:
@@ -371,17 +391,55 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
             restore_ui_focus(self)
 
 
+    def _teardown_style_group(self, group, root):
+        """Safely dismantle a previous run's style group:
+
+        1. Source layers hidden inside "원본 레이어 (숨김)" get a fresh node at
+           the root (otherwise their ONLY tree node dies with the group and the
+           layer vanishes from the panel until QGIS restarts).
+        2. Plugin-created layers (tagged tool_id="map_styling") are deregistered
+           from the project so they don't accumulate as orphans.
+        """
+        project = QgsProject.instance()
+        try:
+            hidden = group.findGroup("원본 레이어 (숨김)")
+            if hidden is not None:
+                for node in list(hidden.findLayers()):
+                    lyr = node.layer()
+                    if lyr is not None:
+                        root.insertChildNode(0, QgsLayerTreeLayer(lyr))
+        except Exception:
+            pass
+        try:
+            for node in list(group.findLayers()):
+                lyr = node.layer()
+                if lyr is None:
+                    continue
+                try:
+                    meta = get_archtoolkit_layer_metadata(lyr) or {}
+                    if str(meta.get("tool_id") or "") == "map_styling":
+                        project.removeMapLayer(lyr.id())
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        try:
+            root.removeChildNode(group)
+        except Exception:
+            pass
+
     def style_dem_background(self, source_raster):
         """Create a 3-layer styled background group from a single DEM"""
         run_id = str(getattr(self, "_style_run_id", "") or "").strip() or new_run_id("map_styling")
         
         group_name = f"Style: 배경 지형 ({source_raster.name()})"
         root = QgsProject.instance().layerTreeRoot()
-        
-        # Remove existing group if it exists
+
+        # Remove existing group if it exists (deregistering the plugin-created
+        # clone layers, so re-runs don't accumulate orphans)
         existing_group = root.findGroup(group_name)
         if existing_group:
-            root.removeChildNode(existing_group)
+            self._teardown_style_group(existing_group, root)
         
         group = root.addGroup(group_name)
         
@@ -488,21 +546,38 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
         dest_layer.updateFields()
         
         all_features = []
-        
+
         for sl in source_layers:
             field_name = self.detect_code_field(sl)
             if not field_name: continue
-            
+
+            # The destination layer uses source_layers[0]'s CRS; any other
+            # layer's raw coordinates would land in the wrong place. Reproject.
+            layer_ct = None
+            try:
+                if sl.crs() != source_layers[0].crs():
+                    layer_ct = QgsCoordinateTransform(
+                        sl.crs(), source_layers[0].crs(), QgsProject.instance()
+                    )
+            except Exception:
+                layer_ct = None
+
             quoted_codes = ", ".join(["'{}'".format(c) for c in codes])
             query = '"{}" IN ({})'.format(field_name, quoted_codes)
             request = QgsFeatureRequest().setFilterExpression(query)
-            
+
             for feat in sl.getFeatures(request):
                 new_feat = QgsFeature(dest_layer.fields())
                 code_val = feat.attribute(field_name)
                 new_feat.setAttributes([code_val])
-                
+
                 geom = feat.geometry()
+                if layer_ct is not None:
+                    try:
+                        geom = QgsGeometry(geom)
+                        geom.transform(layer_ct)
+                    except Exception:
+                        continue
                 if is_building:
                     # Robust polygonization for buildings
                     poly_geom = None
@@ -646,9 +721,11 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
     @staticmethod
     def _save_named_style(layer, path):
         try:
+            # saveNamedStyle returns (message: str, success: bool) — testing
+            # res[0] tested the MESSAGE (non-empty exactly on failure).
             res = layer.saveNamedStyle(path)
-            if isinstance(res, (tuple, list)):
-                return bool(res[0])
+            if isinstance(res, (tuple, list)) and len(res) >= 2:
+                return bool(res[1])
             return bool(res)
         except Exception:
             return False
