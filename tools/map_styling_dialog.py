@@ -283,6 +283,18 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
         source_layers = self.get_selected_layers()
         dem_layer = self.cmbDemLayer.currentLayer()
 
+        # Exclude this tool's own previous outputs from the source set: they are
+        # aggregated products, not DXF sources, and (critically) the up-front
+        # teardown below deletes them — iterating a deleted layer in
+        # aggregate_features would crash the run (e.g. after "Select All").
+        try:
+            source_layers = [
+                sl for sl in source_layers
+                if str((get_archtoolkit_layer_metadata(sl) or {}).get("tool_id") or "") != "map_styling"
+            ]
+        except Exception:
+            pass
+
         if not source_layers and not (self.chkDemStyling.isChecked() and dem_layer):
             push_message(self.iface, "오류", "시각화를 적용할 레이어를 선택해주세요.", level=2)
             restore_ui_focus(self)
@@ -326,17 +338,14 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
                         'style_func': self.style_building_layer,
                     })
 
-                # 2.1 Create Vector Group. Re-run safety: the previous group
-                # must be torn down properly — dropping the node without
-                # deregistering plugin layers orphaned them, and source layers
-                # whose only tree node lived inside the group vanished from the
-                # layer panel permanently.
+                # 2.1 Build the new group under a temporary name FIRST, and only
+                # tear down the previous run's group after we know this run
+                # actually produced something — otherwise a no-match run would
+                # destroy the existing outputs before creating any replacement.
                 vector_group_name = "Style: 도면 데이터"
                 root = QgsProject.instance().layerTreeRoot()
-                vec_group = root.findGroup(vector_group_name)
-                if vec_group:
-                    self._teardown_style_group(vec_group, root)
-                vec_group = root.insertGroup(0, vector_group_name) # Always top for vector data
+                tmp_group_name = f"Style: 도면 데이터 (작업중 {self._style_run_id})"
+                vec_group = root.insertGroup(0, tmp_group_name)
 
                 created_any = False
                 for task in tasks:
@@ -351,28 +360,32 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
                         results.append(task['name'].replace("Style: ", ""))
                         created_any = True
 
-                # 3. Move source layers into a hidden sub-group — but ONLY when
-                # something was actually created. A no-op run must not make the
-                # user's layers disappear behind an unchecked group.
                 if created_any:
+                    # Now it's safe to retire the previous run's group.
+                    old_group = root.findGroup(vector_group_name)
+                    if old_group:
+                        self._teardown_style_group(old_group, root)
+                    try:
+                        vec_group.setName(vector_group_name)
+                    except Exception:
+                        pass
+
+                    # 3. Move source layers into a hidden sub-group.
                     source_group_name = "원본 레이어 (숨김)"
                     source_sub_group = vec_group.addGroup(source_group_name)
 
                     for sl in source_layers:
                         sl_node = root.findLayer(sl.id())
                         if sl_node:
-                            # Clone and move to sub-group
                             new_node = QgsLayerTreeLayer(sl)
                             source_sub_group.addChildNode(new_node)
-                            # Remove from original location
                             parent = sl_node.parent()
                             if parent:
                                 parent.removeChildNode(sl_node)
 
-                    # Hide the source sub-group
                     source_sub_group.setItemVisibilityChecked(False)
                 else:
-                    # Nothing created: drop the empty group we just made.
+                    # Nothing created: drop the temp group; leave old outputs intact.
                     try:
                         root.removeChildNode(vec_group)
                     except Exception:

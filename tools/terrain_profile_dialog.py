@@ -2059,15 +2059,22 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
                 value = list(results_dict.values())[0]
             if value is None:
                 continue
+            # Same NoData handling as calculate_profile: exact == misses float32
+            # sentinel round-trips and lets NaN through (NaN != x is always True).
             try:
-                if value == dem_layer.dataProvider().sourceNoDataValue(1):
+                elev = float(value)
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(elev):
+                continue
+            try:
+                nd = dem_layer.dataProvider().sourceNoDataValue(1)
+                if nd is not None and math.isfinite(float(nd)) and math.isclose(
+                    elev, float(nd), rel_tol=1e-6, abs_tol=1e-6
+                ):
                     continue
             except Exception:
                 pass
-            try:
-                elev = float(value)
-            except Exception:
-                continue
             dist = fraction * total_distance_m
             self.profile_data.append({"distance": dist, "elevation": elev, "x": x_canvas, "y": y_canvas})
             valid_samples += 1

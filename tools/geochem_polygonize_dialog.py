@@ -35,7 +35,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
-from osgeo import gdal, ogr
+from osgeo import gdal, ogr, osr
 
 import processing
 from qgis.PyQt import QtWidgets
@@ -353,8 +353,24 @@ def _gdal_rasterize_wkt_mask(
     ds.SetProjection(projection_wkt)
     band = ds.GetRasterBand(1)
     band.Fill(0)
+    # gdal.RasterizeGeometries does NOT exist in the GDAL Python bindings —
+    # burn the geometry through an in-memory OGR layer + gdal.RasterizeLayer
+    # (the only Create-driver rasterize API available), otherwise the whole
+    # AOI mask was a silent no-op and zonal stats came back empty.
     try:
-        gdal.RasterizeGeometries(ds, [1], [geom], burn_values=[1], options=["ALL_TOUCHED=TRUE"])
+        vdrv = ogr.GetDriverByName("Memory")
+        vds = vdrv.CreateDataSource("mask")
+        try:
+            srs = osr.SpatialReference()
+            srs.ImportFromWkt(str(projection_wkt))
+        except Exception:
+            srs = None
+        vlyr = vds.CreateLayer("mask", srs, ogr.wkbUnknown)
+        feat = ogr.Feature(vlyr.GetLayerDefn())
+        feat.SetGeometry(geom)
+        vlyr.CreateFeature(feat)
+        gdal.RasterizeLayer(ds, [1], vlyr, burn_values=[1], options=["ALL_TOUCHED=TRUE"])
+        vds = None
     except Exception:
         ds = None
         return None
@@ -1432,11 +1448,10 @@ value/class 래스터와 폴리곤을 생성합니다.
                 except Exception:
                     aoi_geom_raster = None
         except Exception as e:
-            log_message(f"GeoChem: extent transform failed: {e}", level=Qgis.Warning)
-            try:
-                aoi_geom_raster = QgsGeometry(aoi_geom)
-            except Exception:
-                aoi_geom_raster = None
+            # Transform failed outright: do NOT restore the untransformed AOI
+            # (it would mask in the wrong CRS and blank the output). Skip masking.
+            log_message(f"GeoChem: extent transform failed: {e} — AOI 마스킹을 건너뜁니다.", level=Qgis.Warning)
+            aoi_geom_raster = None
 
         if extent_export.isEmpty() or extent_export.width() <= 0 or extent_export.height() <= 0:
             push_message(self.iface, "오류", "조사지역 경계(사각형)가 비어있습니다.", level=2, duration=7)

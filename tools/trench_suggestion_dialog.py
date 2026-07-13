@@ -670,7 +670,7 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
             return False
         return _text_has_grave_keyword(" ".join(txts))
 
-    def _build_reference_index(self, layer: Optional[QgsVectorLayer], *, aoi_geom: QgsGeometry, aoi_crs):
+    def _build_reference_index(self, layer: Optional[QgsVectorLayer], *, aoi_geom: QgsGeometry, aoi_crs, radius_m: float = 0.0):
         idx = QgsSpatialIndex()
         geom_by_id: Dict[int, QgsGeometry] = {}
         if layer is None or not isinstance(layer, QgsVectorLayer):
@@ -679,7 +679,19 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
         try:
             g_on_layer = _transform_geom(aoi_geom, aoi_crs, layer.crs())
             if g_on_layer is not None and (not g_on_layer.isEmpty()):
-                req.setFilterRect(g_on_layer.boundingBox())
+                bb = g_on_layer.boundingBox()
+                # Grow the filter by the proximity radius so sites within the
+                # radius but outside the AOI bbox still feed ref_score (radius
+                # can be up to 10 km — much larger than the AOI).
+                grow = float(radius_m or 0.0)
+                try:
+                    if grow > 0 and layer.crs().isGeographic():
+                        grow = grow / 111320.0  # meters -> degrees for a geographic layer
+                except Exception:
+                    pass
+                if grow > 0:
+                    bb.grow(grow)
+                req.setFilterRect(bb)
         except Exception:
             pass
         for ft in layer.getFeatures(req):
@@ -1076,7 +1088,9 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
                 raise Exception("aspect/slope raster build failed")
 
             self._set_busy("주변 유적 인덱스/무덤 회피 마스크 준비 중…")
-            ref_idx, ref_geoms = self._build_reference_index(ref_layer, aoi_geom=aoi_geom, aoi_crs=aoi_layer.crs())
+            ref_idx, ref_geoms = self._build_reference_index(
+                ref_layer, aoi_geom=aoi_geom, aoi_crs=aoi_layer.crs(), radius_m=ref_radius_m
+            )
             grave_union, grave_count = self._build_grave_avoid_union(
                 topo_layer=topo_layer,
                 aoi_geom=aoi_geom,

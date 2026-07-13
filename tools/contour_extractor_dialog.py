@@ -175,9 +175,14 @@ class ContourExtractorDialog(QtWidgets.QDialog, FORM_CLASS):
             filtered_count = 0
             failed_names = []
             for layer in layers:
-                # Store original filter for undo
-                if layer.id() not in self.original_filters:
-                    self.original_filters[layer.id()] = layer.subsetString()
+                # Store original filter for undo. Persist it on the LAYER
+                # (custom property), not this dialog instance — the dialog is
+                # recreated per open and accept()s right after, so an
+                # instance-only map made 필터 초기화 a guaranteed no-op.
+                prop_key = "archtoolkit/contour_orig_filter"
+                if layer.customProperty(prop_key, None) is None:
+                    layer.setCustomProperty(prop_key, layer.subsetString())
+                self.original_filters.setdefault(layer.id(), layer.customProperty(prop_key, ""))
 
                 # setSubsetString returns False when the provider rejects the
                 # query (e.g. the layer has no "Layer" field) — count honestly.
@@ -187,8 +192,9 @@ class ContourExtractorDialog(QtWidgets.QDialog, FORM_CLASS):
                     failed_names.append(str(layer.name()))
                     # Restore whatever was there before and forget the entry.
                     try:
-                        layer.setSubsetString(self.original_filters.get(layer.id(), ""))
-                        del self.original_filters[layer.id()]
+                        layer.setSubsetString(layer.customProperty(prop_key, "") or "")
+                        layer.removeCustomProperty(prop_key)
+                        self.original_filters.pop(layer.id(), None)
                     except Exception:
                         pass
 
@@ -203,17 +209,24 @@ class ContourExtractorDialog(QtWidgets.QDialog, FORM_CLASS):
             self.iface.messageBar().pushMessage("오류", f"처리 중 오류: {str(e)}", level=2)
     
     def reset_filters(self):
-        """Reset filters on selected layers (undo)"""
+        """Reset filters on selected layers (undo). Reads the original filter
+        from the layer's custom property so it works even after the dialog was
+        closed and reopened (a fresh instance)."""
+        prop_key = "archtoolkit/contour_orig_filter"
         layers = self.get_selected_layers()
         if not layers:
-            # If no selection, reset all stored filters
+            # No selection: reset every layer this tool tagged (project-wide).
             reset_count = 0
-            for layer_id, original_filter in self.original_filters.items():
-                layer = QgsProject.instance().mapLayer(layer_id)
-                if layer:
-                    layer.setSubsetString(original_filter)
-                    reset_count += 1
-            self.original_filters.clear()
+            for layer in QgsProject.instance().mapLayers().values():
+                try:
+                    orig = layer.customProperty(prop_key, None)
+                    if orig is not None:
+                        layer.setSubsetString(orig or "")
+                        layer.removeCustomProperty(prop_key)
+                        self.original_filters.pop(layer.id(), None)
+                        reset_count += 1
+                except Exception:
+                    continue
             self.iface.messageBar().pushMessage("완료", f"{reset_count}개 레이어 필터 초기화 완료", level=0)
         else:
             # Reset only selected layers — but never blank out a filter this
@@ -221,9 +234,11 @@ class ContourExtractorDialog(QtWidgets.QDialog, FORM_CLASS):
             reset_count = 0
             skipped = 0
             for layer in layers:
-                if layer.id() in self.original_filters:
-                    layer.setSubsetString(self.original_filters[layer.id()])
-                    del self.original_filters[layer.id()]
+                orig = layer.customProperty(prop_key, None)
+                if orig is not None:
+                    layer.setSubsetString(orig or "")
+                    layer.removeCustomProperty(prop_key)
+                    self.original_filters.pop(layer.id(), None)
                     reset_count += 1
                 else:
                     skipped += 1
