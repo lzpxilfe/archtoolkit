@@ -58,6 +58,7 @@ from qgis.core import (
 from .help_dialog import show_help_dialog
 from .utils import (
     get_archtoolkit_layer_metadata,
+    is_categorical_raster_meta,
     log_exception,
     log_message,
     push_message,
@@ -252,15 +253,7 @@ class CovariateReportDialog(QtWidgets.QDialog):
             # Pearson/VIF on nominal class codes is statistically meaningless —
             # don't auto-check categorical rasters (geology, slope-position,
             # geochem class), and say why in the label.
-            kind0 = str(meta.get("kind") or "").lower()
-            units0 = str(meta.get("units") or "").lower()
-            tool0 = str(meta.get("tool_id") or "").lower()
-            is_categorical = (
-                units0 in ("class", "classes", "category")
-                or "class" in kind0
-                or "slope_position" in kind0
-                or "geology" in tool0
-            )
+            is_categorical = is_categorical_raster_meta(meta)
             label = lyr.name() + (f"   [{meta.get('tool_id')}/{meta.get('kind')}]" if is_arch else "")
             if is_categorical:
                 label += "  (범주형 — 상관/VIF 부적합)"
@@ -429,6 +422,8 @@ class CovariateReportDialog(QtWidgets.QDialog):
                 r = float(corr[i, j])
                 if i == j:
                     cell = "<td align='center'>1</td>"
+                elif r != r:  # NaN (a constant/degenerate variable) — mirror the VIF path
+                    cell = "<td align='center' style='color:#999'>계산불가</td>"
                 else:
                     hot = abs(r) >= _HIGH_CORR
                     style = "background:#fddbc7;font-weight:bold;" if hot else ""

@@ -39,6 +39,7 @@ Design
 from __future__ import annotations
 
 import csv
+import json
 import os
 from dataclasses import dataclass, field
 from typing import List, Optional
@@ -62,6 +63,7 @@ from .help_dialog import show_help_dialog
 from .live_log_dialog import ensure_live_log_dialog
 from .utils import (
     get_archtoolkit_layer_metadata,
+    is_categorical_raster_meta,
     log_exception,
     log_message,
     new_run_id,
@@ -71,7 +73,6 @@ from .utils import (
 )
 
 PARENT_GROUP_NAME = "ArchToolkit - 정렬 스택 (Aligned Stack)"
-_CATEGORICAL_HINTS = ("class", "category", "litho", "age", "geolog", "categor")
 
 
 class _Cancelled(Exception):
@@ -326,18 +327,10 @@ class AlignExportDialog(QtWidgets.QDialog):
             meta = get_archtoolkit_layer_metadata(lyr) or {}
             kind = str(meta.get("kind") or "")
             units = str(meta.get("units") or "")
-            tool_id = str(meta.get("tool_id") or "")
-            # Categorical detection must catch the toolkit's real outputs, not
-            # just kind-name hints: slope-position tags units="class", the
-            # KIGAM geology raster tags tool_id="geology_zip"/kind="raster",
-            # geochem tags kind="class_raster". Bilinear on class codes would
-            # blend them into meaningless fractional values.
-            categorical = (
-                any(h in kind.lower() for h in _CATEGORICAL_HINTS)
-                or units.lower() in ("class", "classes", "category")
-                or "geology" in tool_id.lower()
-                or "slope_position" in kind.lower()
-            )
+            # Categorical → nearest resampling (bilinear would blend class codes
+            # into meaningless fractional values). Shared helper keeps this in
+            # lockstep with the covariate report's exclusion rule.
+            categorical = is_categorical_raster_meta(meta)
             out.append(_Item(lid, lyr.name(), _safe_key(lyr.name(), used), kind, units, categorical))
         return out
 
@@ -481,15 +474,19 @@ class AlignExportDialog(QtWidgets.QDialog):
 
     def _write_manifest(self, export_dir, outputs, grid=None):
         try:
+            # Reference grid → its own JSON sidecar so the CSV's first row is the
+            # real column header (a bare `pandas.read_csv` / csv.DictReader used
+            # to mis-parse a leading `# reference_grid` comment row as the header).
+            if grid:
+                try:
+                    with open(os.path.join(export_dir, "aligned_stack_grid.json"), "w", encoding="utf-8") as gf:
+                        json.dump(dict(grid), gf, ensure_ascii=False, indent=2)
+                except Exception as e:
+                    log_exception("Align grid sidecar write error", e)
+
             path = os.path.join(export_dir, "aligned_stack_manifest.csv")
             with open(path, "w", newline="", encoding="utf-8-sig") as f:
                 w = csv.writer(f)
-                # Grid definition first — the facts a downstream modeler needs
-                # to verify alignment (CRS / pixel size / extent / NoData).
-                if grid:
-                    w.writerow(["# reference_grid"])
-                    for k in ("crs", "pixel_size", "extent", "continuous_nodata", "run_id"):
-                        w.writerow([f"# {k}", grid.get(k, "")])
                 w.writerow(["variable", "file", "source_layer", "kind", "units", "resampling"])
                 for o in outputs:
                     w.writerow([o["key"], os.path.basename(o["path"]), o["source"],

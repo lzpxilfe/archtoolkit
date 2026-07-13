@@ -737,7 +737,11 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
         layer.updateFields()
 
         feats = []
-        chunk_rows = 256
+        # Align the strip height to step_cells so the global sampling grid
+        # (row0 + dr, step step_cells) is continuous across strip boundaries —
+        # a fixed 256 not divisible by step_cells produced an uneven extra row
+        # of arrows at every boundary.
+        chunk_rows = max(int(step_cells), (256 // int(step_cells)) * int(step_cells)) if step_cells else 256
         for row0 in range(0, ysize, chunk_rows):
             rows_to_read = min(chunk_rows, ysize - row0)
             slope_arr = band_slope.ReadAsArray(0, row0, xsize, rows_to_read)

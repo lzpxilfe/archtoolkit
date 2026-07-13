@@ -807,6 +807,20 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
             if nodata is not None:
                 valid &= (z != nodata)
 
+            # Curvature is invariant to an additive constant. Subtracting the
+            # mean valid elevation drops working magnitudes from ~1000 m (a
+            # Korean LiDAR base) to relief scale, avoiding float32 catastrophic
+            # cancellation in the second-difference terms (verified: cuts
+            # sign-flips/large errors on sub-meter micro-relief) while keeping
+            # the float32 memory budget.
+            try:
+                if np.any(valid):
+                    z0 = float(np.mean(z[valid]))
+                    if np.isfinite(z0):
+                        z = z - np.float32(z0)
+            except Exception:
+                pass
+
             profile, plan = self._zt_curvature(z, cell)
 
             # NoData where any 3x3 neighbour is invalid, plus the 1-px border.
