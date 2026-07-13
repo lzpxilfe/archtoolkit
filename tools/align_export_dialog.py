@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import csv
 import json
+import math
 import os
 from dataclasses import dataclass
 from typing import List, Optional
@@ -55,6 +56,8 @@ from qgis.core import (
     QgsProcessingContext,
     QgsProcessingFeedback,
     QgsProject,
+    QgsPoint,
+    QgsRasterDataProvider,
     QgsRasterLayer,
     QgsRectangle,
     QgsVectorLayer,
@@ -63,8 +66,17 @@ from qgis.core import (
 from qgis.gui import QgsMapLayerComboBox
 
 from .atomic_output import cleanup_staging_dir, create_staging_dir, publish_staging_dir
+from .gdal_outcome import GdalOutcomeTracker
 from .help_dialog import show_help_dialog
 from .live_log_dialog import ensure_live_log_dialog
+from .raster_grid_contract import (
+    Extent,
+    GridContractError,
+    GridMismatchError,
+    RasterGrid,
+    canonical_gdal_target_grid,
+    validate_grid,
+)
 from .utils import (
     get_archtoolkit_layer_metadata,
     is_categorical_raster_meta,
@@ -77,22 +89,146 @@ from .utils import (
 )
 
 PARENT_GROUP_NAME = "ArchToolkit - 정렬 스택 (Aligned Stack)"
+CONTINUOUS_NODATA = -9999.0
 
 
 class _Cancelled(Exception):
     pass
 
 
-class _ErrorTrackingFeedback(QgsProcessingFeedback):
-    """Capture provider-reported errors which do not always fail a task."""
+class _GdalOutcomeFeedback(QgsProcessingFeedback):
+    """Preserve GDAL diagnostics and the provider's localized exit-0 marker."""
 
-    def __init__(self):
+    def __init__(self, success_marker):
         super().__init__()
-        self.errors: List[str] = []
+        self.outcome = GdalOutcomeTracker(success_marker)
 
     def reportError(self, error, fatalError=False):
-        self.errors.append(str(error))
+        self.outcome.record_diagnostic(str(error), fatal=bool(fatalError))
         super().reportError(error, fatalError)
+
+    def pushInfo(self, info):
+        self.outcome.record_info(str(info))
+        super().pushInfo(info)
+
+
+def _translated_gdal_success_marker() -> str:
+    """Return QGIS GDAL provider's localized exit-0 marker, or fail closed."""
+    try:
+        from processing.algs.gdal.GdalUtils import GdalUtils
+
+        marker = str(GdalUtils.tr("Process completed successfully"))
+    except Exception as exc:
+        raise RuntimeError(
+            "QGIS GDAL 공급자의 정상 종료 표식을 확인할 수 없습니다."
+        ) from exc
+    if not marker.strip():
+        raise RuntimeError("QGIS GDAL 공급자의 정상 종료 표식이 비어 있습니다.")
+    return marker
+
+
+def _qgs_rectangle_to_extent(rect: QgsRectangle) -> Extent:
+    return Extent(
+        rect.xMinimum(),
+        rect.xMaximum(),
+        rect.yMinimum(),
+        rect.yMaximum(),
+    )
+
+
+def _raster_grid_from_layer(layer: QgsRasterLayer) -> RasterGrid:
+    return RasterGrid(
+        width=int(layer.width()),
+        height=int(layer.height()),
+        extent=_qgs_rectangle_to_extent(layer.extent()),
+        resolution_x=abs(float(layer.rasterUnitsPerPixelX())),
+        resolution_y=abs(float(layer.rasterUnitsPerPixelY())),
+    )
+
+
+def _nodata_equal(actual, expected) -> bool:
+    if actual is None or expected is None:
+        return actual is None and expected is None
+    try:
+        actual_float = float(actual)
+        expected_float = float(expected)
+    except (TypeError, ValueError):
+        return False
+    if math.isnan(actual_float) or math.isnan(expected_float):
+        return math.isnan(actual_float) and math.isnan(expected_float)
+    return math.isclose(actual_float, expected_float, rel_tol=0.0, abs_tol=1e-9)
+
+
+def _source_nodata_values(layer: QgsRasterLayer, *, categorical: bool):
+    provider = layer.dataProvider()
+    if provider is None:
+        raise RuntimeError(f"입력 래스터 데이터 공급자를 열 수 없습니다: {layer.name()}")
+    values = []
+    for band in range(1, int(layer.bandCount()) + 1):
+        if categorical:
+            try:
+                has_nodata = bool(provider.sourceHasNoDataValue(band))
+            except Exception:
+                has_nodata = False
+            if has_nodata:
+                try:
+                    values.append(float(provider.sourceNoDataValue(band)))
+                except Exception:
+                    values.append(None)
+            else:
+                values.append(None)
+        else:
+            values.append(CONTINUOUS_NODATA)
+    return tuple(values)
+
+
+def _ensure_supported_reference_grid(layer: QgsRasterLayer, px: float, *, pixel_override: bool) -> None:
+    provider = layer.dataProvider()
+    if provider is None:
+        raise RuntimeError("기준 래스터 데이터 공급자를 열 수 없습니다.")
+
+    try:
+        origin = provider.transformCoordinates(
+            QgsPoint(0, 0),
+            QgsRasterDataProvider.TransformImageToLayer,
+        )
+        x_step = provider.transformCoordinates(
+            QgsPoint(1, 0),
+            QgsRasterDataProvider.TransformImageToLayer,
+        )
+        y_step = provider.transformCoordinates(
+            QgsPoint(0, 1),
+            QgsRasterDataProvider.TransformImageToLayer,
+        )
+    except Exception as exc:
+        raise RuntimeError("기준 래스터의 격자 변환을 확인할 수 없습니다.") from exc
+
+    tolerance = max(1e-9, abs(px) * 1e-9)
+    coordinates = (
+        float(origin.x()), float(origin.y()),
+        float(x_step.x()), float(x_step.y()),
+        float(y_step.x()), float(y_step.y()),
+    )
+    if not all(math.isfinite(value) for value in coordinates):
+        raise RuntimeError("기준 래스터의 격자 변환 값이 유효하지 않습니다.")
+    if (
+        abs(float(x_step.y()) - float(origin.y())) > tolerance
+        or abs(float(y_step.x()) - float(origin.x())) > tolerance
+    ):
+        raise RuntimeError(
+            "회전되거나 기울어진 기준 래스터는 현재 정렬/내보내기에서 지원하지 않습니다."
+        )
+
+    if not pixel_override:
+        try:
+            px_y = abs(float(layer.rasterUnitsPerPixelY()))
+        except Exception:
+            px_y = 0.0
+        if px_y <= 0.0 or not math.isclose(px, px_y, rel_tol=0.0, abs_tol=tolerance):
+            raise RuntimeError(
+                "비정사각 픽셀 기준 래스터는 현재 정렬/내보내기에서 지원하지 않습니다. "
+                "명시적인 픽셀 크기를 지정하거나 정사각 격자 기준 래스터를 사용하세요."
+            )
 
 
 @dataclass
@@ -102,6 +238,15 @@ class _Item:
     key: str
     kind: str
     units: str
+    categorical: bool
+
+
+@dataclass(frozen=True)
+class _WarpValidationContract:
+    crs: object
+    grid: RasterGrid
+    band_count: int
+    nodata_values: tuple
     categorical: bool
 
 
@@ -368,6 +513,7 @@ class AlignExportDialog(QtWidgets.QDialog):
             return
 
         px = float(self.spinPixel.value())
+        pixel_override = px > 0.0
         if px <= 0:
             try:
                 px = float(ref.rasterUnitsPerPixelX())
@@ -377,16 +523,31 @@ class AlignExportDialog(QtWidgets.QDialog):
             push_message(self.iface, "오류", "기준 픽셀 크기를 확인할 수 없습니다.", level=2, duration=6)
             return
 
-        ref_crs = ref.crs().authid()
-        extent_str = None
+        try:
+            _ensure_supported_reference_grid(ref, px, pixel_override=pixel_override)
+        except Exception as e:
+            push_message(self.iface, "오류", str(e), level=2, duration=8)
+            return
+
+        ref_crs = ref.crs()
+        requested_extent = None
         aoi = self.cmbAoi.currentLayer()
         if isinstance(aoi, QgsVectorLayer):
             ext = _aoi_extent_in_crs(aoi, selected_only=self.chkAoiSelected.isChecked(), dst_crs=ref.crs())
             if ext is not None and not ext.isEmpty():
-                extent_str = f"{ext.xMinimum()},{ext.xMaximum()},{ext.yMinimum()},{ext.yMaximum()}"
-        if extent_str is None:
+                requested_extent = _qgs_rectangle_to_extent(ext)
+        if requested_extent is None:
             e = ref.extent()
-            extent_str = f"{e.xMinimum()},{e.xMaximum()},{e.yMinimum()},{e.yMaximum()}"
+            requested_extent = _qgs_rectangle_to_extent(e)
+        try:
+            target_grid = canonical_gdal_target_grid(requested_extent, px, px)
+        except GridContractError as e:
+            push_message(self.iface, "오류", f"목표 격자를 계산할 수 없습니다: {e}", level=2, duration=8)
+            return
+        extent_str = (
+            f"{requested_extent.xmin},{requested_extent.xmax},"
+            f"{requested_extent.ymin},{requested_extent.ymax}"
+        )
 
         run_id = new_run_id("align")
         try:
@@ -427,6 +588,13 @@ class AlignExportDialog(QtWidgets.QDialog):
                 src = str(src_layer.source() or "").split("|", 1)[0].strip()
                 if not src:
                     raise RuntimeError(f"입력 경로를 확인할 수 없습니다: {item.name}")
+                expected = _WarpValidationContract(
+                    crs=ref_crs,
+                    grid=target_grid,
+                    band_count=int(src_layer.bandCount()),
+                    nodata_values=_source_nodata_values(src_layer, categorical=item.categorical),
+                    categorical=item.categorical,
+                )
                 out_path = os.path.join(staging_dir, f"{item.key}.tif")
                 self._warp(
                     src,
@@ -442,7 +610,7 @@ class AlignExportDialog(QtWidgets.QDialog):
                     raise _Cancelled()
                 if not os.path.isfile(out_path):
                     raise RuntimeError(f"정렬 출력이 생성되지 않았습니다: {item.name}")
-                self._validate_warp_output(out_path, item.name, ref_crs)
+                self._validate_warp_output(out_path, item.name, expected)
                 outputs.append({
                     "key": item.key, "path": out_path, "source": item.name,
                     "kind": item.kind, "units": item.units,
@@ -484,9 +652,29 @@ class AlignExportDialog(QtWidgets.QDialog):
 
         grid = {
             "crs": str(ref.crs().authid() or ""),
+            "crs_wkt": "" if ref.crs().authid() else str(ref.crs().toWkt() or ""),
             "pixel_size": px,
-            "extent": extent_str,
-            "continuous_nodata": -9999,
+            "pixel_size_x": target_grid.resolution_x,
+            "pixel_size_y": target_grid.resolution_y,
+            "width": target_grid.width,
+            "height": target_grid.height,
+            "requested_extent": {
+                "xmin": requested_extent.xmin,
+                "xmax": requested_extent.xmax,
+                "ymin": requested_extent.ymin,
+                "ymax": requested_extent.ymax,
+            },
+            "actual_extent": {
+                "xmin": target_grid.extent.xmin,
+                "xmax": target_grid.extent.xmax,
+                "ymin": target_grid.extent.ymin,
+                "ymax": target_grid.extent.ymax,
+            },
+            "extent": (
+                f"{target_grid.extent.xmin},{target_grid.extent.xmax},"
+                f"{target_grid.extent.ymin},{target_grid.extent.ymax}"
+            ),
+            "continuous_nodata": CONTINUOUS_NODATA,
             "run_id": run_id,
         }
         try:
@@ -543,7 +731,7 @@ class AlignExportDialog(QtWidgets.QDialog):
             "SOURCE_CRS": None,
             "TARGET_CRS": ref_crs,
             "RESAMPLING": 0 if nearest else 1,  # 0=nearest, 1=bilinear
-            "NODATA": None if nearest else -9999,
+            "NODATA": None if nearest else CONTINUOUS_NODATA,
             "TARGET_RESOLUTION": px,
             "OPTIONS": "",
             "DATA_TYPE": 0 if nearest else 6,  # categorical: keep type / continuous: Float32
@@ -559,7 +747,7 @@ class AlignExportDialog(QtWidgets.QDialog):
 
         context = QgsProcessingContext()
         context.setProject(QgsProject.instance())
-        feedback = _ErrorTrackingFeedback()
+        feedback = _GdalOutcomeFeedback(_translated_gdal_success_marker())
         task = QgsProcessingAlgRunnerTask(algorithm, params, context, feedback)
         loop = QEventLoop(self)
         state = {"finished": False, "successful": False, "results": {}}
@@ -589,35 +777,86 @@ class AlignExportDialog(QtWidgets.QDialog):
 
         if progress.wasCanceled() or feedback.isCanceled() or task.algorithmCanceled():
             raise _Cancelled()
-        if feedback.errors:
-            details = " | ".join(feedback.errors[-3:])
-            raise RuntimeError(f"GDAL 정렬 오류: {details[:1200]}")
         if not state["finished"] or not state["successful"]:
-            raise RuntimeError("GDAL 정렬 작업이 정상적으로 완료되지 않았습니다.")
+            diagnostics = feedback.outcome.decide().diagnostics
+            details = " | ".join(item.message for item in diagnostics[-3:])
+            suffix = f": {details[:1200]}" if details else ""
+            raise RuntimeError(f"GDAL 정렬 작업이 정상적으로 완료되지 않았습니다{suffix}")
+        outcome = feedback.outcome.decide()
+        if not outcome.succeeded:
+            details = " | ".join(item.message for item in outcome.diagnostics[-3:])
+            details = details or outcome.detail
+            raise RuntimeError(f"GDAL 정렬 종료 상태를 확인하지 못했습니다: {details[:1200]}")
+        if outcome.diagnostics:
+            details = " | ".join(item.message for item in outcome.diagnostics[-3:])
+            log_message(
+                f"GDAL alignment completed with non-fatal diagnostics: {details[:1200]}",
+                level=Qgis.Warning,
+            )
         result_path = str(state["results"].get("OUTPUT") or "")
         if result_path and os.path.realpath(result_path) != os.path.realpath(out):
             raise RuntimeError(f"GDAL 출력 경로가 요청과 다릅니다: {result_path}")
         return out
 
-    def _validate_warp_output(self, path, source_name, expected_crs):
+    def _validate_warp_output(self, path, source_name, expected):
         layer = QgsRasterLayer(path, "ArchToolkit alignment validation")
         if not layer.isValid():
             raise RuntimeError(f"정렬 결과를 열 수 없습니다: {source_name}")
         if layer.bandCount() < 1 or layer.width() < 1 or layer.height() < 1:
             raise RuntimeError(f"정렬 결과 격자가 비어 있습니다: {source_name}")
-        actual_crs = str(layer.crs().authid() or "")
-        if expected_crs and actual_crs and actual_crs != expected_crs:
+
+        actual_crs = layer.crs()
+        if expected.crs and actual_crs and actual_crs != expected.crs:
+            actual_label = str(actual_crs.authid() or actual_crs.description() or "")
+            expected_label = str(expected.crs.authid() or expected.crs.description() or "")
             raise RuntimeError(
-                f"정렬 결과 CRS가 기준과 다릅니다: {source_name} ({actual_crs} != {expected_crs})"
+                f"정렬 결과 CRS가 기준과 다릅니다: {source_name} ({actual_label} != {expected_label})"
             )
+
+        try:
+            actual_grid = _raster_grid_from_layer(layer)
+            validate_grid(actual_grid, expected.grid)
+        except GridMismatchError as e:
+            raise RuntimeError(
+                f"정렬 결과 격자가 기준과 다릅니다: {source_name} ({', '.join(e.fields)})"
+            ) from e
+        except GridContractError as e:
+            raise RuntimeError(f"정렬 결과 격자를 확인할 수 없습니다: {source_name} ({e})") from e
+
+        actual_band_count = int(layer.bandCount())
+        if actual_band_count != expected.band_count:
+            raise RuntimeError(
+                f"정렬 결과 band 수가 입력과 다릅니다: {source_name} "
+                f"({actual_band_count} != {expected.band_count})"
+            )
+
         provider = layer.dataProvider()
         if provider is None:
             raise RuntimeError(f"정렬 결과 데이터 공급자를 열 수 없습니다: {source_name}")
-        sample_width = min(32, layer.width())
-        sample_height = min(32, layer.height())
-        block = provider.block(1, layer.extent(), sample_width, sample_height)
-        if block is None or not block.isValid():
-            raise RuntimeError(f"정렬 결과 픽셀을 읽을 수 없습니다: {source_name}")
+
+        if len(expected.nodata_values) != actual_band_count:
+            raise RuntimeError(f"정렬 결과 NoData 계약이 band 수와 맞지 않습니다: {source_name}")
+        for band in range(1, actual_band_count + 1):
+            expected_nodata = expected.nodata_values[band - 1]
+            try:
+                has_nodata = bool(provider.sourceHasNoDataValue(band))
+                actual_nodata = float(provider.sourceNoDataValue(band)) if has_nodata else None
+            except Exception:
+                has_nodata = False
+                actual_nodata = None
+            if not _nodata_equal(actual_nodata, expected_nodata):
+                expected_label = "없음" if expected_nodata is None else expected_nodata
+                actual_label = "없음" if actual_nodata is None else actual_nodata
+                raise RuntimeError(
+                    f"정렬 결과 NoData가 기준과 다릅니다: {source_name} "
+                    f"band {band} ({actual_label} != {expected_label})"
+                )
+
+            sample_width = min(64, layer.width())
+            sample_height = min(64, layer.height())
+            block = provider.block(band, layer.extent(), sample_width, sample_height)
+            if block is None or not block.isValid():
+                raise RuntimeError(f"정렬 결과 픽셀을 읽을 수 없습니다: {source_name} band {band}")
 
     def _write_manifest(self, export_dir, outputs, grid=None):
         # Reference grid → its own JSON sidecar so the CSV's first row is the

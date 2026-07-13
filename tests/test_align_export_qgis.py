@@ -23,7 +23,12 @@ try:
     from qgis.core import QgsApplication, QgsRasterLayer
 
     from processing.core.Processing import Processing
-    from tools.align_export_dialog import AlignExportDialog, _Cancelled
+    from tools.align_export_dialog import (
+        AlignExportDialog,
+        _Cancelled,
+        _WarpValidationContract,
+    )
+    from tools.raster_grid_contract import Extent, RasterGrid, canonical_gdal_target_grid
 
     QGIS_AVAILABLE = True
 except ImportError as exc:  # pragma: no cover - exercised by dependency-free CI
@@ -65,7 +70,7 @@ class AlignExportQgisIntegrationTests(unittest.TestCase):
         spatial_ref.ImportFromEPSG(32652)
         return spatial_ref
 
-    def _create_raster(self, path, width, height, *, tiled=False):
+    def _create_raster(self, path, width, height, *, tiled=False, nodata=None):
         options = ["TILED=YES"] if tiled else []
         dataset = gdal.GetDriverByName("GTiff").Create(
             path,
@@ -78,8 +83,25 @@ class AlignExportQgisIntegrationTests(unittest.TestCase):
         self.assertIsNotNone(dataset)
         dataset.SetProjection(self._spatial_reference().ExportToWkt())
         dataset.SetGeoTransform((0, 1, 0, height, 0, -1))
-        dataset.GetRasterBand(1).Fill(1)
+        band = dataset.GetRasterBand(1)
+        if nodata is not None:
+            band.SetNoDataValue(nodata)
+        band.Fill(1)
         dataset = None
+
+    def _contract(self, grid, *, nodata=-9999.0):
+        crs = QgsRasterLayer(self._path("contract_crs_source.tif"), "missing").crs()
+        if not crs.isValid():
+            source = self._path("contract_crs_source.tif")
+            self._create_raster(source, 1, 1)
+            crs = QgsRasterLayer(source, "contract crs").crs()
+        return _WarpValidationContract(
+            crs=crs,
+            grid=grid,
+            band_count=1,
+            nodata_values=(nodata,),
+            categorical=False,
+        )
 
     @staticmethod
     def _progress_dialog():
@@ -142,7 +164,7 @@ class AlignExportQgisIntegrationTests(unittest.TestCase):
 
         progress = self._progress_dialog()
         self.addCleanup(progress.close)
-        with self.assertRaisesRegex(RuntimeError, "GDAL 정렬 오류"):
+        with self.assertRaisesRegex(RuntimeError, "GDAL 정렬"):
             AlignExportDialog._warp(
                 QObject(),
                 source,
@@ -152,6 +174,69 @@ class AlignExportQgisIntegrationTests(unittest.TestCase):
                 "EPSG:32652",
                 nearest=False,
                 progress=progress,
+            )
+
+    def test_nonmultiple_extent_validates_against_canonical_gdal_grid(self):
+        source = self._path("nonmultiple_source.tif")
+        output = self._path("nonmultiple_output.tif")
+        self._create_raster(source, 20, 20)
+        progress = self._progress_dialog()
+        self.addCleanup(progress.close)
+
+        AlignExportDialog._warp(
+            QObject(),
+            source,
+            output,
+            1.7,
+            "0.2,10.45,-1.3,6.9",
+            QgsRasterLayer(source, "source crs").crs(),
+            nearest=False,
+            progress=progress,
+        )
+        expected_grid = canonical_gdal_target_grid(
+            Extent(0.2, 10.45, -1.3, 6.9),
+            1.7,
+            1.7,
+        )
+
+        AlignExportDialog._validate_warp_output(
+            QObject(),
+            output,
+            "nonmultiple source",
+            self._contract(expected_grid),
+        )
+
+    def test_one_pixel_origin_shift_is_rejected_by_output_validation(self):
+        source = self._path("origin_source.tif")
+        output = self._path("origin_output.tif")
+        self._create_raster(source, 20, 20)
+        progress = self._progress_dialog()
+        self.addCleanup(progress.close)
+
+        AlignExportDialog._warp(
+            QObject(),
+            source,
+            output,
+            1.0,
+            "0,10,0,10",
+            "EPSG:32652",
+            nearest=False,
+            progress=progress,
+        )
+        shifted_grid = RasterGrid(
+            width=10,
+            height=10,
+            extent=Extent(1.0, 11.0, 0.0, 10.0),
+            resolution_x=1.0,
+            resolution_y=1.0,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "격자가 기준과 다릅니다"):
+            AlignExportDialog._validate_warp_output(
+                QObject(),
+                output,
+                "origin source",
+                self._contract(shifted_grid),
             )
 
 

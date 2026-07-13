@@ -18,6 +18,8 @@ jobs:
       - name: Unit tests (stdlib-only foundation)
         run: |
           python -m unittest tests.test_atomic_output -v
+          python -m unittest tests.test_gdal_outcome -v
+          python -m unittest tests.test_raster_grid_contract -v
           python -m unittest tests.test_align_export_qgis -v
           python -m unittest tests.test_release_identity -v
           python -m unittest tests.test_ui_assets -v
