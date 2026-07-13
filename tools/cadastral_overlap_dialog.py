@@ -285,17 +285,46 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
         except Exception:
             split_by_feature = False
 
+        # "선택 피처만" with an empty selection silently processed the WHOLE
+        # layer — a user whose selection was cleared got a full-layer result
+        # while believing it was restricted. Say so explicitly.
+        try:
+            notices = []
+            if survey_sel and survey.selectedFeatureCount() == 0:
+                notices.append("조사구역")
+            if cad_sel and cad.selectedFeatureCount() == 0:
+                notices.append("지적")
+            if notices:
+                push_message(
+                    self.iface,
+                    "알림",
+                    f"{'/'.join(notices)} 레이어에 선택된 피처가 없어 전체 피처로 계산합니다.",
+                    level=1,
+                    duration=7,
+                )
+        except Exception:
+            pass
+
         cad_crs = cad.crs()
         da = self._distance_area(cad_crs)
 
-        # Transform survey CRS -> cadastral CRS if needed
+        # Transform survey CRS -> cadastral CRS if needed. A failed transform
+        # must ABORT: silently keeping the untransformed geometry made every
+        # intersection empty and reported "겹침 없음" as a successful result.
         ct = None
         if survey.crs() != cad_crs:
             try:
                 ct = QgsCoordinateTransform(survey.crs(), cad_crs, QgsProject.instance())
             except Exception as e:
-                ct = None
                 log_message(f"CadastralOverlap: failed to build CRS transform (survey -> cad): {e}", level=Qgis.Warning)
+                push_message(
+                    self.iface,
+                    "오류",
+                    "조사구역과 지적 레이어의 좌표계 변환을 만들 수 없습니다. 두 레이어의 CRS를 확인하세요.",
+                    level=2,
+                    duration=8,
+                )
+                return
 
         # Output fields: cadastral + computed
         base_fields = list(cad.fields())
@@ -379,7 +408,9 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
                         gt.transform(ct)
                         g = _safe_make_valid(gt)
                     except Exception:
-                        pass
+                        # Skip rather than keep the untransformed geometry —
+                        # wrong-CRS coordinates would just yield "no overlap".
+                        continue
                 if g and (not g.isEmpty()):
                     try:
                         aoi_items.append((int(sf.id()), g))
@@ -566,6 +597,15 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
                 aoi = _safe_make_valid(aoi_t)
             except Exception as e:
                 log_message(f"CadastralOverlap: failed CRS transform AOI -> cad CRS: {e}", level=Qgis.Warning)
+                push_message(
+                    self.iface,
+                    "오류",
+                    "조사지역을 지적 레이어 좌표계로 변환하지 못했습니다. 결과가 왜곡되므로 중단합니다.",
+                    level=2,
+                    duration=8,
+                )
+                restore_ui_focus(self)
+                return
 
         aoi = _safe_make_valid(aoi)
         aoi_bbox = aoi.boundingBox()

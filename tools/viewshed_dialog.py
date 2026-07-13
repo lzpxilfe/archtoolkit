@@ -105,6 +105,18 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                 self.cmbAoiStatsLayer.setFilters(self._mlpm_filter.PolygonLayer)
         except Exception:
             pass
+
+        # The field-of-view (azimuth/width) spinboxes exist in the .ui but the
+        # analysis has no sector support (gdal_viewshed is 360°-only). Disable
+        # them honestly instead of letting users believe they take effect.
+        try:
+            for _w_name in ("spinAzimuth", "spinAngleWidth"):
+                _w = getattr(self, _w_name, None)
+                if _w is not None:
+                    _w.setEnabled(False)
+                    _w.setToolTip("미구현: 현재 모든 분석은 360° 전방향으로 수행됩니다.")
+        except Exception:
+            pass
         
         # Connect signals
         self.btnRun.clicked.connect(self.run_analysis)
@@ -1276,7 +1288,13 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         
         # Get parameters
         observer_height = self.spinObserverHeight.value()
-        target_height = self.spinTargetHeight.value()
+        # Target height only applies where its spinbox is enabled (LOS/reverse
+        # modes). In single/line/multi modes the widget is greyed out, so a
+        # leftover value must not silently alter the standard viewshed.
+        if self.spinTargetHeight.isEnabled():
+            target_height = self.spinTargetHeight.value()
+        else:
+            target_height = 0.0
         max_distance = self.spinMaxDistance.value()
         curvature = self.chkCurvature.isChecked()
         refraction = self.chkRefraction.isChecked()
@@ -1510,9 +1528,20 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             feat.setAttributes([1])
             features.append(feat)
         else:
-            for i, (pt, _) in enumerate(points_info):
+            # points_info carries each point's own CRS — transform to the layer
+            # CRS (canvas). Dropping the CRS placed layer-sourced or DEM-CRS
+            # points thousands of km off when it differed from the canvas.
+            dest_crs = self.canvas.mapSettings().destinationCrs()
+            for i, (pt, pt_crs) in enumerate(points_info):
+                pt_out = pt
+                try:
+                    if pt_crs is not None and pt_crs.isValid() and pt_crs != dest_crs:
+                        xform = QgsCoordinateTransform(pt_crs, dest_crs, QgsProject.instance())
+                        pt_out = xform.transform(pt)
+                except Exception:
+                    pt_out = pt
                 feat = QgsFeature(layer.fields())
-                feat.setGeometry(QgsGeometry.fromPointXY(pt))
+                feat.setGeometry(QgsGeometry.fromPointXY(pt_out))
                 attrs = [i + 1]
                 if has_weights:
                     try:
@@ -2420,9 +2449,17 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                 restore_ui_focus(self)
                 return
             if res_msg == QMessageBox.Yes:
-                step = max(1, len(points) // max_points)
-                points = points[::step][:max_points]
-                self.iface.messageBar().pushMessage("알림", f"대상점이 {len(points)}개로 샘플링되었습니다.", level=1)
+                # Evenly spaced indices across the whole sequence (see the
+                # multi-viewshed sampling note: step-based slicing truncates).
+                n_total = len(points)
+                idxs = sorted({
+                    int(round(i * (n_total - 1) / float(max_points - 1))) if max_points > 1 else 0
+                    for i in range(max_points)
+                })
+                points = [points[i] for i in idxs]
+                self.iface.messageBar().pushMessage(
+                    "알림", f"대상점이 전 구간에서 균등하게 {len(points)}개로 샘플링되었습니다.", level=1
+                )
 
         # Hide dialog only when processing starts
         self.hide()
@@ -3023,7 +3060,10 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             res = QMessageBox.warning(
                 self,
                 "경고",
-                f"가시선 길이({total_dist:.0f}m)가 기본 최대 분석 반경(1000m)을 초과합니다.\n계속 진행할까요?",
+                (
+                    f"가시선 길이가 {total_dist:.0f}m로 깁니다. 장거리에서는 DEM 해상도·지구곡률의 영향이 커집니다.\n"
+                    "(곡률/굴절 보정 체크박스가 가시선 판정에 반영됩니다)\n계속 진행할까요?"
+                ),
                 QMessageBox.Yes | QMessageBox.No,
                 QMessageBox.Yes,
             )
@@ -3042,15 +3082,30 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         num_samples = max(200, min(num_samples, 5000))
 
         profile_data = []
-        
+
         provider = dem_layer.dataProvider()
-        
+
+        # Honour the curvature/refraction checkboxes in LOS mode too (they were
+        # previously only applied to the gdal_viewshed modes). Same physics as
+        # gdal's -cc: apparent drop = cc·d²/(2R); cc=1 curvature-only, cc=1−k
+        # with atmospheric refraction. ~7.8 m at 10 km — decisive at long range.
+        cc = 0.0
+        try:
+            if hasattr(self, "chkCurvature") and self.chkCurvature.isChecked():
+                cc = 1.0
+                if hasattr(self, "chkRefraction") and self.chkRefraction.isChecked():
+                    k = float(self.spinRefraction.value()) if hasattr(self, "spinRefraction") else 0.13
+                    cc = max(0.0, 1.0 - k)
+        except Exception:
+            cc = 0.0
+        earth_r = 6371000.0
+
         for i in range(num_samples + 1):
             frac = i / num_samples
             x = observer_dem.x() + frac * dx
             y = observer_dem.y() + frac * dy
             dist = frac * total_dist
-            
+
             # Sample elevation from DEM
             elev, ok = provider.sample(QgsPointXY(x, y), 1)
             if not ok:
@@ -3061,6 +3116,8 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                 continue
             if math.isnan(elev_value):
                 continue
+            if cc > 0.0:
+                elev_value -= cc * (dist * dist) / (2.0 * earth_r)
             profile_data.append({
                 'distance': dist,
                 'elevation': elev_value,
@@ -3519,8 +3576,12 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             circular_mask = np.zeros((target_height, target_width), dtype=np.bool_)
             used_weight_sum = 0.0
             
-            # Universal meshgrid for clipping
+            # Universal meshgrid for clipping. float32 keeps the per-point
+            # broadcast temporaries at half the size (int64 ogrid minus a float
+            # scalar would promote the full HxW grid to float64).
             r_full, c_full = np.ogrid[:target_height, :target_width]
+            r_full = r_full.astype(np.float32)
+            c_full = c_full.astype(np.float32)
             
             # 3. Process each viewshed
             for pt_idx, vs_file in viewshed_files:
@@ -3556,9 +3617,9 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                 # Always calculate circular_mask for buffer-shape boundary
                 pt, pt_crs = observer_points[pt_idx]
                 pt_dem = self.transform_point(pt, pt_crs, dem_layer.crs())
-                c_col = (pt_dem.x() - target_xmin) / dem_xres
-                c_row = (target_ymax - pt_dem.y()) / dem_yres
-                rad_pix = max_dist / dem_xres
+                c_col = np.float32((pt_dem.x() - target_xmin) / dem_xres)
+                c_row = np.float32((target_ymax - pt_dem.y()) / dem_yres)
+                rad_pix = np.float32(max_dist / dem_xres)
                 point_mask = ((c_full - c_col)**2 + (r_full - c_row)**2 <= rad_pix**2)
                 circular_mask |= point_mask
                 
@@ -3671,20 +3732,36 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                     except Exception:
                         transform_to_dem = None
 
-                # Auto-hide labels to reduce clutter
+                # Interval sampling must run in a metric CRS: `interval` is in
+                # meters, but geom.length() is in LAYER units — on a geographic
+                # (degree) layer that yielded ~2 points for an entire feature.
+                # Transform to the DEM CRS (metric-guarded) before interpolating.
+                sample_transform = None
                 try:
-                    obs_layer.setLabelsEnabled(False)
+                    if obs_layer.crs() != dem_layer.crs():
+                        sample_transform = QgsCoordinateTransform(
+                            obs_layer.crs(), dem_layer.crs(), QgsProject.instance()
+                        )
                 except Exception:
-                    pass
-                
+                    sample_transform = None
+
+                def _to_dem_geom(g0):
+                    g1 = QgsGeometry(g0)
+                    if sample_transform is not None:
+                        try:
+                            g1.transform(sample_transform)
+                        except Exception:
+                            return None
+                    return g1
+
                 # Use selection if exists
                 selected_features = obs_layer.selectedFeatures()
                 target_features = selected_features if selected_features else obs_layer.getFeatures()
-                
+
                 for feat in target_features:
                     geom = feat.geometry()
                     if not geom or geom.isEmpty(): continue
-                    
+
                     if geom.type() == QgsWkbTypes.PointGeometry:
                         if geom.isMultipart():
                             for pt in geom.asMultiPoint():
@@ -3693,16 +3770,19 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                         else:
                             points.append((geom.asPoint(), obs_layer.crs()))
                             weights.append(1.0)
-                    
+
                     elif geom.type() == QgsWkbTypes.LineGeometry:
-                        length = geom.length()
+                        geom_m = _to_dem_geom(geom)
+                        if geom_m is None:
+                            continue
+                        length = geom_m.length()
                         num_pts = max(1, int(length / interval))
                         for i in range(num_pts + 1):
                             frac = i / num_pts if num_pts > 0 else 0
-                            pt = geom.interpolate(frac * length).asPoint()
-                            points.append((pt, obs_layer.crs()))
+                            pt = geom_m.interpolate(frac * length).asPoint()
+                            points.append((pt, dem_layer.crs()))
                             weights.append(1.0)
-                    
+
                     elif geom.type() == QgsWkbTypes.PolygonGeometry:
                         if want_cutout_input_polygon:
                             try:
@@ -3715,11 +3795,14 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                                 mask_geometries_dem.append(geom_dem)
                             except Exception:
                                 pass
-                        if geom.isMultipart():
-                            polygons = geom.asMultiPolygon()
+                        geom_m = _to_dem_geom(geom)
+                        if geom_m is None:
+                            continue
+                        if geom_m.isMultipart():
+                            polygons = geom_m.asMultiPolygon()
                         else:
-                            polygons = [geom.asPolygon()]
-                        
+                            polygons = [geom_m.asPolygon()]
+
                         for polygon in polygons:
                             if polygon and len(polygon) > 0:
                                 exterior_ring = polygon[0]
@@ -3729,7 +3812,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                                 for i in range(num_pts + 1):
                                     frac = i / num_pts if num_pts > 0 else 0
                                     pt = ring_geom.interpolate(frac * length).asPoint()
-                                    points.append((pt, obs_layer.crs()))
+                                    points.append((pt, dem_layer.crs()))
                                     weights.append(1.0)
         
         if not points or len(points) < 1:
@@ -3765,14 +3848,25 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                 self.activateWindow()
                 return
             elif res_msg == QMessageBox.Yes:
-                step = len(points) // MAX_POINTS
-                points = points[::step][:MAX_POINTS]
+                # Evenly spaced indices across the WHOLE sequence. The old
+                # `points[::N//M][:M]` kept only the first M points when
+                # M < N < 2M (step=1), silently discarding e.g. the far half
+                # of a rampart perimeter.
+                n_total = len(points)
+                idxs = sorted({
+                    int(round(i * (n_total - 1) / float(MAX_POINTS - 1))) if MAX_POINTS > 1 else 0
+                    for i in range(MAX_POINTS)
+                })
+                sel_points = [points[i] for i in idxs]
                 try:
                     if weights and len(weights) == total_needed:
-                        weights = weights[::step][:MAX_POINTS]
+                        weights = [weights[i] for i in idxs]
                 except Exception:
                     pass
-                self.iface.messageBar().pushMessage("알림", f"관측점이 {len(points)}개로 샘플링되었습니다.", level=1)
+                points = sel_points
+                self.iface.messageBar().pushMessage(
+                    "알림", f"관측점이 전 구간에서 균등하게 {len(points)}개로 샘플링되었습니다.", level=1
+                )
             else:
                 self.iface.messageBar().pushMessage("경고", f"{total_needed}개 전체 점에 대해 분석을 시작합니다. 처리 중 QGIS가 응답하지 않을 수 있습니다.", level=1)
 
@@ -3831,8 +3925,10 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
 
         temp_outputs = []
         viewshed_results = []
+        was_cancelled = False
         for i, (point, p_crs) in enumerate(points):
             if progress.wasCanceled():
+                was_cancelled = True
                 break
             progress.setValue(i)
             QtWidgets.QApplication.processEvents()
@@ -3872,7 +3968,22 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                 continue
         
         progress.setValue(len(points))
-        
+
+        if was_cancelled:
+            # Do not merge a partial set and present it as a complete result.
+            for p in temp_outputs:
+                try:
+                    os.remove(p)
+                except Exception:
+                    pass
+            self.iface.messageBar().pushMessage(
+                "취소",
+                f"누적 가시권 분석이 취소되었습니다 ({len(viewshed_results)}/{len(points)}개 지점 계산 후 중단, 결과 폐기).",
+                level=1,
+            )
+            self.show()
+            return
+
         if not viewshed_results:
             self.iface.messageBar().pushMessage("오류", "유효한 가시권 분석 결과를 생성하지 못했습니다. 보간 또는 범위 설정을 확인하세요.", level=2)
             self.show()

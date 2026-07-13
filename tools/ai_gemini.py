@@ -371,11 +371,25 @@ def generate_text(
 
 
 def _is_model_unavailable_error(err: Optional[str]) -> bool:
+    """True only for retired/unknown-MODEL errors (worth retrying a sibling).
+
+    Deliberately narrow: transient errors (503 "Service Unavailable", DNS
+    failures, timeouts) must NOT match — retrying 3 more models against a down
+    service just multiplies a 45 s timeout into minutes of busy dialog.
+    """
     low = str(err or "").lower()
-    return any(
-        k in low
-        for k in ("not found", "404", "is not supported", "does not exist", "not available", "unavailable")
-    )
+    if "503" in low or "service unavailable" in low or "overloaded" in low or "deadline" in low:
+        return False
+    if "host" in low and "not found" in low:  # Qt DNS failure wording
+        return False
+    # 404 / NOT_FOUND from the API body, or explicit unsupported-model wording.
+    if "404" in low or "not_found" in low:
+        return True
+    if ("model" in low) and any(
+        k in low for k in ("not found", "is not supported", "does not exist", "not available")
+    ):
+        return True
+    return False
 
 
 def generate_text_with_fallback(
@@ -394,7 +408,14 @@ def generate_text_with_fallback(
     actually produced the text (or the last one attempted on failure), so the
     caller can update its "provider" display when a fallback kicks in.
     """
-    seq = [str(model or "").strip() or DEFAULT_MODEL]
+    # An invalid model NAME (spaces, typo characters) would fail generate_text's
+    # validation with an error the unavailable-matcher doesn't recognize —
+    # skipping the fallback in the one case it was built for. Substitute the
+    # default up front instead.
+    primary = str(model or "").strip() or DEFAULT_MODEL
+    if not re.match(r"^[A-Za-z0-9._-]{1,64}$", primary):
+        primary = DEFAULT_MODEL
+    seq = [primary]
     for m in FALLBACK_MODELS:
         if m and m not in seq:
             seq.append(m)

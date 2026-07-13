@@ -218,14 +218,24 @@ def _sna_dijkstra_weighted(*, start: int, adj: List[List[Tuple[int, float]]]) ->
 
 
 def _sna_closeness_centrality_weighted(*, n: int, adj: List[List[Tuple[int, float]]]) -> List[float]:
+    """Closeness with the Wasserman–Faust component-size correction.
+
+    Plain reachable/sum(dist) rewards nodes in tiny isolated components (a
+    2-node pair scores the maximum) — backwards for disconnected graphs, which
+    k-NN networks routinely are. Scaling by reachable/(n-1) weights the score
+    by how much of the whole network the node can actually reach.
+    """
     out = [0.0] * int(n)
+    if n <= 1:
+        return out
     for s in range(int(n)):
         dist = _sna_dijkstra_weighted(start=s, adj=adj)
         reachable = [d for d in dist if 0.0 < float(d) < math.inf]
         if not reachable:
             out[s] = 0.0
         else:
-            out[s] = float(len(reachable)) / float(sum(reachable))
+            r = float(len(reachable))
+            out[s] = (r / float(sum(reachable))) * (r / float(n - 1))
     return out
 
 
@@ -521,19 +531,25 @@ class CostNetworkWorker(QgsTask):
 
             ax, ay = coords[a, 0], coords[a, 1]
             bx, by = coords[b, 0], coords[b, 1]
-            minx = min(ax, bx) - self.pair_buffer_m
-            maxx = max(ax, bx) + self.pair_buffer_m
-            miny = min(ay, by) - self.pair_buffer_m
-            maxy = max(ay, by) + self.pair_buffer_m
-
-            xoff, yoff, win_xsize, win_ysize = _bbox_window(gt, xsize, ysize, minx, miny, maxx, maxy)
+            if self.pair_buffer_m <= 0:
+                # Documented behavior: 0 = full DEM (still bounded by max_cells).
+                # Without this, two nodes sharing an x or y coordinate get a
+                # 1-cell strip that forces a terrain-blind straight path.
+                xoff, yoff, win_xsize, win_ysize = 0, 0, int(xsize), int(ysize)
+            else:
+                minx = min(ax, bx) - self.pair_buffer_m
+                maxx = max(ax, bx) + self.pair_buffer_m
+                miny = min(ay, by) - self.pair_buffer_m
+                maxy = max(ay, by) + self.pair_buffer_m
+                xoff, yoff, win_xsize, win_ysize = _bbox_window(gt, xsize, ysize, minx, miny, maxx, maxy)
             cell_count = int(win_xsize * win_ysize)
             if cell_count > max_cells:
                 return NetworkTaskResult(
                     ok=False,
                     message=(
                         f"후보 쌍 중 일부의 분석 창이 너무 큽니다 ({cell_count:,} cells). "
-                        "경로 버퍼(m)를 줄이거나 후보 간선(k)를 줄이세요."
+                        "경로 버퍼(m)를 줄이거나 후보 간선(k)를 줄이세요. "
+                        "(버퍼 0=DEM 전체는 작은 DEM에서만 권장)"
                     ),
                 )
 

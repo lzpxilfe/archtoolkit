@@ -57,6 +57,9 @@ from .utils import (
 )
 
 
+# Saaty random consistency index, extended to n=15 (Saaty 1980; Alonso &
+# Lamata 2006 for n>10). CR is undefined beyond the table — callers must not
+# silently report 0.0 for larger matrices.
 _RI_TABLE = {
     1: 0.00,
     2: 0.00,
@@ -68,6 +71,11 @@ _RI_TABLE = {
     8: 1.41,
     9: 1.45,
     10: 1.49,
+    11: 1.51,
+    12: 1.54,
+    13: 1.56,
+    14: 1.57,
+    15: 1.58,
 }
 
 
@@ -200,8 +208,10 @@ def _ahp_weights_from_matrix(mat: "np.ndarray") -> Tuple[List[float], float, flo
             cr = 0.0
         else:
             ci = (float(lam) - float(n)) / float(n - 1)
-            ri = float(_RI_TABLE.get(n, 0.0))
-            cr = float(ci / ri) if ri > 0 else 0.0
+            ri = _RI_TABLE.get(n)
+            # Beyond the RI table CR is undefined; NaN (rendered as "-") is
+            # honest, whereas 0.0 would falsely certify consistency.
+            cr = float(ci / float(ri)) if (ri is not None and float(ri) > 0) else float("nan")
     except Exception:
         cr = float("nan")
     return w, float(lam), float(cr)
@@ -568,6 +578,13 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
             except Exception:
                 poly_filter = QgsMapLayerProxyModel.PolygonLayer
             self.cmbAoi.setFilters(poly_filter)
+        except Exception:
+            pass
+        # Optional input: default to "no AOI" so an arbitrary polygon layer is
+        # never silently used to clip the output.
+        try:
+            self.cmbAoi.setAllowEmptyLayer(True)
+            self.cmbAoi.setCurrentIndex(0)
         except Exception:
             pass
         form.addRow("AOI(선택):", self.cmbAoi)
@@ -1513,23 +1530,35 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
                 raise Exception("구간 점수표에 서로 겹치는 구간이 있습니다. 범위를 다시 조정하세요.")
         return rows
 
+    @staticmethod
+    def _clamp01(expr: str) -> str:
+        # gdal_calc evaluates formulas in the numpy namespace, so numpy's
+        # minimum/maximum are available. Clamping keeps scores in [0,1] even
+        # when pixels fall outside the [mn,mx] stats range (e.g. AOI-based
+        # stats with full-raster compute).
+        return f"minimum(maximum(({expr}), 0.0), 1.0)"
+
     def _criterion_score_formula(self, crit: _Criterion, *, mn: float, mx: float) -> str:
         mode = str(crit.direction or "benefit")
         if mode == "cost":
-            return f"({mx} - A) / ({mx} - {mn})"
+            return self._clamp01(f"({mx} - A) / ({mx} - {mn})")
         if mode == "target":
             target = crit.target_v
             try:
                 target0 = float(target) if target is not None else None
             except Exception:
                 target0 = None
-            if target0 is None or (not math.isfinite(target0)) or target0 <= mn or target0 >= mx:
+            if target0 is None or (not math.isfinite(target0)) or target0 < mn or target0 > mx:
                 target0 = mn + ((mx - mn) / 2.0)
-            left_denom = float(target0 - mn)
-            right_denom = float(mx - target0)
-            if left_denom <= 0 or right_denom <= 0:
-                return f"(A - {mn}) / ({mx} - {mn})"
-            return (
+            # A target at (or beyond) a boundary degrades naturally to a pure
+            # ramp instead of being silently recentred at the midpoint:
+            # target==mn means "smaller is better" (cost ramp), target==mx
+            # means "larger is better" (benefit ramp).
+            if target0 <= mn:
+                return self._clamp01(f"({mx} - A) / ({mx} - {mn})")
+            if target0 >= mx:
+                return self._clamp01(f"(A - {mn}) / ({mx} - {mn})")
+            return self._clamp01(
                 f"((A <= {target0}) * ((A - {mn}) / ({target0} - {mn}))) + "
                 f"((A > {target0}) * (({mx} - A) / ({mx} - {target0})))"
             )
@@ -1553,14 +1582,14 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
             if prefer_min <= mn and prefer_max >= mx:
                 return "A*0 + 1"
             if prefer_min <= mn:
-                if prefer_max >= mx:
-                    return "A*0 + 1"
-                return f"(({mx} - A) / ({mx} - {prefer_max})) * (A > {prefer_max}) + ((A <= {prefer_max}) * 1)"
+                return self._clamp01(
+                    f"(({mx} - A) / ({mx} - {prefer_max})) * (A > {prefer_max}) + ((A <= {prefer_max}) * 1)"
+                )
             if prefer_max >= mx:
-                if prefer_min <= mn:
-                    return "A*0 + 1"
-                return f"((A - {mn}) / ({prefer_min} - {mn})) * (A < {prefer_min}) + ((A >= {prefer_min}) * 1)"
-            return (
+                return self._clamp01(
+                    f"((A - {mn}) / ({prefer_min} - {mn})) * (A < {prefer_min}) + ((A >= {prefer_min}) * 1)"
+                )
+            return self._clamp01(
                 f"((A < {prefer_min}) * ((A - {mn}) / ({prefer_min} - {mn}))) + "
                 f"(((A >= {prefer_min}) * (A <= {prefer_max})) * 1) + "
                 f"((A > {prefer_max}) * (({mx} - A) / ({mx} - {prefer_max})))"
@@ -1583,7 +1612,7 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
                 else:
                     parts.append(f"(((A >= {lo}) * (A < {hi})) * {score})")
             return " + ".join(parts) if parts else "A*0"
-        return f"(A - {mn}) / ({mx} - {mn})"
+        return self._clamp01(f"(A - {mn}) / ({mx} - {mn})")
 
     def _processing_warp_to_reference(
         self,
@@ -1593,6 +1622,8 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
         out_path: str,
         extent_str: Optional[str],
         extent_crs_authid: Optional[str],
+        resampling: int = 1,  # 1=bilinear (continuous); use 0=nearest for categorical/reclass
+        nodata: Optional[float] = -9999.0,
     ) -> str:
         pixel = None
         try:
@@ -1606,11 +1637,13 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
             "INPUT": str(input_path),
             "SOURCE_CRS": None,
             "TARGET_CRS": str(ref_layer.crs().authid() or ""),
-            "RESAMPLING": 1,  # bilinear
-            "NODATA": None,
+            "RESAMPLING": int(resampling),
+            # Declare an output NoData so extent-fill areas are flagged invalid
+            # instead of silently becoming value 0.
+            "NODATA": nodata,
             "TARGET_RESOLUTION": pixel,
             "OPTIONS": "",
-            "DATA_TYPE": 0,
+            "DATA_TYPE": 6,  # Float32: avoid integer truncation of source values
             "TARGET_EXTENT": extent_str,
             "TARGET_EXTENT_CRS": extent_crs_authid,
             "MULTITHREADING": False,
@@ -1628,7 +1661,11 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
         formula: str,
         out_path: str,
         rtype: int = 5,  # Float32
+        no_data: Optional[float] = -9999.0,
     ) -> str:
+        # NO_DATA is essential: gdal_calc replaces output pixels where ANY input
+        # equals its declared NoData with this value AND flags it on the band.
+        # Without it, gdal_calc silently uses the Float32 default 3.402823e38.
         params: Dict[str, Any] = {
             "INPUT_A": str(input_a),
             "BAND_A": 1,
@@ -1636,6 +1673,8 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
             "OUTPUT": str(out_path),
             "RTYPE": int(rtype),
         }
+        if no_data is not None:
+            params["NO_DATA"] = float(no_data)
         if input_b:
             params["INPUT_B"] = str(input_b)
             params["BAND_B"] = 1
@@ -1855,24 +1894,58 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
                 pass
 
         # 6) Compute suitability
+        #
+        # NoData design: every warp/calc step declares NO_DATA=-9999. gdal_calc
+        # then propagates invalidity itself — any pixel where ANY input equals
+        # its NoData is written as -9999 and flagged on the band — so the
+        # chained accumulator (A + B) naturally yields the intersection of all
+        # criteria's valid areas. No separate validity raster is needed.
         try:
             push_message(self.iface, "AHP", "래스터 정규화/가중합 계산 중…", level=0, duration=6)
 
             align = bool(self.chkAlignToFirst.isChecked())
-            acc_path = None       # weighted-score accumulator
-            vacc_path = None      # validity accumulator: 1 only where EVERY layer is valid
+            acc_path = None  # weighted-score accumulator
             nodata_sentinel = -9999.0
 
-            def _nodata_of(path):
+            # With "align" on but no AOI extent, default the target grid to the
+            # reference layer's extent so every warped criterion shares one grid
+            # (otherwise each keeps its own extent and A+B aborts on size mismatch).
+            if align and not extent_str:
                 try:
-                    probe = QgsRasterLayer(str(path), "nd_probe")
-                    if probe.isValid():
-                        nd = probe.dataProvider().sourceNoDataValue(1)
-                        if nd is not None and math.isfinite(float(nd)):
-                            return float(nd)
+                    re0 = ref_layer.extent()
+                    if re0 is not None and (not re0.isEmpty()):
+                        extent_str = f"{re0.xMinimum()},{re0.xMaximum()},{re0.yMinimum()},{re0.yMaximum()}"
+                        extent_crs = str(ref_layer.crs().authid() or "")
                 except Exception:
                     pass
-                return None
+
+            def _grid_signature(lyr0):
+                try:
+                    e = lyr0.extent()
+                    return (
+                        str(lyr0.crs().authid() or ""),
+                        int(lyr0.width()), int(lyr0.height()),
+                        round(float(e.xMinimum()), 6), round(float(e.yMinimum()), 6),
+                        round(float(e.xMaximum()), 6), round(float(e.yMaximum()), 6),
+                    )
+                except Exception:
+                    return None
+
+            # With "align" off the rasters are combined pixel-by-pixel as-is, so
+            # they must already share one grid. gdal_calc only checks the pixel
+            # counts — a same-size raster in a different place would be summed
+            # with wrong georeferencing. Verify properly and fail loudly.
+            if not align:
+                ref_sig = _grid_signature(ref_layer)
+                for c in self._criteria:
+                    lyr0 = self._criterion_layer(c)
+                    if lyr0 is None:
+                        continue
+                    if _grid_signature(lyr0) != ref_sig:
+                        raise Exception(
+                            f"기준 레이어 '{lyr0.name()}'의 그리드(CRS/범위/해상도)가 첫 레이어와 다릅니다. "
+                            "'첫 레이어에 정렬' 옵션을 켜세요."
+                        )
 
             for idx, c in enumerate(self._criteria):
                 lyr = self._criterion_layer(c)
@@ -1883,6 +1956,7 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
                 if not src0:
                     raise Exception("래스터 소스 경로를 읽을 수 없습니다.")
 
+                is_reclass = str(c.direction or "") == "reclass"
                 in_path = src0
                 if align:
                     warped = _tmp(f"warp_{idx}")
@@ -1892,6 +1966,10 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
                         out_path=warped,
                         extent_str=extent_str,
                         extent_crs_authid=extent_crs,
+                        # Reclass criteria are categorical: bilinear would blend
+                        # class codes into values between the score intervals.
+                        resampling=0 if is_reclass else 1,
+                        nodata=nodata_sentinel,
                     )
 
                 try:
@@ -1902,11 +1980,6 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
 
                 if mn is None or mx is None or (not math.isfinite(mn)) or (not math.isfinite(mx)):
                     raise Exception(f"min/max 통계가 없습니다: {lyr.name()}")
-
-                # NoData mask term: 1 where valid, 0 where NoData. Prevents -9999
-                # cells from polluting the weighted sum where rasters don't overlap.
-                nd = _nodata_of(in_path)
-                valid_term = f"(A != {nd})" if nd is not None else "(A*0 + 1)"
 
                 denom = float(mx - mn)
                 if (not math.isfinite(denom)) or denom == 0:
@@ -1919,50 +1992,36 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
                 weighted_path = _tmp(f"w_{idx}")
                 self._processing_raster_calc(
                     input_a=in_path,
-                    formula=f"({score_formula} * {valid_term}) * {w0}",
+                    formula=f"{score_formula} * {w0}",
                     out_path=weighted_path,
+                    no_data=nodata_sentinel,
                 )
 
                 if acc_path is None:
                     acc_path = weighted_path
                 else:
                     new_acc = _tmp(f"acc_{idx}")
-                    self._processing_raster_calc(input_a=acc_path, input_b=weighted_path, formula="A + B", out_path=new_acc)
+                    self._processing_raster_calc(
+                        input_a=acc_path, input_b=weighted_path, formula="A + B",
+                        out_path=new_acc, no_data=nodata_sentinel,
+                    )
                     _safe_rm(acc_path)
                     _safe_rm(weighted_path)
                     acc_path = new_acc
-
-                # accumulate validity (product of per-layer valid masks)
-                if vacc_path is None:
-                    vpath = _tmp(f"v_{idx}")
-                    self._processing_raster_calc(input_a=in_path, formula=valid_term, out_path=vpath)
-                    vacc_path = vpath
-                else:
-                    new_v = _tmp(f"v_{idx}")
-                    combine = f"A * (B != {nd})" if nd is not None else "A"
-                    self._processing_raster_calc(input_a=vacc_path, input_b=in_path, formula=combine, out_path=new_v)
-                    _safe_rm(vacc_path)
-                    vacc_path = new_v
 
             if acc_path is None:
                 raise Exception("가중합 결과를 생성할 수 없습니다.")
 
             if self.chkScale100.isChecked():
                 scaled = _tmp("scaled")
-                self._processing_raster_calc(input_a=acc_path, formula="A * 100.0", out_path=scaled)
+                self._processing_raster_calc(
+                    input_a=acc_path, formula="A * 100.0", out_path=scaled,
+                    no_data=nodata_sentinel,
+                )
                 _safe_rm(acc_path)
                 acc_path = scaled
 
-            # Mask NoData: keep value where all layers valid, else the sentinel.
-            if vacc_path is not None:
-                masked = _tmp("masked")
-                self._processing_raster_calc(
-                    input_a=acc_path, input_b=vacc_path,
-                    formula=f"A * B + ({nodata_sentinel}) * (1 - B)", out_path=masked,
-                )
-                _safe_rm(acc_path)
-                acc_path = masked
-                self._suitability_nodata = nodata_sentinel
+            self._suitability_nodata = nodata_sentinel
 
             final_path = out_path_user
             if os.path.abspath(acc_path) != os.path.abspath(final_path):

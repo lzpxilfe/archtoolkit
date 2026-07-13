@@ -173,20 +173,30 @@ class ContourExtractorDialog(QtWidgets.QDialog, FORM_CLASS):
             query = '"Layer" IN (' + ','.join([f"'{c}'" for c in codes]) + ')'
             
             filtered_count = 0
+            failed_names = []
             for layer in layers:
                 # Store original filter for undo
                 if layer.id() not in self.original_filters:
                     self.original_filters[layer.id()] = layer.subsetString()
-                
-                # Apply filter
-                layer.setSubsetString(query)
-                filtered_count += 1
-            
-            push_message(
-                self.iface, "완료", 
-                f"{filtered_count}개 레이어에 등고선 필터 적용 완료 ({len(codes)}개 유형)", 
-                level=0
-            )
+
+                # setSubsetString returns False when the provider rejects the
+                # query (e.g. the layer has no "Layer" field) — count honestly.
+                if layer.setSubsetString(query):
+                    filtered_count += 1
+                else:
+                    failed_names.append(str(layer.name()))
+                    # Restore whatever was there before and forget the entry.
+                    try:
+                        layer.setSubsetString(self.original_filters.get(layer.id(), ""))
+                        del self.original_filters[layer.id()]
+                    except Exception:
+                        pass
+
+            msg = f"{filtered_count}개 레이어에 등고선 필터 적용 완료 ({len(codes)}개 유형)"
+            if failed_names:
+                msg += f" / 적용 실패 {len(failed_names)}개: {', '.join(failed_names[:3])}"
+                msg += ' ("Layer" 필드가 없는 레이어일 수 있습니다)'
+            push_message(self.iface, "완료" if filtered_count else "경고", msg, level=0 if filtered_count else 1)
             self.accept()
             
         except Exception as e:
@@ -206,16 +216,21 @@ class ContourExtractorDialog(QtWidgets.QDialog, FORM_CLASS):
             self.original_filters.clear()
             self.iface.messageBar().pushMessage("완료", f"{reset_count}개 레이어 필터 초기화 완료", level=0)
         else:
-            # Reset only selected layers
+            # Reset only selected layers — but never blank out a filter this
+            # tool didn't set (the user may have their own subset applied).
             reset_count = 0
+            skipped = 0
             for layer in layers:
                 if layer.id() in self.original_filters:
                     layer.setSubsetString(self.original_filters[layer.id()])
                     del self.original_filters[layer.id()]
+                    reset_count += 1
                 else:
-                    layer.setSubsetString("")
-                reset_count += 1
-            self.iface.messageBar().pushMessage("완료", f"{reset_count}개 레이어 필터 초기화 완료", level=0)
+                    skipped += 1
+            msg = f"{reset_count}개 레이어 필터 초기화 완료"
+            if skipped:
+                msg += f" (이 도구가 설정하지 않은 {skipped}개 레이어는 건드리지 않음)"
+            self.iface.messageBar().pushMessage("완료", msg, level=0)
     
     def extract_from_dem(self):
         """Generate contours from DEM raster"""
@@ -237,13 +252,16 @@ class ContourExtractorDialog(QtWidgets.QDialog, FORM_CLASS):
             temp_output = os.path.join(tempfile.gettempdir(), f'archtoolkit_contour_{interval}m_{run_id}.gpkg')
             
             # Run GDAL contour
+            # IGNORE_NODATA maps to gdal_contour's -inodata flag, which means
+            # "ignore the nodata DESIGNATION and treat every value as valid" —
+            # True would draw garbage contour rings around -9999/-32768 fill.
             result = processing.run("gdal:contour", {
                 'INPUT': layer.source(),
                 'BAND': 1,
                 'INTERVAL': interval,
                 'FIELD_NAME': 'ELEV',
                 'CREATE_3D': False,
-                'IGNORE_NODATA': True,
+                'IGNORE_NODATA': False,
                 'NODATA': None,
                 'OUTPUT': temp_output
             })

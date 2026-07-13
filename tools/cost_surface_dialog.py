@@ -357,8 +357,14 @@ def _estimate_straight_line_cost(
     win_gt,
     step_m,
     cost_mode="time_s",
+    friction=None,
 ):
-    """Estimate cumulative cost along a straight line by DEM sampling."""
+    """Estimate cumulative cost along a straight line by DEM sampling.
+
+    When a friction grid is supplied (same window/grid as `dem`), each step's
+    cost is multiplied by the friction at that cell — matching the LCP solver
+    so the "LCP vs straight line" comparison uses one cost system.
+    """
     sx, sy = start_xy
     ex, ey = end_xy
     straight_dist = math.hypot(ex - sx, ey - sy)
@@ -368,6 +374,22 @@ def _estimate_straight_line_cost(
     step_m = max(0.001, float(step_m))
     n_steps = max(1, int(math.ceil(straight_dist / step_m)))
     inv_win_gt = _inv_geotransform(win_gt)
+
+    def _friction_at(x0, y0):
+        if friction is None:
+            return 1.0
+        try:
+            px, py = gdal.ApplyGeoTransform(inv_win_gt, float(x0), float(y0))
+            r = int(py)
+            c = int(px)
+            rows0, cols0 = friction.shape
+            if 0 <= r < rows0 and 0 <= c < cols0:
+                f = float(friction[r, c])
+                if math.isfinite(f) and f > 0:
+                    return f
+        except Exception:
+            pass
+        return 1.0
 
     z_prev = _bilinear_elevation(dem, nodata_mask, inv_win_gt, sx, sy)
     if z_prev is None:
@@ -385,7 +407,9 @@ def _estimate_straight_line_cost(
             return None, straight_dist
         horiz = math.hypot(x - x_prev, y - y_prev)
         dz = float(z) - float(z_prev)
-        total_cost += _edge_cost(model_key, horiz, dz, model_params, cost_mode=cost_mode)
+        mid_x = (x + x_prev) * 0.5
+        mid_y = (y + y_prev) * 0.5
+        total_cost += _edge_cost(model_key, horiz, dz, model_params, cost_mode=cost_mode) * _friction_at(mid_x, mid_y)
         x_prev, y_prev, z_prev = float(x), float(y), float(z)
 
     return total_cost, straight_dist
@@ -763,8 +787,14 @@ def _edge_cost(model_key, horiz_m, dz_m, model_params, *, cost_mode="time_s"):
         M = (1.5 * W) + (2.0 * (W + L) * (load_ratio**2)) + (
             eta * (W + L) * (1.5 * V * V + 0.35 * V * grade_percent)
         )
-        # Ensure strictly positive to keep the path solver stable.
-        M = max(1.0, float(M))
+        # The Pandolf equation has no downhill validity: on grades below about
+        # -9% the grade term drives M toward (and past) zero, which would make
+        # steep descents ~300x cheaper than flat ground and glue "energy-optimal"
+        # paths to cliffs. Clamp to the standing metabolic term 1.5·W (a
+        # conservative floor: walking downhill still costs at least standing
+        # metabolism; a full Santee-style descent correction would need
+        # validated coefficients).
+        M = max(1.5 * W, float(M))
         return (float(M) * float(horiz_m)) / V
 
     # Isotropic slope-based models (use absolute slope magnitude)
@@ -1276,9 +1306,12 @@ class CostSurfaceWorker(QgsTask):
                 if not math.isfinite(scale) or scale <= 0:
                     scale = 1.0
 
-                mult = fr.astype(np.float32, copy=False)
-                mult[~np.isfinite(mult)] = 1.0
+                mult = fr.astype(np.float32, copy=True)
+                invalid = ~np.isfinite(mult)
                 mult = mult * float(scale)
+                # NoData cells are neutral (1.0) as the tooltip promises —
+                # set AFTER scaling so they don't become `scale` instead.
+                mult[invalid] = 1.0
                 mult = np.clip(mult, 0.0001, 1.0e6).astype(np.float32, copy=False)
                 friction *= mult
 
@@ -1644,6 +1677,7 @@ class CostSurfaceWorker(QgsTask):
                     win_gt,
                     step_m=min(dx, dy),
                     cost_mode="energy_j",
+                    friction=friction,
                 )
                 if straight_energy_j is not None and math.isfinite(straight_energy_j):
                     straight_energy_kcal = float(straight_energy_j) / 4184.0
@@ -1658,6 +1692,7 @@ class CostSurfaceWorker(QgsTask):
                     win_gt,
                     step_m=min(dx, dy),
                     cost_mode="time_s",
+                    friction=friction,
                 )
 
         lcp_time_s = None

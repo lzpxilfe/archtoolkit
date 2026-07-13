@@ -326,7 +326,18 @@ class AlignExportDialog(QtWidgets.QDialog):
             meta = get_archtoolkit_layer_metadata(lyr) or {}
             kind = str(meta.get("kind") or "")
             units = str(meta.get("units") or "")
-            categorical = any(h in kind.lower() for h in _CATEGORICAL_HINTS)
+            tool_id = str(meta.get("tool_id") or "")
+            # Categorical detection must catch the toolkit's real outputs, not
+            # just kind-name hints: slope-position tags units="class", the
+            # KIGAM geology raster tags tool_id="geology_zip"/kind="raster",
+            # geochem tags kind="class_raster". Bilinear on class codes would
+            # blend them into meaningless fractional values.
+            categorical = (
+                any(h in kind.lower() for h in _CATEGORICAL_HINTS)
+                or units.lower() in ("class", "classes", "category")
+                or "geology" in tool_id.lower()
+                or "slope_position" in kind.lower()
+            )
             out.append(_Item(lid, lyr.name(), _safe_key(lyr.name(), used), kind, units, categorical))
         return out
 
@@ -420,7 +431,17 @@ class AlignExportDialog(QtWidgets.QDialog):
             return
 
         if export_dir:
-            self._write_manifest(export_dir, outputs)
+            self._write_manifest(
+                export_dir,
+                outputs,
+                grid={
+                    "crs": str(ref.crs().authid() or ""),
+                    "pixel_size": px,
+                    "extent": extent_str,
+                    "continuous_nodata": -9999,
+                    "run_id": run_id,
+                },
+            )
         if self.chkAddToProject.isChecked():
             try:
                 self._add_layers(outputs, run_id)
@@ -435,9 +456,11 @@ class AlignExportDialog(QtWidgets.QDialog):
         restore_ui_focus(self)
 
     def _warp(self, src, out, px, extent_str, ref_crs, *, nearest: bool):
-        # Categorical layers keep their input type (often Byte); forcing -9999 as
-        # NoData would be out of a Byte range and make gdalwarp fail. Let those
-        # inherit the source NoData; only continuous outputs get -9999.
+        # Categorical layers keep their input type (often Byte) and inherit the
+        # source NoData (nearest resampling preserves codes). Continuous layers
+        # are forced to Float32 so the -9999 NoData is always representable —
+        # with DATA_TYPE=0 a continuous Byte product (e.g. 0-255 hillshade)
+        # would have -9999 clamped, turning valid value 0 into NoData.
         params = {
             "INPUT": src,
             "SOURCE_CRS": None,
@@ -446,7 +469,7 @@ class AlignExportDialog(QtWidgets.QDialog):
             "NODATA": None if nearest else -9999,
             "TARGET_RESOLUTION": px,
             "OPTIONS": "",
-            "DATA_TYPE": 0,  # keep input type (0 = use input)
+            "DATA_TYPE": 0 if nearest else 6,  # categorical: keep type / continuous: Float32
             "TARGET_EXTENT": extent_str,
             "TARGET_EXTENT_CRS": ref_crs,
             "MULTITHREADING": False,
@@ -456,11 +479,17 @@ class AlignExportDialog(QtWidgets.QDialog):
         processing.run("gdal:warpreproject", params)
         return out
 
-    def _write_manifest(self, export_dir, outputs):
+    def _write_manifest(self, export_dir, outputs, grid=None):
         try:
             path = os.path.join(export_dir, "aligned_stack_manifest.csv")
             with open(path, "w", newline="", encoding="utf-8-sig") as f:
                 w = csv.writer(f)
+                # Grid definition first — the facts a downstream modeler needs
+                # to verify alignment (CRS / pixel size / extent / NoData).
+                if grid:
+                    w.writerow(["# reference_grid"])
+                    for k in ("crs", "pixel_size", "extent", "continuous_nodata", "run_id"):
+                        w.writerow([f"# {k}", grid.get(k, "")])
                 w.writerow(["variable", "file", "source_layer", "kind", "units", "resampling"])
                 for o in outputs:
                     w.writerow([o["key"], os.path.basename(o["path"]), o["source"],

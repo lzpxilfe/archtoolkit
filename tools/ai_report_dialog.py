@@ -407,7 +407,7 @@ class AiAoiReportDialog(QtWidgets.QDialog):
 
         self.txtModel = QtWidgets.QLineEdit()
         self.txtModel.setText(ai_gemini.get_configured_model())
-        self.txtModel.setPlaceholderText("예: gemini-1.5-flash")
+        self.txtModel.setPlaceholderText(f"예: {ai_gemini.DEFAULT_MODEL}")
 
         self.btnSaveModel = QtWidgets.QPushButton("모델 저장")
         self.btnSaveModel.clicked.connect(self._on_save_model)
@@ -932,23 +932,11 @@ class AiAoiReportDialog(QtWidgets.QDialog):
             ctx2, err2 = _build(False)
             if (not err2) and ctx2 and (ctx2.get("layers") or []):
                 ctx = ctx2
-                key = self._make_ctx_key(
-                    aoi_layer=aoi_layer,
-                    selected_only=selected_only,
-                    aoi_selection_sig=aoi_selection_sig,
-                    radius_m=radius_m,
-                    only_arch=False,
-                    exclude_styling=exclude_styling,
-                    scope=scope,
-                    target_group=target_group,
-                    layer_ids=layer_ids,
-                    reference_layer_id=reference_layer_id,
-                    reference_selected_only=reference_selected_only,
-                    reference_selection_sig=reference_selection_sig,
-                    reference_name_field=reference_name_field,
-                    reference_max_features=reference_max_features,
-                    max_layers=max_layers,
-                )
+                # Cache under the ORIGINAL (pre-widen) key: the next lookup
+                # recomputes that same key, so storing under a widened key made
+                # every subsequent click rebuild twice and re-fire the toast.
+                # The widening is deterministic for identical inputs, so this
+                # is safe.
                 try:
                     push_message(
                         self.iface,

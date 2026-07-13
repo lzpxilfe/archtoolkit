@@ -21,7 +21,7 @@ from qgis.PyQt import uic
 from qgis.PyQt import QtWidgets
 from qgis.PyQt.QtWidgets import QTableWidgetItem, QCheckBox, QWidget, QHBoxLayout, QFileDialog, QListWidgetItem
 from qgis.PyQt.QtCore import Qt, QSize
-from qgis.core import QgsProject, QgsVectorLayer
+from qgis.core import QgsFeatureRequest, QgsProject, QgsVectorLayer
 from qgis.PyQt.QtGui import QIcon
 import processing
 import tempfile
@@ -655,10 +655,14 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
                 pass
     
     def get_selected_layer_codes(self):
+        """All CHECKED codes, regardless of which era tab is currently shown.
+
+        Filtering by row visibility made the run-time query depend on the tab
+        the user happened to be browsing — running while on the "구(old)" tab
+        silently dropped every checked modern code and produced an empty DEM.
+        """
         selected = []
         for code, checkbox in (self.layer_checkboxes or {}).items():
-            if not self._is_code_visible(code):
-                continue
             try:
                 if checkbox.isChecked():
                     selected.append(str(code))
@@ -805,7 +809,7 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
         
         try:
             temp_merged = None
-            
+
             # Step 1: Merge all selected layers into one temp file
             if len(selected_layers) > 1:
                 temp_merged = os.path.join(tempfile.gettempdir(), f'archtoolkit_merged_{uuid.uuid4().hex[:8]}.gpkg')
@@ -816,13 +820,20 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
                 })
                 merged_layer = QgsVectorLayer(temp_merged, "merged", "ogr")
             else:
-                merged_layer = selected_layers[0]
-            
+                # NEVER filter the user's own project layer in place:
+                # setSubsetString would permanently overwrite their canvas
+                # filter (and destroy any subset they had set themselves).
+                # Work on an independent handle to the same source instead.
+                src0 = selected_layers[0]
+                merged_layer = QgsVectorLayer(src0.source(), "dem_input", src0.providerType())
+                if not merged_layer.isValid():
+                    merged_layer = src0.materialize(QgsFeatureRequest())
+
             if not merged_layer or not merged_layer.isValid():
                 push_message(self.iface, "오류", "레이어 병합에 실패했습니다.", level=2)
                 restore_ui_focus(self)
                 return
-            
+
             # Step 2: Apply query filter
             if query and merged_layer.fields().indexFromName('Layer') >= 0:
                 merged_layer.setSubsetString(query)

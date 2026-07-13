@@ -1389,7 +1389,16 @@ value/class 래스터와 폴리곤을 생성합니다.
         extent_aoi = aoi_geom.boundingBox()
         buf = float(self.spinExtentBuffer.value() or 0.0)
         if buf > 0:
-            extent_aoi.grow(buf)
+            # The spinbox is meters, but grow() works in the AOI layer's CRS
+            # units — on a geographic AOI a "500 m" buffer would become 500
+            # DEGREES (a world-spanning export). Convert meters → degrees.
+            grow_units = buf
+            try:
+                if aoi.crs().isGeographic():
+                    grow_units = buf / 111320.0
+            except Exception:
+                pass
+            extent_aoi.grow(grow_units)
 
         # Keep a canvas-compatible extent for zooming (destination CRS).
         extent_canvas = QgsRectangle(extent_aoi)
@@ -1408,10 +1417,20 @@ value/class 래스터와 폴리곤을 생성합니다.
             if aoi.crs() != raster.crs():
                 ct = QgsCoordinateTransform(aoi.crs(), raster.crs(), QgsProject.instance())
                 extent_export = ct.transformBoundingBox(extent_export)
+                # QgsGeometry.transform reports failure via its RETURN CODE
+                # (0=success), not an exception. A failed reprojection left the
+                # AOI in the wrong CRS and the mask then blanked the whole
+                # output to NoData. Disable masking instead.
                 try:
-                    aoi_geom_raster.transform(ct)
+                    rc = aoi_geom_raster.transform(ct)
+                    if rc != 0:
+                        log_message(
+                            f"GeoChem: AOI reprojection failed (code {rc}) — AOI 마스킹을 건너뜁니다.",
+                            level=Qgis.Warning,
+                        )
+                        aoi_geom_raster = None
                 except Exception:
-                    pass
+                    aoi_geom_raster = None
         except Exception as e:
             log_message(f"GeoChem: extent transform failed: {e}", level=Qgis.Warning)
             try:

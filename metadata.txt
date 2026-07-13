@@ -2,22 +2,23 @@
 name=ArchToolkit
 qgisMinimumVersion=3.40
 qgisMaximumVersion=3.99
-description=Integrated archaeology toolkit for QGIS covering terrain, visibility, cost, geology, and AOI reporting workflows.
-version=0.1.2
+description=Integrated archaeology toolkit for QGIS covering terrain, visibility, cost, networks, AHP suitability, trench planning, geology, and AOI reporting workflows.
+version=0.2.0
 author=balguljang2 (lzpxilfe)
 email=lzpxilfe@gmail.com
 license=GPL-3.0-or-later
-repository=https://github.com/lzpxilfe/ar
-tracker=https://github.com/lzpxilfe/ar/issues
-homepage=https://github.com/lzpxilfe/ar
+repository=https://github.com/lzpxilfe/archtoolkit
+tracker=https://github.com/lzpxilfe/archtoolkit/issues
+homepage=https://github.com/lzpxilfe/archtoolkit
 category=Analysis
 tags=archaeology,cultural-heritage,dem,kriging,geostatistics,ahp,contour,dxf,viewshed,line-of-sight,terrain-profile,terrain-analysis,slope,aspect,cost-surface,least-cost-path,least-cost-network,network,ppa,visibility,wms,geochem,geology,geological-map,kigam,cadastral,overlap,map-styling,ai,고고학,문화유산,가시권,가시선,지형,단면,비용표면,최소비용경로,최소비용네트워크,근접성,지적도,중첩,지구화학도,지질도,크리깅,AHP,지오통계
 icon=icon.png
 experimental=false
 deprecated=false
 about=ArchToolkit is an integrated QGIS plugin for archaeological and cultural-heritage workflows.
-  It includes DEM generation, terrain analysis, viewshed and line-of-sight tools, cost surface and least-cost path/network analysis, terrain profiles, cadastral overlap, map styling, GeoChem helpers, KIGAM geology ZIP loading, and AOI reporting.
+  It includes DEM generation, terrain analysis (slope/aspect/TPI/TRI/curvature/aspect derivatives), viewshed and line-of-sight tools, cost surface and least-cost path/network analysis, spatial/visibility networks (PPA), AHP site suitability, trench suggestion, covariate align/export and correlation/VIF reporting, terrain profiles, cadastral overlap, map styling, slope/aspect drafting, GeoChem helpers, KIGAM geology ZIP loading, and AI-assisted AOI reporting.
   Requirements: QGIS 3.40+, Processing, GDAL, and NumPy in the QGIS Python environment.
   Optional service: Gemini API access for AI AOI reporting.
-changelog=0.1.2 - Added scroll-safe popups for long text and cleaned remaining flake8 issues flagged in quality checks (including W503/W226 updates); 0.1.1 - Added selectable English UI support across plugin menus, dialogs, help, messages, and outputs; fixed runtime i18n regressions, terrain profile reopen sync, safer geology QML parsing, and release polish.
+changelog=0.2.0 - Full-code review hardening: fixed the plugin-wide help dialog crash (search now works); AHP suitability honors all scoring modes with correct NoData propagation, grid-alignment validation, boundary-target handling, and score clamping; trench suggestion gains coverage-first placement, footprint-averaged orientation with corrected flat-terrain fallback, geographic-DEM guard, and honest grave-avoidance reporting; contour extraction no longer inverts NoData handling; cost surface clamps Pandolf descents and applies friction to comparison figures; cost network fixes buffer=0 (full DEM) and closeness (Wasserman-Faust) with the spatial network tool; viewshed gains even sampling, LOS curvature/refraction support, cancel honesty, and CRS-correct observer outputs; terrain analysis adds memory guards, geographic-CRS guard, and NoData-correct aspect derivatives/custom TPI; map styling and DEM generator no longer orphan or mutate user layers; geology ZIP keeps project-referenced extracts, sanitizes ZIP names, survives bad config, and .asc export works; AI reporting narrows fallback retries and fixes context caching; align/export protects categorical rasters and records the reference grid; CI now detects missing modules.
+  0.1.2 - Added scroll-safe popups for long text and cleaned remaining flake8 issues flagged in quality checks (including W503/W226 updates); 0.1.1 - Added selectable English UI support across plugin menus, dialogs, help, messages, and outputs; fixed runtime i18n regressions, terrain profile reopen sync, safer geology QML parsing, and release polish.
   0.1.0 - Initial public beta covering terrain, visibility, cost, network, geology, GeoChem, cadastral overlap, styling, and AOI reporting workflows.
