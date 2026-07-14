@@ -74,6 +74,8 @@ from .cost_models import (
     MODEL_PANDOLF,
     MODEL_TOBLER,
     edge_cost as _edge_cost,
+    isochrone_levels_minutes as _default_isochrone_levels_minutes,
+    isoenergy_levels_kcal as _default_isoenergy_levels_kcal,
 )
 from .live_log_dialog import ensure_live_log_dialog
 from .help_dialog import show_help_dialog
@@ -424,84 +426,6 @@ def _polyline_length(coords):
     for (x0, y0), (x1, y1) in zip(coords, coords[1:]):
         total += math.hypot(float(x1) - float(x0), float(y1) - float(y0))
     return total
-
-
-def _default_isochrone_levels_minutes(max_minutes):
-    """Generate isochrone levels (minutes) with coarse spacing as time increases.
-
-    - Up to 60 min: every 15 min
-    - 60~180 min: every 30 min
-    - 180+ min: every 60 min
-    """
-    try:
-        max_minutes = float(max_minutes)
-    except Exception:
-        return []
-    if not math.isfinite(max_minutes) or max_minutes <= 0:
-        return []
-
-    levels = []
-
-    for v in (15, 30, 45, 60):
-        if v <= max_minutes + 1e-6:
-            levels.append(float(v))
-
-    v = 90
-    while v <= 180 and v <= max_minutes + 1e-6:
-        levels.append(float(v))
-        v += 30
-
-    v = 240
-    # Safety cap to avoid producing an excessive number of contours on huge rasters.
-    max_levels = 60
-    while v <= max_minutes + 1e-6 and len(levels) < max_levels:
-        levels.append(float(v))
-        v += 60
-
-    # Ensure sorted unique values
-    uniq = []
-    for t in sorted(set(levels)):
-        if t > 0:
-            uniq.append(t)
-    return uniq
-
-
-def _default_isoenergy_levels_kcal(max_kcal):
-    """Generate iso-energy levels (kcal) with coarser spacing as energy increases."""
-    try:
-        max_kcal = float(max_kcal)
-    except Exception:
-        return []
-    if not math.isfinite(max_kcal) or max_kcal <= 0:
-        return []
-
-    levels = []
-
-    # Up to 600 kcal: 50-kcal steps
-    step = 50.0
-    v = step
-    while v <= min(600.0, max_kcal + 1e-6):
-        levels.append(float(v))
-        v += step
-
-    # 600~2000 kcal: 200-kcal steps
-    v = 800.0
-    while v <= min(2000.0, max_kcal + 1e-6):
-        levels.append(float(v))
-        v += 200.0
-
-    # 2000+ kcal: 500-kcal steps (cap count)
-    v = 2500.0
-    max_levels = 80
-    while v <= max_kcal + 1e-6 and len(levels) < max_levels:
-        levels.append(float(v))
-        v += 500.0
-
-    uniq = []
-    for t in sorted(set(levels)):
-        if t > 0:
-            uniq.append(t)
-    return uniq
 
 
 def _safe_layer_name_fragment(text):

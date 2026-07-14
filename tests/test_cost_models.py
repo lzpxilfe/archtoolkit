@@ -11,6 +11,8 @@ from tools.cost_models import (
     MODEL_PANDOLF,
     MODEL_TOBLER,
     edge_cost,
+    isochrone_levels_minutes,
+    isoenergy_levels_kcal,
     naismith_time_s,
     tobler_speed_mps,
 )
@@ -121,6 +123,49 @@ class PandolfTests(unittest.TestCase):
         floor = (1.5 * 70.0) * 100.0 / _V
         self.assertAlmostEqual(cost, floor, places=3)
         self.assertGreater(cost, 0.0)
+
+
+class LevelGeneratorTests(unittest.TestCase):
+    def test_isochrone_tiers(self):
+        self.assertEqual(isochrone_levels_minutes(50), [15.0, 30.0, 45.0])
+        self.assertEqual(isochrone_levels_minutes(70), [15.0, 30.0, 45.0, 60.0])
+        self.assertEqual(
+            isochrone_levels_minutes(200),
+            [15.0, 30.0, 45.0, 60.0, 90.0, 120.0, 150.0, 180.0],
+        )
+
+    def test_isochrone_rejects_nonpositive_and_bad_input(self):
+        self.assertEqual(isochrone_levels_minutes(0), [])
+        self.assertEqual(isochrone_levels_minutes(-5), [])
+        self.assertEqual(isochrone_levels_minutes("nope"), [])
+        self.assertEqual(isochrone_levels_minutes(float("nan")), [])
+
+    def test_isochrone_levels_are_sorted_unique_and_bounded(self):
+        for mx in (10, 55, 130, 400, 5000):
+            lv = isochrone_levels_minutes(mx)
+            self.assertEqual(lv, sorted(set(lv)))
+            self.assertTrue(all(0 < x <= mx + 1e-6 for x in lv))
+
+    def test_isochrone_contour_count_is_capped(self):
+        # A huge extent must not emit an unbounded number of contours.
+        self.assertLessEqual(len(isochrone_levels_minutes(1_000_000)), 60)
+
+    def test_isoenergy_tiers(self):
+        self.assertEqual(
+            isoenergy_levels_kcal(300),
+            [50.0, 100.0, 150.0, 200.0, 250.0, 300.0],
+        )
+
+    def test_isoenergy_rejects_nonpositive(self):
+        self.assertEqual(isoenergy_levels_kcal(0), [])
+        self.assertEqual(isoenergy_levels_kcal(-1), [])
+
+    def test_isoenergy_levels_are_sorted_unique_bounded_and_capped(self):
+        for mx in (30, 300, 1500, 9000):
+            lv = isoenergy_levels_kcal(mx)
+            self.assertEqual(lv, sorted(set(lv)))
+            self.assertTrue(all(0 < x <= mx + 1e-6 for x in lv))
+        self.assertLessEqual(len(isoenergy_levels_kcal(10_000_000)), 80)
 
 
 if __name__ == "__main__":
