@@ -226,3 +226,125 @@ def compute_hierarchy_summary(
         "global_weights": global_weights,
         "global_pairwise": global_pairwise,
     }
+
+
+def clamp01(expr):
+    """Wrap a gdal_calc/numpy expression so its result stays within [0, 1].
+
+    gdal_calc evaluates formulas in the numpy namespace, so minimum/maximum are
+    available.  Clamping keeps scores in [0, 1] even when pixels fall outside
+    the [mn, mx] stats range.
+    """
+    return f"minimum(maximum(({expr}), 0.0), 1.0)"
+
+
+def validated_score_ranges(score_ranges):
+    """Clean, clamp, sort, and overlap-check a reclass score table.
+
+    Non-numeric or non-finite rows are dropped, scores clamped to [0, 1], and
+    min/max swapped if reversed.  Raises on overlapping intervals.
+    """
+    rows_in = score_ranges or []
+    rows = []
+    for row in rows_in:
+        try:
+            min_v = float(row.get("min"))
+            max_v = float(row.get("max"))
+            score = float(row.get("score"))
+        except Exception:
+            continue
+        if max_v < min_v:
+            min_v, max_v = max_v, min_v
+        if not math.isfinite(min_v) or not math.isfinite(max_v) or not math.isfinite(score):
+            continue
+        score = max(0.0, min(1.0, score))
+        rows.append({"min": min_v, "max": max_v, "score": score})
+    rows.sort(key=lambda d: (d["min"], d["max"]))
+    for idx in range(1, len(rows)):
+        prev = rows[idx - 1]
+        cur = rows[idx]
+        prev_exact = abs(float(prev["max"]) - float(prev["min"])) <= 1e-12
+        if cur["min"] < prev["max"] or (prev_exact and abs(float(cur["min"]) - float(prev["max"])) <= 1e-12):
+            raise Exception("\uad6c\uac04 \uc810\uc218\ud45c\uc5d0 \uc11c\ub85c \uacb9\uce58\ub294 \uad6c\uac04\uc774 \uc788\uc2b5\ub2c8\ub2e4. \ubc94\uc704\ub97c \ub2e4\uc2dc \uc870\uc815\ud558\uc138\uc694.")
+    return rows
+
+
+def score_formula(*, direction, mn, mx, target_v=None, prefer_min=None, prefer_max=None, score_ranges=None):
+    """Build the gdal_calc expression mapping a criterion raster (band ``A``) to
+    a 0-1 suitability score, per the criterion's preference mode.
+
+    - benefit: linear ramp, larger is better
+    - cost: linear ramp, smaller is better
+    - target: 1 at the target value, ramping to 0 toward mn/mx (degrading to a
+      pure ramp when the target sits on a boundary)
+    - range: 1 inside [prefer_min, prefer_max], ramping to 0 outside
+    - reclass: piecewise scores from a validated interval table
+    """
+    mode = str(direction or "benefit")
+    if mode == "cost":
+        return clamp01(f"({mx} - A) / ({mx} - {mn})")
+    if mode == "target":
+        try:
+            target0 = float(target_v) if target_v is not None else None
+        except Exception:
+            target0 = None
+        if target0 is None or (not math.isfinite(target0)) or target0 < mn or target0 > mx:
+            target0 = mn + ((mx - mn) / 2.0)
+        if target0 <= mn:
+            return clamp01(f"({mx} - A) / ({mx} - {mn})")
+        if target0 >= mx:
+            return clamp01(f"(A - {mn}) / ({mx} - {mn})")
+        return clamp01(
+            f"((A <= {target0}) * ((A - {mn}) / ({target0} - {mn}))) + "
+            f"((A > {target0}) * (({mx} - A) / ({mx} - {target0})))"
+        )
+    if mode == "range":
+        try:
+            prefer_min0 = float(prefer_min) if prefer_min is not None else None
+            prefer_max0 = float(prefer_max) if prefer_max is not None else None
+        except Exception:
+            prefer_min0, prefer_max0 = None, None
+        invalid_prefer = (
+            prefer_min0 is None
+            or prefer_max0 is None
+            or not math.isfinite(prefer_min0)
+            or not math.isfinite(prefer_max0)
+            or prefer_min0 >= prefer_max0
+        )
+        if invalid_prefer:
+            prefer_min0 = mn + ((mx - mn) * 0.25)
+            prefer_max0 = mn + ((mx - mn) * 0.75)
+        if prefer_min0 <= mn and prefer_max0 >= mx:
+            return "A*0 + 1"
+        if prefer_min0 <= mn:
+            return clamp01(
+                f"(({mx} - A) / ({mx} - {prefer_max0})) * (A > {prefer_max0}) + ((A <= {prefer_max0}) * 1)"
+            )
+        if prefer_max0 >= mx:
+            return clamp01(
+                f"((A - {mn}) / ({prefer_min0} - {mn})) * (A < {prefer_min0}) + ((A >= {prefer_min0}) * 1)"
+            )
+        return clamp01(
+            f"((A < {prefer_min0}) * ((A - {mn}) / ({prefer_min0} - {mn}))) + "
+            f"(((A >= {prefer_min0}) * (A <= {prefer_max0})) * 1) + "
+            f"((A > {prefer_max0}) * (({mx} - A) / ({mx} - {prefer_max0})))"
+        )
+    if mode == "reclass":
+        rows = validated_score_ranges(score_ranges)
+        if not rows:
+            return "A*0"
+        parts = []
+        for idx, row in enumerate(rows):
+            lo = float(row["min"])
+            hi = float(row["max"])
+            score = float(row["score"])
+            if abs(hi - lo) <= 1e-12:
+                parts.append(f"((A == {lo}) * {score})")
+                continue
+            is_last = idx == (len(rows) - 1)
+            if is_last:
+                parts.append(f"(((A >= {lo}) * (A <= {hi})) * {score})")
+            else:
+                parts.append(f"(((A >= {lo}) * (A < {hi})) * {score})")
+        return " + ".join(parts) if parts else "A*0"
+    return clamp01(f"(A - {mn}) / ({mx} - {mn})")

@@ -8,10 +8,20 @@ import numpy as np
 from tools.ahp_core import (
     RI_TABLE,
     ahp_weights_from_matrix,
+    clamp01,
     compute_hierarchy_summary,
     matrix_from_pairs,
     sanitize_pair_values,
+    score_formula,
+    validated_score_ranges,
 )
+
+
+def _evaluate(formula, values):
+    """Evaluate a gdal_calc score expression the way GDAL's numpy namespace does."""
+    a = np.asarray(values, dtype=float)
+    namespace = {"minimum": np.minimum, "maximum": np.maximum, "A": a}
+    return np.asarray(eval(formula, {"__builtins__": {}}, namespace), dtype=float)
 
 
 def _consistent_matrix(weights):
@@ -202,6 +212,113 @@ class HierarchySummaryTests(unittest.TestCase):
         self.assertEqual(summary["group_order"], [])
         self.assertEqual(summary["global_weights"], {})
         self.assertEqual(summary["global_pairwise"], {})
+
+
+class ScoreFormulaTests(unittest.TestCase):
+    """The 0-1 scoring expressions are checked by actually evaluating them."""
+
+    MN, MX = 0.0, 100.0
+    SAMPLE = [0.0, 25.0, 50.0, 75.0, 100.0]
+
+    def test_benefit_ramps_up(self):
+        f = score_formula(direction="benefit", mn=self.MN, mx=self.MX)
+        out = _evaluate(f, self.SAMPLE)
+        for got, exp in zip(out, [0.0, 0.25, 0.5, 0.75, 1.0]):
+            self.assertAlmostEqual(got, exp, places=9)
+
+    def test_cost_ramps_down(self):
+        f = score_formula(direction="cost", mn=self.MN, mx=self.MX)
+        out = _evaluate(f, self.SAMPLE)
+        for got, exp in zip(out, [1.0, 0.75, 0.5, 0.25, 0.0]):
+            self.assertAlmostEqual(got, exp, places=9)
+
+    def test_unknown_mode_defaults_to_benefit(self):
+        f = score_formula(direction="wat", mn=self.MN, mx=self.MX)
+        self.assertAlmostEqual(_evaluate(f, [self.MX])[0], 1.0, places=9)
+
+    def test_target_peaks_at_target_value(self):
+        f = score_formula(direction="target", mn=self.MN, mx=self.MX, target_v=50.0)
+        out = _evaluate(f, self.SAMPLE)
+        for got, exp in zip(out, [0.0, 0.5, 1.0, 0.5, 0.0]):
+            self.assertAlmostEqual(got, exp, places=9)
+
+    def test_target_on_lower_boundary_degrades_to_cost(self):
+        at_boundary = score_formula(direction="target", mn=self.MN, mx=self.MX, target_v=0.0)
+        cost = score_formula(direction="cost", mn=self.MN, mx=self.MX)
+        self.assertTrue((_evaluate(at_boundary, self.SAMPLE) == _evaluate(cost, self.SAMPLE)).all())
+
+    def test_target_on_upper_boundary_degrades_to_benefit(self):
+        at_boundary = score_formula(direction="target", mn=self.MN, mx=self.MX, target_v=100.0)
+        benefit = score_formula(direction="benefit", mn=self.MN, mx=self.MX)
+        self.assertTrue((_evaluate(at_boundary, self.SAMPLE) == _evaluate(benefit, self.SAMPLE)).all())
+
+    def test_invalid_target_recenters_to_midpoint(self):
+        # A target outside [mn, mx] falls back to the midpoint (a symmetric tent).
+        f = score_formula(direction="target", mn=self.MN, mx=self.MX, target_v=None)
+        self.assertAlmostEqual(_evaluate(f, [50.0])[0], 1.0, places=9)
+
+    def test_range_is_flat_inside_and_ramps_outside(self):
+        f = score_formula(direction="range", mn=self.MN, mx=self.MX, prefer_min=25.0, prefer_max=75.0)
+        out = _evaluate(f, self.SAMPLE)
+        for got, exp in zip(out, [0.0, 1.0, 1.0, 1.0, 0.0]):
+            self.assertAlmostEqual(got, exp, places=9)
+
+    def test_range_covering_full_extent_is_all_one(self):
+        f = score_formula(direction="range", mn=self.MN, mx=self.MX, prefer_min=-10.0, prefer_max=200.0)
+        out = _evaluate(f, self.SAMPLE)
+        self.assertTrue((out == 1.0).all())
+
+    def test_scores_are_clamped_outside_stats_range(self):
+        # Pixels beyond [mn, mx] must not exceed [0, 1].
+        f = score_formula(direction="benefit", mn=self.MN, mx=self.MX)
+        out = _evaluate(f, [-50.0, 150.0])
+        self.assertAlmostEqual(out[0], 0.0, places=9)
+        self.assertAlmostEqual(out[1], 1.0, places=9)
+
+    def test_reclass_assigns_bin_scores(self):
+        rows = [
+            {"min": 0.0, "max": 50.0, "score": 0.2},
+            {"min": 50.0, "max": 100.0, "score": 0.9},
+        ]
+        f = score_formula(direction="reclass", mn=self.MN, mx=self.MX, score_ranges=rows)
+        out = _evaluate(f, [10.0, 60.0])
+        self.assertAlmostEqual(out[0], 0.2, places=9)
+        self.assertAlmostEqual(out[1], 0.9, places=9)
+
+    def test_reclass_without_rows_scores_zero(self):
+        f = score_formula(direction="reclass", mn=self.MN, mx=self.MX, score_ranges=[])
+        self.assertAlmostEqual(_evaluate(f, [42.0])[0], 0.0, places=9)
+
+
+class ValidatedScoreRangesTests(unittest.TestCase):
+    def test_sorts_and_clamps_scores(self):
+        rows = validated_score_ranges([
+            {"min": 50, "max": 100, "score": 1.5},   # score clamped to 1
+            {"min": 0, "max": 50, "score": -0.2},    # score clamped to 0
+        ])
+        self.assertEqual([r["min"] for r in rows], [0.0, 50.0])
+        self.assertEqual(rows[0]["score"], 0.0)
+        self.assertEqual(rows[1]["score"], 1.0)
+
+    def test_reversed_bounds_are_swapped(self):
+        rows = validated_score_ranges([{"min": 80, "max": 20, "score": 0.5}])
+        self.assertEqual((rows[0]["min"], rows[0]["max"]), (20.0, 80.0))
+
+    def test_non_numeric_rows_dropped(self):
+        rows = validated_score_ranges([{"min": "x", "max": 1, "score": 1}, {"min": 0, "max": 1, "score": 1}])
+        self.assertEqual(len(rows), 1)
+
+    def test_overlapping_intervals_raise(self):
+        with self.assertRaises(Exception):
+            validated_score_ranges([
+                {"min": 0, "max": 60, "score": 1.0},
+                {"min": 40, "max": 100, "score": 0.5},
+            ])
+
+
+class Clamp01Tests(unittest.TestCase):
+    def test_wraps_expression_in_min_max(self):
+        self.assertEqual(clamp01("A"), "minimum(maximum((A), 0.0), 1.0)")
 
 
 if __name__ == "__main__":

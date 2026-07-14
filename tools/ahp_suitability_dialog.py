@@ -59,6 +59,7 @@ from .ahp_core import (
     ahp_weights_from_matrix as _ahp_weights_from_matrix,
     compute_hierarchy_summary as _compute_hierarchy_summary,
     sanitize_pair_values as _sanitize_pair_values,
+    score_formula,
 )
 
 
@@ -1302,114 +1303,16 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
         )
         return out
 
-    def _validated_score_ranges(self, crit: _Criterion) -> List[Dict[str, float]]:
-        rows_in = crit.score_ranges or []
-        rows: List[Dict[str, float]] = []
-        for row in rows_in:
-            try:
-                min_v = float(row.get("min"))
-                max_v = float(row.get("max"))
-                score = float(row.get("score"))
-            except Exception:
-                continue
-            if max_v < min_v:
-                min_v, max_v = max_v, min_v
-            if not math.isfinite(min_v) or not math.isfinite(max_v) or not math.isfinite(score):
-                continue
-            score = max(0.0, min(1.0, score))
-            rows.append({"min": min_v, "max": max_v, "score": score})
-        rows.sort(key=lambda d: (d["min"], d["max"]))
-        for idx in range(1, len(rows)):
-            prev = rows[idx - 1]
-            cur = rows[idx]
-            prev_exact = abs(float(prev["max"]) - float(prev["min"])) <= 1e-12
-            if cur["min"] < prev["max"] or (prev_exact and abs(float(cur["min"]) - float(prev["max"])) <= 1e-12):
-                raise Exception("구간 점수표에 서로 겹치는 구간이 있습니다. 범위를 다시 조정하세요.")
-        return rows
-
-    @staticmethod
-    def _clamp01(expr: str) -> str:
-        # gdal_calc evaluates formulas in the numpy namespace, so numpy's
-        # minimum/maximum are available. Clamping keeps scores in [0,1] even
-        # when pixels fall outside the [mn,mx] stats range (e.g. AOI-based
-        # stats with full-raster compute).
-        return f"minimum(maximum(({expr}), 0.0), 1.0)"
-
     def _criterion_score_formula(self, crit: _Criterion, *, mn: float, mx: float) -> str:
-        mode = str(crit.direction or "benefit")
-        if mode == "cost":
-            return self._clamp01(f"({mx} - A) / ({mx} - {mn})")
-        if mode == "target":
-            target = crit.target_v
-            try:
-                target0 = float(target) if target is not None else None
-            except Exception:
-                target0 = None
-            if target0 is None or (not math.isfinite(target0)) or target0 < mn or target0 > mx:
-                target0 = mn + ((mx - mn) / 2.0)
-            # A target at (or beyond) a boundary degrades naturally to a pure
-            # ramp instead of being silently recentred at the midpoint:
-            # target==mn means "smaller is better" (cost ramp), target==mx
-            # means "larger is better" (benefit ramp).
-            if target0 <= mn:
-                return self._clamp01(f"({mx} - A) / ({mx} - {mn})")
-            if target0 >= mx:
-                return self._clamp01(f"(A - {mn}) / ({mx} - {mn})")
-            return self._clamp01(
-                f"((A <= {target0}) * ((A - {mn}) / ({target0} - {mn}))) + "
-                f"((A > {target0}) * (({mx} - A) / ({mx} - {target0})))"
-            )
-        if mode == "range":
-            try:
-                prefer_min = float(crit.prefer_min) if crit.prefer_min is not None else None
-                prefer_max = float(crit.prefer_max) if crit.prefer_max is not None else None
-            except Exception:
-                prefer_min, prefer_max = None, None
-            # `or` short-circuits so isfinite() never sees None.
-            invalid_prefer = (
-                prefer_min is None
-                or prefer_max is None
-                or not math.isfinite(prefer_min)
-                or not math.isfinite(prefer_max)
-                or prefer_min >= prefer_max
-            )
-            if invalid_prefer:
-                prefer_min = mn + ((mx - mn) * 0.25)
-                prefer_max = mn + ((mx - mn) * 0.75)
-            if prefer_min <= mn and prefer_max >= mx:
-                return "A*0 + 1"
-            if prefer_min <= mn:
-                return self._clamp01(
-                    f"(({mx} - A) / ({mx} - {prefer_max})) * (A > {prefer_max}) + ((A <= {prefer_max}) * 1)"
-                )
-            if prefer_max >= mx:
-                return self._clamp01(
-                    f"((A - {mn}) / ({prefer_min} - {mn})) * (A < {prefer_min}) + ((A >= {prefer_min}) * 1)"
-                )
-            return self._clamp01(
-                f"((A < {prefer_min}) * ((A - {mn}) / ({prefer_min} - {mn}))) + "
-                f"(((A >= {prefer_min}) * (A <= {prefer_max})) * 1) + "
-                f"((A > {prefer_max}) * (({mx} - A) / ({mx} - {prefer_max})))"
-            )
-        if mode == "reclass":
-            rows = self._validated_score_ranges(crit)
-            if not rows:
-                return "A*0"
-            parts: List[str] = []
-            for idx, row in enumerate(rows):
-                lo = float(row["min"])
-                hi = float(row["max"])
-                score = float(row["score"])
-                if abs(hi - lo) <= 1e-12:
-                    parts.append(f"((A == {lo}) * {score})")
-                    continue
-                is_last = idx == (len(rows) - 1)
-                if is_last:
-                    parts.append(f"(((A >= {lo}) * (A <= {hi})) * {score})")
-                else:
-                    parts.append(f"(((A >= {lo}) * (A < {hi})) * {score})")
-            return " + ".join(parts) if parts else "A*0"
-        return self._clamp01(f"(A - {mn}) / ({mx} - {mn})")
+        return score_formula(
+            direction=crit.direction,
+            mn=mn,
+            mx=mx,
+            target_v=crit.target_v,
+            prefer_min=crit.prefer_min,
+            prefer_max=crit.prefer_max,
+            score_ranges=crit.score_ranges,
+        )
 
     def _processing_warp_to_reference(
         self,
