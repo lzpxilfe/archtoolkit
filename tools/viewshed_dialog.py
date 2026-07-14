@@ -3675,8 +3675,13 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
 
             log_message(f"Viewshed merge error: {e}", level=Qgis.Critical)
             log_message(traceback.format_exc(), level=Qgis.Critical)
+            # Close any open dataset and drop the partial cumulative raster so a
+            # failed merge never orphans a truncated file (matches the Higuchi
+            # reclass path's cleanup).
+            out_ds = None
+            cleanup_files([output_path])
             return False
-    
+
     def run_multi_viewshed(self, dem_layer, obs_height, tgt_height, max_dist, curvature, refraction, refraction_coeff=0.13):
         """Run cumulative viewshed from multiple observer points
         
