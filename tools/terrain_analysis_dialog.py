@@ -45,6 +45,7 @@ from .utils import (
     cleanup_files, log_message, push_message, restore_ui_focus, set_archtoolkit_layer_metadata,
 )
 from .raster_io import write_single_band_geotiff
+from .terrain_math import zt_curvature
 from .live_log_dialog import ensure_live_log_dialog
 from .help_dialog import show_help_dialog
 
@@ -874,27 +875,7 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
     def _zt_curvature(self, z, cell):
         """Zevenbergen & Thorne (1987) profile/plan curvature. See run_curvature_analysis
         for the (verified) sign convention."""
-        Z2 = np.roll(z, 1, 0)
-        Z8 = np.roll(z, -1, 0)
-        Z4 = np.roll(z, 1, 1)
-        Z6 = np.roll(z, -1, 1)
-        Z1 = np.roll(np.roll(z, 1, 0), 1, 1)
-        Z3 = np.roll(np.roll(z, 1, 0), -1, 1)
-        Z7 = np.roll(np.roll(z, -1, 0), 1, 1)
-        Z9 = np.roll(np.roll(z, -1, 0), -1, 1)
-        Z5 = z
-        L2 = cell * cell
-        D = ((Z4 + Z6) / 2.0 - Z5) / L2
-        E = ((Z2 + Z8) / 2.0 - Z5) / L2
-        F = (-Z1 + Z3 + Z7 - Z9) / (4.0 * L2)
-        G = (-Z4 + Z6) / (2.0 * cell)
-        H = (Z2 - Z8) / (2.0 * cell)
-        denom = G * G + H * H
-        small = denom < 1e-12
-        ds = np.where(small, 1.0, denom)
-        profile = np.where(small, 0.0, 2.0 * (D * G * G + E * H * H + F * G * H) / ds)
-        plan = np.where(small, 0.0, -2.0 * (D * H * H + E * G * G - F * G * H) / ds)
-        return profile, plan
+        return zt_curvature(z, cell)
 
     def _write_geotiff(self, out_path, arr, gt, proj, nodata):
         write_single_band_geotiff(
