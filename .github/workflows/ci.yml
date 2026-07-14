@@ -18,11 +18,20 @@ jobs:
       - name: Unit tests (stdlib-only foundation)
         run: |
           python -m unittest tests.test_atomic_output -v
+          python -m unittest tests.test_raster_io -v
           python -m unittest tests.test_gdal_outcome -v
           python -m unittest tests.test_raster_grid_contract -v
+          python -m unittest tests.test_cost_models -v
+          python -m unittest tests.test_network_metrics -v
           python -m unittest tests.test_align_export_qgis -v
           python -m unittest tests.test_release_identity -v
           python -m unittest tests.test_ui_assets -v
+
+      - name: Unit tests (numpy-backed analysis cores)
+        run: |
+          python -m pip install --upgrade numpy
+          python -m unittest tests.test_ahp_core -v
+          python -m unittest tests.test_terrain_math -v
 
       - name: Release identity
         shell: bash
