@@ -32,6 +32,7 @@ jobs:
           python -m pip install --upgrade numpy
           python -m unittest tests.test_ahp_core -v
           python -m unittest tests.test_terrain_math -v
+          python -m unittest tests.test_geochem_legend -v
 
       - name: Release identity
         shell: bash
