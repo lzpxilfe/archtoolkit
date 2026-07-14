@@ -217,6 +217,128 @@ def cleanup_staging_dir(path: str) -> bool:
     return True
 
 
+_STAGING_FILE_INFIX = ".archtoolkit-staged."
+
+
+def reserve_staging_path(final_path: str, run_id: str) -> str:
+    """Return an unused sibling path used to stage a single output file.
+
+    The staging file lives in the *same directory* as ``final_path`` so the
+    later :func:`atomic_publish_file` is a same-filesystem atomic rename rather
+    than a copy.  The real extension is preserved (``dem.tif`` stages as
+    ``.dem.archtoolkit-staged.<run>.tif``) so GDAL/QGIS format detection still
+    works when a processing algorithm writes to the staged path.  The hidden
+    ``.archtoolkit-staged.`` infix marks the file as ArchToolkit-owned so
+    :func:`cleanup_staging_path` never deletes an unrelated file.  The path is
+    only computed here, not created, so writers that refuse to overwrite an
+    existing destination still work.
+    """
+    final = Path(final_path).expanduser()
+    parent = final.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    safe_run = _safe_component(run_id, "run")
+    stem = final.stem
+    suffix = final.suffix
+    counter = 0
+    while True:
+        tag = safe_run if counter == 0 else f"{safe_run}-{counter}"
+        candidate = parent / f".{stem}{_STAGING_FILE_INFIX}{tag}{suffix}"
+        if not os.path.lexists(candidate):
+            return str(candidate)
+        counter += 1
+        if counter > 9999:
+            raise RuntimeError(
+                f"Could not reserve a unique staging path near {final}"
+            )
+
+
+def _validate_completed_file(path: str) -> Path:
+    staged = Path(path)
+    try:
+        mode = staged.lstat().st_mode
+    except OSError as exc:
+        raise ValueError(f"Staged output is missing: {staged}") from exc
+    if stat.S_ISLNK(mode):
+        raise ValueError(f"Refusing to publish a staged symlink: {staged}")
+    if not stat.S_ISREG(mode):
+        raise ValueError(f"Staged output is not a regular file: {staged}")
+    if staged.stat().st_size <= 0:
+        raise ValueError(f"Staged output is empty: {staged}")
+    return staged
+
+
+def _prepare_file_publication(source: Path, final_path: str) -> Path:
+    final = Path(final_path).expanduser()
+    parent = final.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    if source.parent.resolve(strict=True) != parent.resolve(strict=True):
+        raise ValueError(
+            "Staged file and final path must share a parent directory"
+        )
+    return final
+
+
+def atomic_publish_file(source_path: str, final_path: str) -> str:
+    """Atomically move one fully-written file onto its final path.
+
+    ``source_path`` must be a completed regular file on the same filesystem as
+    ``final_path`` (use :func:`reserve_staging_path`).  ``os.replace`` is an
+    atomic rename on POSIX and Windows, so a reader sees either the previous
+    file or the finished one, never a truncated blend, and a crash *before*
+    this call leaves the previous output untouched.
+    """
+    source = _validate_completed_file(source_path)
+    final = _prepare_file_publication(source, final_path)
+    os.replace(source, final)
+    return str(final)
+
+
+def atomic_publish_files(pairs) -> list:
+    """Publish several completed files as close to together as a filesystem allows.
+
+    Every staged file is validated and confirmed to share its destination's
+    parent directory *before* any rename runs; only then are the renames done
+    back to back.  This gives all-or-nothing semantics against the realistic
+    failure -- a long write that dies partway -- because either every staged
+    file finished (and the quick metadata-only renames all succeed) or nothing
+    is published.  ``pairs`` is an iterable of ``(source_path, final_path)``.
+    """
+    prepared = []
+    for source_path, final_path in pairs:
+        source = _validate_completed_file(source_path)
+        final = _prepare_file_publication(source, final_path)
+        prepared.append((source, final))
+    published = []
+    for source, final in prepared:
+        os.replace(source, final)
+        published.append(str(final))
+    return published
+
+
+def cleanup_staging_path(path: str) -> bool:
+    """Best-effort removal of a reserved single-file staging path.
+
+    Only files carrying the ArchToolkit staging infix are removed, so a caller
+    that accidentally passes a final output path (or a path already consumed by
+    a publish rename) never destroys real data.  Never raises.
+    """
+    if not path:
+        return False
+    if _STAGING_FILE_INFIX not in os.path.basename(str(path)):
+        return False
+    try:
+        mode = os.lstat(path).st_mode
+    except OSError:
+        return False
+    if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
+        return False
+    try:
+        os.unlink(path)
+        return True
+    except OSError:
+        return False
+
+
 def publish_staging_dir(path: str, parent_dir: str, final_name: str) -> str:
     """Atomically rename a complete staging directory into its final location."""
     staging = _require_staging_dir(path)

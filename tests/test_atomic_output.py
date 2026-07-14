@@ -333,5 +333,175 @@ class AtomicOutputTests(unittest.TestCase):
         self.assertTrue(cleanup_staging_dir(str(staging)))
 
 
+class AtomicFilePublishTests(unittest.TestCase):
+    """Single-file / file-pair atomic publication used by long-running tools."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.out = self.root / "out"
+        self.out.mkdir()
+
+    def _reserve(self, final, run_id="run-1"):
+        return atomic_output.reserve_staging_path(str(final), run_id)
+
+    def test_reserve_is_hidden_sibling_that_keeps_extension(self):
+        final = self.out / "dem.tif"
+        staged = Path(self._reserve(final))
+
+        self.assertEqual(staged.parent, self.out)
+        self.assertEqual(staged.suffix, ".tif")
+        self.assertTrue(staged.name.startswith(".dem"))
+        self.assertIn(atomic_output._STAGING_FILE_INFIX, staged.name)
+        # Path is only computed, never created, so writers that refuse to
+        # overwrite an existing destination still work.
+        self.assertFalse(staged.exists())
+
+    def test_reserve_creates_missing_parent_directory(self):
+        final = self.out / "nested" / "sub" / "dem.tif"
+        staged = Path(self._reserve(final))
+
+        self.assertTrue(staged.parent.is_dir())
+        self.assertEqual(staged.parent, final.parent)
+
+    def test_reserve_avoids_a_leftover_staging_file(self):
+        final = self.out / "dem.tif"
+        first = Path(self._reserve(final))
+        first.write_text("leftover", encoding="utf-8")
+
+        second = Path(self._reserve(final))
+
+        self.assertNotEqual(second, first)
+        self.assertFalse(second.exists())
+
+    def test_publish_file_replaces_destination_atomically(self):
+        final = self.out / "dem.tif"
+        final.write_text("old", encoding="utf-8")
+        staged = Path(self._reserve(final))
+        staged.write_text("new", encoding="utf-8")
+
+        published = atomic_output.atomic_publish_file(str(staged), str(final))
+
+        self.assertEqual(published, str(final))
+        self.assertFalse(staged.exists())
+        self.assertEqual(final.read_text(encoding="utf-8"), "new")
+
+    def test_publish_file_rejects_empty_staged_output(self):
+        final = self.out / "dem.tif"
+        final.write_text("old", encoding="utf-8")
+        staged = Path(self._reserve(final))
+        staged.write_text("", encoding="utf-8")
+
+        with self.assertRaisesRegex(ValueError, "empty"):
+            atomic_output.atomic_publish_file(str(staged), str(final))
+
+        # A rejected publish leaves the previous output untouched.
+        self.assertEqual(final.read_text(encoding="utf-8"), "old")
+
+    def test_publish_file_rejects_missing_staged_output(self):
+        final = self.out / "dem.tif"
+        staged = self._reserve(final)
+
+        with self.assertRaisesRegex(ValueError, "missing"):
+            atomic_output.atomic_publish_file(str(staged), str(final))
+
+    def test_publish_file_requires_same_parent(self):
+        final = self.out / "dem.tif"
+        elsewhere = self.root / "elsewhere"
+        elsewhere.mkdir()
+        staged = elsewhere / ("x" + atomic_output._STAGING_FILE_INFIX + "r.tif")
+        staged.write_text("new", encoding="utf-8")
+
+        with self.assertRaisesRegex(ValueError, "same parent|share a parent"):
+            atomic_output.atomic_publish_file(str(staged), str(final))
+
+        self.assertFalse(final.exists())
+
+    @unittest.skipUnless(os.name == "posix", "POSIX symlinks required")
+    def test_publish_file_refuses_symlink_source_and_spares_target(self):
+        final = self.out / "dem.tif"
+        external = self.root / "external.tif"
+        external.write_text("external", encoding="utf-8")
+        staged = self.out / ("x" + atomic_output._STAGING_FILE_INFIX + "r.tif")
+        staged.symlink_to(external)
+
+        with self.assertRaisesRegex(ValueError, "symlink"):
+            atomic_output.atomic_publish_file(str(staged), str(final))
+
+        self.assertTrue(staged.is_symlink())
+        self.assertEqual(external.read_text(encoding="utf-8"), "external")
+        self.assertFalse(final.exists())
+
+    def test_publish_files_publishes_a_pair_together(self):
+        pred_final = self.out / "dem.tif"
+        var_final = self.out / "dem_variance.tif"
+        pred = Path(self._reserve(pred_final))
+        var = Path(self._reserve(var_final))
+        pred.write_text("pred", encoding="utf-8")
+        var.write_text("var", encoding="utf-8")
+
+        published = atomic_output.atomic_publish_files([
+            (str(pred), str(pred_final)),
+            (str(var), str(var_final)),
+        ])
+
+        self.assertEqual(published, [str(pred_final), str(var_final)])
+        self.assertEqual(pred_final.read_text(encoding="utf-8"), "pred")
+        self.assertEqual(var_final.read_text(encoding="utf-8"), "var")
+
+    def test_publish_files_validates_all_before_renaming_any(self):
+        pred_final = self.out / "dem.tif"
+        var_final = self.out / "dem_variance.tif"
+        pred_final.write_text("old-pred", encoding="utf-8")
+        pred = Path(self._reserve(pred_final))
+        var = Path(self._reserve(var_final))
+        pred.write_text("pred", encoding="utf-8")
+        var.write_text("", encoding="utf-8")  # variance failed to write
+
+        with self.assertRaisesRegex(ValueError, "empty"):
+            atomic_output.atomic_publish_files([
+                (str(pred), str(pred_final)),
+                (str(var), str(var_final)),
+            ])
+
+        # Neither final is touched: the good prediction stays staged, the old
+        # prediction output is preserved, and no half-variance appears.
+        self.assertEqual(pred_final.read_text(encoding="utf-8"), "old-pred")
+        self.assertTrue(pred.exists())
+        self.assertFalse(var_final.exists())
+
+    def test_cleanup_removes_reserved_staging_file(self):
+        final = self.out / "dem.tif"
+        staged = Path(self._reserve(final))
+        staged.write_text("partial", encoding="utf-8")
+
+        self.assertTrue(atomic_output.cleanup_staging_path(str(staged)))
+        self.assertFalse(staged.exists())
+
+    def test_cleanup_refuses_a_non_staging_path(self):
+        final = self.out / "dem.tif"
+        final.write_text("real output", encoding="utf-8")
+
+        self.assertFalse(atomic_output.cleanup_staging_path(str(final)))
+        self.assertEqual(final.read_text(encoding="utf-8"), "real output")
+
+    def test_cleanup_is_silent_on_missing_file(self):
+        missing = self.out / (".gone" + atomic_output._STAGING_FILE_INFIX + "r.tif")
+        self.assertFalse(atomic_output.cleanup_staging_path(str(missing)))
+        self.assertFalse(atomic_output.cleanup_staging_path(""))
+
+    @unittest.skipUnless(os.name == "posix", "POSIX symlinks required")
+    def test_cleanup_refuses_a_staging_symlink(self):
+        external = self.root / "external.tif"
+        external.write_text("external", encoding="utf-8")
+        link = self.out / ("x" + atomic_output._STAGING_FILE_INFIX + "r.tif")
+        link.symlink_to(external)
+
+        self.assertFalse(atomic_output.cleanup_staging_path(str(link)))
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(external.read_text(encoding="utf-8"), "external")
+
+
 if __name__ == "__main__":
     unittest.main()

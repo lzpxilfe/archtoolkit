@@ -66,6 +66,11 @@ from .utils import (
     restore_ui_focus,
     set_archtoolkit_layer_metadata,
 )
+from .atomic_output import (
+    atomic_publish_file,
+    cleanup_staging_path,
+    reserve_staging_path,
+)
 from .live_log_dialog import ensure_live_log_dialog
 from .help_dialog import show_help_dialog
 from .i18n import get_output_group_name
@@ -2121,14 +2126,30 @@ value/class 래스터와 폴리곤을 생성합니다.
                 out_dir = os.path.join(os.path.expanduser("~"), "ArchToolkit_outputs", "geochem")
 
         os.makedirs(out_dir, exist_ok=True)
+
+        # Copy each raster into a staged sibling of its final path, then publish
+        # it with an atomic rename, so a crash mid-copy cannot leave a truncated
+        # GeoTIFF at the permanent output path. The value raster is required; the
+        # class raster stays best-effort, preserving the prior behaviour.
         val_dst = os.path.join(out_dir, os.path.basename(val_path))
-        shutil.copy2(val_path, val_dst)
+        val_staging = reserve_staging_path(val_dst, "geochem")
+        try:
+            shutil.copy2(val_path, val_staging)
+            atomic_publish_file(val_staging, val_dst)
+        finally:
+            cleanup_staging_path(val_staging)
+
         cls_dst = None
         if cls_path:
             try:
                 if os.path.exists(cls_path):
                     cls_dst = os.path.join(out_dir, os.path.basename(cls_path))
-                    shutil.copy2(cls_path, cls_dst)
+                    cls_staging = reserve_staging_path(cls_dst, "geochem")
+                    try:
+                        shutil.copy2(cls_path, cls_staging)
+                        atomic_publish_file(cls_staging, cls_dst)
+                    finally:
+                        cleanup_staging_path(cls_staging)
             except Exception:
                 cls_dst = None
         return val_dst, cls_dst

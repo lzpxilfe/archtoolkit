@@ -26,6 +26,12 @@ from qgis.PyQt.QtGui import QIcon
 import processing
 import tempfile
 from .utils import new_run_id, push_message, restore_ui_focus, set_archtoolkit_layer_metadata
+from .atomic_output import (
+    atomic_publish_file,
+    atomic_publish_files,
+    cleanup_staging_path,
+    reserve_staging_path,
+)
 from .live_log_dialog import ensure_live_log_dialog
 from .help_dialog import show_help_dialog
 
@@ -809,6 +815,7 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
         
         try:
             temp_merged = None
+            staging_out = None
 
             # Step 1: Merge all selected layers into one temp file
             if len(selected_layers) > 1:
@@ -878,6 +885,8 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
             # Kriging (Lite) path: implemented in pure Python (numpy) + QGIS, no external providers.
             if str(algorithm or "") == "archtoolkit:kriging_lite":
                 progress = None
+                staging_pred = None
+                staging_var = None
                 try:
                     from .kriging_lite import ordinary_kriging_lite_to_geotiff
 
@@ -903,6 +912,13 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
                     if not ext:
                         ext = ".tif"
                     variance_path = f"{base}_variance{ext}"
+
+                    # Stage both rasters beside their finals so the prediction
+                    # and its variance are published together via a pair of
+                    # atomic renames; a crash mid-compute or mid-write cannot
+                    # truncate a previously-generated DEM at output_path.
+                    staging_pred = reserve_staging_path(output_path, run_id)
+                    staging_var = reserve_staging_path(variance_path, run_id)
 
                     progress = QtWidgets.QProgressDialog("Kriging 계산 중…", "취소", 0, 100, self.iface.mainWindow())
                     try:
@@ -935,8 +951,8 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
                         value_field=value_field,
                         extent=combined_extent,
                         pixel_size=float(pixel_size),
-                        out_path=str(output_path),
-                        variance_path=str(variance_path),
+                        out_path=str(staging_pred),
+                        variance_path=str(staging_var),
                         neighbors=int(neighbors),
                         progress_cb=progress_cb,
                         is_cancelled=is_cancelled,
@@ -947,6 +963,14 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
                         progress.close()
                     except Exception:
                         pass
+
+                    # Both rasters finished writing: publish them together.
+                    atomic_publish_files([
+                        (staging_pred, output_path),
+                        (staging_var, variance_path),
+                    ])
+                    staging_pred = None
+                    staging_var = None
 
                     if os.path.exists(output_path):
                         out_layer = self.iface.addRasterLayer(output_path, "생성된 DEM (Kriging)")
@@ -1010,24 +1034,38 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
                     push_message(self.iface, "오류", f"Kriging 처리 중 오류: {str(e)}", level=2, duration=10)
                     restore_ui_focus(self)
                     return
+                finally:
+                    # Remove any staged raster left by a cancel/failure; after a
+                    # successful publish these are None and this is a no-op.
+                    for _staged in (staging_pred, staging_var):
+                        if _staged:
+                            cleanup_staging_path(_staged)
 
 
             
+            # Interpolate into a staged sibling of the final path so a failed or
+            # killed run cannot truncate a previously-generated DEM at output_path.
+            staging_out = reserve_staging_path(output_path, run_id)
             params = {
                 'INTERPOLATION_DATA': interp_data,
                 'EXTENT': combined_extent,
                 'PIXEL_SIZE': pixel_size,
-                'OUTPUT': output_path
+                'OUTPUT': staging_out
             }
             if method_param is not None:
                 params['METHOD'] = method_param
-            
+
             push_message(self.iface, "처리 중", f"{method_name} 보간 실행 중...", level=0)
             QtWidgets.QApplication.processEvents()
-            
+
             # Step 4: Run TIN interpolation
             result = processing.run(algorithm, params)
-            
+
+            # Publish atomically only once the interpolation produced a file.
+            if result and os.path.exists(staging_out):
+                atomic_publish_file(staging_out, output_path)
+                staging_out = None
+
             # Add result to map
             if result and os.path.exists(output_path):
                 out_layer = self.iface.addRasterLayer(output_path, "생성된 DEM")
@@ -1060,6 +1098,10 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
             if temp_merged and os.path.exists(temp_merged):
                 from .utils import cleanup_files
                 cleanup_files([temp_merged])
+            # Remove a staged interpolation output left by a failed/aborted run;
+            # after a successful publish staging_out is None and this is a no-op.
+            if staging_out:
+                cleanup_staging_path(staging_out)
 
 
 
