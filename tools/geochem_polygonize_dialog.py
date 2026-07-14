@@ -66,6 +66,7 @@ from .utils import (
     restore_ui_focus,
     set_archtoolkit_layer_metadata,
 )
+from .raster_io import write_single_band_geotiff
 from .atomic_output import (
     atomic_publish_file,
     cleanup_staging_path,
@@ -2079,18 +2080,15 @@ value/class 래스터와 폴리곤을 생성합니다.
         nodata: float,
         gdal_type=gdal.GDT_Float32,
     ):
-        gt = src_ds.GetGeoTransform()
-        proj = src_ds.GetProjection()
-        ysize, xsize = data.shape
-        drv = gdal.GetDriverByName("GTiff")
-        ds = drv.Create(out_path, int(xsize), int(ysize), 1, gdal_type, options=["COMPRESS=LZW", "TILED=YES"])
-        ds.SetGeoTransform(gt)
-        ds.SetProjection(proj)
-        band = ds.GetRasterBand(1)
-        band.WriteArray(data)
-        band.SetNoDataValue(float(nodata))
-        ds.FlushCache()
-        ds = None
+        write_single_band_geotiff(
+            out_path,
+            data,
+            geotransform=src_ds.GetGeoTransform(),
+            projection=src_ds.GetProjection(),
+            nodata=nodata,
+            gdal_type=gdal_type,
+            options=("COMPRESS=LZW", "TILED=YES"),
+        )
 
     def _persist_geochem_rasters(
         self,

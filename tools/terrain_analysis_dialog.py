@@ -44,6 +44,7 @@ import processing
 from .utils import (
     cleanup_files, log_message, push_message, restore_ui_focus, set_archtoolkit_layer_metadata,
 )
+from .raster_io import write_single_band_geotiff
 from .live_log_dialog import ensure_live_log_dialog
 from .help_dialog import show_help_dialog
 
@@ -896,17 +897,15 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
         return profile, plan
 
     def _write_geotiff(self, out_path, arr, gt, proj, nodata):
-        driver = gdal.GetDriverByName("GTiff")
-        rows, cols = arr.shape
-        ds = driver.Create(out_path, cols, rows, 1, gdal.GDT_Float32, ["COMPRESS=LZW"])
-        ds.SetGeoTransform(gt)
-        if proj:
-            ds.SetProjection(proj)
-        b = ds.GetRasterBand(1)
-        b.SetNoDataValue(float(nodata))
-        b.WriteArray(arr)
-        b.FlushCache()
-        ds = None
+        write_single_band_geotiff(
+            out_path,
+            arr,
+            geotransform=gt,
+            projection=proj,
+            nodata=nodata,
+            gdal_type=gdal.GDT_Float32,
+            options=("COMPRESS=LZW",),
+        )
 
     def _apply_diverging_style(self, layer, valid_values, neg_label, pos_label):
         """Blue-white-red diverging ramp, symmetric about 0 (2/98 percentile range).

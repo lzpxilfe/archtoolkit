@@ -524,7 +524,7 @@ python scripts/check_release_identity.py \
 6. `STABILITY.md`의 `work/*`와 자동화의 `agent/*` 브랜치 규칙을 하나의 운영 규칙으로 정리한다.
 7. 현재 UI·README pictograph 정적 검사의 허용 범위를 유지하면서 문서 예시와 학술 기호를 오탐 없이 분리한다.
 8. 픽셀 아이콘 공통 팔레트, 16×16·24×24·32×32 변형, 명명 규칙을 작은 디자인 시스템으로 문서화한다.
-9. Align & Export에서 검증된 원자적 게시 helper를 다른 장시간 실행 도구에 적용할지 도구별 위험도를 평가한다. — **평가 완료.** 영구 경로에 직접 쓰는 도구만 위험이 크다. DEM 생성기(사용자 지정 경로, Kriging은 예측+분산 쌍)와 지구화학 폴리곤화(`ArchToolkit_outputs/geochem/`로 `shutil.copy2`)를 대상으로 단일 파일·파일 쌍 원자적 게시(`reserve_staging_path`/`atomic_publish_file`/`atomic_publish_files`/`cleanup_staging_path`)를 적용했다. 지형 분석·비용면·가시권 등은 고유 run-id 임시 경로에만 쓰므로(사용자 산출물 덮어쓰기 위험 없음) 부분 산출 집합 노출만 남아 우선순위가 낮다.
+9. Align & Export에서 검증된 원자적 게시 helper를 다른 장시간 실행 도구에 적용할지 도구별 위험도를 평가한다. — **평가 완료.** 영구 경로에 직접 쓰는 도구만 위험이 크다. DEM 생성기(사용자 지정 경로, Kriging은 예측+분산 쌍)와 지구화학 폴리곤화(`ArchToolkit_outputs/geochem/`로 `shutil.copy2`)를 대상으로 단일 파일·파일 쌍 원자적 게시(`reserve_staging_path`/`atomic_publish_file`/`atomic_publish_files`/`cleanup_staging_path`)를 적용했다. 지형 분석·비용면·가시권 등은 고유 run-id 임시 경로에만 쓰므로(사용자 산출물 덮어쓰기 위험 없음) 전면 원자적 게시는 우선순위가 낮다 — 다만 쓰기 실패 시 잘린 임시 파일이 정리되지 않던 공통 결함에는 QGIS 비의존 `raster_io.write_single_band_geotiff`(실패 시 부분 파일 삭제 후 재발생)를 적용해 비용면(누적/에너지/회랑)·지구화학·지형 분석의 GeoTIFF 쓰기를 일원화했다.
 10. full flake8의 기존 스타일 부채를 기능 변경과 분리한 작은 커밋으로 점진적으로 줄인다.
 11. 출력 경로 변경을 README의 사용 예시와 향후 migration note에 더 명시한다.
 

@@ -65,6 +65,7 @@ from .utils import (
     set_archtoolkit_layer_metadata,
     transform_point,
 )
+from .raster_io import write_single_band_geotiff
 from .live_log_dialog import ensure_live_log_dialog
 from .help_dialog import show_help_dialog
 from .i18n import is_english_ui
@@ -1500,25 +1501,15 @@ class CostSurfaceWorker(QgsTask):
             cost_raster_path = os.path.join(
                 tempfile.gettempdir(), f"archt_cost_{self.model_key}_{run_id}.tif"
             )
-            driver = gdal.GetDriverByName("GTiff")
-            out_ds = driver.Create(
+            if not write_single_band_geotiff(
                 cost_raster_path,
-                cols,
-                rows,
-                1,
-                gdal.GDT_Float32,
-                options=["TILED=YES", "COMPRESS=LZW"],
-            )
-            if out_ds is None:
+                out,
+                geotransform=win_gt,
+                projection=proj,
+                nodata=-9999.0,
+                gdal_type=gdal.GDT_Float32,
+            ):
                 return CostTaskResult(ok=False, message="누적 비용 래스터를 생성할 수 없습니다.")
-            out_ds.SetGeoTransform(win_gt)
-            out_ds.SetProjection(proj)
-            out_band = out_ds.GetRasterBand(1)
-            out_band.SetNoDataValue(-9999.0)
-            out_band.WriteArray(out)
-            out_band.FlushCache()
-            out_ds.FlushCache()
-            out_ds = None
 
             # Isochrones (0/15/30/45/60/...) for easier interpretation.
             try:
@@ -1555,25 +1546,15 @@ class CostSurfaceWorker(QgsTask):
             energy_raster_path = os.path.join(
                 tempfile.gettempdir(), f"archt_energy_{self.model_key}_{run_id}.tif"
             )
-            driver = gdal.GetDriverByName("GTiff")
-            out_ds = driver.Create(
+            if not write_single_band_geotiff(
                 energy_raster_path,
-                cols,
-                rows,
-                1,
-                gdal.GDT_Float32,
-                options=["TILED=YES", "COMPRESS=LZW"],
-            )
-            if out_ds is None:
+                out,
+                geotransform=win_gt,
+                projection=proj,
+                nodata=-9999.0,
+                gdal_type=gdal.GDT_Float32,
+            ):
                 return CostTaskResult(ok=False, message="누적 에너지 래스터를 생성할 수 없습니다.")
-            out_ds.SetGeoTransform(win_gt)
-            out_ds.SetProjection(proj)
-            out_band = out_ds.GetRasterBand(1)
-            out_band.SetNoDataValue(-9999.0)
-            out_band.WriteArray(out)
-            out_band.FlushCache()
-            out_ds.FlushCache()
-            out_ds = None
 
             # Iso-energy contours (kcal) for interpretation (same polygonal artifacts as grid-based movement).
             try:
@@ -1616,25 +1597,14 @@ class CostSurfaceWorker(QgsTask):
                         corridor_raster_path = os.path.join(
                             tempfile.gettempdir(), f"archt_corridor_{self.model_key}_{run_id}.tif"
                         )
-                        driver = gdal.GetDriverByName("GTiff")
-                        out_ds = driver.Create(
+                        if write_single_band_geotiff(
                             corridor_raster_path,
-                            cols,
-                            rows,
-                            1,
-                            gdal.GDT_Byte,
-                            options=["TILED=YES", "COMPRESS=LZW"],
-                        )
-                        if out_ds is not None:
-                            out_ds.SetGeoTransform(win_gt)
-                            out_ds.SetProjection(proj)
-                            out_band = out_ds.GetRasterBand(1)
-                            out_band.SetNoDataValue(0)
-                            out_band.WriteArray(corridor_mask)
-                            out_band.FlushCache()
-                            out_ds.FlushCache()
-                            out_ds = None
-
+                            corridor_mask,
+                            geotransform=win_gt,
+                            projection=proj,
+                            nodata=0,
+                            gdal_type=gdal.GDT_Byte,
+                        ):
                             if corridor_polygonize:
                                 corridor_gpkg_path = os.path.join(
                                     tempfile.gettempdir(),
