@@ -12,7 +12,6 @@ DEM 기반 이동 비용 모델을 이용해 유적(포인트/폴리곤) 간 최
 주의: 실제 도로/하천/토지피복을 알지 못하며, DEM 경사 기반 이동 비용만 고려합니다.
 """
 
-import heapq
 import math
 import os
 import threading
@@ -75,6 +74,10 @@ from .utils import (
 from .live_log_dialog import ensure_live_log_dialog
 from .help_dialog import show_help_dialog
 from .i18n import get_output_group_name
+from .network_metrics import (
+    betweenness_centrality_weighted as _sna_betweenness_centrality_weighted,
+    closeness_centrality_weighted as _sna_closeness_centrality_weighted,
+)
 
 
 FORM_CLASS, _ = uic.loadUiType(
@@ -188,105 +191,6 @@ class _UnionFind:
             self.parent[rb] = ra
             self.rank[ra] += 1
         return True
-
-
-def _sna_dijkstra_weighted(*, start: int, adj: List[List[Tuple[int, float]]]) -> List[float]:
-    n = int(len(adj))
-    dist = [math.inf] * n
-    s = int(start)
-    if not (0 <= s < n):
-        return dist
-    dist[s] = 0.0
-    heap: List[Tuple[float, int]] = [(0.0, s)]
-    eps = 1e-12
-    while heap:
-        dv, v = heapq.heappop(heap)
-        if dv > dist[v] + eps:
-            continue
-        for w, weight in adj[v]:
-            try:
-                ww = float(weight)
-            except Exception:
-                continue
-            if not math.isfinite(ww) or ww <= 0:
-                continue
-            nd = dv + ww
-            if nd < dist[w] - eps:
-                dist[w] = nd
-                heapq.heappush(heap, (nd, int(w)))
-    return dist
-
-
-def _sna_closeness_centrality_weighted(*, n: int, adj: List[List[Tuple[int, float]]]) -> List[float]:
-    """Closeness with the Wasserman–Faust component-size correction.
-
-    Plain reachable/sum(dist) rewards nodes in tiny isolated components (a
-    2-node pair scores the maximum) — backwards for disconnected graphs, which
-    k-NN networks routinely are. Scaling by reachable/(n-1) weights the score
-    by how much of the whole network the node can actually reach.
-    """
-    out = [0.0] * int(n)
-    if n <= 1:
-        return out
-    for s in range(int(n)):
-        dist = _sna_dijkstra_weighted(start=s, adj=adj)
-        reachable = [d for d in dist if 0.0 < float(d) < math.inf]
-        if not reachable:
-            out[s] = 0.0
-        else:
-            r = float(len(reachable))
-            out[s] = (r / float(sum(reachable))) * (r / float(n - 1))
-    return out
-
-
-def _sna_betweenness_centrality_weighted(*, n: int, adj: List[List[Tuple[int, float]]]) -> List[float]:
-    """Brandes betweenness for weighted undirected graphs (no external deps)."""
-    bc = [0.0] * int(n)
-    eps = 1e-12
-    for s in range(int(n)):
-        stack: List[int] = []
-        pred: List[List[int]] = [[] for _ in range(int(n))]
-        sigma = [0.0] * int(n)
-        sigma[s] = 1.0
-        dist = [math.inf] * int(n)
-        dist[s] = 0.0
-
-        heap: List[Tuple[float, int]] = [(0.0, int(s))]
-        while heap:
-            dv, v = heapq.heappop(heap)
-            if dv > dist[v] + eps:
-                continue
-            stack.append(int(v))
-            for w, weight in adj[v]:
-                try:
-                    ww = float(weight)
-                except Exception:
-                    continue
-                if not math.isfinite(ww) or ww <= 0:
-                    continue
-                nd = dv + ww
-                if nd < dist[w] - eps:
-                    dist[w] = nd
-                    heapq.heappush(heap, (nd, int(w)))
-                    sigma[w] = sigma[v]
-                    pred[w] = [int(v)]
-                elif abs(nd - dist[w]) <= eps:
-                    sigma[w] += sigma[v]
-                    pred[w].append(int(v))
-
-        delta = [0.0] * int(n)
-        while stack:
-            w = stack.pop()
-            for v in pred[w]:
-                if sigma[w] > 0:
-                    delta[v] += (sigma[v] / sigma[w]) * (1.0 + delta[w])
-            if w != s:
-                bc[w] += delta[w]
-
-    # Undirected normalization: each shortest path counted twice.
-    for i in range(int(n)):
-        bc[i] = bc[i] * 0.5
-    return bc
 
 
 class CostNetworkWorker(QgsTask):

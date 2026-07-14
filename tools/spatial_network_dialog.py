@@ -17,7 +17,6 @@ import heapq
 import math
 import os
 import uuid
-from collections import deque
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -62,6 +61,10 @@ from .utils import (
 from .live_log_dialog import ensure_live_log_dialog
 from .help_dialog import show_help_dialog
 from .i18n import is_english_ui
+from .network_metrics import (
+    betweenness_centrality_unweighted,
+    closeness_centrality_unweighted,
+)
 
 
 FORM_CLASS, _ = uic.loadUiType(
@@ -1787,67 +1790,10 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
             project.addMapLayer(layer)
 
     def _closeness_centrality(self, *, n: int, adj: List[List[int]]) -> List[float]:
-        """Closeness with the Wasserman–Faust component-size correction:
-        (r/Σd)·(r/(n−1)). Without it a node in an isolated 2-node pair scores
-        the maximum 1.0, which is backwards for the disconnected graphs
-        (threshold/LOS) this tool routinely produces."""
-        out = [0.0] * int(n)
-        if n <= 1:
-            return out
-        for s in range(int(n)):
-            dist = [-1] * int(n)
-            dist[s] = 0
-            q = deque([s])
-            while q:
-                v = q.popleft()
-                for w in adj[v]:
-                    if dist[w] < 0:
-                        dist[w] = dist[v] + 1
-                        q.append(w)
-            reachable = [d for d in dist if d > 0]
-            if not reachable:
-                out[s] = 0.0
-            else:
-                r = float(len(reachable))
-                out[s] = (r / float(sum(reachable))) * (r / float(n - 1))
-        return out
+        return closeness_centrality_unweighted(n=n, adj=adj)
 
     def _betweenness_centrality(self, *, n: int, adj: List[List[int]]) -> List[float]:
-        """Brandes betweenness for unweighted undirected graphs (no external deps)."""
-        bc = [0.0] * int(n)
-        for s in range(int(n)):
-            stack: List[int] = []
-            pred: List[List[int]] = [[] for _ in range(int(n))]
-            sigma = [0.0] * int(n)
-            sigma[s] = 1.0
-            dist = [-1] * int(n)
-            dist[s] = 0
-            q = deque([s])
-
-            while q:
-                v = q.popleft()
-                stack.append(v)
-                for w in adj[v]:
-                    if dist[w] < 0:
-                        q.append(w)
-                        dist[w] = dist[v] + 1
-                    if dist[w] == dist[v] + 1:
-                        sigma[w] += sigma[v]
-                        pred[w].append(v)
-
-            delta = [0.0] * int(n)
-            while stack:
-                w = stack.pop()
-                for v in pred[w]:
-                    if sigma[w] > 0:
-                        delta[v] += (sigma[v] / sigma[w]) * (1.0 + delta[w])
-                if w != s:
-                    bc[w] += delta[w]
-
-        # Undirected normalization: each shortest path counted twice.
-        for i in range(int(n)):
-            bc[i] = bc[i] * 0.5
-        return bc
+        return betweenness_centrality_unweighted(n=n, adj=adj)
 
     def _los_visible(
         self,
