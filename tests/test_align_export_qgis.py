@@ -27,6 +27,7 @@ try:
         AlignExportDialog,
         _Cancelled,
         _WarpValidationContract,
+        _categorical_output_nodata,
     )
     from tools.raster_grid_contract import Extent, RasterGrid, canonical_gdal_target_grid
 
@@ -139,6 +140,7 @@ class AlignExportQgisIntegrationTests(unittest.TestCase):
                 "0,100,0,100",
                 "EPSG:32652",
                 nearest=False,
+                nodata=-9999.0,
                 progress=progress,
             )
         elapsed = time.monotonic() - started
@@ -173,6 +175,7 @@ class AlignExportQgisIntegrationTests(unittest.TestCase):
                 "0,2000,0,2000",
                 "EPSG:32652",
                 nearest=False,
+                nodata=-9999.0,
                 progress=progress,
             )
 
@@ -191,6 +194,7 @@ class AlignExportQgisIntegrationTests(unittest.TestCase):
             "0.2,10.45,-1.3,6.9",
             QgsRasterLayer(source, "source crs").crs(),
             nearest=False,
+            nodata=-9999.0,
             progress=progress,
         )
         expected_grid = canonical_gdal_target_grid(
@@ -221,6 +225,7 @@ class AlignExportQgisIntegrationTests(unittest.TestCase):
             "0,10,0,10",
             "EPSG:32652",
             nearest=False,
+            nodata=-9999.0,
             progress=progress,
         )
         shifted_grid = RasterGrid(
@@ -238,6 +243,104 @@ class AlignExportQgisIntegrationTests(unittest.TestCase):
                 "origin source",
                 self._contract(shifted_grid),
             )
+
+    # -- categorical NoData -------------------------------------------------
+    #
+    # A class raster exported with no NoData value disables the consumer's own
+    # safety net: the nodata mask gets guessed from the array, so nothing can
+    # report presence points landing on padding. These tests cover the decision
+    # made before the warp, which is where the value is chosen.
+
+    def _create_class_raster(self, path, *, nodata=None, codes=(1, 2, 3),
+                             gdal_type=None):
+        """A small integer-coded raster, optionally without a NoData value."""
+        dataset = gdal.GetDriverByName("GTiff").Create(
+            path, 10, 10, 1, gdal_type or gdal.GDT_Int32,
+        )
+        self.assertIsNotNone(dataset)
+        dataset.SetProjection(self._spatial_reference().ExportToWkt())
+        dataset.SetGeoTransform((0, 1, 0, 10, 0, -1))
+        band = dataset.GetRasterBand(1)
+        if nodata is not None:
+            band.SetNoDataValue(nodata)
+        band.Fill(codes[0])
+        array = band.ReadAsArray()
+        for index, code in enumerate(codes):
+            array[index % array.shape[0], :] = code
+        band.WriteArray(array)
+        dataset = None
+        return path
+
+    def test_categorical_source_nodata_is_reused_not_replaced(self):
+        path = self._create_class_raster(self._path("cls_with_nodata.tif"), nodata=0)
+        layer = QgsRasterLayer(path, "class with nodata")
+        self.assertTrue(layer.isValid())
+        value, reason = _categorical_output_nodata(layer)
+        self.assertEqual(reason, "source")
+        self.assertEqual(value, 0.0)
+
+    def test_categorical_without_nodata_gets_a_sentinel_outside_the_codes(self):
+        # The KIGAM shape: integer lithology codes, no NoData declared.
+        path = self._create_class_raster(
+            self._path("cls_no_nodata.tif"), nodata=None, codes=(1, 2, 3, 47))
+        layer = QgsRasterLayer(path, "class without nodata")
+        self.assertTrue(layer.isValid())
+        value, reason = _categorical_output_nodata(layer)
+        self.assertEqual(reason, "sentinel")
+        self.assertIsNotNone(value)
+        self.assertFalse(1 <= value <= 47,
+                         msg=f"sentinel {value} collides with a class code in use")
+
+    def test_warp_stamps_the_chosen_nodata_onto_a_categorical_output(self):
+        source = self._create_class_raster(
+            self._path("cls_warp_source.tif"), nodata=None, codes=(1, 2, 3))
+        output = self._path("cls_warp_out.tif")
+        layer = QgsRasterLayer(source, "class warp source")
+        value, _reason = _categorical_output_nodata(layer)
+        self.assertIsNotNone(value)
+
+        progress = QtWidgets.QProgressDialog("", "", 0, 1)
+        self.addCleanup(progress.close)
+        AlignExportDialog._warp(
+            QObject(),
+            source,
+            output,
+            1.0,
+            "0,10,0,10",
+            "EPSG:32652",
+            nearest=True,
+            nodata=value,
+            progress=progress,
+        )
+        written = gdal.Open(output)
+        self.assertIsNotNone(written)
+        self.assertIsNotNone(
+            written.GetRasterBand(1).GetNoDataValue(),
+            msg="categorical output must carry an explicit NoData value",
+        )
+        self.assertAlmostEqual(
+            float(written.GetRasterBand(1).GetNoDataValue()), float(value), places=6)
+        written = None
+
+    def test_nearest_resampling_keeps_class_codes_integral(self):
+        # The corruption this whole path exists to prevent: bilinear on codes
+        # 1/2/3 yields 1.5 and 2.5, values that are not classes.
+        source = self._create_class_raster(
+            self._path("cls_integral_source.tif"), nodata=0, codes=(1, 2, 3))
+        output = self._path("cls_integral_out.tif")
+        progress = QtWidgets.QProgressDialog("", "", 0, 1)
+        self.addCleanup(progress.close)
+        AlignExportDialog._warp(
+            QObject(), source, output, 2.0, "0,10,0,10", "EPSG:32652",
+            nearest=True, nodata=0.0, progress=progress,
+        )
+        band = gdal.Open(output).GetRasterBand(1)
+        array = band.ReadAsArray()
+        nodata = band.GetNoDataValue()
+        valid = array[array != nodata] if nodata is not None else array.ravel()
+        for value in set(valid.ravel().tolist()):
+            self.assertEqual(float(value), float(int(value)),
+                             msg=f"non-integral class code {value} after resampling")
 
 
 if __name__ == "__main__":

@@ -57,6 +57,7 @@ from qgis.core import (
     QgsProcessingFeedback,
     QgsProject,
     QgsPoint,
+    QgsRasterBandStats,
     QgsRasterDataProvider,
     QgsRasterLayer,
     QgsRectangle,
@@ -69,6 +70,7 @@ from .atomic_output import cleanup_staging_dir, create_staging_dir, publish_stag
 from .gdal_outcome import GdalOutcomeTracker
 from .help_dialog import show_help_dialog
 from .live_log_dialog import ensure_live_log_dialog
+from .predictor_naming import assign_variable_keys
 from .raster_grid_contract import (
     Extent,
     GridContractError,
@@ -77,6 +79,7 @@ from .raster_grid_contract import (
     canonical_gdal_target_grid,
     validate_grid,
 )
+from .raster_semantics import choose_nodata_sentinel
 from .utils import (
     get_archtoolkit_layer_metadata,
     is_categorical_raster_meta,
@@ -159,27 +162,115 @@ def _nodata_equal(actual, expected) -> bool:
     return math.isclose(actual_float, expected_float, rel_tol=0.0, abs_tol=1e-9)
 
 
-def _source_nodata_values(layer: QgsRasterLayer, *, categorical: bool):
+def _band_type_name(provider, band: int) -> str:
+    """GDAL type name for a band, or "" when it cannot be determined."""
+    try:
+        data_type = provider.dataType(band)
+    except Exception:
+        return ""
+    for holder in (getattr(Qgis, "DataType", None), Qgis):
+        if holder is None:
+            continue
+        for name in ("Byte", "Int8", "UInt16", "Int16", "UInt32", "Int32",
+                     "Float32", "Float64"):
+            member = getattr(holder, name, None)
+            if member is not None and member == data_type:
+                return name
+    return ""
+
+
+def _categorical_output_nodata(layer: QgsRasterLayer):
+    """Decide the NoData value a categorical output should carry.
+
+    Class rasters used to be warped with ``NODATA=None``, so a source with no
+    NoData produced an export with none either. That is not a cosmetic gap:
+    with no NoData the consumer guesses the mask from the array, the warp's own
+    padding reads as a real class code, and the checks that would have caught
+    it (high-nodata warning, presence-on-nodata) cannot fire.
+
+    Preference order: reuse the source's own value when every band agrees -
+    that keeps the file describing itself the way its producer meant - then a
+    sentinel outside the observed code range. Returns ``(value, reason)`` where
+    a ``None`` value means no safe choice was found and the caller should warn
+    rather than invent one.
+    """
+    provider = layer.dataProvider()
+    if provider is None:
+        raise RuntimeError(f"입력 래스터 데이터 공급자를 열 수 없습니다: {layer.name()}")
+    band_count = int(layer.bandCount())
+
+    source_values = []
+    for band in range(1, band_count + 1):
+        try:
+            if provider.sourceHasNoDataValue(band):
+                source_values.append(float(provider.sourceNoDataValue(band)))
+            else:
+                source_values.append(None)
+        except Exception:
+            source_values.append(None)
+
+    if source_values and all(v is not None for v in source_values):
+        first = source_values[0]
+        if all(_nodata_equal(v, first) for v in source_values):
+            return first, "source"
+        # Bands disagree. Forcing one value onto the others would change what
+        # the other bands mean, so leave it alone and let the caller say so.
+        return None, "bands_disagree"
+
+    if band_count != 1:
+        # The sentinel is chosen from band 1's value range; stamping it across
+        # the other bands could land inside their data. Every categorical
+        # raster this plugin produces is single-band, so refuse rather than
+        # guess for the case that should not arise.
+        return None, "multiband"
+
+    type_name = _band_type_name(provider, 1)
+    try:
+        # A full statistics pass, but only for a class raster that declared no
+        # NoData - rare, and the alternative is shipping a file whose nodata
+        # nothing downstream can verify.
+        log_message(
+            f"범주형 NoData 결정을 위해 값 범위를 확인합니다: {layer.name()}",
+            level=Qgis.Info,
+        )
+        stats = provider.bandStatistics(1, QgsRasterBandStats.Min | QgsRasterBandStats.Max)
+        data_min, data_max = float(stats.minimumValue), float(stats.maximumValue)
+    except Exception:
+        return None, "no_statistics"
+
+    sentinel = choose_nodata_sentinel(type_name, data_min, data_max)
+    if sentinel is None:
+        return None, "no_safe_value"
+    return float(sentinel), "sentinel"
+
+
+def _source_nodata_per_band(layer: QgsRasterLayer):
+    """Each band's own source NoData, or None where it has none."""
     provider = layer.dataProvider()
     if provider is None:
         raise RuntimeError(f"입력 래스터 데이터 공급자를 열 수 없습니다: {layer.name()}")
     values = []
     for band in range(1, int(layer.bandCount()) + 1):
-        if categorical:
-            try:
-                has_nodata = bool(provider.sourceHasNoDataValue(band))
-            except Exception:
-                has_nodata = False
-            if has_nodata:
-                try:
-                    values.append(float(provider.sourceNoDataValue(band)))
-                except Exception:
-                    values.append(None)
-            else:
-                values.append(None)
-        else:
-            values.append(CONTINUOUS_NODATA)
+        try:
+            values.append(float(provider.sourceNoDataValue(band))
+                          if provider.sourceHasNoDataValue(band) else None)
+        except Exception:
+            values.append(None)
     return tuple(values)
+
+
+def _expected_nodata_values(layer: QgsRasterLayer, nodata):
+    """What each output band's NoData must be, given the value passed to warp.
+
+    ``nodata=None`` means the warp was left to inherit, so the expectation is
+    the source's own per-band values - not None for every band. Collapsing
+    that to None would reject a perfectly good multi-band output whose bands
+    declare different NoData values.
+    """
+    band_count = max(1, int(layer.bandCount()))
+    if nodata is None:
+        return _source_nodata_per_band(layer)
+    return tuple([nodata] * band_count)
 
 
 def _ensure_supported_reference_grid(layer: QgsRasterLayer, px: float, *, pixel_override: bool) -> None:
@@ -239,6 +330,9 @@ class _Item:
     kind: str
     units: str
     categorical: bool
+    tool_id: str = ""
+    nodata: Optional[float] = None
+    nodata_reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -248,18 +342,6 @@ class _WarpValidationContract:
     band_count: int
     nodata_values: tuple
     categorical: bool
-
-
-def _safe_key(name: str, used: set) -> str:
-    base = "".join(ch if (ch.isalnum() or ch in "-_") else "_" for ch in str(name or "layer")).strip("_")
-    base = base or "layer"
-    key = base
-    i = 2
-    while key in used:
-        key = f"{base}_{i}"
-        i += 1
-    used.add(key)
-    return key
 
 
 def _aoi_extent_in_crs(aoi_layer, *, selected_only: bool, dst_crs) -> Optional[QgsRectangle]:
@@ -433,12 +515,23 @@ class AlignExportDialog(QtWidgets.QDialog):
             meta = get_archtoolkit_layer_metadata(lyr) or {}
             is_arch = bool(meta.get("tool_id") or meta.get("kind"))
             kind = str(meta.get("kind") or "")
-            label = lyr.name() + (f"   [{meta.get('tool_id')}/{kind}]" if is_arch else "")
+            tool_id = str(meta.get("tool_id") or "")
+            # 도면 시각화 outputs are render clones of a DEM the user already
+            # has - hillshade, grey and colour views of the same elevation.
+            # Auto-checking them exported three byte-identical predictors and
+            # handed the model three copies of one variable.
+            is_render_clone = tool_id == "map_styling"
+            auto_check = is_arch and not is_render_clone
+            label = lyr.name() + (f"   [{tool_id}/{kind}]" if is_arch else "")
+            if is_render_clone:
+                label += "  (도면용 사본 — 예측변수 아님)"
+            elif is_categorical_raster_meta(meta):
+                label += "  (범주형)"
             item = QtWidgets.QListWidgetItem(label)
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-            item.setCheckState(Qt.Checked if is_arch else Qt.Unchecked)
+            item.setCheckState(Qt.Checked if auto_check else Qt.Unchecked)
             item.setData(Qt.UserRole, lyr.id())
-            item.setData(Qt.UserRole + 1, bool(is_arch))
+            item.setData(Qt.UserRole + 1, bool(auto_check))
             self.listLayers.addItem(item)
         if self.listLayers.count() == 0:
             item = QtWidgets.QListWidgetItem("(프로젝트에 래스터 레이어가 없습니다)")
@@ -466,7 +559,6 @@ class AlignExportDialog(QtWidgets.QDialog):
     # -- run -----------------------------------------------------------------
     def _selected_items(self) -> List[_Item]:
         out: List[_Item] = []
-        used: set = set()
         project = QgsProject.instance()
         for i in range(self.listLayers.count()):
             it = self.listLayers.item(i)
@@ -479,11 +571,22 @@ class AlignExportDialog(QtWidgets.QDialog):
             meta = get_archtoolkit_layer_metadata(lyr) or {}
             kind = str(meta.get("kind") or "")
             units = str(meta.get("units") or "")
+            tool_id = str(meta.get("tool_id") or "")
             # Categorical → nearest resampling (bilinear would blend class codes
             # into meaningless fractional values). Shared helper keeps this in
             # lockstep with the covariate report's exclusion rule.
             categorical = is_categorical_raster_meta(meta)
-            out.append(_Item(lid, lyr.name(), _safe_key(lyr.name(), used), kind, units, categorical))
+            out.append(_Item(lid, lyr.name(), "", kind, units, categorical, tool_id))
+
+        # The exported base name becomes the model's variable name downstream,
+        # and consumers reduce it to ASCII - which deletes Hangul rather than
+        # transcribing it, turning 경사도.tif into "predictor". Derive the key
+        # from the English `kind` each tool already records, in the order shown
+        # in this dialog so the numbering is reproducible.
+        for item, key in zip(out, assign_variable_keys(
+            [{"kind": i.kind, "name": i.name, "tool_id": i.tool_id} for i in out]
+        )):
+            item.key = key
         return out
 
     def _on_run(self):
@@ -555,6 +658,16 @@ class AlignExportDialog(QtWidgets.QDialog):
         except Exception:
             pass
 
+        # The variable name is what the user will see in a model report, and it
+        # is no longer the layer name, so show the mapping before the run
+        # rather than leaving them to infer it from the manifest afterwards.
+        for item in items:
+            log_message(
+                f"변수명 '{item.key}' ← {item.name}"
+                + ("  [범주형]" if item.categorical else ""),
+                level=Qgis.Info,
+            )
+
         try:
             staging_dir = create_staging_dir(export_dir, run_id, purpose="align")
         except Exception as e:
@@ -588,11 +701,23 @@ class AlignExportDialog(QtWidgets.QDialog):
                 src = str(src_layer.source() or "").split("|", 1)[0].strip()
                 if not src:
                     raise RuntimeError(f"입력 경로를 확인할 수 없습니다: {item.name}")
+                if item.categorical:
+                    item.nodata, item.nodata_reason = _categorical_output_nodata(src_layer)
+                    if item.nodata is None:
+                        # Say it out loud rather than shipping a class raster
+                        # whose NoData nothing downstream can check.
+                        log_message(
+                            f"범주형 래스터 NoData를 정할 수 없습니다 ({item.name}, "
+                            f"사유: {item.nodata_reason}). NoData 없이 내보냅니다.",
+                            level=Qgis.Warning,
+                        )
+                else:
+                    item.nodata, item.nodata_reason = CONTINUOUS_NODATA, "continuous"
                 expected = _WarpValidationContract(
                     crs=ref_crs,
                     grid=target_grid,
                     band_count=int(src_layer.bandCount()),
-                    nodata_values=_source_nodata_values(src_layer, categorical=item.categorical),
+                    nodata_values=_expected_nodata_values(src_layer, item.nodata),
                     categorical=item.categorical,
                 )
                 out_path = os.path.join(staging_dir, f"{item.key}.tif")
@@ -603,6 +728,7 @@ class AlignExportDialog(QtWidgets.QDialog):
                     extent_str,
                     ref_crs,
                     nearest=item.categorical,
+                    nodata=item.nodata,
                     progress=progress,
                 )
                 QtWidgets.QApplication.processEvents()
@@ -614,6 +740,8 @@ class AlignExportDialog(QtWidgets.QDialog):
                 outputs.append({
                     "key": item.key, "path": out_path, "source": item.name,
                     "kind": item.kind, "units": item.units,
+                    "categorical": bool(item.categorical),
+                    "nodata": item.nodata,
                     "resampling": "nearest" if item.categorical else "bilinear",
                 })
                 progress.setValue(idx + 1)
@@ -718,20 +846,22 @@ class AlignExportDialog(QtWidgets.QDialog):
         log_message(f"Align & export done: {len(outputs)} rasters (run {run_id})", level=log_level)
         restore_ui_focus(self)
 
-    def _warp(self, src, out, px, extent_str, ref_crs, *, nearest: bool, progress):
+    def _warp(self, src, out, px, extent_str, ref_crs, *, nearest: bool, nodata, progress):
         if progress.wasCanceled():
             raise _Cancelled()
-        # Categorical layers keep their input type (often Byte) and inherit the
-        # source NoData (nearest resampling preserves codes). Continuous layers
-        # are forced to Float32 so the -9999 NoData is always representable —
-        # with DATA_TYPE=0 a continuous Byte product (e.g. 0-255 hillshade)
-        # would have -9999 clamped, turning valid value 0 into NoData.
+        # Categorical layers keep their input type (often Byte) so the class
+        # codes stay integral, and carry an explicit NoData chosen by
+        # _categorical_output_nodata — either the source's own value or a
+        # sentinel outside the code range. Continuous layers are forced to
+        # Float32 so the -9999 NoData is always representable — with DATA_TYPE=0
+        # a continuous Byte product (e.g. 0-255 hillshade) would have -9999
+        # clamped, turning valid value 0 into NoData.
         params = {
             "INPUT": src,
             "SOURCE_CRS": None,
             "TARGET_CRS": ref_crs,
             "RESAMPLING": 0 if nearest else 1,  # 0=nearest, 1=bilinear
-            "NODATA": None if nearest else CONTINUOUS_NODATA,
+            "NODATA": nodata,
             "TARGET_RESOLUTION": px,
             "OPTIONS": "",
             "DATA_TYPE": 0 if nearest else 6,  # categorical: keep type / continuous: Float32
@@ -869,10 +999,25 @@ class AlignExportDialog(QtWidgets.QDialog):
         path = os.path.join(export_dir, "aligned_stack_manifest.csv")
         with open(path, "w", newline="", encoding="utf-8-sig") as f:
             w = csv.writer(f)
-            w.writerow(["variable", "file", "source_layer", "kind", "units", "resampling"])
+            w.writerow(["variable", "file", "source_layer", "kind", "units",
+                        "categorical", "nodata", "resampling"])
             for o in outputs:
                 w.writerow([o["key"], os.path.basename(o["path"]), o["source"],
-                            o["kind"], o["units"], o["resampling"]])
+                            o["kind"], o["units"],
+                            "yes" if o.get("categorical") else "no",
+                            "" if o.get("nodata") is None else o["nodata"],
+                            o["resampling"]])
+
+        # Which rasters are categorical is the one thing file conventions
+        # cannot carry, and a modelling tool that wants it as a typed list
+        # otherwise makes the user retype names by hand. Write the exact string
+        # to paste, next to the stack it describes. This states what the export
+        # already knows; it is not a format for anyone to depend on.
+        categorical_keys = [o["key"] for o in outputs if o.get("categorical")]
+        with open(os.path.join(export_dir, "CATEGORICAL_PREDICTORS.txt"),
+                  "w", encoding="utf-8") as cf:
+            cf.write(",".join(categorical_keys))
+            cf.write("\n")
 
     def _add_layers(self, outputs, run_id):
         project = QgsProject.instance()
