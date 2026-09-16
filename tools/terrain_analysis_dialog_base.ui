@@ -237,7 +237,7 @@
             <string> 셀</string>
            </property>
            <property name="toolTip">
-            <string>&lt;html&gt;&lt;b&gt;TPI 분석 반경&lt;/b&gt;&lt;hr/&gt;주변 평균을 계산할 창(window)의 반경입니다.&lt;br/&gt;&lt;br/&gt;&lt;b&gt;권장값 (Weiss 2001):&lt;/b&gt;&lt;br/&gt;• 3셀: 미시지형 (기본값, 유적 규모)&lt;br/&gt;• 10셀: 중규모 지형&lt;br/&gt;• 30셀: 광역 지형 (산줄기/계곡)&lt;br/&gt;&lt;br/&gt;DEM 해상도에 따라 실제 거리가 달라집니다.&lt;/html&gt;</string>
+            <string>&lt;html&gt;&lt;b&gt;TPI 분석 반경&lt;/b&gt;&lt;hr/&gt;주변 평균을 계산할 창(window)의 반경입니다. &lt;b&gt;TPI 출력과 사면위치(지형분류) 양쪽에 함께 적용됩니다.&lt;/b&gt;&lt;br/&gt;&lt;br/&gt;&lt;b&gt;권장값 (Weiss 2001):&lt;/b&gt;&lt;br/&gt;• 3셀: 미시지형 (기본값, 유적 규모)&lt;br/&gt;• 10셀: 중규모 지형&lt;br/&gt;• 30셀: 광역 지형 (산줄기/계곡)&lt;br/&gt;&lt;br/&gt;Weiss의 6분류는 원래 &lt;b&gt;광역 TPI&lt;/b&gt;를 전제로 합니다. 5m DEM에서 반경 1셀(3x3)은 15m 범위라 지형이 아니라 미세기복을 분류하게 됩니다.&lt;br/&gt;&lt;br/&gt;반경 2셀 이상은 블록평균+재보간 근사이며(순수 GDAL), 정확한 (2r+1)² 초점평균은 아닙니다. DEM 해상도에 따라 실제 거리가 달라집니다.&lt;/html&gt;</string>
            </property>
           </widget>
          </item>

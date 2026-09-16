@@ -477,7 +477,10 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
             
             # Slope Position - Weiss (2001) 6-class with user thresholds
             if self.chkSlopePosition.isChecked():
-                self.run_slope_position_analysis(dem_source, slope_threshold, tpi_low, tpi_high, results, run_id)
+                self.run_slope_position_analysis(
+                    dem_layer, dem_source, tpi_radius, slope_threshold,
+                    tpi_low, tpi_high, results, run_id,
+                )
 
             # Curvature - Zevenbergen & Thorne (1987): profile + plan + interpretation
             if hasattr(self, "chkCurvature") and self.chkCurvature.isChecked():
@@ -502,97 +505,98 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
             if not success:
                 restore_ui_focus(self)
     
-    def run_tpi_analysis(self, dem_layer, dem_source, radius, threshold, results, run_id):
-        """Run TPI analysis with user-specified radius and classification threshold
-        
-        TPI = Elevation - Mean of Neighborhood
-        
-        Uses GDAL only - for radius > 1, uses resampling trick to approximate larger windows.
-        
-        Parameters:
-        - radius: Number of cells for neighborhood window (larger = broader terrain features)
-        - threshold: Classification boundary for valley/flat/ridge (smaller = more sensitive)
-        """
-        downsampled = None
-        mean_approx = None
-        try:
-            output = os.path.join(tempfile.gettempdir(), f'archtoolkit_tpi_{run_id}.tif')
-            
-            # Calculate window size (must be odd number: 3, 5, 7, ...)
-            window_size = radius * 2 + 1 if radius > 1 else 3
-            
-            if radius <= 1:
-                # Use standard GDAL TPI for radius=1 (3x3 window)
-                processing.run("gdal:tpitopographicpositionindex", {
-                    'INPUT': dem_source, 'BAND': 1, 'OUTPUT': output
-                })
-            else:
-                # Pure GDAL approach for custom radius:
-                
-                # Get original resolution
-                pixel_size_x = dem_layer.rasterUnitsPerPixelX()
-                pixel_size_y = dem_layer.rasterUnitsPerPixelY()
-                new_res = max(pixel_size_x, pixel_size_y) * radius
-                
-                # Step 1: Downsample (average resampling = approximate focal mean)
-                downsampled = os.path.join(tempfile.gettempdir(), f'archtoolkit_tpi_down_{run_id}.tif')
-                processing.run("gdal:warpreproject", {
-                    'INPUT': dem_source,
-                    'SOURCE_CRS': None,
-                    'TARGET_CRS': None,
-                    'RESAMPLING': 5,  # Average
-                    'NODATA': None,
-                    'TARGET_RESOLUTION': new_res,
-                    'OPTIONS': '',
-                    'DATA_TYPE': 6,  # Float32: keep the focal mean fractional (Int16 DEMs truncate)
-                    'TARGET_EXTENT': None,
-                    'TARGET_EXTENT_CRS': None,
-                    'MULTITHREADING': False,
-                    'EXTRA': '',
-                    'OUTPUT': downsampled
-                })
-                
-                # Step 2: Resample back to original resolution (neighborhood mean approximation)
-                mean_approx = os.path.join(tempfile.gettempdir(), f'archtoolkit_tpi_mean_{run_id}.tif')
-                extent = dem_layer.extent()
-                extent_str = f"{extent.xMinimum()},{extent.xMaximum()},{extent.yMinimum()},{extent.yMaximum()}"
-                
-                processing.run("gdal:warpreproject", {
-                    'INPUT': downsampled,
-                    'SOURCE_CRS': None,
-                    'TARGET_CRS': None,
-                    'RESAMPLING': 1,  # Bilinear
-                    'NODATA': None,
-                    'TARGET_RESOLUTION': pixel_size_x,
-                    'OPTIONS': '',
-                    'DATA_TYPE': 6,  # Float32
-                    'TARGET_EXTENT': extent_str,
-                    'TARGET_EXTENT_CRS': dem_layer.crs().authid(),
-                    'MULTITHREADING': False,
-                    'EXTRA': '',
-                    'OUTPUT': mean_approx
-                })
+    def _compute_tpi_raster(self, dem_layer, dem_source, radius, run_id, tag):
+        """TPI at a user-chosen radius. Returns (path, scratch_files, effective_radius).
 
-                # Step 3: Calculate TPI = DEM - Mean.
-                # NO_DATA makes gdal_calc propagate DEM NoData into the output
-                # instead of computing (-9999)-(-9999)=0 and classifying the
-                # collar outside a clipped DEM as "flat terrain".
-                if os.path.exists(mean_approx):
-                    processing.run("gdal:rastercalculator", {
-                        'INPUT_A': dem_source, 'BAND_A': 1,
-                        'INPUT_B': mean_approx, 'BAND_B': 1,
-                        'FORMULA': 'A - B',
-                        'NO_DATA': -9999.0,
-                        'OUTPUT': output,
-                        'RTYPE': 5  # Float32
-                    })
-                else:
-                    # Fallback to standard GDAL TPI
-                    processing.run("gdal:tpitopographicpositionindex", {
-                        'INPUT': dem_source, 'BAND': 1, 'OUTPUT': output
-                    })
-                    window_size = 3
-            
+        gdal:tpitopographicpositionindex is fixed at 3x3. Weiss's landform
+        classification is defined on a *broad-scale* TPI, so at 5 m cells a 3x3
+        window classifies micro-relief rather than landform - which is why this
+        is shared rather than duplicated: the standalone TPI output honoured the
+        dialog's radius while the landform classification quietly did not.
+
+        For radius > 1 the neighbourhood mean is approximated by block-averaging
+        down and resampling back up, which is the pure-GDAL route this plugin is
+        limited to (DEVELOPMENT.md). It is an approximation at scale ~radius
+        cells, not a true (2r+1)^2 focal mean, and the caller labels it as such.
+        ``effective_radius`` is 1 when the approximation could not be built and
+        the 3x3 result was used instead, so the caller never claims a radius it
+        did not get.
+        """
+        scratch = []
+        output = os.path.join(tempfile.gettempdir(), f'archtoolkit_tpi_{tag}_{run_id}.tif')
+
+        if radius <= 1:
+            processing.run("gdal:tpitopographicpositionindex", {
+                'INPUT': dem_source, 'BAND': 1, 'OUTPUT': output
+            })
+            return output, scratch, 1
+
+        pixel_size_x = dem_layer.rasterUnitsPerPixelX()
+        pixel_size_y = dem_layer.rasterUnitsPerPixelY()
+        new_res = max(pixel_size_x, pixel_size_y) * radius
+
+        # Step 1: block average = approximate focal mean at ~radius scale.
+        downsampled = os.path.join(
+            tempfile.gettempdir(), f'archtoolkit_tpi_down_{tag}_{run_id}.tif')
+        scratch.append(downsampled)
+        processing.run("gdal:warpreproject", {
+            'INPUT': dem_source, 'SOURCE_CRS': None, 'TARGET_CRS': None,
+            'RESAMPLING': 5,  # Average
+            'NODATA': None, 'TARGET_RESOLUTION': new_res, 'OPTIONS': '',
+            'DATA_TYPE': 6,  # Float32: keep the focal mean fractional (Int16 DEMs truncate)
+            'TARGET_EXTENT': None, 'TARGET_EXTENT_CRS': None,
+            'MULTITHREADING': False, 'EXTRA': '', 'OUTPUT': downsampled,
+        })
+
+        # Step 2: back to the original grid.
+        mean_approx = os.path.join(
+            tempfile.gettempdir(), f'archtoolkit_tpi_mean_{tag}_{run_id}.tif')
+        scratch.append(mean_approx)
+        extent = dem_layer.extent()
+        extent_str = (f"{extent.xMinimum()},{extent.xMaximum()},"
+                      f"{extent.yMinimum()},{extent.yMaximum()}")
+        processing.run("gdal:warpreproject", {
+            'INPUT': downsampled, 'SOURCE_CRS': None, 'TARGET_CRS': None,
+            'RESAMPLING': 1,  # Bilinear
+            'NODATA': None, 'TARGET_RESOLUTION': pixel_size_x, 'OPTIONS': '',
+            'DATA_TYPE': 6,
+            'TARGET_EXTENT': extent_str,
+            'TARGET_EXTENT_CRS': dem_layer.crs().authid(),
+            'MULTITHREADING': False, 'EXTRA': '', 'OUTPUT': mean_approx,
+        })
+
+        if not os.path.exists(mean_approx):
+            # Fall back to the 3x3 index and say so, rather than reporting a
+            # broad-scale radius the output does not actually have.
+            processing.run("gdal:tpitopographicpositionindex", {
+                'INPUT': dem_source, 'BAND': 1, 'OUTPUT': output
+            })
+            return output, scratch, 1
+
+        # Step 3: TPI = DEM - neighbourhood mean.
+        # NO_DATA makes gdal_calc propagate DEM NoData into the output instead
+        # of computing (-9999)-(-9999)=0 and classifying the collar outside a
+        # clipped DEM as "flat terrain".
+        processing.run("gdal:rastercalculator", {
+            'INPUT_A': dem_source, 'BAND_A': 1,
+            'INPUT_B': mean_approx, 'BAND_B': 1,
+            'FORMULA': 'A - B', 'NO_DATA': -9999.0,
+            'OUTPUT': output, 'RTYPE': 5,  # Float32
+        })
+        return output, scratch, int(radius)
+
+    def run_tpi_analysis(self, dem_layer, dem_source, radius, threshold, results, run_id):
+        """Topographic Position Index at the radius the user chose.
+
+        Parameters:
+        - radius: neighbourhood window radius in cells (larger = broader features)
+        - threshold: classification boundary for valley/flat/ridge
+        """
+        scratch = []
+        try:
+            output, scratch, radius = self._compute_tpi_raster(
+                dem_layer, dem_source, radius, run_id, "single")
+
             # Apply classification with user threshold
             tpi_classes = self.get_tpi_classes(threshold)
             if radius > 1:
@@ -600,7 +604,8 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                 # approximation at scale ~radius cells, not a true (2r+1)² focal mean.
                 layer_name = f"TPI (근사 반경≈{radius}셀, 임계값:±{threshold:.2f})"
             else:
-                layer_name = f"TPI (창:{window_size}x{window_size}, 임계값:±{threshold:.2f})"
+                # radius 1 (or a radius that fell back) is gdaldem's fixed 3x3.
+                layer_name = f"TPI (창:3x3, 임계값:±{threshold:.2f})"
             layer = QgsRasterLayer(output, layer_name)
             
             if layer.isValid():
@@ -622,12 +627,17 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
         except Exception as e:
             self.iface.messageBar().pushMessage("경고", f"TPI 분석 오류: {str(e)}", level=1)
         finally:
-            cleanup_files([downsampled, mean_approx])
+            cleanup_files(scratch)
     
-    def run_slope_position_analysis(self, dem_source, slope_thresh, tpi_low, tpi_high, results, run_id):
+    def run_slope_position_analysis(self, dem_layer, dem_source, tpi_radius, slope_thresh,
+                                    tpi_low, tpi_high, results, run_id):
         """Run Weiss (2001) 6-class Landform Classification using GDAL with user thresholds
         
         Parameters:
+        - tpi_radius: TPI neighbourhood radius in cells. Weiss defines the
+          classification on a BROAD-scale TPI; this used to be hard-wired to
+          gdaldem's 3x3 while the dialog's own radius control was ignored, so
+          at 5 m cells it classified 15 m micro-relief as landform.
         - slope_thresh: Degree threshold for flat vs sloped areas (e.g., 5°)
         - tpi_low: TPI threshold for valley classification (e.g., -1.0)
         - tpi_high: TPI threshold for ridge classification (e.g., 1.0)
@@ -644,12 +654,12 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
         # an unbound name (which would mask the original error).
         tpi_path = None
         slope_path = None
+        tpi_scratch = []
         try:
-            # 1. Generate TPI
-            tpi_path = os.path.join(tempfile.gettempdir(), f'archtoolkit_tpi_temp_{run_id}.tif')
-            processing.run("gdal:tpitopographicpositionindex", {
-                'INPUT': dem_source, 'BAND': 1, 'OUTPUT': tpi_path
-            })
+            # 1. TPI at the radius the user asked for, not a fixed 3x3.
+            tpi_path, tpi_scratch, tpi_radius = self._compute_tpi_raster(
+                dem_source=dem_source, dem_layer=dem_layer, radius=tpi_radius,
+                run_id=run_id, tag="landform")
             
             # 2. Generate Slope
             slope_path = os.path.join(tempfile.gettempdir(), f'archtoolkit_slope_temp_{run_id}.tif')
@@ -730,7 +740,9 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
             })
             
             if result and os.path.exists(output_path):
-                layer_name = f"지형분류 (경사:{slope_thresh}°, TPI:{tpi_low:.1f}~{tpi_high:.1f})"
+                radius_label = ("3x3" if tpi_radius <= 1 else f"근사 반경≈{tpi_radius}셀")
+                layer_name = (f"지형분류 (TPI {radius_label}, 경사:{slope_thresh}°, "
+                              f"TPI:{tpi_low:.1f}-{tpi_high:.1f})")
                 layer = QgsRasterLayer(output_path, layer_name)
                 if layer.isValid():
                     try:
@@ -741,6 +753,9 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                             kind="slope_position",
                             units="class",
                             params={
+                                "tpi_radius_cells": int(tpi_radius),
+                                "tpi_window": ("3x3" if tpi_radius <= 1
+                                               else f"block_average_approx_r{int(tpi_radius)}"),
                                 "slope_thresh_deg": float(slope_thresh),
                                 "tpi_low": float(tpi_low),
                                 "tpi_high": float(tpi_high),
@@ -764,7 +779,7 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
         except Exception as e:
             self.iface.messageBar().pushMessage("경고", f"지형분류 분석 오류: {str(e)}", level=1)
         finally:
-            cleanup_files([tpi_path, slope_path])
+            cleanup_files([tpi_path, slope_path] + list(tpi_scratch))
 
     def run_tri_radius_analysis(self, dem_layer, dem_source, radius, tri_max, results, run_id):
         """Ruggedness over a (2r+1)x(2r+1) window, for landscape-scale questions.
