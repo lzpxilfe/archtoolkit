@@ -51,6 +51,8 @@ ArchToolkit은 **기본 QGIS 설치만으로 완전히 동작**해야 합니다.
 | `raster_io.py` | 단일 밴드 GeoTIFF 저장(실패 시 부분 파일 삭제) | `tests/test_raster_io.py` |
 | `gdal_outcome.py` | GDAL 성공 마커 판정 | `tests/test_gdal_outcome.py` |
 | `raster_grid_contract.py` | canonical 목표 격자·격자 검증 | `tests/test_raster_grid_contract.py` |
+| `predictor_naming.py` | 내보내기 변수명(ASCII 왕복 안정성·중복 해소) | `tests/test_predictor_naming.py` |
+| `raster_semantics.py` | 범주형/연속형 판정·범주형 NoData 센티넬 선택 | `tests/test_categorical_meta.py` |
 | `ahp_core.py` | AHP 가중치(고유벡터)·Saaty 일관성비·계층 종합·기준 점수식(benefit/cost/target/range/reclass) | `tests/test_ahp_core.py` |
 | `cost_models.py` | 이동비용 모델(Tobler·Naismith·Pandolf 등)·등시선 레벨 | `tests/test_cost_models.py` |
 | `network_metrics.py` | Wasserman–Faust 근접·Brandes 매개 중심성(가중/비가중) | `tests/test_network_metrics.py` |

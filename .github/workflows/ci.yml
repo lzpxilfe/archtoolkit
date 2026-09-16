@@ -21,6 +21,8 @@ jobs:
           python -m unittest tests.test_raster_io -v
           python -m unittest tests.test_gdal_outcome -v
           python -m unittest tests.test_raster_grid_contract -v
+          python -m unittest tests.test_predictor_naming -v
+          python -m unittest tests.test_categorical_meta -v
           python -m unittest tests.test_cost_models -v
           python -m unittest tests.test_network_metrics -v
           python -m unittest tests.test_align_export_qgis -v
