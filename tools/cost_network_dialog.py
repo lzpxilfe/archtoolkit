@@ -71,6 +71,7 @@ from .utils import (
     set_archtoolkit_layer_metadata,
     transform_point,
 )
+from . import cost_budget
 from .live_log_dialog import ensure_live_log_dialog
 from .help_dialog import show_help_dialog
 from .i18n import get_output_group_name
@@ -409,7 +410,10 @@ class CostNetworkWorker(QgsTask):
         cost_dir: Dict[Tuple[int, int], float] = {}
         path_dir: Dict[Tuple[int, int], List[Tuple[float, float]]] = {}
 
-        max_cells = 4_000_000
+        # One accumulation per directed pair, so memory is per-window but time
+        # is cumulative - the reason this cannot simply inherit the cost
+        # surface's per-run ceiling. A window that is a minute on its own is a
+        # working day once it runs for 400 directed pairs.
         total_dir = len(candidate_pairs) * 2
         done_dir = 0
         last_bucket = -1
@@ -447,13 +451,25 @@ class CostNetworkWorker(QgsTask):
                 maxy = max(ay, by) + self.pair_buffer_m
                 xoff, yoff, win_xsize, win_ysize = _bbox_window(gt, xsize, ysize, minx, miny, maxx, maxy)
             cell_count = int(win_xsize * win_ysize)
-            if cell_count > max_cells:
+            budget = cost_budget.assess_batch(
+                cell_count,
+                total_dir,
+                available_bytes=cost_budget.available_memory_bytes(),
+                current_pixel_size=(abs(float(gt[1])) + abs(float(gt[5]))) / 2.0,
+            )
+            if budget.level == cost_budget.LEVEL_REFUSE:
+                hint = (
+                    f" 픽셀 크기 {budget.suggested_pixel:g} m 정도로 리샘플하면 들어갑니다."
+                    if budget.suggested_pixel else ""
+                )
                 return NetworkTaskResult(
                     ok=False,
                     message=(
-                        f"후보 쌍 중 일부의 분석 창이 너무 큽니다 ({cell_count:,} cells). "
+                        f"분석 규모가 너무 큽니다: 창 {cell_count:,} cells x {total_dir}개 "
+                        f"방향 경로 = 예상 {budget.seconds / 3600.0:.1f}시간, "
+                        f"창당 {budget.gigabytes:.1f}GB. "
                         "경로 버퍼(m)를 줄이거나 후보 간선(k)를 줄이세요. "
-                        "(버퍼 0=DEM 전체는 작은 DEM에서만 권장)"
+                        f"(버퍼 0=DEM 전체는 작은 DEM에서만 권장){hint}"
                     ),
                 )
 

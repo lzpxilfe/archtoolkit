@@ -55,6 +55,7 @@ ArchToolkit은 **기본 QGIS 설치만으로 완전히 동작**해야 합니다.
 | `raster_semantics.py` | 범주형/연속형 판정·범주형 NoData 센티넬 선택 | `tests/test_categorical_meta.py` |
 | `ahp_core.py` | AHP 가중치(고유벡터)·Saaty 일관성비·계층 종합·기준 점수식(benefit/cost/target/range/reclass) | `tests/test_ahp_core.py` |
 | `cost_models.py` | 이동비용 모델(Tobler·Naismith·Pandolf 등)·등시선 레벨 | `tests/test_cost_models.py` |
+| `cost_budget.py` | 누적비용 분석 규모 판정(가용 메모리 기반 셀 예산·소요 추정·권장 픽셀크기) | `tests/test_cost_budget.py` |
 | `network_metrics.py` | Wasserman–Faust 근접·Brandes 매개 중심성(가중/비가중) | `tests/test_network_metrics.py` |
 | `terrain_math.py` | Zevenbergen & Thorne 곡률 | `tests/test_terrain_math.py` |
 | `geochem_legend.py` | 색상 범례 → 정량값 역변환(RGB 최근접 세그먼트 투영) | `tests/test_geochem_legend.py` |

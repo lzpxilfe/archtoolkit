@@ -23,6 +23,7 @@ from osgeo import gdal, ogr, osr
 import re
 
 from qgis.PyQt import QtWidgets, uic
+from qgis.PyQt.QtWidgets import QMessageBox
 from qgis.PyQt.QtCore import Qt, QVariant
 from qgis.PyQt.QtGui import QColor, QIcon, QPainter, QPen
 from qgis.core import (
@@ -66,6 +67,7 @@ from .utils import (
     transform_point,
 )
 from .raster_io import write_single_band_geotiff
+from . import cost_budget
 from .cost_models import (
     MODEL_CONOLLY_LAKE,
     MODEL_HERZOG_METABOLIC,
@@ -622,6 +624,52 @@ def _create_fixed_contours_gpkg(
         return None
 
 
+def analysis_window(gt, xsize, ysize, start_xy, end_xy, buffer_m):
+    """The DEM window an accumulation will actually read.
+
+    Shared so the dialog's pre-flight estimate and the worker's own ceiling
+    describe the same rectangle. They used to be one inline block inside the
+    worker, which meant the dialog had no way to tell the user how big a run
+    was about to be without duplicating - and eventually drifting from - this.
+
+    buffer_m <= 0 means the whole DEM.
+    """
+    if buffer_m is None or float(buffer_m) <= 0:
+        return 0, 0, int(xsize), int(ysize)
+    sx, sy = start_xy
+    if end_xy is not None:
+        ex, ey = end_xy
+    else:
+        ex, ey = sx, sy
+    buffer_m = float(buffer_m)
+    minx = min(sx, ex) - buffer_m
+    maxx = max(sx, ex) + buffer_m
+    miny = min(sy, ey) - buffer_m
+    maxy = max(sy, ey) + buffer_m
+    return _bbox_window(gt, xsize, ysize, minx, miny, maxx, maxy)
+
+
+def dem_window_cells(dem_source, start_xy, end_xy, buffer_m):
+    """(cells, pixel_size) for a planned run, or (None, None) if unreadable.
+
+    Opens the DEM for metadata only, so it is cheap enough to call while the
+    user is still looking at the dialog.
+    """
+    try:
+        ds = gdal.Open(dem_source, gdal.GA_ReadOnly)
+        if ds is None:
+            return None, None
+        gt = ds.GetGeoTransform()
+        xsize, ysize = ds.RasterXSize, ds.RasterYSize
+        ds = None
+        _xo, _yo, win_x, win_y = analysis_window(
+            gt, xsize, ysize, start_xy, end_xy, buffer_m)
+        pixel = (abs(float(gt[1])) + abs(float(gt[5]))) / 2.0
+        return int(win_x) * int(win_y), (pixel if pixel > 0 else None)
+    except Exception:
+        return None, None
+
+
 def _bbox_window(gt, xsize, ysize, minx, miny, maxx, maxy):
     inv = _inv_geotransform(gt)
     px0, py0 = gdal.ApplyGeoTransform(inv, minx, maxy)
@@ -972,30 +1020,38 @@ class CostSurfaceWorker(QgsTask):
         # Analysis extent
         # - buffer_m == 0 : full DEM
         # - buffer_m > 0  : window around start/end (faster)
-        if self.buffer_m <= 0:
-            xoff, yoff, win_xsize, win_ysize = 0, 0, xsize, ysize
-        else:
-            if has_end:
-                minx = min(sx, ex) - self.buffer_m
-                maxx = max(sx, ex) + self.buffer_m
-                miny = min(sy, ey) - self.buffer_m
-                maxy = max(sy, ey) + self.buffer_m
-            else:
-                minx = sx - self.buffer_m
-                maxx = sx + self.buffer_m
-                miny = sy - self.buffer_m
-                maxy = sy + self.buffer_m
-
-            xoff, yoff, win_xsize, win_ysize = _bbox_window(
-                gt, xsize, ysize, minx, miny, maxx, maxy
-            )
+        xoff, yoff, win_xsize, win_ysize = analysis_window(
+            gt, xsize, ysize, (sx, sy), (ex, ey) if has_end else None, self.buffer_m
+        )
         cell_count = int(win_xsize * win_ysize)
-        if cell_count > 4_000_000:
+
+        # The ceiling is what this machine can hold, not a constant. The old
+        # flat 4,000,000 refused a run that fits comfortably in a few hundred
+        # megabytes on any modern laptop, which put a 5 m county-scale analysis
+        # out of reach for no reason the machine could confirm. The dialog has
+        # already shown the estimate and taken confirmation for a long run;
+        # this is the backstop that a confirmation cannot talk past, because
+        # running out of memory takes the QGIS session with it.
+        verdict = cost_budget.assess_current_machine(
+            cell_count,
+            current_pixel_size=(dx + dy) / 2.0,
+            confirmed=True,   # the time warning belongs to the dialog, not here
+        )
+        if verdict.level == cost_budget.LEVEL_REFUSE:
+            hint = (
+                f" 픽셀 크기 {verdict.suggested_pixel:g} m 정도로 리샘플하면 들어갑니다."
+                if verdict.suggested_pixel else ""
+            )
+            memory_note = (
+                f"가용 메모리 {verdict.available_bytes / 1024 ** 3:.1f}GB"
+                if verdict.memory_known else "가용 메모리를 확인할 수 없어 보수적으로 판단"
+            )
             return CostTaskResult(
                 ok=False,
                 message=(
-                    f"분석 영역이 너무 큽니다(약 {cell_count:,} cells). "
-                    "분석 제한(m)을 0보다 크게 설정해 영역을 줄이거나 DEM을 클립하세요."
+                    f"분석 영역이 이 컴퓨터가 감당할 수 있는 범위를 넘습니다"
+                    f"(약 {cell_count:,} cells, 예상 {verdict.gigabytes:.1f}GB; {memory_note}). "
+                    f"분석 제한(m)을 줄이거나 DEM을 클립하세요.{hint}"
                 ),
             )
 
@@ -2268,6 +2324,13 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
             "pandolf_terrain_factor": float(self.spinPandolfTerrainFactor.value()),
         }
 
+        # Pre-flight on the main thread: the worker cannot ask anything, so a
+        # long-but-feasible run has to be put to the user here. Refusing it
+        # outright - which is what a flat cell cap did - takes the decision
+        # away from the person who knows whether they want to wait.
+        if not self._confirm_analysis_size(dem_layer, start_dem, end_dem, buffer_m):
+            return
+
         self._set_running_ui(True)
 
         def on_done(res):
@@ -2302,6 +2365,64 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
         self._task_running = True
         QgsApplication.taskManager().addTask(task)
         push_message(self.iface, "비용표면/최소비용경로", "분석을 시작했습니다. (QGIS 작업 관리자 확인)", level=0, duration=6)
+
+    def _confirm_analysis_size(self, dem_layer, start_dem, end_dem, buffer_m):
+        """Show the estimate for a large run and let the user decide.
+
+        Returns True to proceed. A run that cannot fit in memory is not offered
+        as a choice - the worker refuses it with a pixel size that would fit -
+        but a run that is merely long is the user's call, and the numbers they
+        need to make it (cells, minutes, gigabytes) are computable here.
+        """
+        try:
+            cells, pixel = dem_window_cells(
+                dem_layer.source(),
+                (float(start_dem.x()), float(start_dem.y())),
+                (float(end_dem.x()), float(end_dem.y())) if end_dem else None,
+                buffer_m,
+            )
+        except Exception:
+            cells, pixel = None, None
+        if not cells:
+            return True   # cannot estimate; let the worker's own check decide
+
+        verdict = cost_budget.assess_current_machine(cells, current_pixel_size=pixel)
+        if verdict.level == cost_budget.LEVEL_OK:
+            return True
+
+        if verdict.level == cost_budget.LEVEL_REFUSE:
+            hint = (
+                f"\n\n픽셀 크기 {verdict.suggested_pixel:g} m 정도로 리샘플하면 들어갑니다."
+                if verdict.suggested_pixel else ""
+            )
+            memory_note = (
+                f"이 컴퓨터 가용 메모리 약 {verdict.available_bytes / 1024 ** 3:.1f}GB"
+                if verdict.memory_known
+                else "이 컴퓨터의 가용 메모리를 확인할 수 없어 보수적으로 판단했습니다"
+            )
+            QMessageBox.warning(
+                self,
+                "분석 영역이 너무 큽니다",
+                f"분석 영역 약 {cells:,} 셀은 예상 메모리 {verdict.gigabytes:.1f}GB가 "
+                f"필요합니다.\n{memory_note}.\n\n"
+                f"분석 제한(m)을 줄이거나 DEM을 클립하세요.{hint}",
+            )
+            return False
+
+        minutes = verdict.minutes
+        duration = (f"약 {minutes:.0f}분" if minutes >= 1.5
+                    else f"약 {verdict.seconds:.0f}초")
+        answer = QMessageBox.question(
+            self,
+            "큰 분석 영역",
+            f"분석 영역이 약 {cells:,} 셀입니다.\n\n"
+            f"예상 소요 시간: {duration}\n"
+            f"예상 메모리: {verdict.gigabytes:.1f}GB\n\n"
+            "계속 진행할까요? (분석 제한(m)을 줄이면 훨씬 빨라집니다)",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        return answer == QMessageBox.Yes
 
     def _set_running_ui(self, running: bool):
         self.btnRun.setEnabled(not running)
