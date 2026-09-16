@@ -62,7 +62,7 @@ ArchToolkit은 한국의 고고학·문화유산 조사/연구에서 자주 반�
 | `거리 래스터 (Distance to Features)` | 하천·기존 유적·도로 등 대상 레이어까지의 직선거리를 기준 격자에 맞춰 계산 (예측모델에서 가장 널리 쓰이는 변수 계열, `gdal:proximity` 기반) |
 | `분석 결과 정렬/내보내기 (Align & Export Stack)` | 이미 만든 분석 결과 래스터들을 하나의 기준 격자(CRS·범위·픽셀크기·NoData)로 정렬해 실행별 원자적 스택+manifest로 내보내기 (범주형=최근접, 연속형=이중선형, 취소·실패 시 부분 결과 미게시) |
 | `변수 상관/VIF 리포트 (Correlation & VIF)` | 변수(래스터) 스택의 상관행렬과 VIF(분산팽창계수)를 계산해 예측모델 투입 전 다중공선성 점검, 상관/VIF 리포트·CSV 저장 |
-| `AHP 입지적합도 (AHP Suitability)` | 여러 환경 래스터를 AHP 쌍대비교 가중치로 통합해 적합도 래스터 생성 |
+| `AHP 입지적합도 (AHP Suitability)` | 여러 환경 래스터를 AHP 쌍대비교 가중치로 통합해 적합도 래스터 생성 ([사용설명서](docs/AHP_GUIDE.md)) |
 | `지구화학도 래스터 수치화 (GeoChem WMS → Raster)` | WMS RGB를 범례 기반으로 역추정해 value/class 래스터와 폴리곤 결과 생성 |
 | `지질도 도엽 ZIP 불러오기/래스터 변환 (KIGAM)` | KIGAM 1:50,000 지질도 ZIP 자동 로드, 스타일 적용, 범주형 래스터 변환 |
 | `지형 단면 (Terrain Profile)` | 단면선 그리기/저장, 다중 프로파일, 지도-차트 연동, 통계/CSV/이미지 내보내기 |
