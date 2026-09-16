@@ -254,17 +254,36 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
             pass
         return da
 
-    def _area_m2(self, da: QgsDistanceArea, geom: QgsGeometry) -> float:
+    def _area_m2(self, da: QgsDistanceArea, geom: QgsGeometry, crs=None) -> float:
+        """Ellipsoidal area in square metres.
+
+        The planar fallback is only reached when the ellipsoidal measurement
+        fails, and it returns the geometry's area in *layer units*. For a
+        projected metre CRS that is the right number; for a geographic one it
+        is square degrees, and writing that into a column called `parcel_m2`
+        would be a wrong figure presented as a measurement. So the fallback is
+        used only when the units are metres, and otherwise the row reports 0
+        with a logged warning.
+        """
         if geom is None or geom.isEmpty():
             return 0.0
         try:
             a = float(da.measureArea(geom))
             return float(da.convertAreaMeasurement(a, QgsUnitTypes.AreaSquareMeters))
         except Exception:
-            try:
-                return float(geom.area())
-            except Exception:
-                return 0.0
+            pass
+        try:
+            if crs is not None and crs.isValid() and not crs.isGeographic():
+                if crs.mapUnits() == QgsUnitTypes.DistanceMeters:
+                    return float(geom.area())
+            log_message(
+                "면적을 타원체 기준으로 계산하지 못했고 레이어 단위가 미터가 아니어서 "
+                "0으로 기록합니다(제곱도를 ㎡로 적지 않기 위함).",
+                level=Qgis.Warning,
+            )
+        except Exception:
+            pass
+        return 0.0
 
     def run(self):
         use_en = is_english_ui()
@@ -529,11 +548,11 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
                         continue
                     inter = _safe_make_valid(inter)
 
-                    in_m2 = self._area_m2(da, inter)
+                    in_m2 = self._area_m2(da, inter, crs=cad_crs)
                     if not math.isfinite(float(in_m2)) or float(in_m2) <= 0.0:
                         continue
 
-                    parcel_m2 = self._area_m2(da, g)
+                    parcel_m2 = self._area_m2(da, g, crs=cad_crs)
                     if parcel_m2 > 0.0 and math.isfinite(float(parcel_m2)):
                         pct = float(in_m2) / float(parcel_m2) * 100.0
                     else:
@@ -609,7 +628,7 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
 
         aoi = _safe_make_valid(aoi)
         aoi_bbox = aoi.boundingBox()
-        aoi_area_m2 = self._area_m2(da, aoi)
+        aoi_area_m2 = self._area_m2(da, aoi, crs=cad_crs)
 
         # Collect candidate cadastral features (bbox filter)
         feats: List[QgsFeature] = []
@@ -691,11 +710,11 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
                 continue
             inter = _safe_make_valid(inter)
 
-            in_m2 = self._area_m2(da, inter)
+            in_m2 = self._area_m2(da, inter, crs=cad_crs)
             if not math.isfinite(float(in_m2)) or float(in_m2) <= 0.0:
                 continue
 
-            parcel_m2 = self._area_m2(da, g)
+            parcel_m2 = self._area_m2(da, g, crs=cad_crs)
             if parcel_m2 > 0.0 and math.isfinite(float(parcel_m2)):
                 pct = float(in_m2) / float(parcel_m2) * 100.0
             else:
