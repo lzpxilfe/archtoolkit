@@ -10,7 +10,7 @@
 
 <p align="center">
   <img alt="QGIS 3.40+" src="https://img.shields.io/badge/QGIS-3.40%2B-589632?logo=qgis&logoColor=white">
-  <img alt="Version 0.2.0" src="https://img.shields.io/badge/version-0.2.0-2d7ff9">
+  <img alt="Version 0.1.3" src="https://img.shields.io/badge/version-0.1.3-2d7ff9">
   <img alt="Status stable" src="https://img.shields.io/badge/status-stable-2ea44f">
   <img alt="License GPL-3.0-or-later" src="https://img.shields.io/badge/license-GPL--3.0--or--later-1f6feb">
 </p>
@@ -281,7 +281,7 @@ Linux:   ~/.local/share/QGIS/QGIS3/profiles/default/python/plugins/ArchToolkit
   title = {ArchToolkit: Archaeology Toolkit for QGIS},
   year = {2026},
   url = {https://github.com/lzpxilfe/archtoolkit},
-  version = {0.2.0}
+  version = {0.1.3}
 }
 ```
 
