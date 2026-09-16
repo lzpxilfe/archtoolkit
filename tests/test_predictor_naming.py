@@ -8,6 +8,7 @@ from tools.predictor_naming import (
     assign_variable_keys,
     consumer_safe_name,
     derive_variable_key,
+    distance_variable_key,
     is_round_trip_stable,
     sanitize_key,
 )
@@ -192,6 +193,36 @@ class AssignVariableKeysTests(unittest.TestCase):
     def test_empty_input(self):
         self.assertEqual(assign_variable_keys([]), [])
         self.assertEqual(assign_variable_keys(None), [])
+
+
+class DistanceVariableKeyTests(unittest.TestCase):
+    """Distance rasters are named by the user, so the name is checked on entry."""
+
+    def test_builds_a_prefixed_key(self):
+        self.assertEqual(distance_variable_key("water"), "distance_water")
+        self.assertEqual(distance_variable_key("Road"), "distance_road")
+        self.assertEqual(distance_variable_key(" site "), "distance_site")
+
+    def test_rejects_a_name_with_no_ascii(self):
+        # This is the whole point of asking up front: the consumer would turn
+        # "distance_하천" into "distance" and collide with the next one.
+        self.assertIsNone(distance_variable_key("하천"))
+        self.assertIsNone(distance_variable_key(""))
+        self.assertIsNone(distance_variable_key(None))
+
+    def test_mixed_names_keep_their_ascii_part(self):
+        self.assertEqual(distance_variable_key("하천 river"), "distance_river")
+
+    def test_result_survives_the_consumer(self):
+        for name in ("water", "River 2023", "iron-ore", "하천 river", "site_5179"):
+            key = distance_variable_key(name)
+            if key is not None:
+                self.assertTrue(is_round_trip_stable(key), msg=f"{name!r} -> {key!r}")
+                self.assertEqual(_archmodelbench_safe_name(f"{key}.tif"), key)
+
+    def test_distinct_sources_give_distinct_keys(self):
+        keys = {distance_variable_key(n) for n in ("water", "road", "site")}
+        self.assertEqual(len(keys), 3)
 
 
 if __name__ == "__main__":

@@ -28,7 +28,7 @@ ArchToolkit은 한국의 고고학·문화유산 조사/연구에서 자주 반�
 
 ## 핵심 포인트
 
-- 총 18개 도구를 하나의 플러그인 메뉴와 툴바 드롭다운으로 묶었습니다.
+- 총 19개 도구를 하나의 플러그인 메뉴와 툴바 드롭다운으로 묶었습니다.
 - 한국 실무 맥락에 맞춰 수치지형도 DXF, 지적도, KIGAM 지질도, 지구화학도, 트렌치 후보 제안 보조 기능을 지원합니다.
 - QGIS 기본 구성 중심으로 설계했습니다. Processing, GDAL, NumPy(QGIS 포함)를 활용하며 GRASS/SAGA/WhiteboxTools 같은 외부 의존성을 기본 요구로 두지 않습니다.
 - 결과 레이어를 가능한 한 `ArchToolkit - ...` 그룹 아래 정리해 프로젝트를 덜 어지럽게 만듭니다.
@@ -59,6 +59,7 @@ ArchToolkit은 한국의 고고학·문화유산 조사/연구에서 자주 반�
 | 도구 | 핵심 기능 |
 | --- | --- |
 | `지형 분석 (Terrain Analysis)` | 경사, 사면방향, TRI, TPI, Roughness, Slope Position, 곡률(Zevenbergen & Thorne 1987), 사면파생(북향성/동향성/TRASP, Roberts & Cooper 1989) 계산과 분류/스타일·해석 요약 |
+| `거리 래스터 (Distance to Features)` | 하천·기존 유적·도로 등 대상 레이어까지의 직선거리를 기준 격자에 맞춰 계산 (예측모델에서 가장 널리 쓰이는 변수 계열, `gdal:proximity` 기반) |
 | `분석 결과 정렬/내보내기 (Align & Export Stack)` | 이미 만든 분석 결과 래스터들을 하나의 기준 격자(CRS·범위·픽셀크기·NoData)로 정렬해 실행별 원자적 스택+manifest로 내보내기 (범주형=최근접, 연속형=이중선형, 취소·실패 시 부분 결과 미게시) |
 | `변수 상관/VIF 리포트 (Correlation & VIF)` | 변수(래스터) 스택의 상관행렬과 VIF(분산팽창계수)를 계산해 예측모델 투입 전 다중공선성 점검, 상관/VIF 리포트·CSV 저장 |
 | `AHP 입지적합도 (AHP Suitability)` | 여러 환경 래스터를 AHP 쌍대비교 가중치로 통합해 적합도 래스터 생성 |

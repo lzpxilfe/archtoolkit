@@ -117,6 +117,8 @@ RUNTIME_EXPECTED = {
     ("viewshed", "count", "count"): False,
     ("viewshed", "weighted_percent", "percent"): False,
     ("viewshed", "weighted_cumulative", "weight"): False,
+    ("distance_raster", "distance_water", "m"): False,
+    ("distance_raster", "distance_site", "m"): False,
     ("cost_surface", "cost_time", "min"): False,
     ("cost_surface", "cost_energy", "kcal"): False,
 }
@@ -252,7 +254,8 @@ class CallSiteCensusTests(unittest.TestCase):
         self.assertEqual(
             files,
             ["ahp_suitability_dialog.py", "align_export_dialog.py", "cost_surface_dialog.py",
-             "geochem_polygonize_dialog.py", "terrain_analysis_dialog.py", "viewshed_dialog.py"],
+             "distance_raster_dialog.py", "geochem_polygonize_dialog.py",
+             "terrain_analysis_dialog.py", "viewshed_dialog.py"],
             msg=f"dynamic metadata call sites changed: {dynamic}",
         )
 

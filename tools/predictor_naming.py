@@ -156,11 +156,28 @@ def assign_variable_keys(items):
     return keys
 
 
+def distance_variable_key(name, prefix="distance"):
+    """``distance_<name>``, or None when ``name`` cannot survive downstream.
+
+    A distance raster is named by the user, not by a tool's metadata, so the
+    check has to happen while they can still fix it. Returning None lets the
+    dialog say "use letters and digits" at the point of entry, instead of the
+    user discovering in a model report that their column is called
+    ``predictor_2``.
+    """
+    cleaned = sanitize_key(str(name or "").strip())
+    if not cleaned:
+        return None
+    key = f"{prefix}_{cleaned}".lower()
+    return key if is_round_trip_stable(key) else None
+
+
 __all__ = [
     "FALLBACK_STEM",
     "assign_variable_keys",
     "consumer_safe_name",
     "derive_variable_key",
+    "distance_variable_key",
     "is_round_trip_stable",
     "sanitize_key",
 ]
