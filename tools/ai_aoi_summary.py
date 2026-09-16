@@ -372,6 +372,11 @@ def _vector_layer_stats_in_geom(
     hist = {} if hist_field else None
 
     num_acc: Dict[str, Dict[str, Any]] = {}
+    # Unconvertible (non-null) values are counted per field and reported once
+    # after the scan. Logging each one ran a file append per feature per field
+    # - 200k features x a text column named like a number was 200k appends on
+    # the GUI thread and a flooded UI log queue.
+    convert_failures: Dict[str, int] = {}
     for f in num_fields:
         num_acc[str(f)] = {"sum": 0.0, "min": float("inf"), "max": float("-inf"), "n": 0}
 
@@ -432,8 +437,8 @@ def _vector_layer_stats_in_geom(
                 acc["min"] = float(min(float(acc["min"]), float(x)))
                 acc["max"] = float(max(float(acc["max"]), float(x)))
                 acc["n"] = int(acc["n"]) + 1
-            except Exception as _exc:
-                log_swallowed("ai_aoi_summary._vector_layer_stats_in_geom", _exc)
+            except Exception:
+                convert_failures[str(f)] = convert_failures.get(str(f), 0) + 1
                 continue
 
         if dist_acc is not None:
@@ -464,6 +469,11 @@ def _vector_layer_stats_in_geom(
         out["top_field"] = hist_field
 
     numeric_out = {}
+    for field_name, count in convert_failures.items():
+        log_swallowed(
+            "ai_aoi_summary._vector_layer_stats_in_geom",
+            ValueError(f"field '{field_name}': {count} value(s) not numeric; skipped"),
+        )
     for f, acc in num_acc.items():
         try:
             n0 = int(acc.get("n") or 0)
