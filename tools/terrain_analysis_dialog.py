@@ -45,7 +45,7 @@ from .utils import (
     cleanup_files, log_message, push_message, restore_ui_focus, set_archtoolkit_layer_metadata,
 )
 from .raster_io import write_single_band_geotiff
-from .terrain_math import zt_curvature
+from .terrain_math import tri_radius, zt_curvature
 from .live_log_dialog import ensure_live_log_dialog
 from .help_dialog import show_help_dialog
 
@@ -366,6 +366,7 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
             tpi_low = self.spinTPILow.value()
             tpi_high = self.spinTPIHigh.value()
             tri_max = self.spinTRIMax.value()
+            tri_radius_cells = int(self.spinTRIRadius.value())
             
             # Slope
             if self.chkSlope.isChecked():
@@ -416,28 +417,37 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
             
             # TRI with user-defined classification threshold
             if self.chkTRI.isChecked():
-                output = os.path.join(tempfile.gettempdir(), f'archtoolkit_tri_{run_id}.tif')
-                processing.run("gdal:triterrainruggednessindex", {
-                    'INPUT': dem_source, 'BAND': 1, 'OUTPUT': output
-                })
-                tri_classes = self.get_tri_classes(tri_max)
-                layer_name = f"TRI Riley 1999 (험준기준:{tri_max})"
-                layer = QgsRasterLayer(output, layer_name)
-                if layer.isValid():
-                    try:
-                        set_archtoolkit_layer_metadata(
-                            layer,
-                            tool_id="terrain_analysis",
-                            run_id=str(run_id),
-                            kind="tri",
-                            units="index",
-                            params={"tri_max": float(tri_max)},
-                        )
-                    except Exception:
-                        pass
-                    QgsProject.instance().addMapLayer(layer)
-                    self.apply_style(layer, tri_classes, tri_max * 2.5)
-                    results.append("TRI")
+                # gdaldem's TRI is fixed at 3x3 - on a 5 m DEM that is a 15 m
+                # neighbourhood. A broader window is a different variable, not
+                # a coarser one, so radius > 1 takes its own path and its own
+                # variable name rather than quietly relabelling the 3x3.
+                if tri_radius_cells > 1:
+                    self.run_tri_radius_analysis(
+                        dem_layer, dem_source, tri_radius_cells, tri_max, results, run_id
+                    )
+                else:
+                    output = os.path.join(tempfile.gettempdir(), f'archtoolkit_tri_{run_id}.tif')
+                    processing.run("gdal:triterrainruggednessindex", {
+                        'INPUT': dem_source, 'BAND': 1, 'OUTPUT': output
+                    })
+                    tri_classes = self.get_tri_classes(tri_max)
+                    layer_name = f"TRI Riley 1999 (험준기준:{tri_max})"
+                    layer = QgsRasterLayer(output, layer_name)
+                    if layer.isValid():
+                        try:
+                            set_archtoolkit_layer_metadata(
+                                layer,
+                                tool_id="terrain_analysis",
+                                run_id=str(run_id),
+                                kind="tri",
+                                units="index",
+                                params={"tri_max": float(tri_max), "radius": 1},
+                            )
+                        except Exception:
+                            pass
+                        QgsProject.instance().addMapLayer(layer)
+                        self.apply_style(layer, tri_classes, tri_max * 2.5)
+                        results.append("TRI")
             
             # TPI with user parameters (radius and threshold)
             if self.chkTPI.isChecked():
@@ -755,6 +765,112 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
             self.iface.messageBar().pushMessage("경고", f"지형분류 분석 오류: {str(e)}", level=1)
         finally:
             cleanup_files([tpi_path, slope_path])
+
+    def run_tri_radius_analysis(self, dem_layer, dem_source, radius, tri_max, results, run_id):
+        """Ruggedness over a (2r+1)x(2r+1) window, for landscape-scale questions.
+
+        gdaldem's TRI is fixed at 3x3. On a 5 m DEM that is a 15 m
+        neighbourhood, which describes micro-relief; a model asking about
+        ruggedness at, say, 65 m needs a genuinely wider window. The result is
+        the RMS elevation difference from the centre cell - Riley's index
+        normalised by sqrt(N) - so values stay comparable across radii. It is
+        published as its own variable (`tri_radius`) because its units differ
+        from the 3x3 product and silently swapping them would make two runs
+        look comparable when they are not.
+        """
+        try:
+            ds = gdal.Open(dem_source, gdal.GA_ReadOnly)
+            if ds is None:
+                push_message(self.iface, "경고", "DEM을 열 수 없습니다(TRI 반경).", level=1)
+                return
+            band = ds.GetRasterBand(1)
+
+            # Cost is O(n * (2r+1)^2) - there is no summed-area shortcut for a
+            # difference taken against the centre cell - so guard on the
+            # product, not the pixel count alone. 2e9 cell-visits is a few tens
+            # of seconds; beyond that the dialog would look hung.
+            npx = int(ds.RasterXSize) * int(ds.RasterYSize)
+            window_cells = (2 * int(radius) + 1) ** 2
+            if npx * window_cells > 2_000_000_000:
+                suggested = max(1, int((2_000_000_000 / max(1, npx)) ** 0.5 - 1) // 2)
+                push_message(
+                    self.iface,
+                    "경고",
+                    f"DEM {npx:,} 픽셀에 반경 {radius}셀은 너무 큽니다. "
+                    f"반경을 {suggested}셀 이하로 줄이거나 DEM을 클립하세요.",
+                    level=1,
+                    duration=10,
+                )
+                ds = None
+                return
+
+            z = band.ReadAsArray()
+            gt = ds.GetGeoTransform()
+            proj = ds.GetProjection()
+            nodata = band.GetNoDataValue()
+            ds = None
+            if z is None or z.ndim != 2:
+                push_message(self.iface, "경고", "DEM 배열을 읽을 수 없습니다(TRI 반경).", level=1)
+                return
+            if z.shape[0] <= 2 * radius or z.shape[1] <= 2 * radius:
+                push_message(
+                    self.iface, "경고",
+                    f"DEM이 반경 {radius}셀 창보다 작습니다(TRI 반경).", level=1,
+                )
+                return
+
+            z = z.astype("float64")
+            nodata_mask = None
+            if nodata is not None:
+                nodata_mask = (z == nodata)
+
+            cell = (abs(float(gt[1])) + abs(float(gt[5]))) / 2.0
+            log_message(
+                f"TRI 반경 계산: {npx:,}픽셀 x {window_cells}셀 창 (반경 {radius}셀"
+                + (f" ≈ {radius * cell:.0f}m)" if cell > 0 else ")")
+            )
+
+            result = tri_radius(z, int(radius), nodata_mask=nodata_mask)
+
+            nd = -9999.0
+            out = np.where(np.isfinite(result), result, nd).astype("float32")
+            path = os.path.join(
+                tempfile.gettempdir(), f'archtoolkit_tri_r{int(radius)}_{run_id}.tif'
+            )
+            self._write_geotiff(path, out, gt, proj, nd)
+
+            distance_label = f"≈{radius * cell:.0f}m" if cell > 0 else f"{radius}셀"
+            layer = QgsRasterLayer(path, f"TRI 반경 {radius}셀 ({distance_label}, RMS 고도차)")
+            if not layer.isValid():
+                push_message(self.iface, "경고", "TRI 반경 결과를 열 수 없습니다.", level=1)
+                return
+            try:
+                set_archtoolkit_layer_metadata(
+                    layer,
+                    tool_id="terrain_analysis",
+                    run_id=str(run_id),
+                    kind="tri_radius",
+                    units="m",
+                    params={
+                        "radius_cells": int(radius),
+                        "radius_m": float(radius * cell) if cell > 0 else None,
+                        "statistic": "rms_elevation_difference_from_centre",
+                        "note": "Riley (1999) normalised by sqrt(N); not comparable to the 3x3 TRI",
+                    },
+                )
+            except Exception:
+                pass
+            QgsProject.instance().addMapLayer(layer)
+            valid_vals = result[np.isfinite(result)]
+            if valid_vals.size:
+                self._apply_sequential_style(
+                    layer, float(np.nanpercentile(valid_vals, 2)),
+                    float(np.nanpercentile(valid_vals, 98)),
+                    "평탄 smooth", "험준 rugged",
+                )
+            results.append(f"TRI(반경 {radius}셀)")
+        except Exception as e:
+            push_message(self.iface, "경고", f"TRI 반경 분석 오류: {str(e)}", level=1)
 
     def run_curvature_analysis(self, dem_layer, dem_source, results, run_id):
         """Profile & plan curvature (Zevenbergen & Thorne 1987) + interpretation.

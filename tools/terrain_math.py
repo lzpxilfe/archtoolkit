@@ -41,3 +41,92 @@ def zt_curvature(z, cell):
     profile = np.where(small, 0.0, 2.0 * (D * G * G + E * H * H + F * G * H) / ds)
     plan = np.where(small, 0.0, -2.0 * (D * H * H + E * G * G - F * G * H) / ds)
     return profile, plan
+
+
+def tri_radius(z, radius, *, nodata_mask=None):
+    """Terrain ruggedness over a (2r+1)x(2r+1) window, as an RMS difference.
+
+    ``gdaldem``'s TRI is fixed at 3x3, so on a 5 m DEM it reports ruggedness
+    over a 15 m neighbourhood. Landscape-scale questions - and the ruggedness
+    variable an archaeological model usually wants - are about a broader
+    window, and a 3x3 result is not a coarse version of that, it is a
+    different variable.
+
+    Riley et al. (1999) define TRI as ``sqrt(sum((z_c - z_n)^2))`` over the
+    eight neighbours. That sum grows with the number of cells in the window, so
+    values at different radii are not comparable. This returns the *normalised*
+    form - the root-mean-square difference from the centre cell::
+
+        tri_r(c) = sqrt( mean_{n in W(c)} (z_c - z_n)^2 )
+
+    which is Riley's index divided by ``sqrt(N)``; on a full 3x3 window the two
+    differ by exactly ``sqrt(8)``. Callers should expose it under its own name
+    rather than as "TRI", since the units differ from the 3x3 product.
+
+    ``z`` is a 2D elevation array and ``radius`` a positive cell count.
+    ``nodata_mask`` marks cells to exclude (True = NoData); those cells neither
+    contribute to a neighbourhood nor receive a value. Cells whose window holds
+    no valid neighbour come back as NaN, as do the outermost ``radius`` rows and
+    columns, whose windows are not fully inside the grid.
+
+    Cost is O(n * (2r+1)^2): the absolute/squared difference is taken against
+    the centre cell, which no summed-area shortcut can decompose. The caller is
+    responsible for guarding the array size.
+    """
+    array = np.asarray(z, dtype="float64")
+    if array.ndim != 2:
+        raise ValueError("tri_radius expects a 2D array")
+    radius = int(radius)
+    if radius < 1:
+        raise ValueError("radius must be at least 1 cell")
+    rows, cols = array.shape
+    if rows <= 2 * radius or cols <= 2 * radius:
+        raise ValueError("array is too small for the requested radius")
+
+    valid = np.ones(array.shape, dtype=bool)
+    if nodata_mask is not None:
+        valid &= ~np.asarray(nodata_mask, dtype=bool)
+    valid &= np.isfinite(array)
+
+    centre = np.where(valid, array, 0.0)
+    sq_total = np.zeros(array.shape, dtype="float64")
+    counts = np.zeros(array.shape, dtype="int64")
+
+    # Accumulate over every offset in the window except the centre itself.
+    # np.roll would wrap the border around the grid, which for a ruggedness
+    # statistic invents a cliff at the edges, so the border is trimmed instead.
+    for row_offset in range(-radius, radius + 1):
+        for col_offset in range(-radius, radius + 1):
+            if row_offset == 0 and col_offset == 0:
+                continue
+            shifted = _shift2d(centre, row_offset, col_offset)
+            shifted_valid = _shift2d(valid, row_offset, col_offset, fill=False)
+            both = valid & shifted_valid
+            difference = np.where(both, centre - shifted, 0.0)
+            sq_total += difference * difference
+            counts += both
+
+    with np.errstate(invalid="ignore", divide="ignore"):
+        result = np.sqrt(sq_total / np.where(counts > 0, counts, 1))
+    result[counts == 0] = np.nan
+    result[~valid] = np.nan
+
+    # The rim cannot see a full window, so its value would be computed from a
+    # truncated neighbourhood and read as artificially smooth terrain.
+    result[:radius, :] = np.nan
+    result[-radius:, :] = np.nan
+    result[:, :radius] = np.nan
+    result[:, -radius:] = np.nan
+    return result
+
+
+def _shift2d(array, row_offset, col_offset, fill=0.0):
+    """Shift a 2D array without wrapping, padding the vacated edge with ``fill``."""
+    out = np.full(array.shape, fill, dtype=array.dtype)
+    rows, cols = array.shape
+    src_row = slice(max(0, -row_offset), rows - max(0, row_offset))
+    dst_row = slice(max(0, row_offset), rows - max(0, -row_offset))
+    src_col = slice(max(0, -col_offset), cols - max(0, col_offset))
+    dst_col = slice(max(0, col_offset), cols - max(0, -col_offset))
+    out[dst_row, dst_col] = array[src_row, src_col]
+    return out

@@ -361,6 +361,32 @@
         </property>
         <layout class="QHBoxLayout" name="horizontalLayout_TRI">
          <item>
+          <widget class="QLabel" name="label_TRIRadius">
+           <property name="text">
+            <string>분석 반경:</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QSpinBox" name="spinTRIRadius">
+           <property name="minimum">
+            <number>1</number>
+           </property>
+           <property name="maximum">
+            <number>50</number>
+           </property>
+           <property name="value">
+            <number>1</number>
+           </property>
+           <property name="suffix">
+            <string> 셀</string>
+           </property>
+           <property name="toolTip">
+            <string>&lt;html&gt;&lt;b&gt;TRI 분석 반경&lt;/b&gt;&lt;hr/&gt;1셀이면 GDAL의 3x3 창을 그대로 사용해 Riley(1999) 원식으로 계산합니다.&lt;br/&gt;&lt;br/&gt;2셀 이상이면 (2r+1)x(2r+1) 창의 &lt;b&gt;RMS 고도차&lt;/b&gt;를 계산합니다. 이는 Riley 지수를 sqrt(N)으로 나눈 정규화 형태로, 반경이 달라도 값을 비교할 수 있습니다.&lt;br/&gt;&lt;br/&gt;&lt;b&gt;주의:&lt;/b&gt; 3x3 결과와 단위가 다르므로 별도 변수(tri_radius)로 출력됩니다.&lt;br/&gt;&lt;br/&gt;5m DEM에서 반경 13셀 = 약 65m 범위입니다.&lt;/html&gt;</string>
+           </property>
+          </widget>
+         </item>
+         <item>
           <widget class="QLabel" name="label_TRIMax">
            <property name="text">
             <string>험준 기준 임계:</string>
