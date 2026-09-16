@@ -132,7 +132,7 @@ def assign_variable_keys(items):
     from the order the user sees in the dialog, makes the mapping reproducible
     and lets the manifest record it.
     """
-    used: dict = {}
+    taken: set = set()
     keys = []
     for index, item in enumerate(items or []):
         get = item.get if hasattr(item, "get") else (lambda k, d="": getattr(item, k, d))
@@ -145,13 +145,23 @@ def assign_variable_keys(items):
             # Nothing usable survived. A positional name is honest - it points
             # at the manifest row rather than pretending to describe the layer.
             base = f"{FALLBACK_STEM}_{index + 1:02d}"
-        count = used.get(base, 0) + 1
-        used[base] = count
-        key = base if count == 1 else f"{base}_{count}"
+        # Uniqueness is checked against every FINAL key handed out, not just
+        # the bases. Counting bases alone let ("slope", "slope", "slope_2")
+        # produce slope, slope_2, slope_2 - two rasters written to one file,
+        # one predictor silently lost.
+        key = base
+        suffix = 2
+        while key in taken:
+            key = f"{base}_{suffix}"
+            suffix += 1
         # The suffix cannot break the contract (it is ASCII), but assert it
         # rather than trust it: everything downstream depends on this holding.
         if not is_round_trip_stable(key):  # pragma: no cover - defensive
             key = f"{FALLBACK_STEM}_{index + 1:02d}"
+            while key in taken:
+                index += 1
+                key = f"{FALLBACK_STEM}_{index + 1:02d}"
+        taken.add(key)
         keys.append(key)
     return keys
 

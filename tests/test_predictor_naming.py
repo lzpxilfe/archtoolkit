@@ -185,6 +185,25 @@ class AssignVariableKeysTests(unittest.TestCase):
         for key in keys:
             self.assertTrue(is_round_trip_stable(key))
 
+    def test_suffix_never_collides_with_another_items_base(self):
+        # Found in review: counting bases alone gave slope, slope_2, slope_2.
+        # Two rasters then warp to the same {key}.tif and one is lost.
+        keys = assign_variable_keys([
+            {"kind": "slope", "name": "a"},
+            {"kind": "slope", "name": "b"},
+            {"kind": "slope_2", "name": "c"},
+        ])
+        self.assertEqual(len(set(keys)), 3, msg=f"collision in {keys}")
+        keys = assign_variable_keys([
+            {"kind": "viewshed_single", "name": "a"},
+            {"kind": "viewshed_single", "name": "b"},
+            {"kind": "viewshed_single_2", "name": "c"},
+            {"kind": "viewshed_single", "name": "d"},
+        ])
+        self.assertEqual(len(set(keys)), 4, msg=f"collision in {keys}")
+        # And the exported filenames must still survive the consumer as a set.
+        self.assertEqual(len(set(_archmodelbench_unique_names([f"{k}.tif" for k in keys]))), 4)
+
     def test_fallback_and_derived_keys_never_collide(self):
         items = [{"kind": "layer_01", "name": "x"}, {"kind": "", "name": "경사도"}]
         keys = assign_variable_keys(items)

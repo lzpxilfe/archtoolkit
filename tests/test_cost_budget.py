@@ -6,6 +6,7 @@ from tools.cost_budget import (
     ALWAYS_ALLOW_CELLS,
     MAX_BATCH_SECONDS,
     assess_batch,
+    assess_windows,
     LEVEL_OK,
     LEVEL_REFUSE,
     LEVEL_WARN,
@@ -154,6 +155,38 @@ class BatchTests(unittest.TestCase):
     def test_zero_runs_treated_as_one(self):
         self.assertEqual(assess_batch(1000, 0, available_bytes=GB).level,
                          assess_batch(1000, 1, available_bytes=GB).level)
+
+
+class WindowsTests(unittest.TestCase):
+    """The network's windows differ per pair; the batch is judged once, up front."""
+
+    def test_mixed_windows_are_not_refused_by_their_largest_member(self):
+        # Review case: k-NN over 60 sites, most windows small, one far pair
+        # at 2M cells. Extrapolating 2M across 360 directed paths refused a
+        # run whose real total is a few minutes.
+        windows = [50_000] * 359 + [2_000_000]
+        verdict = assess_windows(windows, available_bytes=16 * GB)
+        self.assertNotEqual(verdict.level, LEVEL_REFUSE)
+        self.assertLess(verdict.seconds, MAX_BATCH_SECONDS)
+
+    def test_time_is_the_sum_and_memory_is_the_largest(self):
+        windows = [1_000_000, 3_000_000, 2_000_000]
+        verdict = assess_windows(windows, available_bytes=16 * GB)
+        self.assertAlmostEqual(verdict.seconds, sum(estimate_seconds(c) for c in windows), places=6)
+        self.assertEqual(verdict.cells, 3_000_000)
+
+    def test_a_batch_too_long_in_total_is_still_refused(self):
+        windows = [3_000_000] * 300
+        verdict = assess_windows(windows, available_bytes=32 * GB, current_pixel_size=5.0)
+        self.assertEqual(verdict.level, LEVEL_REFUSE)
+        self.assertIsNotNone(verdict.suggested_pixel)
+
+    def test_one_window_that_does_not_fit_in_memory_refuses(self):
+        verdict = assess_windows([1_000, 500_000_000], available_bytes=2 * GB)
+        self.assertEqual(verdict.level, LEVEL_REFUSE)
+
+    def test_empty_batch_is_ok(self):
+        self.assertEqual(assess_windows([], available_bytes=GB).level, LEVEL_OK)
 
 
 class SuggestedPixelTests(unittest.TestCase):

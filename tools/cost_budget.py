@@ -280,6 +280,51 @@ def assess_batch(cells_per_run, runs, *, available_bytes=None, memory_known=None
     return verdict
 
 
+def assess_windows(cells_per_window, *, available_bytes=None, memory_known=None,
+                   current_pixel_size=None) -> BudgetVerdict:
+    """Assess a batch whose windows differ in size, once, before any run.
+
+    :func:`assess_batch` multiplies one window by the run count, which is only
+    right when every window is the same size. A least-cost network's windows
+    are not: most pairs are near neighbours with small windows and a few are
+    far apart. Extrapolating the largest window across all pairs refused runs
+    that were fine, and doing it inside the loop refused them after earlier
+    pairs had already been computed and thrown away.
+
+    Memory is bounded by the largest window (one is held at a time); time is
+    the sum. Both are known from geotransform arithmetic before the first
+    accumulation starts, so the decision belongs there.
+    """
+    sizes = [max(0, int(c)) for c in (cells_per_window or [])]
+    if not sizes:
+        return assess(0, available_bytes=available_bytes, memory_known=memory_known,
+                      current_pixel_size=current_pixel_size, confirmed=True)
+    largest = max(sizes)
+    verdict = assess(
+        largest,
+        available_bytes=available_bytes,
+        memory_known=memory_known,
+        current_pixel_size=current_pixel_size,
+        confirmed=True,
+    )
+    total_seconds = sum(estimate_seconds(c) for c in sizes)
+    verdict.seconds = total_seconds
+    if verdict.level == LEVEL_REFUSE:
+        return verdict
+    if total_seconds > MAX_BATCH_SECONDS:
+        verdict.level = LEVEL_REFUSE
+        if verdict.suggested_pixel is None and current_pixel_size:
+            # Time-bound, so size the suggestion so the SUM fits: every
+            # window shrinks by the same factor, so scale the total.
+            total_cells = sum(sizes)
+            affordable = int(MAX_BATCH_SECONDS / PER_CELL_SECONDS)
+            verdict.suggested_pixel = suggested_pixel_size(
+                current_pixel_size, total_cells, max(1, affordable))
+    elif total_seconds >= WARN_SECONDS:
+        verdict.level = LEVEL_WARN
+    return verdict
+
+
 def assess_current_machine(cells, *, current_pixel_size=None, confirmed=False):
     """:func:`assess` against this machine's reported available memory."""
     available = available_memory_bytes()
@@ -296,6 +341,7 @@ __all__ = [
     "ALWAYS_ALLOW_CELLS",
     "MAX_BATCH_SECONDS",
     "assess_batch",
+    "assess_windows",
     "ASSUMED_AVAILABLE_BYTES",
     "BudgetVerdict",
     "CostBudgetError",

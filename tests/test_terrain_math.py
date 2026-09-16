@@ -77,8 +77,6 @@ class ZtCurvatureTests(unittest.TestCase):
         self.assertAlmostEqual(p_hill[3, 3], -p_valley[3, 3], places=6)
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 class TriRadiusTests(unittest.TestCase):

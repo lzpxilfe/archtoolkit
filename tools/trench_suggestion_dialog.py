@@ -41,6 +41,7 @@ import processing
 from .help_dialog import show_help_dialog
 from .live_log_dialog import ensure_live_log_dialog
 from .utils import (
+    is_null_value,
     log_swallowed,
     cleanup_files,
     get_archtoolkit_layer_metadata,
@@ -112,6 +113,14 @@ def _text_has_grave_keyword(text: str) -> bool:
 
 
 def _safe_float(v, default=None):
+    """Convert to float, returning ``default`` for null, NaN or unconvertible.
+
+    Called per candidate cell in the placement loop, where NoData samples are
+    routine - so a null is handled before conversion and never logged. Only a
+    non-null value that still fails to convert is worth a [swallowed] line.
+    """
+    if is_null_value(v):
+        return default
     try:
         f = float(v)
         if math.isfinite(f):

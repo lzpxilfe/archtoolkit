@@ -434,45 +434,60 @@ class CostNetworkWorker(QgsTask):
             except Exception as _exc:
                 log_swallowed("cost_network_dialog.update_progress", _exc)
 
-        for a, b in candidate_pairs:
-            if self._is_cancelled():
-                return NetworkTaskResult(ok=False, message="취소됨")
-
+        def _pair_window(a, b):
             ax, ay = coords[a, 0], coords[a, 1]
             bx, by = coords[b, 0], coords[b, 1]
             if self.pair_buffer_m <= 0:
-                # Documented behavior: 0 = full DEM (still bounded by max_cells).
-                # Without this, two nodes sharing an x or y coordinate get a
-                # 1-cell strip that forces a terrain-blind straight path.
-                xoff, yoff, win_xsize, win_ysize = 0, 0, int(xsize), int(ysize)
-            else:
-                minx = min(ax, bx) - self.pair_buffer_m
-                maxx = max(ax, bx) + self.pair_buffer_m
-                miny = min(ay, by) - self.pair_buffer_m
-                maxy = max(ay, by) + self.pair_buffer_m
-                xoff, yoff, win_xsize, win_ysize = _bbox_window(gt, xsize, ysize, minx, miny, maxx, maxy)
-            cell_count = int(win_xsize * win_ysize)
-            budget = cost_budget.assess_batch(
-                cell_count,
-                total_dir,
-                available_bytes=cost_budget.available_memory_bytes(),
-                current_pixel_size=(abs(float(gt[1])) + abs(float(gt[5]))) / 2.0,
+                # Documented behavior: 0 = full DEM. Without this, two nodes
+                # sharing an x or y coordinate get a 1-cell strip that forces
+                # a terrain-blind straight path.
+                return 0, 0, int(xsize), int(ysize)
+            minx = min(ax, bx) - self.pair_buffer_m
+            maxx = max(ax, bx) + self.pair_buffer_m
+            miny = min(ay, by) - self.pair_buffer_m
+            maxy = max(ay, by) + self.pair_buffer_m
+            return _bbox_window(gt, xsize, ysize, minx, miny, maxx, maxy)
+
+        # Decide the whole batch ONCE, up front. Windows are cheap to size
+        # (geotransform arithmetic) and differ a lot between near and far
+        # pairs, so the budget must see all of them: assessing inside the
+        # loop extrapolated one pair's window across every pair and refused
+        # the run after earlier pairs were already computed and lost. Each
+        # directed pair runs once per direction, hence the doubling.
+        windows = [_pair_window(a, b) for a, b in candidate_pairs]
+        window_cells = [int(w[2] * w[3]) for w in windows for _ in (0, 1)]
+        budget = cost_budget.assess_windows(
+            window_cells,
+            available_bytes=cost_budget.available_memory_bytes(),
+            current_pixel_size=(abs(float(gt[1])) + abs(float(gt[5]))) / 2.0,
+        )
+        if budget.level == cost_budget.LEVEL_REFUSE:
+            hint = (
+                f" 픽셀 크기 {budget.suggested_pixel:g} m 정도로 리샘플하면 들어갑니다."
+                if budget.suggested_pixel else ""
             )
-            if budget.level == cost_budget.LEVEL_REFUSE:
-                hint = (
-                    f" 픽셀 크기 {budget.suggested_pixel:g} m 정도로 리샘플하면 들어갑니다."
-                    if budget.suggested_pixel else ""
-                )
-                return NetworkTaskResult(
-                    ok=False,
-                    message=(
-                        f"분석 규모가 너무 큽니다: 창 {cell_count:,} cells x {total_dir}개 "
-                        f"방향 경로 = 예상 {budget.seconds / 3600.0:.1f}시간, "
-                        f"창당 {budget.gigabytes:.1f}GB. "
-                        "경로 버퍼(m)를 줄이거나 후보 간선(k)를 줄이세요. "
-                        f"(버퍼 0=DEM 전체는 작은 DEM에서만 권장){hint}"
-                    ),
-                )
+            largest = max(window_cells) if window_cells else 0
+            return NetworkTaskResult(
+                ok=False,
+                message=(
+                    f"분석 규모가 너무 큽니다: 방향 경로 {total_dir}개, 가장 큰 창 {largest:,} cells, "
+                    f"전체 예상 {budget.seconds / 3600.0:.1f}시간, 창당 최대 {budget.gigabytes:.1f}GB. "
+                    "경로 버퍼(m)를 줄이거나 후보 간선(k)를 줄이세요. "
+                    f"(버퍼 0=DEM 전체는 작은 DEM에서만 권장){hint}"
+                ),
+            )
+        log_message(
+            f"CostNetwork: budget ok - {total_dir} directed paths, largest window "
+            f"{max(window_cells) if window_cells else 0:,} cells, est. {budget.minutes:.1f} min "
+            "(upper bound: pairs use A*, which visits a corridor, not the full window)",
+            level=Qgis.Info,
+        )
+
+        for (a, b), (xoff, yoff, win_xsize, win_ysize) in zip(candidate_pairs, windows):
+            if self._is_cancelled():
+                return NetworkTaskResult(ok=False, message="취소됨")
+            ax, ay = coords[a, 0], coords[a, 1]
+            bx, by = coords[b, 0], coords[b, 1]
 
             dem = band.ReadAsArray(xoff, yoff, win_xsize, win_ysize)
             if dem is None:

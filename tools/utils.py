@@ -43,6 +43,28 @@ def transform_point(point, src_crs, dest_crs):
             pass
         return point
 
+def is_null_value(value) -> bool:
+    """True for Python None and for PyQGIS's NULL QVariant.
+
+    A null attribute comes back from a feature as ``qgis.core.NULL``, which is
+    not ``None`` - ``float(NULL)`` raises. Checking only ``is None`` before a
+    conversion therefore raised, and was logged, once per null cell of every
+    scanned feature. Nulls are expected data, not failures.
+    """
+    if value is None:
+        return True
+    try:
+        if hasattr(value, "isNull") and value.isNull():
+            return True
+    except Exception:
+        pass
+    try:
+        from qgis.core import NULL
+        return value == NULL
+    except Exception:
+        return False
+
+
 def split_qgis_source_path(source) -> str:
     """Strip QGIS URI options (``|layername=...``, ``|layerid=...``) for GDAL/OGR.
 

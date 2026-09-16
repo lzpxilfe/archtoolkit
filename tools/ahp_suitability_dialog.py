@@ -277,7 +277,9 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
     def __init__(self, iface, parent=None):
         super().__init__(parent)
         self.iface = iface
-        self._aoi_failure = None
+        self._aoi_failure = None   # AOI requested and NOT applied
+        self._aoi_warning = None   # AOI applied, some polygons skipped
+        self._stats_used_aoi = False
         self._criteria: List[_Criterion] = []
         self._pairwise: Dict[Tuple[int, int], float] = {}
         self._hierarchy_config: Dict[str, Any] = {}
@@ -1101,6 +1103,8 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
         message. So a failure is recorded and reported by the caller instead.
         """
         self._aoi_failure = None
+        self._aoi_warning = None
+        self._stats_used_aoi = False
         aoi = self.cmbAoi.currentLayer()
         if aoi is None or not isinstance(aoi, QgsVectorLayer):
             return None
@@ -1116,8 +1120,12 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
             self._aoi_failure = "AOI 범위를 계산할 수 없습니다."
             return None
         if result.ok:
+            # The AOI WAS applied. A skipped polygon is worth a warning but
+            # must not be reported as "statistics over the whole raster" -
+            # that would make the user distrust or redo correct numbers.
+            self._stats_used_aoi = True
             if result.skipped:
-                self._aoi_failure = result.message()
+                self._aoi_warning = result.message()
             return result.extent
         if result.requested_but_failed:
             self._aoi_failure = result.message()
@@ -1141,33 +1149,55 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
     def _on_compute_stats(self):
         if not self._criteria:
             return
-        self._aoi_failure = None
-        aoi_problems = []
+        failures, warnings = self._compute_all_stats(force=True)
+        self._refresh_criteria_table()
+
+        if failures:
+            # Statistics computed over the whole raster instead of the AOI
+            # stretch every scoring ramp, so the resulting suitability map is
+            # wrong everywhere. The stats were NOT stored; say so now.
+            push_message(
+                self.iface, "오류",
+                "AOI 범위를 적용하지 못해 통계를 저장하지 않았습니다: " + " ".join(failures),
+                level=2, duration=12,
+            )
+            return
+        if warnings:
+            push_message(self.iface, "주의", " ".join(warnings), level=1, duration=8)
+        # Report the scope that was actually measured, not the checkbox: with
+        # the box ticked and no AOI layer chosen, the stats span the raster.
+        scope = "AOI 범위" if self._stats_used_aoi else "래스터 전체"
+        push_message(self.iface, "AHP", f"통계(min/max) 계산 완료 ({scope} 기준)",
+                     level=0, duration=5)
+
+    def _compute_all_stats(self, *, force: bool):
+        """Fill min/max for every criterion (all of them when ``force``).
+
+        Returns ``(failures, warnings)``. When the AOI was requested but could
+        not be applied for a layer, that layer's statistics are DISCARDED
+        rather than stored: keeping whole-raster numbers on the criterion
+        would let the next run reuse them silently against an AOI-clipped
+        output, which is the wrong-everywhere map this guard exists to stop.
+        """
+        failures, warnings = [], []
         for c in self._criteria:
+            if not force and c.min_v is not None and c.max_v is not None:
+                continue
             lyr = self._criterion_layer(c)
             if lyr is None:
                 continue
             mn, mx = self._compute_minmax_for_layer(lyr)
+            if self._aoi_failure:
+                if self._aoi_failure not in failures:
+                    failures.append(self._aoi_failure)
+                c.min_v = None
+                c.max_v = None
+                continue
+            if self._aoi_warning and self._aoi_warning not in warnings:
+                warnings.append(self._aoi_warning)
             c.min_v = mn
             c.max_v = mx
-            if self._aoi_failure and self._aoi_failure not in aoi_problems:
-                aoi_problems.append(self._aoi_failure)
-        self._refresh_criteria_table()
-
-        if aoi_problems:
-            # Statistics computed over the whole raster instead of the AOI
-            # stretch every scoring ramp, so the resulting suitability map is
-            # wrong everywhere. Say so now rather than after the run.
-            push_message(
-                self.iface, "주의",
-                "AOI 범위를 적용하지 못해 래스터 전체 기준으로 통계를 냈습니다: "
-                + " ".join(aoi_problems),
-                level=1, duration=12,
-            )
-            return
-        scope = "AOI 범위" if self.chkClipToAoiExtent.isChecked() else "래스터 전체"
-        push_message(self.iface, "AHP", f"통계(min/max) 계산 완료 ({scope} 기준)",
-                     level=0, duration=5)
+        return failures, warnings
 
     def _on_browse_out(self):
         path, _flt = QtWidgets.QFileDialog.getSaveFileName(
@@ -1565,17 +1595,18 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
         except Exception:
             pass
 
-        # 2) Stats
-        for c in self._criteria:
-            if c.min_v is not None and c.max_v is not None:
-                continue
-            lyr = self._criterion_layer(c)
-            if lyr is None:
-                continue
-            mn, mx = self._compute_minmax_for_layer(lyr)
-            c.min_v = mn
-            c.max_v = mx
+        # 2) Stats - through the guarded path, so a failed AOI never leaves
+        #    whole-raster min/max stored on a criterion for a later run.
+        failures, warnings = self._compute_all_stats(force=False)
         self._refresh_criteria_table()
+        if failures:
+            push_message(self.iface, "오류",
+                         "AOI를 사용할 수 없어 실행을 중단했습니다: " + " ".join(failures),
+                         level=2, duration=12)
+            restore_ui_focus(self)
+            return
+        if warnings:
+            push_message(self.iface, "주의", " ".join(warnings), level=1, duration=8)
 
         # 3) Reference raster
         ref_layer = self._criterion_layer(self._criteria[0])

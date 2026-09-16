@@ -47,12 +47,18 @@ from .utils import (
 )
 from .raster_io import write_single_band_geotiff
 from .terrain_math import tri_radius, zt_curvature
+from . import cost_budget
 from .live_log_dialog import ensure_live_log_dialog
 from .help_dialog import show_help_dialog
 
 # This tool uses QGIS built-in GDAL processing algorithms. The curvature
 # analysis additionally uses NumPy + GDAL (both ship with QGIS - no extra
 # install), per DEVELOPMENT.md.
+
+# Peak working set of terrain_math.tri_radius per input pixel: the float64
+# grid, the centre/shifted/difference arrays, the squared-sum and count
+# accumulators and both validity masks. Measured with tracemalloc; rounded up.
+TRI_RADIUS_BYTES_PER_PIXEL = 80
 
 FORM_CLASS, _ = uic.loadUiType(os.path.join(
     os.path.dirname(__file__), 'terrain_analysis_dialog_base.ui'))
@@ -506,7 +512,7 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
             if not success:
                 restore_ui_focus(self)
     
-    def _compute_tpi_raster(self, dem_layer, dem_source, radius, run_id, tag):
+    def _compute_tpi_raster(self, dem_layer, dem_source, radius, run_id, tag, scratch):
         """TPI at a user-chosen radius. Returns (path, scratch_files, effective_radius).
 
         gdal:tpitopographicpositionindex is fixed at 3x3. Weiss's landform
@@ -522,8 +528,12 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
         ``effective_radius`` is 1 when the approximation could not be built and
         the 3x3 result was used instead, so the caller never claims a radius it
         did not get.
+
+        ``scratch`` is the CALLER's list: intermediate files are appended to it
+        as they are created, so if a later processing step raises, the caller's
+        ``finally`` still sees and removes them. Returning the list only on
+        success orphaned a temp GeoTIFF on every failed run.
         """
-        scratch = []
         output = os.path.join(tempfile.gettempdir(), f'archtoolkit_tpi_{tag}_{run_id}.tif')
 
         if radius <= 1:
@@ -595,8 +605,8 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
         """
         scratch = []
         try:
-            output, scratch, radius = self._compute_tpi_raster(
-                dem_layer, dem_source, radius, run_id, "single")
+            output, _scratch, radius = self._compute_tpi_raster(
+                dem_layer, dem_source, radius, run_id, "single", scratch)
 
             # Apply classification with user threshold
             tpi_classes = self.get_tpi_classes(threshold)
@@ -658,9 +668,9 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
         tpi_scratch = []
         try:
             # 1. TPI at the radius the user asked for, not a fixed 3x3.
-            tpi_path, tpi_scratch, tpi_radius = self._compute_tpi_raster(
+            tpi_path, _scratch, tpi_radius = self._compute_tpi_raster(
                 dem_source=dem_source, dem_layer=dem_layer, radius=tpi_radius,
-                run_id=run_id, tag="landform")
+                run_id=run_id, tag="landform", scratch=tpi_scratch)
             
             # 2. Generate Slope
             slope_path = os.path.join(tempfile.gettempdir(), f'archtoolkit_slope_temp_{run_id}.tif')
@@ -814,6 +824,28 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                     "경고",
                     f"DEM {npx:,} 픽셀에 반경 {radius}셀은 너무 큽니다. "
                     f"반경을 {suggested}셀 이하로 줄이거나 DEM을 클립하세요.",
+                    level=1,
+                    duration=10,
+                )
+                ds = None
+                return
+            # Time is not the only bound. tri_radius holds the float64 grid
+            # plus shifted/difference/accumulator temporaries - measured at
+            # ~67 B/px - all on the GUI thread, so a DEM the time guard admits
+            # (small radius, huge grid) can still want gigabytes. Check it
+            # against what the machine reports, the way the cost surface does.
+            bytes_needed = npx * TRI_RADIUS_BYTES_PER_PIXEL
+            available = cost_budget.available_memory_bytes()
+            allowed = (available if available is not None
+                       else cost_budget.ASSUMED_AVAILABLE_BYTES) * cost_budget.MEMORY_SAFETY_FRACTION
+            if bytes_needed > allowed:
+                push_message(
+                    self.iface,
+                    "경고",
+                    f"DEM {npx:,} 픽셀의 TRI 반경 계산에 약 {bytes_needed / 1024 ** 3:.1f}GB가 "
+                    f"필요한데 가용 메모리가 부족합니다"
+                    + (f" (가용 약 {available / 1024 ** 3:.1f}GB)." if available else ".")
+                    + " DEM을 클립하거나 리샘플하세요.",
                     level=1,
                     duration=10,
                 )

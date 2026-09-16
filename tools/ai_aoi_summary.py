@@ -41,7 +41,7 @@ from qgis.core import (
     QgsWkbTypes,
 )
 
-from .utils import log_swallowed, get_archtoolkit_layer_metadata, is_metric_crs, log_message
+from .utils import is_null_value, log_swallowed, get_archtoolkit_layer_metadata, is_metric_crs, log_message
 from .utils import split_qgis_source_path
 
 
@@ -412,7 +412,7 @@ def _vector_layer_stats_in_geom(
         if hist is not None and hist_field is not None:
             try:
                 v = feat[hist_field]
-                k = str(v) if v is not None else "(null)"
+                k = "(null)" if is_null_value(v) else str(v)
                 hist[k] = int(hist.get(k, 0)) + 1
             except Exception as _exc:
                 log_swallowed("ai_aoi_summary._vector_layer_stats_in_geom", _exc)
@@ -420,7 +420,10 @@ def _vector_layer_stats_in_geom(
         for f, acc in num_acc.items():
             try:
                 v = feat[f]
-                if v is None:
+                # PyQGIS hands back NULL (not None) for a null attribute, and
+                # float(NULL) raises - which was being logged once per null
+                # cell of every scanned feature. Nulls are data, not failures.
+                if is_null_value(v):
                     continue
                 x = float(v)
                 if not math.isfinite(x):
