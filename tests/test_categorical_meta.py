@@ -70,6 +70,7 @@ EXPECTED = {
     ("terrain_analysis", "slope", "deg"): False,
     ("terrain_analysis", "aspect", "deg"): False,
     ("terrain_analysis", "tri", "index"): False,
+    ("terrain_analysis", "tri_radius", "m"): False,
     ("terrain_analysis", "tpi", "index"): False,
     ("terrain_analysis", "roughness", "index"): False,
     ("dem_generate", "dem", "m"): False,
@@ -111,9 +112,11 @@ RUNTIME_EXPECTED = {
     ("viewshed", "viewshed_single", "mask"): True,
     ("viewshed", "higuchi", "mask"): True,
     ("viewshed", "reverse_single", "mask"): True,
-    ("viewshed", "cumulative", "mask/count"): False,   # a count surface
-    ("viewshed", "count", "mask/count"): False,
-    ("viewshed", "weighted_percent", "mask/count"): False,
+    ("viewshed", "union", "mask"): True,               # binary across observers
+    ("viewshed", "cumulative", "count"): False,        # a count surface
+    ("viewshed", "count", "count"): False,
+    ("viewshed", "weighted_percent", "percent"): False,
+    ("viewshed", "weighted_cumulative", "weight"): False,
     ("cost_surface", "cost_time", "min"): False,
     ("cost_surface", "cost_energy", "kcal"): False,
 }
@@ -154,7 +157,15 @@ class KnownMetadataTests(unittest.TestCase):
         # A cumulative viewshed is a count surface, not a mask; averaging it is
         # meaningful, so it must NOT take the nearest-neighbour branch.
         self.assertFalse(is_categorical_meta(
-            {"tool_id": "viewshed", "kind": "cumulative", "units": "mask/count"}))
+            {"tool_id": "viewshed", "kind": "cumulative", "units": "count"}))
+
+    def test_union_and_count_modes_are_told_apart(self):
+        # Both came out of the same branch tagged "mask/count", which matched
+        # neither rule, so the binary union was resampled bilinearly.
+        self.assertTrue(is_categorical_meta(
+            {"tool_id": "viewshed", "kind": "union", "units": "mask"}))
+        self.assertFalse(is_categorical_meta(
+            {"tool_id": "viewshed", "kind": "count", "units": "count"}))
 
     def test_missing_or_malformed_metadata_is_not_categorical(self):
         for meta in (None, {}, {"kind": None}, {"tool_id": 5}, "not-a-dict"):

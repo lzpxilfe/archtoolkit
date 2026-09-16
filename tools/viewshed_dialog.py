@@ -4099,21 +4099,27 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             
             if viewshed_layer.isValid():
                 try:
-                    kind = "cumulative"
+                    # units decides how align/export resamples this raster, so
+                    # the five modes cannot share one label: "union" is a
+                    # binary visible/not-visible grid that must resample with
+                    # nearest, while the counts and percentages are continuous
+                    # and must not. The old shared "mask/count" matched neither
+                    # rule, so a binary union was averaged into fractions.
+                    kind, units = "cumulative", "count"
                     if weighted_mode and normalize_weighted:
-                        kind = "weighted_percent"
+                        kind, units = "weighted_percent", "percent"
                     elif weighted_mode:
-                        kind = "weighted_cumulative"
+                        kind, units = "weighted_cumulative", "weight"
                     elif is_union_mode:
-                        kind = "union"
+                        kind, units = "union", "mask"
                     elif is_count_mode:
-                        kind = "count"
+                        kind, units = "count", "count"
                     set_archtoolkit_layer_metadata(
                         viewshed_layer,
                         tool_id="viewshed",
                         run_id=str(result_run_id),
                         kind=kind,
-                        units="mask/count",
+                        units=units,
                         params={"points_n": int(len(points))},
                     )
                 except Exception:
