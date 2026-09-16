@@ -55,6 +55,7 @@ from .utils import (
     restore_ui_focus,
     set_archtoolkit_layer_metadata,
 )
+from .aoi_extent import resolve_aoi_extent
 from .ahp_core import (
     ahp_weights_from_matrix as _ahp_weights_from_matrix,
     compute_hierarchy_summary as _compute_hierarchy_summary,
@@ -102,50 +103,6 @@ def _fmt_float(v: Any, *, digits: int = 4) -> str:
         return f"{x:.{int(digits)}f}"
     except Exception:
         return str(v)
-
-
-def _aoi_extent_in_crs(aoi_layer: QgsVectorLayer, *, selected_only: bool, dst_crs) -> Optional[QgsRectangle]:
-    if aoi_layer is None:
-        return None
-    try:
-        if aoi_layer.geometryType() != QgsWkbTypes.PolygonGeometry:
-            return None
-    except Exception:
-        return None
-
-    geom = None
-    feats = aoi_layer.selectedFeatures() if selected_only and aoi_layer.selectedFeatureCount() > 0 else aoi_layer.getFeatures()
-    for f in feats:
-        try:
-            g = f.geometry()
-        except Exception:
-            continue
-        if not g or g.isEmpty():
-            continue
-        if geom is None:
-            geom = g
-        else:
-            try:
-                geom = geom.combine(g)
-            except Exception:
-                pass
-
-    if geom is None or geom.isEmpty():
-        return None
-
-    try:
-        if aoi_layer.crs() != dst_crs:
-            ct = QgsCoordinateTransform(aoi_layer.crs(), dst_crs, QgsProject.instance())
-            g2 = type(geom)(geom)  # copy
-            g2.transform(ct)
-            geom = g2
-    except Exception:
-        return None
-
-    try:
-        return geom.boundingBox()
-    except Exception:
-        return None
 
 
 @dataclass
@@ -322,6 +279,7 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
     def __init__(self, iface, parent=None):
         super().__init__(parent)
         self.iface = iface
+        self._aoi_failure = None
         self._criteria: List[_Criterion] = []
         self._pairwise: Dict[Tuple[int, int], float] = {}
         self._hierarchy_config: Dict[str, Any] = {}
@@ -1132,15 +1090,36 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
             pass
 
     def _extent_for_raster_stats(self, raster: QgsRasterLayer) -> Optional[QgsRectangle]:
+        """AOI rectangle to compute min/max within, or None for the whole raster.
+
+        Returning None on a *failed* AOI would be the worst silent error this
+        tool can make: the statistics would then span the entire raster, the
+        scoring ramps would be stretched to a range the user never asked for,
+        and the suitability map would be wrong everywhere without a single
+        message. So a failure is recorded and reported by the caller instead.
+        """
+        self._aoi_failure = None
         aoi = self.cmbAoi.currentLayer()
         if aoi is None or not isinstance(aoi, QgsVectorLayer):
             return None
         if not self.chkClipToAoiExtent.isChecked():
             return None
         try:
-            return _aoi_extent_in_crs(aoi, selected_only=bool(self.chkAoiSelectedOnly.isChecked()), dst_crs=raster.crs())
+            result = resolve_aoi_extent(
+                aoi,
+                selected_only=bool(self.chkAoiSelectedOnly.isChecked()),
+                dst_crs=raster.crs(),
+            )
         except Exception:
+            self._aoi_failure = "AOI 범위를 계산할 수 없습니다."
             return None
+        if result.ok:
+            if result.skipped:
+                self._aoi_failure = result.message()
+            return result.extent
+        if result.requested_but_failed:
+            self._aoi_failure = result.message()
+        return None
 
     def _compute_minmax_for_layer(self, raster: QgsRasterLayer) -> Tuple[Optional[float], Optional[float]]:
         if raster is None or not isinstance(raster, QgsRasterLayer):
@@ -1160,6 +1139,8 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
     def _on_compute_stats(self):
         if not self._criteria:
             return
+        self._aoi_failure = None
+        aoi_problems = []
         for c in self._criteria:
             lyr = self._criterion_layer(c)
             if lyr is None:
@@ -1167,8 +1148,24 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
             mn, mx = self._compute_minmax_for_layer(lyr)
             c.min_v = mn
             c.max_v = mx
+            if self._aoi_failure and self._aoi_failure not in aoi_problems:
+                aoi_problems.append(self._aoi_failure)
         self._refresh_criteria_table()
-        push_message(self.iface, "AHP", "통계(min/max) 계산 완료", level=0, duration=4)
+
+        if aoi_problems:
+            # Statistics computed over the whole raster instead of the AOI
+            # stretch every scoring ramp, so the resulting suitability map is
+            # wrong everywhere. Say so now rather than after the run.
+            push_message(
+                self.iface, "주의",
+                "AOI 범위를 적용하지 못해 래스터 전체 기준으로 통계를 냈습니다: "
+                + " ".join(aoi_problems),
+                level=1, duration=12,
+            )
+            return
+        scope = "AOI 범위" if self.chkClipToAoiExtent.isChecked() else "래스터 전체"
+        push_message(self.iface, "AHP", f"통계(min/max) 계산 완료 ({scope} 기준)",
+                     level=0, duration=5)
 
     def _on_browse_out(self):
         path, _flt = QtWidgets.QFileDialog.getSaveFileName(
@@ -1595,14 +1592,22 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
         extent_str = None
         extent_crs = None
         if self.chkClipToAoiExtent.isChecked() and aoi_layer is not None and isinstance(aoi_layer, QgsVectorLayer):
-            try:
-                ext = _aoi_extent_in_crs(aoi_layer, selected_only=bool(self.chkAoiSelectedOnly.isChecked()), dst_crs=ref_layer.crs())
-                if ext is not None and (not ext.isEmpty()):
-                    extent_str = f"{ext.xMinimum()},{ext.xMaximum()},{ext.yMinimum()},{ext.yMaximum()}"
-                    extent_crs = str(ref_layer.crs().authid() or "")
-            except Exception:
-                extent_str = None
-                extent_crs = None
+            aoi_result = resolve_aoi_extent(
+                aoi_layer,
+                selected_only=bool(self.chkAoiSelectedOnly.isChecked()),
+                dst_crs=ref_layer.crs(),
+            )
+            if aoi_result.ok:
+                ext = aoi_result.extent
+                extent_str = f"{ext.xMinimum()},{ext.xMaximum()},{ext.yMinimum()},{ext.yMaximum()}"
+                extent_crs = str(ref_layer.crs().authid() or "")
+                if aoi_result.skipped:
+                    push_message(self.iface, "주의", aoi_result.message(), level=1, duration=8)
+            elif aoi_result.requested_but_failed:
+                push_message(self.iface, "오류",
+                             f"AOI를 사용할 수 없습니다: {aoi_result.message()}",
+                             level=2, duration=10)
+                return
 
         # 5) Output path
         out_path_user = str(self.txtOut.text() or "").strip()

@@ -52,10 +52,10 @@ from qgis.core import (
     QgsRasterLayer,
     QgsRectangle,
     QgsVectorLayer,
-    QgsWkbTypes,
 )
 
 from .help_dialog import show_help_dialog
+from .aoi_extent import resolve_aoi_extent
 from .utils import (
     get_archtoolkit_layer_metadata,
     is_categorical_raster_meta,
@@ -90,40 +90,6 @@ def _common_extent(layers, dst_crs) -> Optional[QgsRectangle]:
         return None
     return rect
 
-
-def _aoi_extent_in_crs(aoi_layer, *, selected_only, dst_crs) -> Optional[QgsRectangle]:
-    if aoi_layer is None:
-        return None
-    try:
-        if aoi_layer.geometryType() != QgsWkbTypes.PolygonGeometry:
-            return None
-    except Exception:
-        return None
-    geom = None
-    try:
-        use_sel = selected_only and aoi_layer.selectedFeatureCount() > 0
-        feats = aoi_layer.selectedFeatures() if use_sel else aoi_layer.getFeatures()
-    except Exception:
-        feats = aoi_layer.getFeatures()
-    for f in feats:
-        try:
-            g = f.geometry()
-        except Exception:
-            continue
-        if not g or g.isEmpty():
-            continue
-        geom = g if geom is None else geom.combine(g)
-    if geom is None or geom.isEmpty():
-        return None
-    try:
-        if aoi_layer.crs() != dst_crs:
-            ct = QgsCoordinateTransform(aoi_layer.crs(), dst_crs, QgsProject.instance())
-            g2 = type(geom)(geom)
-            g2.transform(ct)
-            geom = g2
-        return geom.boundingBox()
-    except Exception:
-        return None
 
 
 def _compute_vif(matrix):
@@ -308,12 +274,22 @@ class CovariateReportDialog(QtWidgets.QDialog):
             return
         aoi = self.cmbAoi.currentLayer()
         if isinstance(aoi, QgsVectorLayer):
-            aoi_ext = _aoi_extent_in_crs(aoi, selected_only=self.chkAoiSelected.isChecked(), dst_crs=dst_crs)
-            if aoi_ext is not None and not aoi_ext.isEmpty():
-                extent = extent.intersect(aoi_ext)
+            aoi_result = resolve_aoi_extent(
+                aoi, selected_only=self.chkAoiSelected.isChecked(), dst_crs=dst_crs)
+            if aoi_result.ok:
+                extent = extent.intersect(aoi_result.extent)
                 if extent.isEmpty():
                     push_message(self.iface, "오류", "AOI가 공통 범위와 겹치지 않습니다.", level=2, duration=7)
                     return
+                if aoi_result.skipped:
+                    push_message(self.iface, "주의", aoi_result.message(), level=1, duration=8)
+            elif aoi_result.requested_but_failed:
+                # Sampling the full common extent instead would silently report
+                # correlations for an area the user did not ask about.
+                push_message(self.iface, "오류",
+                             f"AOI를 사용할 수 없습니다: {aoi_result.message()}",
+                             level=2, duration=10)
+                return
 
         target = int(self.spinSamples.value())
         names = [lyr.name() for lyr in layers]

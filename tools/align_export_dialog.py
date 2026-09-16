@@ -51,7 +51,6 @@ from qgis.PyQt.QtGui import QIcon
 from qgis.core import (
     Qgis,
     QgsApplication,
-    QgsCoordinateTransform,
     QgsProcessingAlgRunnerTask,
     QgsProcessingContext,
     QgsProcessingFeedback,
@@ -62,10 +61,10 @@ from qgis.core import (
     QgsRasterLayer,
     QgsRectangle,
     QgsVectorLayer,
-    QgsWkbTypes,
 )
 from qgis.gui import QgsMapLayerComboBox
 
+from .aoi_extent import resolve_aoi_extent
 from .atomic_output import cleanup_staging_dir, create_staging_dir, publish_staging_dir
 from .gdal_outcome import GdalOutcomeTracker
 from .help_dialog import show_help_dialog
@@ -344,41 +343,6 @@ class _WarpValidationContract:
     categorical: bool
 
 
-def _aoi_extent_in_crs(aoi_layer, *, selected_only: bool, dst_crs) -> Optional[QgsRectangle]:
-    if aoi_layer is None:
-        return None
-    try:
-        if aoi_layer.geometryType() != QgsWkbTypes.PolygonGeometry:
-            return None
-    except Exception:
-        return None
-    geom = None
-    try:
-        use_sel = selected_only and aoi_layer.selectedFeatureCount() > 0
-        feats = aoi_layer.selectedFeatures() if use_sel else aoi_layer.getFeatures()
-    except Exception:
-        feats = aoi_layer.getFeatures()
-    for f in feats:
-        try:
-            g = f.geometry()
-        except Exception:
-            continue
-        if not g or g.isEmpty():
-            continue
-        geom = g if geom is None else geom.combine(g)
-    if geom is None or geom.isEmpty():
-        return None
-    try:
-        if aoi_layer.crs() != dst_crs:
-            ct = QgsCoordinateTransform(aoi_layer.crs(), dst_crs, QgsProject.instance())
-            g2 = type(geom)(geom)
-            g2.transform(ct)
-            geom = g2
-        return geom.boundingBox()
-    except Exception:
-        return None
-
-
 class AlignExportDialog(QtWidgets.QDialog):
     """Align selected analysis-result rasters to a common grid; export a stack."""
 
@@ -636,9 +600,21 @@ class AlignExportDialog(QtWidgets.QDialog):
         requested_extent = None
         aoi = self.cmbAoi.currentLayer()
         if isinstance(aoi, QgsVectorLayer):
-            ext = _aoi_extent_in_crs(aoi, selected_only=self.chkAoiSelected.isChecked(), dst_crs=ref.crs())
-            if ext is not None and not ext.isEmpty():
-                requested_extent = _qgs_rectangle_to_extent(ext)
+            aoi_result = resolve_aoi_extent(
+                aoi, selected_only=self.chkAoiSelected.isChecked(), dst_crs=ref.crs())
+            if aoi_result.ok:
+                requested_extent = _qgs_rectangle_to_extent(aoi_result.extent)
+                if aoi_result.skipped:
+                    push_message(self.iface, "주의", aoi_result.message(), level=1, duration=8)
+            elif aoi_result.requested_but_failed:
+                # Falling back to the full reference extent here would hand the
+                # user an unclipped stack while they believe it was clipped.
+                push_message(
+                    self.iface, "오류",
+                    f"AOI를 사용할 수 없습니다: {aoi_result.message()}",
+                    level=2, duration=10,
+                )
+                return
         if requested_extent is None:
             e = ref.extent()
             requested_extent = _qgs_rectangle_to_extent(e)
