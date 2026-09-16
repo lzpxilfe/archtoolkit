@@ -89,6 +89,7 @@ from .utils import (
     push_message,
     restore_ui_focus,
     set_archtoolkit_layer_metadata,
+    split_qgis_source_path,
 )
 
 PARENT_GROUP_NAME = "ArchToolkit - 정렬 스택 (Aligned Stack)"
@@ -675,7 +676,7 @@ class AlignExportDialog(QtWidgets.QDialog):
                 src_layer = QgsProject.instance().mapLayer(item.layer_id)
                 if src_layer is None:
                     raise RuntimeError(f"입력 레이어를 찾을 수 없습니다: {item.name}")
-                src = str(src_layer.source() or "").split("|", 1)[0].strip()
+                src = split_qgis_source_path(src_layer.source())
                 if not src:
                     raise RuntimeError(f"입력 경로를 확인할 수 없습니다: {item.name}")
                 if item.categorical:

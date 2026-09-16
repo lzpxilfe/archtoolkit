@@ -281,7 +281,7 @@ def assess_batch(cells_per_run, runs, *, available_bytes=None, memory_known=None
 
 
 def assess_windows(cells_per_window, *, available_bytes=None, memory_known=None,
-                   current_pixel_size=None) -> BudgetVerdict:
+                   current_pixel_size=None, time_refuses=True) -> BudgetVerdict:
     """Assess a batch whose windows differ in size, once, before any run.
 
     :func:`assess_batch` multiplies one window by the run count, which is only
@@ -311,7 +311,12 @@ def assess_windows(cells_per_window, *, available_bytes=None, memory_known=None,
     verdict.seconds = total_seconds
     if verdict.level == LEVEL_REFUSE:
         return verdict
-    if total_seconds > MAX_BATCH_SECONDS:
+    # ``time_refuses=False`` turns a long batch into a warning instead of a
+    # refusal. The per-cell constant was measured on the full Dijkstra
+    # accumulation; a caller whose runs are A* over a corridor is handing in
+    # an upper bound, and refusing on an upper bound - with no way to ask -
+    # rejected runs that used to complete. Memory still refuses either way.
+    if total_seconds > MAX_BATCH_SECONDS and time_refuses:
         verdict.level = LEVEL_REFUSE
         if verdict.suggested_pixel is None and current_pixel_size:
             # Time-bound, so size the suggestion so the SUM fits: every

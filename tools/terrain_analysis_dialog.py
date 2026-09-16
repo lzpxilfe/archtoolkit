@@ -34,7 +34,7 @@ except Exception:  # pragma: no cover
     gdal = None
 
 from qgis.PyQt import uic
-from qgis.PyQt import QtWidgets
+from qgis.PyQt import QtCore, QtWidgets
 from qgis.PyQt.QtGui import QColor
 from qgis.core import (
     QgsProject, QgsRasterLayer, QgsMapLayerProxyModel,
@@ -878,7 +878,30 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                 + (f" ≈ {radius * cell:.0f}m)" if cell > 0 else ")")
             )
 
-            result = tri_radius(z, int(radius), nodata_mask=nodata_mask)
+            # Runs on the GUI thread for up to tens of seconds, so keep the
+            # interface alive and give the user a way out. The dialog would
+            # otherwise sit unresponsive until the OS calls QGIS "not
+            # responding".
+            progress = QtWidgets.QProgressDialog(
+                f"TRI 반경 {radius}셀 계산 중…", "취소", 0, window_cells - 1, self)
+            progress.setWindowModality(QtCore.Qt.WindowModal)
+            progress.setMinimumDuration(500)
+
+            def _progress(done, total):
+                progress.setValue(done)
+                QtWidgets.QApplication.processEvents()
+
+            try:
+                result = tri_radius(
+                    z, int(radius), nodata_mask=nodata_mask,
+                    progress_cb=_progress, cancel_check=progress.wasCanceled,
+                )
+            finally:
+                progress.close()
+            if result is None:
+                push_message(self.iface, "TRI 반경", "취소됨: 결과를 만들지 않았습니다.",
+                             level=1, duration=6)
+                return
 
             nd = -9999.0
             out = np.where(np.isfinite(result), result, nd).astype("float32")

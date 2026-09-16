@@ -149,6 +149,20 @@ class TriRadiusTests(unittest.TestCase):
         self.assertTrue(np.isnan(result[4, 5]))
         self.assertAlmostEqual(result[4, 4], 0.0, places=12)
 
+    def test_progress_is_reported_per_offset(self):
+        seen = []
+        tri_radius(np.zeros((9, 9)), 2, progress_cb=lambda d, t: seen.append((d, t)))
+        self.assertEqual(seen[-1], (24, 24))          # (2r+1)^2 - 1 offsets
+        self.assertEqual([d for d, _ in seen], list(range(1, 25)))
+
+    def test_cancel_returns_none_and_stops_early(self):
+        calls = []
+        result = tri_radius(np.zeros((9, 9)), 2,
+                            progress_cb=lambda d, t: calls.append(d),
+                            cancel_check=lambda: len(calls) >= 3)
+        self.assertIsNone(result)
+        self.assertEqual(len(calls), 3)
+
     def test_rejects_bad_arguments(self):
         with self.assertRaises(ValueError):
             tri_radius(np.zeros((5, 5)), 0)

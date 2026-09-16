@@ -188,6 +188,19 @@ class WindowsTests(unittest.TestCase):
     def test_empty_batch_is_ok(self):
         self.assertEqual(assess_windows([], available_bytes=GB).level, LEVEL_OK)
 
+    def test_time_can_be_downgraded_to_a_warning(self):
+        # The network's pairs run A* over a corridor, so its estimate is an
+        # upper bound; a caller may ask for time to warn rather than refuse.
+        # Memory must still refuse regardless.
+        windows = [3_000_000] * 300
+        self.assertEqual(assess_windows(windows, available_bytes=32 * GB).level, LEVEL_REFUSE)
+        relaxed = assess_windows(windows, available_bytes=32 * GB, time_refuses=False)
+        self.assertEqual(relaxed.level, LEVEL_WARN)
+        self.assertGreater(relaxed.seconds, MAX_BATCH_SECONDS)
+        self.assertEqual(
+            assess_windows([500_000_000], available_bytes=2 * GB, time_refuses=False).level,
+            LEVEL_REFUSE)
+
 
 class SuggestedPixelTests(unittest.TestCase):
     def test_returns_none_when_it_already_fits(self):

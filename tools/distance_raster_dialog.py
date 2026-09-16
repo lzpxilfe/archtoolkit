@@ -46,6 +46,7 @@ import tempfile
 from qgis.PyQt import QtWidgets
 from qgis.PyQt.QtGui import QIcon
 from qgis.core import (
+    Qgis,
     QgsCoordinateReferenceSystem,
     QgsProject,
     QgsRasterLayer,
@@ -350,6 +351,32 @@ class DistanceRasterDialog(QtWidgets.QDialog):
             progress.setLabelText("대상을 격자에 굽는 중…")
             QtWidgets.QApplication.processEvents()
             extent = ref.extent()
+
+            # gdal:rasterize burns only what falls inside EXTENT. A river whose
+            # main channel runs just past the DEM edge would be dropped without
+            # a word, and every "distance to water" would then point at some
+            # minor tributary instead - or, with nothing inside at all, the
+            # output would be all NoData and still report success. Check the
+            # overlap before burning so the user hears about it.
+            prepared_extent = self._layer_extent(prepared)
+            if prepared_extent is not None and not prepared_extent.isEmpty():
+                if not prepared_extent.intersects(extent):
+                    raise RuntimeError(
+                        "대상 레이어가 기준 래스터 범위와 전혀 겹치지 않습니다. "
+                        "거리를 잴 피처가 격자 안에 없습니다."
+                    )
+                if not extent.contains(prepared_extent):
+                    log_message(
+                        f"거리 래스터: 대상 레이어 일부가 기준 래스터 범위 밖에 있습니다. "
+                        f"범위 밖 피처는 거리 계산에서 제외됩니다 ({key}).",
+                        level=Qgis.Warning,
+                    )
+                    push_message(
+                        self.iface, "주의",
+                        "대상 레이어 일부가 기준 래스터 범위 밖에 있어 그 피처들은 제외됩니다. "
+                        "가장 가까운 피처가 범위 밖이면 거리가 과대평가됩니다.",
+                        level=1, duration=10,
+                    )
             extent_str = (f"{extent.xMinimum()},{extent.xMaximum()},"
                           f"{extent.yMinimum()},{extent.yMaximum()}"
                           f" [{ref_crs.authid()}]")
@@ -434,6 +461,19 @@ class DistanceRasterDialog(QtWidgets.QDialog):
             # raster itself is referenced by the new layer and must survive.
             cleanup_files(temp_files)
             restore_ui_focus(self)
+
+    @staticmethod
+    def _layer_extent(obj):
+        """Extent of a layer object or of a vector path, or None."""
+        try:
+            if isinstance(obj, QgsVectorLayer):
+                return obj.extent()
+            layer = QgsVectorLayer(str(obj), "archt_dist_extent_probe", "ogr")
+            if layer.isValid():
+                return layer.extent()
+        except Exception as _exc:
+            log_swallowed("distance_raster_dialog._layer_extent", _exc)
+        return None
 
     def _add_to_group(self, layer, run_id):
         project = QgsProject.instance()

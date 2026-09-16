@@ -875,8 +875,19 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
                         lyr_row = self._criterion_layer(crit_row)
                         if lyr_row is not None and (crit_row.min_v is None or crit_row.max_v is None):
                             mn_r, mx_r = self._compute_minmax_for_layer(lyr_row)
-                            crit_row.min_v = mn_r
-                            crit_row.max_v = mx_r
+                            # Same rule as _compute_all_stats: statistics taken
+                            # while the AOI could not be applied span the whole
+                            # raster and must not be stored, or the next run
+                            # reuses them silently against an AOI-clipped map.
+                            if self._aoi_failure:
+                                push_message(
+                                    self.iface, "주의",
+                                    f"AOI를 적용하지 못해 통계를 저장하지 않았습니다: {self._aoi_failure}",
+                                    level=1, duration=10,
+                                )
+                            else:
+                                crit_row.min_v = mn_r
+                                crit_row.max_v = mx_r
                         self._ensure_criterion_preference_defaults(crit_row)
                         try:
                             self.tblCriteria.selectRow(int(row))

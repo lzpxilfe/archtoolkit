@@ -58,6 +58,7 @@ from .cost_surface_dialog import (
     _bbox_window,
     _cell_center,
     _inv_geotransform,
+    analysis_window,
     _polyline_length,
     _reconstruct_path,
     _safe_layer_name_fragment,
@@ -435,18 +436,15 @@ class CostNetworkWorker(QgsTask):
                 log_swallowed("cost_network_dialog.update_progress", _exc)
 
         def _pair_window(a, b):
-            ax, ay = coords[a, 0], coords[a, 1]
-            bx, by = coords[b, 0], coords[b, 1]
-            if self.pair_buffer_m <= 0:
-                # Documented behavior: 0 = full DEM. Without this, two nodes
-                # sharing an x or y coordinate get a 1-cell strip that forces
-                # a terrain-blind straight path.
-                return 0, 0, int(xsize), int(ysize)
-            minx = min(ax, bx) - self.pair_buffer_m
-            maxx = max(ax, bx) + self.pair_buffer_m
-            miny = min(ay, by) - self.pair_buffer_m
-            maxy = max(ay, by) + self.pair_buffer_m
-            return _bbox_window(gt, xsize, ysize, minx, miny, maxx, maxy)
+            # Same rectangle the cost surface's pre-flight and worker use, from
+            # the one shared implementation: buffer <= 0 means the full DEM
+            # (two nodes sharing an x or y would otherwise get a 1-cell strip
+            # that forces a terrain-blind straight path).
+            return analysis_window(
+                gt, xsize, ysize,
+                (coords[a, 0], coords[a, 1]), (coords[b, 0], coords[b, 1]),
+                self.pair_buffer_m,
+            )
 
         # Decide the whole batch ONCE, up front. Windows are cheap to size
         # (geotransform arithmetic) and differ a lot between near and far
@@ -456,32 +454,46 @@ class CostNetworkWorker(QgsTask):
         # directed pair runs once per direction, hence the doubling.
         windows = [_pair_window(a, b) for a, b in candidate_pairs]
         window_cells = [int(w[2] * w[3]) for w in windows for _ in (0, 1)]
+        # Memory is a hard limit: one window over the machine's share ends the
+        # session, and no confirmation changes that. Time is NOT: the per-cell
+        # constant was measured on a full Dijkstra accumulation, while each
+        # pair here runs A* over a corridor, so the estimate is an upper bound.
+        # Refusing on an upper bound - from a worker that cannot ask - rejected
+        # runs that used to complete. A long batch is logged and proceeds; the
+        # task is cancellable per pair.
         budget = cost_budget.assess_windows(
             window_cells,
             available_bytes=cost_budget.available_memory_bytes(),
             current_pixel_size=(abs(float(gt[1])) + abs(float(gt[5]))) / 2.0,
+            time_refuses=False,
         )
+        largest = max(window_cells) if window_cells else 0
         if budget.level == cost_budget.LEVEL_REFUSE:
             hint = (
                 f" 픽셀 크기 {budget.suggested_pixel:g} m 정도로 리샘플하면 들어갑니다."
                 if budget.suggested_pixel else ""
             )
-            largest = max(window_cells) if window_cells else 0
             return NetworkTaskResult(
                 ok=False,
                 message=(
-                    f"분석 규모가 너무 큽니다: 방향 경로 {total_dir}개, 가장 큰 창 {largest:,} cells, "
-                    f"전체 예상 {budget.seconds / 3600.0:.1f}시간, 창당 최대 {budget.gigabytes:.1f}GB. "
-                    "경로 버퍼(m)를 줄이거나 후보 간선(k)를 줄이세요. "
+                    f"창 하나가 이 컴퓨터 메모리를 넘습니다: 가장 큰 창 {largest:,} cells, "
+                    f"약 {budget.gigabytes:.1f}GB 필요. 경로 버퍼(m)를 줄이거나 DEM을 클립하세요. "
                     f"(버퍼 0=DEM 전체는 작은 DEM에서만 권장){hint}"
                 ),
             )
-        log_message(
-            f"CostNetwork: budget ok - {total_dir} directed paths, largest window "
-            f"{max(window_cells) if window_cells else 0:,} cells, est. {budget.minutes:.1f} min "
-            "(upper bound: pairs use A*, which visits a corridor, not the full window)",
-            level=Qgis.Info,
-        )
+        if budget.level == cost_budget.LEVEL_WARN:
+            log_message(
+                f"CostNetwork: 긴 작업 - 방향 경로 {total_dir}개, 가장 큰 창 {largest:,} cells, "
+                f"전체 상한 약 {budget.minutes:.0f}분 (A*는 회랑만 방문하므로 실제는 이보다 짧음). "
+                "오래 걸리면 작업 관리자에서 취소하고 버퍼(m)나 후보 간선(k)을 줄이세요.",
+                level=Qgis.Warning,
+            )
+        else:
+            log_message(
+                f"CostNetwork: budget ok - {total_dir} directed paths, largest window "
+                f"{largest:,} cells, est. <= {budget.minutes:.1f} min",
+                level=Qgis.Info,
+            )
 
         for (a, b), (xoff, yoff, win_xsize, win_ysize) in zip(candidate_pairs, windows):
             if self._is_cancelled():

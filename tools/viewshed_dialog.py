@@ -2270,11 +2270,6 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                 max_points = int(self.spinLineMaxPoints.value())
             except Exception as _exc:
                 log_swallowed("viewshed_dialog._get_sampling_max_points", _exc)
-        elif hasattr(self, "spinLineMaxPoints"):
-            try:
-                max_points = int(self.spinLineMaxPoints.value())
-            except Exception as _exc:
-                log_swallowed("viewshed_dialog._get_sampling_max_points", _exc)
         return max(1, max_points)
 
     def _sample_polygon_boundary_points(self, polygon_geom, interval):

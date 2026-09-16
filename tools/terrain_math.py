@@ -43,7 +43,7 @@ def zt_curvature(z, cell):
     return profile, plan
 
 
-def tri_radius(z, radius, *, nodata_mask=None):
+def tri_radius(z, radius, *, nodata_mask=None, progress_cb=None, cancel_check=None):
     """Terrain ruggedness over a (2r+1)x(2r+1) window, as an RMS difference.
 
     ``gdaldem``'s TRI is fixed at 3x3, so on a 5 m DEM it reports ruggedness
@@ -72,6 +72,12 @@ def tri_radius(z, radius, *, nodata_mask=None):
     Cost is O(n * (2r+1)^2): the absolute/squared difference is taken against
     the centre cell, which no summed-area shortcut can decompose. The caller is
     responsible for guarding the array size.
+
+    ``progress_cb(done, total)`` is called after each window offset and
+    ``cancel_check()`` is polled at the same point; if it returns True the
+    function stops and returns ``None``. A large radius on a large grid runs
+    for tens of seconds, and a caller on a GUI thread needs both to keep the
+    interface alive and give the user a way out.
     """
     array = np.asarray(z, dtype="float64")
     if array.ndim != 2:
@@ -95,6 +101,8 @@ def tri_radius(z, radius, *, nodata_mask=None):
     # Accumulate over every offset in the window except the centre itself.
     # np.roll would wrap the border around the grid, which for a ruggedness
     # statistic invents a cliff at the edges, so the border is trimmed instead.
+    total_offsets = (2 * radius + 1) ** 2 - 1
+    done = 0
     for row_offset in range(-radius, radius + 1):
         for col_offset in range(-radius, radius + 1):
             if row_offset == 0 and col_offset == 0:
@@ -105,6 +113,11 @@ def tri_radius(z, radius, *, nodata_mask=None):
             difference = np.where(both, centre - shifted, 0.0)
             sq_total += difference * difference
             counts += both
+            done += 1
+            if progress_cb is not None:
+                progress_cb(done, total_offsets)
+            if cancel_check is not None and cancel_check():
+                return None
 
     with np.errstate(invalid="ignore", divide="ignore"):
         result = np.sqrt(sq_total / np.where(counts > 0, counts, 1))

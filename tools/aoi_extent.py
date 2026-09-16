@@ -34,6 +34,7 @@ STATUS_NOT_POLYGON = "not_polygon"
 STATUS_NO_FEATURES = "no_features"
 STATUS_UNION_FAILED = "union_failed"
 STATUS_TRANSFORM_FAILED = "transform_failed"
+STATUS_NOTHING_SELECTED = "nothing_selected"
 
 _MESSAGES = {
     STATUS_NOT_POLYGON: "AOI 레이어가 폴리곤이 아닙니다.",
@@ -43,6 +44,10 @@ _MESSAGES = {
         "벡터 > 지오메트리 도구 > 유효성 검사로 확인하세요."
     ),
     STATUS_TRANSFORM_FAILED: "AOI를 대상 좌표계로 변환할 수 없습니다.",
+    STATUS_NOTHING_SELECTED: (
+        "'선택 피처만'이 켜져 있지만 AOI 레이어에 선택된 피처가 없습니다. "
+        "피처를 선택하거나 옵션을 끄세요."
+    ),
 }
 
 
@@ -109,8 +114,12 @@ def resolve_aoi_extent(aoi_layer, *, selected_only: bool, dst_crs) -> AoiExtentR
         return AoiExtentResult(status=STATUS_NOT_POLYGON)
 
     try:
-        use_selected = selected_only and aoi_layer.selectedFeatureCount() > 0
-        features = aoi_layer.selectedFeatures() if use_selected else aoi_layer.getFeatures()
+        if selected_only and aoi_layer.selectedFeatureCount() == 0:
+            # The old copies quietly unioned EVERY feature here. That is the
+            # same silent substitution this module exists to remove: the user
+            # asked for their selection and got the whole layer's extent.
+            return AoiExtentResult(status=STATUS_NOTHING_SELECTED)
+        features = aoi_layer.selectedFeatures() if selected_only else aoi_layer.getFeatures()
     except Exception:
         try:
             features = aoi_layer.getFeatures()
@@ -175,6 +184,7 @@ __all__ = [
     "AoiExtentResult",
     "STATUS_NO_FEATURES",
     "STATUS_NO_LAYER",
+    "STATUS_NOTHING_SELECTED",
     "STATUS_NOT_POLYGON",
     "STATUS_OK",
     "STATUS_TRANSFORM_FAILED",
