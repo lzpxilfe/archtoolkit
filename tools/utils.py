@@ -15,6 +15,8 @@ from qgis.core import (
     Qgis,
 )
 
+from .raster_semantics import is_categorical_meta
+
 _UI_LOG_QUEUE_MAX = 5000
 _ui_log_queue = queue.Queue(maxsize=_UI_LOG_QUEUE_MAX)
 _ui_log_timer = None
@@ -397,24 +399,12 @@ def get_archtoolkit_layer_metadata(layer) -> dict:
         return {}
 
 
-# Hints that an ArchToolkit raster holds nominal class codes (not continuous
-# values). Shared by align/export (nearest-resampling) and the covariate report
-# (excludes them from Pearson/VIF) so the two definitions cannot drift apart.
-# Bare "age" is deliberately excluded: it substring-matches unrelated kinds
-# (drainage/average/image). Specific multi-char hints only.
-_CATEGORICAL_KIND_HINTS = ("class", "category", "categor", "litho", "geolog", "slope_position")
-
-
 def is_categorical_raster_meta(meta: dict) -> bool:
-    """True when the ArchToolkit layer metadata describes a categorical raster."""
-    try:
-        kind = str((meta or {}).get("kind") or "").lower()
-        units = str((meta or {}).get("units") or "").lower()
-        tool_id = str((meta or {}).get("tool_id") or "").lower()
-    except Exception:
-        return False
-    if units in ("class", "classes", "category"):
-        return True
-    if "geology" in tool_id:
-        return True
-    return any(h in kind for h in _CATEGORICAL_KIND_HINTS)
+    """True when the ArchToolkit layer metadata describes a categorical raster.
+
+    Thin re-export: the rule itself lives in the QGIS-free
+    :mod:`tools.raster_semantics` so CI can pin it to the metadata the tools
+    actually write (``tests/test_categorical_meta.py``). Callers keep importing
+    it from here.
+    """
+    return is_categorical_meta(meta)

@@ -1380,7 +1380,13 @@ class GeologyZipDialog(QtWidgets.QDialog):
                         rlayer,
                         tool_id="kigam_raster",
                         run_id=run_id,
-                        kind="raster",
+                        # Lithology codes are nominal. Saying so here is what
+                        # makes align/export resample them with nearest instead
+                        # of blending code 5 and code 12 into 8.5, and what
+                        # keeps them out of the Pearson/VIF report. "geology_class"
+                        # also becomes the exported variable name.
+                        kind="geology_class",
+                        units="class",
                         params={"field": field, "pixel": pixel},
                     )
                 if csv_path:
@@ -1432,7 +1438,13 @@ class GeologyZipDialog(QtWidgets.QDialog):
                         rlayer,
                         tool_id="kigam_raster",
                         run_id=run_id,
-                        kind="raster",
+                        # Lithology codes are nominal. Saying so here is what
+                        # makes align/export resample them with nearest instead
+                        # of blending code 5 and code 12 into 8.5, and what
+                        # keeps them out of the Pearson/VIF report. "geology_class"
+                        # also becomes the exported variable name.
+                        kind="geology_class",
+                        units="class",
                         params={"field": field, "pixel": pixel},
                     )
                 if csv_path:
