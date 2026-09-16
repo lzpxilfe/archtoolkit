@@ -37,6 +37,7 @@ from qgis.gui import QgsMapToolEmitPoint, QgsRubberBand, QgsSnapIndicator, QgsMa
 from qgis.PyQt.QtGui import QTextDocument, QTextOption
 
 from .utils import (
+    log_swallowed,
     cleanup_files,
     is_metric_crs,
     log_message,
@@ -49,6 +50,8 @@ from .utils import (
 from .live_log_dialog import ensure_live_log_dialog
 from .help_dialog import show_help_dialog
 from .i18n import is_english_ui
+from .utils import split_qgis_source_path
+from .raster_io import inv_geotransform
 
 # Load the UI file
 FORM_CLASS, _ = uic.loadUiType(os.path.join(
@@ -321,8 +324,8 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                         self.horizontalLayout_Buttons.addWidget(self.btnHelp)
                     except Exception:
                         pass
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("viewshed_dialog._setup_help_button", _exc)
 
     def _on_help(self):
         html = """
@@ -381,7 +384,8 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
 
                 try:
                     pt_layer = self.transform_point(canvas_point, canvas_crs, layer.crs())
-                except Exception:
+                except Exception as _exc:
+                    log_swallowed("viewshed_dialog._identify_polygon_feature_at_canvas_point", _exc)
                     continue
 
                 rect = QgsRectangle(
@@ -523,9 +527,9 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                 f"- 20km: 곡률 ~ {drop20:.1f}m, 굴절 완화 ~ {refr_relief_20:.2f}m<br>"
                 "</div>"
             )
-        except Exception:
+        except Exception as _exc:
             # Never fail the tool due to UI help text
-            pass
+            log_swallowed("viewshed_dialog._update_curvature_refraction_help", _exc)
 
     def _show_curvature_refraction_help_dialog(self):
         try:
@@ -639,8 +643,8 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         for layer in layers:
             try:
                 QgsProject.instance().removeMapLayer(layer.id())
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("viewshed_dialog._remove_label_layer", _exc)
         self.label_layer = None
 
                 
@@ -884,8 +888,8 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                 if checked:
                     self.chkCountOnly.setChecked(False)
                 self.chkCountOnly.setEnabled(not bool(checked))
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("viewshed_dialog._on_weighted_cumulative_toggled", _exc)
 
         try:
             # Update weight widget visibility if present.
@@ -948,8 +952,8 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                 obs_layer_id = self.result_observer_layer_map[lid]
                 try:
                     QgsProject.instance().removeMapLayer(obs_layer_id)
-                except Exception:
-                    pass
+                except Exception as _exc:
+                    log_swallowed("viewshed_dialog.on_layers_removed", _exc)
                 del self.result_observer_layer_map[lid]
 
             # 3-1. Clean up linked auxiliary layers (e.g., analysis radius rings)
@@ -958,8 +962,8 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                 for aux_id in aux_ids:
                     try:
                         QgsProject.instance().removeMapLayer(aux_id)
-                    except Exception:
-                        pass
+                    except Exception as _exc:
+                        log_swallowed("viewshed_dialog.on_layers_removed", _exc)
                 del self.result_aux_layer_map[lid]
 
             # 4. Clean up LOS profile payload/dialogs
@@ -976,8 +980,8 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                     layer = QgsProject.instance().mapLayer(lid)
                     if layer and handler:
                         layer.selectionChanged.disconnect(handler)
-                except Exception:
-                    pass
+                except Exception as _exc:
+                    log_swallowed("viewshed_dialog.on_layers_removed", _exc)
 
             if lid in getattr(self, "_los_profile_dialogs", {}):
                 try:
@@ -1177,8 +1181,8 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                             src_crs,
                             self.canvas.mapSettings().destinationCrs(),
                         )
-                    except Exception:
-                        pass
+                    except Exception as _exc:
+                        log_swallowed("viewshed_dialog.set_observer_point", _exc)
 
                     self.observer_point = marker_pt
                     self.point_marker.reset(QgsWkbTypes.PointGeometry)
@@ -1604,25 +1608,11 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         QgsProject.instance().addMapLayers([layer])
         return layer
 
-    def _split_qgis_source_path(self, source: str) -> str:
-        try:
-            s = str(source or "").strip()
-        except Exception:
-            return ""
-        if not s:
-            return ""
-        return (s.split("|", 1)[0] or "").strip()
+    def _split_qgis_source_path(self, *args, **kwargs):
+        return split_qgis_source_path(*args, **kwargs)
 
-    def _inv_geotransform(self, gt):
-        inv = gdal.InvGeoTransform(gt)
-        if isinstance(inv, (list, tuple)) and len(inv) == 2:
-            ok, inv_gt = inv
-            if not ok:
-                raise Exception("geotransform inverse failed")
-            return inv_gt
-        if isinstance(inv, (list, tuple)) and len(inv) == 6:
-            return inv
-        raise Exception("geotransform inverse failed")
+    def _inv_geotransform(self, *args, **kwargs):
+        return inv_geotransform(*args, **kwargs)
 
     def _rasterize_geom_mask(self, geom_dem: QgsGeometry, *, win_gt, proj_wkt: str, cols: int, rows: int):
         """Rasterize a polygon geometry into a boolean mask aligned to the given raster window."""
@@ -1730,7 +1720,8 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         for f in src_iter:
             try:
                 geom = f.geometry()
-            except Exception:
+            except Exception as _exc:
+                log_swallowed("viewshed_dialog._compute_aoi_visibility_stats_layer", _exc)
                 continue
             if not geom or geom.isEmpty():
                 continue
@@ -1739,8 +1730,8 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             try:
                 if tr is not None:
                     geom_dem.transform(tr)
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("viewshed_dialog._compute_aoi_visibility_stats_layer", _exc)
             if geom_dem.isEmpty():
                 continue
 
@@ -1748,7 +1739,8 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             try:
                 px0, py0 = gdal.ApplyGeoTransform(inv_gt, bbox.xMinimum(), bbox.yMaximum())
                 px1, py1 = gdal.ApplyGeoTransform(inv_gt, bbox.xMaximum(), bbox.yMinimum())
-            except Exception:
+            except Exception as _exc:
+                log_swallowed("viewshed_dialog._compute_aoi_visibility_stats_layer", _exc)
                 continue
 
             x0 = int(math.floor(min(px0, px1)))
@@ -1775,8 +1767,8 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             if nodata is not None:
                 try:
                     valid &= (arr != float(nodata))
-                except Exception:
-                    pass
+                except Exception as _exc:
+                    log_swallowed("viewshed_dialog._compute_aoi_visibility_stats_layer", _exc)
 
             win_gt = (
                 gt[0] + x0 * gt[1] + y0 * gt[2],
@@ -1837,8 +1829,8 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
 
             out.setLabeling(QgsVectorLayerSimpleLabeling(pal))
             out.setLabelsEnabled(True)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("viewshed_dialog._compute_aoi_visibility_stats_layer", _exc)
 
         summary = None
         if total_tot_m2 > 0:
@@ -1891,8 +1883,8 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                     "selected_only": bool(selected_only),
                 },
             )
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("viewshed_dialog._add_aoi_stats_layer_for_raster", _exc)
         QgsProject.instance().addMapLayer(stats_layer)
         try:
             self.result_aux_layer_map.setdefault(raster_layer.id(), []).append(stats_layer.id())
@@ -2018,8 +2010,8 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                                 "reverse": bool(is_reverse),
                             },
                         )
-                    except Exception:
-                        pass
+                    except Exception as _exc:
+                        log_swallowed("viewshed_dialog.run_single_viewshed", _exc)
                     if use_higuchi:
                         self.apply_higuchi_style(viewshed_layer)
                     else:
@@ -2276,13 +2268,13 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         if hasattr(self, "spinLineMaxPoints"):
             try:
                 max_points = int(self.spinLineMaxPoints.value())
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("viewshed_dialog._get_sampling_max_points", _exc)
         elif hasattr(self, "spinLineMaxPoints"):
             try:
                 max_points = int(self.spinLineMaxPoints.value())
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("viewshed_dialog._get_sampling_max_points", _exc)
         return max(1, max_points)
 
     def _sample_polygon_boundary_points(self, polygon_geom, interval):
@@ -2344,8 +2336,8 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             band = ds.GetRasterBand(1)
             try:
                 band.SetNoDataValue(float(nodata_value))
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("viewshed_dialog._burn_nodata_for_geometries_in_raster", _exc)
 
             ogr_driver = ogr.GetDriverByName("Memory")
             if ogr_driver is None:
@@ -2572,8 +2564,8 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                         viewshed_results.append((i, full_vs))
                         try:
                             os.remove(output_raw)
-                        except Exception:
-                            pass
+                        except Exception as _exc:
+                            log_swallowed("viewshed_dialog._run_union_viewshed_for_points", _exc)
                 except Exception as e:
                     log_message(f"warpreproject failed for reverse viewshed #{i}: {e}", level=Qgis.Warning)
 
@@ -2626,8 +2618,8 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                     units="mask",
                     params={"max_dist_m": float(max_dist), "points_n": int(len(points))},
                 )
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("viewshed_dialog._run_union_viewshed_for_points", _exc)
             self.apply_viewshed_style(viewshed_layer)
             QgsProject.instance().addMapLayer(viewshed_layer)
             self.last_result_layer_id = viewshed_layer.id()
@@ -2757,8 +2749,8 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                     units="mask",
                     params={"max_dist_m": float(max_dist)},
                 )
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("viewshed_dialog.run_reverse_viewshed_with_visual_imbalance", _exc)
             self.apply_viewshed_style(reverse_layer)
             QgsProject.instance().addMapLayer(reverse_layer)
             self.last_result_layer_id = reverse_layer.id()
@@ -2775,8 +2767,8 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                     units="class",
                     params={"max_dist_m": float(max_dist)},
                 )
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("viewshed_dialog.run_reverse_viewshed_with_visual_imbalance", _exc)
             self.apply_visual_imbalance_style(imbalance_layer)
             QgsProject.instance().addMapLayer(imbalance_layer)
 
@@ -2799,11 +2791,11 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                             units="m",
                             params={"max_dist_m": float(max_dist)},
                         )
-                    except Exception:
-                        pass
+                    except Exception as _exc:
+                        log_swallowed("viewshed_dialog.run_reverse_viewshed_with_visual_imbalance", _exc)
                     self.result_aux_layer_map.setdefault(imbalance_layer.id(), []).append(ring_layer.id())
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("viewshed_dialog.run_reverse_viewshed_with_visual_imbalance", _exc)
 
             self.link_current_marker_to_layer(reverse_layer.id(), [(point, src_crs)])
             self.update_layer_order()
@@ -2875,8 +2867,8 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             try:
                 centroid_src = self._reverse_target_geom.centroid().asPoint()
                 marker = [(centroid_src, src_crs)]
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("viewshed_dialog.run_reverse_viewshed", _exc)
 
             self._run_union_viewshed_for_points(
                 dem_layer=dem_layer,
@@ -2945,7 +2937,8 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                         for g in geoms:
                             try:
                                 pts.append((g.centroid().asPoint(), obs_layer.crs()))
-                            except Exception:
+                            except Exception as _exc:
+                                log_swallowed("viewshed_dialog.run_reverse_viewshed", _exc)
                                 continue
                         if not pts:
                             push_message(self.iface, "오류", "폴리곤 중심점을 계산할 수 없습니다.", level=2)
@@ -2980,8 +2973,8 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                         if transform is not None:
                             try:
                                 g_dem.transform(transform)
-                            except Exception:
-                                pass
+                            except Exception as _exc:
+                                log_swallowed("viewshed_dialog.run_reverse_viewshed", _exc)
                         mask_geoms_dem.append(g_dem)
                         for pt in self._sample_polygon_boundary_points(g_dem, interval):
                             pts.append((pt, dem_layer.crs()))
@@ -2994,8 +2987,8 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                     marker = []
                     try:
                         marker = [(geoms[0].centroid().asPoint(), obs_layer.crs())]
-                    except Exception:
-                        pass
+                    except Exception as _exc:
+                        log_swallowed("viewshed_dialog.run_reverse_viewshed", _exc)
 
                     self._run_union_viewshed_for_points(
                         dem_layer=dem_layer,
@@ -3375,8 +3368,8 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                     root.insertChildNode(insert_index, clone)
                     root.removeChildNode(parent_group)
                     parent_group = clone
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("viewshed_dialog.run_line_of_sight", _exc)
 
         run_id = str(uuid.uuid4())[:8]
         group_name = f"가시선_{int(total_dist)}m_{run_id}"
@@ -3409,8 +3402,8 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                     units=u,
                     params={"total_dist_m": float(total_dist), "visible": bool(is_visible_overall)},
                 )
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("viewshed_dialog.run_line_of_sight", _exc)
             project.addMapLayer(lyr, False)
             run_group.addLayer(lyr)
 
@@ -3652,8 +3645,8 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             if weighted_mode and normalize_weighted and used_weight_sum > 0:
                 try:
                     cumulative = (cumulative / float(used_weight_sum)) * 100.0
-                except Exception:
-                    pass
+                except Exception as _exc:
+                    log_swallowed("viewshed_dialog.combine_viewsheds_numpy", _exc)
 
             # 5. Final NoData masking
             # Apply circular buffer masking for ALL modes
@@ -3817,11 +3810,11 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                                 if transform_to_dem is not None:
                                     try:
                                         geom_dem.transform(transform_to_dem)
-                                    except Exception:
-                                        pass
+                                    except Exception as _exc:
+                                        log_swallowed("viewshed_dialog.run_multi_viewshed", _exc)
                                 mask_geometries_dem.append(geom_dem)
-                            except Exception:
-                                pass
+                            except Exception as _exc:
+                                log_swallowed("viewshed_dialog.run_multi_viewshed", _exc)
                         geom_m = _to_dem_geom(geom)
                         if geom_m is None:
                             continue
@@ -3986,8 +3979,8 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                             viewshed_results.append((i, full_vs))
                             try:
                                 os.remove(output_raw)
-                            except Exception:
-                                pass
+                            except Exception as _exc:
+                                log_swallowed("viewshed_dialog.run_multi_viewshed", _exc)
                     except Exception as e:
                         log_message(f"warpreproject failed for viewshed #{i}: {e}", level=Qgis.Warning)
             except Exception as e:
@@ -4001,8 +3994,8 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             for p in temp_outputs:
                 try:
                     os.remove(p)
-                except Exception:
-                    pass
+                except Exception as _exc:
+                    log_swallowed("viewshed_dialog.run_multi_viewshed", _exc)
             self.iface.messageBar().pushMessage(
                 "취소",
                 f"누적 가시권 분석이 취소되었습니다 ({len(viewshed_results)}/{len(points)}개 지점 계산 후 중단, 결과 폐기).",
@@ -4122,8 +4115,8 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                         units=units,
                         params={"points_n": int(len(points))},
                     )
-                except Exception:
-                    pass
+                except Exception as _exc:
+                    log_swallowed("viewshed_dialog.run_multi_viewshed", _exc)
                 # Apply result style
                 if weighted_mode:
                     try:
@@ -4159,8 +4152,8 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                             units="",
                             params={"points_n": int(len(points))},
                         )
-                except Exception:
-                    pass
+                except Exception as _exc:
+                    log_swallowed("viewshed_dialog.run_multi_viewshed", _exc)
                 
                 QgsProject.instance().addMapLayer(viewshed_layer)
                 self.last_result_layer_id = viewshed_layer.id()
@@ -4354,8 +4347,8 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             try:
                 renderer.setClassificationMin(0.0)
                 renderer.setClassificationMax(float(vmax))
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("viewshed_dialog.apply_weighted_style", _exc)
             layer.setRenderer(renderer)
             layer.setOpacity(0.8)
             layer.triggerRepaint()
@@ -4924,11 +4917,11 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                     layer = QgsProject.instance().mapLayer(lid)
                     if layer and handler:
                         layer.selectionChanged.disconnect(handler)
-                except Exception:
-                    pass
+                except Exception as _exc:
+                    log_swallowed("viewshed_dialog.cleanup_for_unload", _exc)
             self._los_selection_handlers = {}
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("viewshed_dialog.cleanup_for_unload", _exc)
 
         # Close any open profile dialogs to ensure their canvas signals are released.
         try:
@@ -4939,8 +4932,8 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                 except Exception:
                     pass
             self._los_profile_dialogs = {}
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("viewshed_dialog.cleanup_for_unload", _exc)
 
 
 class ViewshedPointTool(QgsMapToolEmitPoint):

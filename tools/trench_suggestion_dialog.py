@@ -41,6 +41,7 @@ import processing
 from .help_dialog import show_help_dialog
 from .live_log_dialog import ensure_live_log_dialog
 from .utils import (
+    log_swallowed,
     cleanup_files,
     get_archtoolkit_layer_metadata,
     is_metric_crs,
@@ -115,8 +116,8 @@ def _safe_float(v, default=None):
         f = float(v)
         if math.isfinite(f):
             return f
-    except Exception:
-        pass
+    except Exception as _exc:
+        log_swallowed("trench_suggestion_dialog._safe_float", _exc)
     return default
 
 
@@ -135,7 +136,8 @@ def _unary_union_geom(layer: QgsVectorLayer, *, selected_only: bool) -> Tuple[Op
             g = ft.geometry()
             if g is not None and (not g.isEmpty()):
                 geoms.append(g)
-        except Exception:
+        except Exception as _exc:
+            log_swallowed("trench_suggestion_dialog._unary_union_geom", _exc)
             continue
     if not geoms:
         return None, 0
@@ -216,8 +218,8 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
                     break
             if icon_path:
                 self.setWindowIcon(QIcon(icon_path))
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("trench_suggestion_dialog._setup_ui", _exc)
 
         self.setMinimumWidth(680)
         layout = QtWidgets.QVBoxLayout(self)
@@ -664,8 +666,8 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
                 s = str(v).strip()
                 if s:
                     txts.append(s)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("trench_suggestion_dialog._feature_has_grave_hint", _exc)
         if not txts:
             return False
         return _text_has_grave_keyword(" ".join(txts))
@@ -697,12 +699,13 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
                 if grow > 0:
                     bb.grow(grow)
                 req.setFilterRect(bb)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("trench_suggestion_dialog._build_reference_index", _exc)
         for ft in layer.getFeatures(req):
             try:
                 g0 = ft.geometry()
-            except Exception:
+            except Exception as _exc:
+                log_swallowed("trench_suggestion_dialog._build_reference_index", _exc)
                 continue
             if g0 is None or g0.isEmpty():
                 continue
@@ -715,7 +718,8 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
             try:
                 idx.addFeature(f2)
                 geom_by_id[int(ft.id())] = g
-            except Exception:
+            except Exception as _exc:
+                log_swallowed("trench_suggestion_dialog._build_reference_index", _exc)
                 continue
         return idx, geom_by_id
 
@@ -734,7 +738,8 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
                 continue
             try:
                 d = float(g.distance(ptg))
-            except Exception:
+            except Exception as _exc:
+                log_swallowed("trench_suggestion_dialog._nearest_reference_distance", _exc)
                 continue
             if (dmin is None) or (d < dmin):
                 dmin = d
@@ -765,8 +770,8 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
                 bb = g_on_topo.boundingBox()
                 bb.grow(max(5.0, float(grave_buffer_m) + 3.0))
                 req.setFilterRect(bb)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("trench_suggestion_dialog._build_grave_avoid_union", _exc)
 
         geoms: List[QgsGeometry] = []
         for ft in topo_layer.getFeatures(req):
@@ -774,7 +779,8 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
                 continue
             try:
                 g0 = ft.geometry()
-            except Exception:
+            except Exception as _exc:
+                log_swallowed("trench_suggestion_dialog._build_grave_avoid_union", _exc)
                 continue
             if g0 is None or g0.isEmpty():
                 continue
@@ -784,8 +790,8 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
             try:
                 if float(grave_buffer_m) > 0:
                     g = g.buffer(float(grave_buffer_m), 8)
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("trench_suggestion_dialog._build_grave_avoid_union", _exc)
             geoms.append(g)
 
         count = len(geoms)
@@ -807,8 +813,8 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
             px = float(dem_layer.rasterUnitsPerPixelX())
             if math.isfinite(px) and px > 0:
                 return px
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("trench_suggestion_dialog._dem_pixel_size", _exc)
         return 1.0
 
     def _default_bearing_from_aoi(self, aoi_geom: QgsGeometry) -> float:
@@ -836,8 +842,8 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
                     bearing = (angle + 90.0) % 180.0
                 if math.isfinite(bearing):
                     return bearing
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("trench_suggestion_dialog._default_bearing_from_aoi", _exc)
         return 0.0
 
     def _footprint_downslope_bearing(
@@ -918,8 +924,8 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
             try:
                 if dem_layer.crs().isGeographic():
                     grow_units = float(buffer_m) / 111320.0
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("trench_suggestion_dialog._clip_dem_to_aoi", _exc)
             bb.grow(max(1e-9, grow_units))
             # Intersect with the DEM extent to avoid requesting data outside coverage.
             dem_ext = dem_layer.extent()
@@ -1004,8 +1010,8 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
                     duration=9,
                 )
                 return
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("trench_suggestion_dialog._run", _exc)
 
         ahp_layer = self.cmbAhp.currentLayer()
         if ahp_layer is not None and (not isinstance(ahp_layer, QgsRasterLayer)):
@@ -1301,8 +1307,8 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
                             if trench_geom.intersects(grave_union):
                                 y += grid_step
                                 continue
-                        except Exception:
-                            pass
+                        except Exception as _exc:
+                            log_swallowed("trench_suggestion_dialog._run", _exc)
 
                     ahp_val = self._sample_raster_value(ahp_layer, pt, aoi_layer.crs()) if ahp_available else None
                     if ahp_val is not None and ahp_min is not None and ahp_max is not None and ahp_max > ahp_min:
@@ -1398,7 +1404,8 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
                             return True
                         if min_spacing > 0 and float(g.distance(sg)) < min_spacing:
                             return True
-                    except Exception:
+                    except Exception as _exc:
+                        log_swallowed("trench_suggestion_dialog._conflicts", _exc)
                         continue
                 return False
 

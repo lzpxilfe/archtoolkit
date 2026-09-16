@@ -48,6 +48,7 @@ from .live_log_dialog import ensure_live_log_dialog
 from .help_dialog import show_help_dialog
 from .i18n import is_english_ui
 from .utils import (
+    log_swallowed,
     get_archtoolkit_layer_metadata,
     log_exception,
     new_run_id,
@@ -62,6 +63,7 @@ from .ahp_core import (
     sanitize_pair_values as _sanitize_pair_values,
     score_formula,
 )
+from .utils import split_qgis_source_path
 
 
 _SCALE_OPTIONS: List[Tuple[str, float]] = [
@@ -85,12 +87,7 @@ _SCALE_OPTIONS: List[Tuple[str, float]] = [
 ]
 
 
-def _split_qgis_source_path(src: str) -> str:
-    try:
-        s = str(src or "")
-        return (s.split("|", 1)[0] or "").strip()
-    except Exception:
-        return str(src or "").strip()
+_split_qgis_source_path = split_qgis_source_path
 
 
 def _fmt_float(v: Any, *, digits: int = 4) -> str:
@@ -151,8 +148,8 @@ class _CriterionPreferenceDialog(QtWidgets.QDialog):
             try:
                 if value is not None and math.isfinite(float(value)):
                     sp.setValue(float(value))
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("ahp_suitability_dialog._spin", _exc)
             return sp
 
         self.spinTarget = _spin(criterion.target_v)
@@ -265,7 +262,8 @@ class _CriterionReclassDialog(QtWidgets.QDialog):
                 mn = float(self.table.item(r, 0).text())
                 mx = float(self.table.item(r, 1).text())
                 score = float(self.table.item(r, 2).text())
-            except Exception:
+            except Exception as _exc:
+                log_swallowed("ahp_suitability_dialog.values", _exc)
                 continue
             if not (math.isfinite(mn) and math.isfinite(mx) and math.isfinite(score)):
                 continue
@@ -307,8 +305,8 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
                 if os.path.exists(icon_path):
                     self.setWindowIcon(QIcon(icon_path))
                     break
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("ahp_suitability_dialog._setup_ui", _exc)
 
         layout = QtWidgets.QVBoxLayout(self)
 
@@ -334,8 +332,8 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
             except Exception:
                 poly_filter = QgsMapLayerProxyModel.PolygonLayer
             self.cmbAoi.setFilters(poly_filter)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("ahp_suitability_dialog._setup_ui", _exc)
         # Optional input: default to "no AOI" so an arbitrary polygon layer is
         # never silently used to clip the output.
         try:
@@ -372,8 +370,8 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
             except Exception:
                 raster_filter = QgsMapLayerProxyModel.RasterLayer
             self.cmbRaster.setFilters(raster_filter)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("ahp_suitability_dialog._setup_ui", _exc)
         self.cmbRaster.setAllowEmptyLayer(True)
 
         self.cmbDirection = QtWidgets.QComboBox()
@@ -560,14 +558,14 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
                 row = int(rows[0])
                 if 0 <= row < len(self._criteria):
                     return row
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("ahp_suitability_dialog._selected_criterion_row", _exc)
         try:
             row = int(self.tblCriteria.currentRow())
             if 0 <= row < len(self._criteria):
                 return row
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("ahp_suitability_dialog._selected_criterion_row", _exc)
         return None
 
     def _criterion_rows(self) -> List[Tuple[str, str]]:
@@ -880,14 +878,14 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
                         self._ensure_criterion_preference_defaults(crit_row)
                         try:
                             self.tblCriteria.selectRow(int(row))
-                        except Exception:
-                            pass
+                        except Exception as _exc:
+                            log_swallowed("ahp_suitability_dialog._on_dir_changed", _exc)
                         # Defer to the next event-loop tick: opening the editor
                         # rebuilds this table, which would delete the combo whose
                         # signal we are still inside (crash risk on some Qt builds).
                         QTimer.singleShot(0, self._on_edit_selected_preference)
-                except Exception:
-                    pass
+                except Exception as _exc:
+                    log_swallowed("ahp_suitability_dialog._on_dir_changed", _exc)
 
             cmb.currentIndexChanged.connect(_on_dir_changed)
             self.tblCriteria.setCellWidget(i, 1, cmb)
@@ -920,7 +918,8 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
                     continue
                 try:
                     v = float(value)
-                except Exception:
+                except Exception as _exc:
+                    log_swallowed("ahp_suitability_dialog._rebuild_pairwise_table", _exc)
                     continue
                 if not math.isfinite(v) or v <= 0:
                     continue
@@ -989,7 +988,8 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
             try:
                 if abs(float(pv) - 1.0) > 1e-12:
                     self._set_reciprocal_cell(int(pi), int(pj), float(pv))
-            except Exception:
+            except Exception as _exc:
+                log_swallowed("ahp_suitability_dialog._rebuild_pairwise_table", _exc)
                 continue
 
         try:
@@ -1012,7 +1012,8 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
                     if abs(float(s_val) - float(vv)) <= 1e-9:
                         label = str(s_label)
                         break
-                except Exception:
+                except Exception as _exc:
+                    log_swallowed("ahp_suitability_dialog._set_reciprocal_cell", _exc)
                     continue
             if label is None:
                 label = _fmt_float(vv, digits=4)
@@ -1024,8 +1025,8 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
                 self.tblPairwise.setItem(int(j), int(i), item)
             else:
                 item.setText(label)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("ahp_suitability_dialog._set_reciprocal_cell", _exc)
 
     def _on_reset_pairwise(self):
         self._rebuild_pairwise_table()
@@ -1046,7 +1047,8 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
                     v0 = 1.0
                 mat[i0, j0] = v0
                 mat[j0, i0] = 1.0 / v0
-            except Exception:
+            except Exception as _exc:
+                log_swallowed("ahp_suitability_dialog._build_pairwise_matrix", _exc)
                 continue
         return mat
 
@@ -1086,8 +1088,8 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
         try:
             for r, c in enumerate(self._criteria):
                 self.tblCriteria.setItem(r, 4, QtWidgets.QTableWidgetItem(_fmt_float(c.weight, digits=6)))
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("ahp_suitability_dialog._update_criteria_weight_column", _exc)
 
     def _extent_for_raster_stats(self, raster: QgsRasterLayer) -> Optional[QgsRectangle]:
         """AOI rectangle to compute min/max within, or None for the whole raster.
@@ -1284,7 +1286,8 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
             try:
                 if ct is not None:
                     pt = ct.transform(pt)
-            except Exception:
+            except Exception as _exc:
+                log_swallowed("ahp_suitability_dialog._quick_validate_output", _exc)
                 continue
             try:
                 sampled += 1
@@ -1300,7 +1303,8 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
                 value_f = float(value)
                 if math.isfinite(value_f):
                     values.append(value_f)
-            except Exception:
+            except Exception as _exc:
+                log_swallowed("ahp_suitability_dialog._quick_validate_output", _exc)
                 continue
 
         scale_factor = 100.0 if self.chkScale100.isChecked() else 1.0
@@ -1429,8 +1433,8 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
             renderer = QgsSingleBandPseudoColorRenderer(layer.dataProvider(), 1, shader)
             layer.setRenderer(renderer)
             layer.triggerRepaint()
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("ahp_suitability_dialog._apply_suitability_style", _exc)
 
     def _add_output_to_project(self, out_path: str, *, run_id: str, cr: Optional[float]) -> Optional[QgsRasterLayer]:
         try:
@@ -1453,8 +1457,8 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
             nd = getattr(self, "_suitability_nodata", None)
             if nd is not None:
                 layer.dataProvider().setNoDataValue(1, float(nd))
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("ahp_suitability_dialog._add_output_to_project", _exc)
 
         try:
             params = {
@@ -1483,8 +1487,8 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
                 units="0-100" if self.chkScale100.isChecked() else "0-1",
                 params=params,
             )
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("ahp_suitability_dialog._add_output_to_project", _exc)
 
         project = QgsProject.instance()
         root = project.layerTreeRoot()
@@ -1498,8 +1502,8 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
                 if idx != 0:
                     root.removeChildNode(parent_group)
                     root.insertChildNode(0, parent_group)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("ahp_suitability_dialog._add_output_to_project", _exc)
 
         try:
             run_group = parent_group.insertGroup(0, f"AHP_{run_id}")
@@ -1513,8 +1517,8 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
         except Exception:
             try:
                 project.addMapLayer(layer, True)
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("ahp_suitability_dialog._add_output_to_project", _exc)
 
         self._apply_suitability_style(layer)
         return layer
@@ -1629,8 +1633,8 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
             try:
                 if path and os.path.exists(path):
                     os.remove(path)
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("ahp_suitability_dialog._safe_rm", _exc)
 
         # 6) Compute suitability
         #
@@ -1791,13 +1795,13 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
             if os.path.abspath(acc_path) != os.path.abspath(final_path):
                 try:
                     os.makedirs(os.path.dirname(final_path), exist_ok=True)
-                except Exception:
-                    pass
+                except Exception as _exc:
+                    log_swallowed("ahp_suitability_dialog._on_run", _exc)
                 try:
                     if os.path.exists(final_path):
                         os.remove(final_path)
-                except Exception:
-                    pass
+                except Exception as _exc:
+                    log_swallowed("ahp_suitability_dialog._on_run", _exc)
                 try:
                     os.replace(acc_path, final_path)
                 except Exception:
@@ -1829,5 +1833,5 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
                     if ap in keep:
                         continue
                     _safe_rm(p)
-                except Exception:
-                    pass
+                except Exception as _exc:
+                    log_swallowed("ahp_suitability_dialog._on_run", _exc)

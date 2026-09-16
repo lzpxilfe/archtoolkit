@@ -23,7 +23,7 @@ from qgis.PyQt import QtWidgets
 from qgis.PyQt.QtCore import Qt
 from qgis.core import QgsProject, QgsVectorLayer, QgsMapLayerProxyModel
 import processing
-from .utils import push_message, set_archtoolkit_layer_metadata
+from .utils import log_swallowed, push_message, set_archtoolkit_layer_metadata
 from .live_log_dialog import ensure_live_log_dialog
 from .help_dialog import show_help_dialog
 
@@ -81,8 +81,8 @@ class ContourExtractorDialog(QtWidgets.QDialog, FORM_CLASS):
                 layout.insertWidget(idx, self.btnHelp)
             else:
                 layout.addWidget(self.btnHelp)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("contour_extractor_dialog._setup_help_button", _exc)
 
     def _on_help(self):
         try:
@@ -225,7 +225,8 @@ class ContourExtractorDialog(QtWidgets.QDialog, FORM_CLASS):
                         layer.removeCustomProperty(prop_key)
                         self.original_filters.pop(layer.id(), None)
                         reset_count += 1
-                except Exception:
+                except Exception as _exc:
+                    log_swallowed("contour_extractor_dialog.reset_filters", _exc)
                     continue
             self.iface.messageBar().pushMessage("완료", f"{reset_count}개 레이어 필터 초기화 완료", level=0)
         else:
@@ -294,8 +295,8 @@ class ContourExtractorDialog(QtWidgets.QDialog, FORM_CLASS):
                             units="m",
                             params={"interval_m": float(interval)},
                         )
-                    except Exception:
-                        pass
+                    except Exception as _exc:
+                        log_swallowed("contour_extractor_dialog.extract_from_dem", _exc)
                     QgsProject.instance().addMapLayer(output_layer)
                     self.iface.messageBar().pushMessage("완료", f"등고선 생성 완료 (간격: {interval}m)", level=0)
                     self.accept()

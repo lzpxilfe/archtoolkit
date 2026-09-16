@@ -18,7 +18,7 @@ from qgis.PyQt import QtWidgets
 from qgis.PyQt.QtCore import QEventLoop, QSettings, QTimer, QUrl
 from qgis.PyQt.QtNetwork import QNetworkRequest
 
-from .utils import push_message
+from .utils import log_swallowed, push_message
 
 
 _SETTINGS_PREFIX = "ArchToolkit/ai/gemini"
@@ -325,8 +325,8 @@ def generate_text(
         reply.finished.connect(_on_finished)
         timer.start(int(timeout_ms))
         loop.exec_()
-    except Exception:
-        pass
+    except Exception as _exc:
+        log_swallowed("ai_gemini.generate_text", _exc)
 
     try:
         if timer.isActive():
@@ -342,8 +342,8 @@ def generate_text(
             except Exception:
                 body = ""
             return None, f"{err}\n{body}".strip()
-    except Exception:
-        pass
+    except Exception as _exc:
+        log_swallowed("ai_gemini.generate_text", _exc)
 
     try:
         raw = bytes(reply.readAll()).decode("utf-8", "ignore")

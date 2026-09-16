@@ -43,7 +43,7 @@ from qgis.core import (
 from qgis.gui import QgsMapLayerComboBox
 
 from .live_log_dialog import ensure_live_log_dialog
-from .utils import log_message, push_message, restore_ui_focus
+from .utils import log_swallowed, log_message, push_message, restore_ui_focus
 from .utils import set_archtoolkit_layer_metadata
 from .help_dialog import show_help_dialog
 from .i18n import is_english_ui
@@ -78,7 +78,8 @@ def _iter_layer_geoms(layer: QgsVectorLayer, *, selected_only: bool) -> List[Qgs
             g = f.geometry()
             if g and (not g.isEmpty()):
                 geoms.append(_safe_make_valid(g))
-        except Exception:
+        except Exception as _exc:
+            log_swallowed("cadastral_overlap_dialog._iter_layer_geoms", _exc)
             continue
     return geoms
 
@@ -119,8 +120,8 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
                     break
             if icon_path and os.path.exists(icon_path):
                 self.setWindowIcon(QIcon(icon_path))
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("cadastral_overlap_dialog._setup_ui", _exc)
 
         layout = QtWidgets.QVBoxLayout(self)
 
@@ -270,8 +271,8 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
         try:
             a = float(da.measureArea(geom))
             return float(da.convertAreaMeasurement(a, QgsUnitTypes.AreaSquareMeters))
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("cadastral_overlap_dialog._area_m2", _exc)
         try:
             if crs is not None and crs.isValid() and not crs.isGeographic():
                 if crs.mapUnits() == QgsUnitTypes.DistanceMeters:
@@ -281,8 +282,8 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
                 "0으로 기록합니다(제곱도를 ㎡로 적지 않기 위함).",
                 level=Qgis.Warning,
             )
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("cadastral_overlap_dialog._area_m2", _exc)
         return 0.0
 
     def run(self):
@@ -321,8 +322,8 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
                     level=1,
                     duration=7,
                 )
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("cadastral_overlap_dialog.run", _exc)
 
         cad_crs = cad.crs()
         da = self._distance_area(cad_crs)
@@ -365,8 +366,8 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
                 _set_alias("parcel_m2", "필지면적(㎡)")
                 _set_alias("in_aoi_m2", "조사지역 포함면적(㎡)")
                 _set_alias("in_aoi_pct", "포함비율(%)")
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("cadastral_overlap_dialog.create_output_layer", _exc)
             return out
 
         # Prepare output group (lazy-create run group only when at least one layer is added)
@@ -384,8 +385,8 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
                 if idx != 0:
                     root.removeChildNode(parent_group)
                     root.insertChildNode(0, parent_group)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("cadastral_overlap_dialog.run", _exc)
 
         run_id = uuid.uuid4().hex[:6]
         run_group_name = f"지적중첩_{run_id}"
@@ -416,7 +417,8 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
             for sf in iter_survey_features():
                 try:
                     g = sf.geometry()
-                except Exception:
+                except Exception as _exc:
+                    log_swallowed("cadastral_overlap_dialog.run", _exc)
                     continue
                 if not g or g.isEmpty():
                     continue
@@ -426,9 +428,10 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
                         gt = QgsGeometry(g)
                         gt.transform(ct)
                         g = _safe_make_valid(gt)
-                    except Exception:
+                    except Exception as _exc:
                         # Skip rather than keep the untransformed geometry —
                         # wrong-CRS coordinates would just yield "no overlap".
+                        log_swallowed("cadastral_overlap_dialog.run", _exc)
                         continue
                 if g and (not g.isEmpty()):
                     try:
@@ -488,7 +491,8 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
                             cg = cf.geometry()
                             if cg and (not cg.isEmpty()) and cg.boundingBox().intersects(aoi_bbox):
                                 feats.append(cf)
-                        except Exception:
+                        except Exception as _exc:
+                            log_swallowed("cadastral_overlap_dialog.run", _exc)
                             continue
                 else:
                     req = QgsFeatureRequest()
@@ -512,8 +516,8 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
                         units="m2/%",
                         params={"split_by_feature": True},
                     )
-                except Exception:
-                    pass
+                except Exception as _exc:
+                    log_swallowed("cadastral_overlap_dialog.run", _exc)
 
                 out_feats: List[QgsFeature] = []
                 sum_in = 0.0
@@ -529,7 +533,8 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
 
                     try:
                         g = f.geometry()
-                    except Exception:
+                    except Exception as _exc:
+                        log_swallowed("cadastral_overlap_dialog.run", _exc)
                         continue
                     if not g or g.isEmpty():
                         continue
@@ -537,8 +542,8 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
                     try:
                         if not g.boundingBox().intersects(aoi_bbox):
                             continue
-                    except Exception:
-                        pass
+                    except Exception as _exc:
+                        log_swallowed("cadastral_overlap_dialog.run", _exc)
 
                     try:
                         inter = g.intersection(aoi_geom)
@@ -565,8 +570,8 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
                         attrs.append(float(in_m2))
                         attrs.append(float(pct))
                         feat_out.setAttributes(attrs)
-                    except Exception:
-                        pass
+                    except Exception as _exc:
+                        log_swallowed("cadastral_overlap_dialog.run", _exc)
 
                     feat_out.setGeometry(inter)
                     out_feats.append(feat_out)
@@ -638,7 +643,8 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
                     cg = cf.geometry()
                     if cg and (not cg.isEmpty()) and cg.boundingBox().intersects(aoi_bbox):
                         feats.append(cf)
-                except Exception:
+                except Exception as _exc:
+                    log_swallowed("cadastral_overlap_dialog.run", _exc)
                     continue
         else:
             req = QgsFeatureRequest()
@@ -673,8 +679,8 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
                 units="m2/%",
                 params={"split_by_feature": False},
             )
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("cadastral_overlap_dialog.run", _exc)
 
         out_feats: List[QgsFeature] = []
         sum_in = 0.0
@@ -691,7 +697,8 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
 
             try:
                 g = f.geometry()
-            except Exception:
+            except Exception as _exc:
+                log_swallowed("cadastral_overlap_dialog.run", _exc)
                 continue
             if not g or g.isEmpty():
                 continue
@@ -699,8 +706,8 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
             try:
                 if not g.boundingBox().intersects(aoi_bbox):
                     continue
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("cadastral_overlap_dialog.run", _exc)
 
             try:
                 inter = g.intersection(aoi)
@@ -727,8 +734,8 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
                 attrs.append(float(in_m2))
                 attrs.append(float(pct))
                 feat_out.setAttributes(attrs)
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("cadastral_overlap_dialog.run", _exc)
 
             feat_out.setGeometry(inter)
             out_feats.append(feat_out)

@@ -65,7 +65,7 @@ from qgis.core import (
 
 import processing
 
-from .utils import cleanup_files, push_message, restore_ui_focus, set_archtoolkit_layer_metadata
+from .utils import log_swallowed, cleanup_files, push_message, restore_ui_focus, set_archtoolkit_layer_metadata
 from .live_log_dialog import ensure_live_log_dialog
 from .help_dialog import show_help_dialog
 
@@ -108,8 +108,8 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
                 layout.insertWidget(idx, self.btnHelp)
             else:
                 layout.addWidget(self.btnHelp)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("slope_aspect_drafting_dialog._setup_help_button", _exc)
 
     def _on_help(self):
         try:
@@ -306,8 +306,8 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
                             "slope_class_step": int(slope_class_step),
                         },
                     )
-                except Exception:
-                    pass
+                except Exception as _exc:
+                    log_swallowed("slope_aspect_drafting_dialog.run_drafting", _exc)
                 project.addMapLayer(out_grid, False)
                 run_group.insertLayer(0, out_grid)
 
@@ -347,8 +347,8 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
                             "arrow_size_mm": float(arrow_size_mm),
                         },
                     )
-                except Exception:
-                    pass
+                except Exception as _exc:
+                    log_swallowed("slope_aspect_drafting_dialog.run_drafting", _exc)
                 project.addMapLayer(out_pts, False)
                 run_group.insertLayer(0, out_pts)
 
@@ -359,8 +359,8 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
                     if idx != 0:
                         root.removeChildNode(parent_group)
                         root.insertChildNode(0, parent_group)
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("slope_aspect_drafting_dialog.run_drafting", _exc)
 
             push_message(self.iface, "완료", "도면화 결과가 생성되었습니다.", level=0)
             success = True
@@ -372,8 +372,8 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
         finally:
             try:
                 cleanup_files(intermediate_files)
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("slope_aspect_drafting_dialog.run_drafting", _exc)
             if not success:
                 restore_ui_focus(self)
 
@@ -447,7 +447,8 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
                         sample_r = dr + ((row2 - row) // 2)
                         sample_c = col + ((col2 - col) // 2)
                         slope = float(arr[sample_r, sample_c])
-                    except Exception:
+                    except Exception as _exc:
+                        log_swallowed("slope_aspect_drafting_dialog._build_slope_grid_layer", _exc)
                         continue
                     if not math.isfinite(slope):
                         continue
@@ -515,8 +516,8 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
                     "native:multiparttosingleparts",
                     {"INPUT": out_layer, "OUTPUT": "memory:"},
                 )["OUTPUT"]
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("slope_aspect_drafting_dialog._build_slope_grid_layer", _exc)
 
             if hasattr(out_layer, "setName"):
                 out_layer.setName("경사도_구역(1°) (Slope zones)")
@@ -604,7 +605,8 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
             for ft in layer.getFeatures():
                 try:
                     slope_deg = int(ft["slope_deg"])
-                except Exception:
+                except Exception as _exc:
+                    log_swallowed("slope_aspect_drafting_dialog._apply_slope_grid_style", _exc)
                     continue
                 if slope_deg < 0:
                     slope_deg = 0
@@ -620,8 +622,8 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
             if changes:
                 try:
                     layer.dataProvider().changeAttributeValues(changes)
-                except Exception:
-                    pass
+                except Exception as _exc:
+                    log_swallowed("slope_aspect_drafting_dialog._apply_slope_grid_style", _exc)
 
             vals = []
             try:
@@ -675,8 +677,8 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
             try:
                 pal.placement = QgsPalLayerSettings.OverPoint
                 pal.centroidInside = True
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("slope_aspect_drafting_dialog._apply_slope_grid_style", _exc)
             fmt = QgsTextFormat()
             fmt.setSize(float(label_size_pt))
             fmt.setColor(QColor(20, 20, 20))
@@ -689,8 +691,8 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
             layer.setLabeling(QgsVectorLayerSimpleLabeling(pal))
             layer.setLabelsEnabled(True)
             layer.triggerRepaint()
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("slope_aspect_drafting_dialog._apply_slope_grid_style", _exc)
 
     def _build_aspect_arrow_layer(
         self,
@@ -755,7 +757,8 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
                     try:
                         slope = float(slope_arr[dr, col])
                         aspect = float(aspect_arr[dr, col])
-                    except Exception:
+                    except Exception as _exc:
+                        log_swallowed("slope_aspect_drafting_dialog._build_aspect_arrow_layer", _exc)
                         continue
                     if not math.isfinite(slope) or not math.isfinite(aspect):
                         continue
@@ -820,8 +823,8 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
             sym = base_sym.clone()
             try:
                 sym.setColor(QColor(*[int(x) for x in colors[key].split(",")]))
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("slope_aspect_drafting_dialog._build_aspect_arrow_layer", _exc)
             cats.append(QgsRendererCategory(key, sym, key))
 
         layer.setRenderer(QgsCategorizedSymbolRenderer("dir8", cats))

@@ -40,6 +40,7 @@ from qgis.core import (
     QgsRasterBandStats, QgsLayerTreeLayer, QgsCoordinateTransform
 )
 from .utils import (
+    log_swallowed,
     get_archtoolkit_layer_metadata,
     new_run_id,
     push_message,
@@ -132,8 +133,8 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
                 layout.insertWidget(idx, self.btnHelp)
             else:
                 layout.addWidget(self.btnHelp)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("map_styling_dialog._setup_help_button", _exc)
 
     def _on_help(self):
         try:
@@ -199,7 +200,8 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
                             continue
                         try:
                             width_f = float(width)
-                        except Exception:
+                        except Exception as _exc:
+                            log_swallowed("map_styling_dialog._load_code_config", _exc)
                             continue
                         if not isinstance(label, str):
                             label = str(label)
@@ -217,13 +219,13 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
                 if cat.get("outline_width_mm") is not None:
                     try:
                         config[key]["outline_width_mm"] = float(cat["outline_width_mm"])
-                    except Exception:
-                        pass
+                    except Exception as _exc:
+                        log_swallowed("map_styling_dialog._load_code_config", _exc)
                 if cat.get("shadow_alpha") is not None:
                     try:
                         config[key]["shadow_alpha"] = int(cat["shadow_alpha"])
-                    except Exception:
-                        pass
+                    except Exception as _exc:
+                        log_swallowed("map_styling_dialog._load_code_config", _exc)
 
         return config
 
@@ -388,8 +390,8 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
                     # Nothing created: drop the temp group; leave old outputs intact.
                     try:
                         root.removeChildNode(vec_group)
-                    except Exception:
-                        pass
+                    except Exception as _exc:
+                        log_swallowed("map_styling_dialog.apply_styling", _exc)
 
             # Final message
             if results:
@@ -421,8 +423,8 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
                     lyr = node.layer()
                     if lyr is not None:
                         root.insertChildNode(0, QgsLayerTreeLayer(lyr))
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("map_styling_dialog._teardown_style_group", _exc)
         try:
             for node in list(group.findLayers()):
                 lyr = node.layer()
@@ -432,14 +434,15 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
                     meta = get_archtoolkit_layer_metadata(lyr) or {}
                     if str(meta.get("tool_id") or "") == "map_styling":
                         project.removeMapLayer(lyr.id())
-                except Exception:
+                except Exception as _exc:
+                    log_swallowed("map_styling_dialog._teardown_style_group", _exc)
                     continue
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("map_styling_dialog._teardown_style_group", _exc)
         try:
             root.removeChildNode(group)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("map_styling_dialog._teardown_style_group", _exc)
 
     def style_dem_background(self, source_raster):
         """Create a 3-layer styled background group from a single DEM"""
@@ -473,8 +476,8 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
                 units="m",
                 params={"source": str(source_raster.name() or "")},
             )
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("map_styling_dialog.style_dem_background", _exc)
         QgsProject.instance().addMapLayer(hillshade_layer, False)
         group.addLayer(hillshade_layer) 
         
@@ -493,8 +496,8 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
                 units="m",
                 params={"source": str(source_raster.name() or "")},
             )
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("map_styling_dialog.style_dem_background", _exc)
         QgsProject.instance().addMapLayer(gray_layer, False)
         gray_node = QgsLayerTreeLayer(gray_layer)
         group.insertChildNode(0, gray_node) # Insert at top of group
@@ -528,8 +531,8 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
                 units="m",
                 params={"source": str(source_raster.name() or "")},
             )
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("map_styling_dialog.style_dem_background", _exc)
         QgsProject.instance().addMapLayer(color_layer, False)
         color_node = QgsLayerTreeLayer(color_layer)
         group.insertChildNode(0, color_node) # Insert at very top of group
@@ -589,7 +592,8 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
                     try:
                         geom = QgsGeometry(geom)
                         geom.transform(layer_ct)
-                    except Exception:
+                    except Exception as _exc:
+                        log_swallowed("map_styling_dialog.aggregate_features", _exc)
                         continue
                 if is_building:
                     # Robust polygonization for buildings
@@ -603,8 +607,8 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
                                 poly_geom = QgsGeometry.fromPolygonXY([ring])
                             else:
                                 poly_geom = QgsGeometry.fromPolygonXY([geom.asPolyline()])
-                        except Exception:
-                            pass
+                        except Exception as _exc:
+                            log_swallowed("map_styling_dialog.aggregate_features", _exc)
                     
                     if poly_geom and not poly_geom.isNull() and not poly_geom.isEmpty():
                         new_feat.setGeometry(poly_geom)
@@ -637,8 +641,8 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
                 units="",
                 params={"name": str(name or ""), "dest_geom": str(dest_geom or "")},
             )
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("map_styling_dialog.aggregate_features", _exc)
         QgsProject.instance().addMapLayer(dest_layer, False)  # Add to project but NOT to layer tree
         return dest_layer
 
@@ -660,7 +664,8 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
                 continue
             try:
                 width_f = float(width)
-            except Exception:
+            except Exception as _exc:
+                log_swallowed("map_styling_dialog.style_road_layer", _exc)
                 continue
             sym = QgsLineSymbol.createSimple({'color': color.name(), 'width': str(width_f)})
             rule = QgsRuleBasedRenderer.Rule(sym, 0, 0, f"\"{field_name}\" = '{code}'", str(label))
@@ -687,7 +692,8 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
                 continue
             try:
                 width_f = float(width)
-            except Exception:
+            except Exception as _exc:
+                log_swallowed("map_styling_dialog.style_river_layer", _exc)
                 continue
             sym = QgsLineSymbol.createSimple({'color': color.name(), 'width': str(width_f)})
             rule = QgsRuleBasedRenderer.Rule(sym, 0, 0, f"\"{field_name}\" = '{code}'", str(label))
@@ -767,8 +773,8 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
             self.style_road_layer(roads_layer, "Layer")
             if self._save_named_style(roads_layer, os.path.join(preset_dir, "roads.qml")):
                 exported.append("roads.qml")
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("map_styling_dialog.export_qml_preset", _exc)
 
         try:
             rivers_layer = QgsVectorLayer(f"LineString?crs={project_crs}", "rivers_style_template", "memory")
@@ -777,8 +783,8 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
             self.style_river_layer(rivers_layer, "Layer")
             if self._save_named_style(rivers_layer, os.path.join(preset_dir, "rivers.qml")):
                 exported.append("rivers.qml")
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("map_styling_dialog.export_qml_preset", _exc)
 
         try:
             buildings_layer = QgsVectorLayer(f"MultiPolygon?crs={project_crs}", "buildings_style_template", "memory")
@@ -787,8 +793,8 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
             self.style_building_layer(buildings_layer, "Layer")
             if self._save_named_style(buildings_layer, os.path.join(preset_dir, "buildings.qml")):
                 exported.append("buildings.qml")
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("map_styling_dialog.export_qml_preset", _exc)
 
         # DEM styles (export only when DEM styling is enabled and a DEM is selected)
         dem_layer = self.cmbDemLayer.currentLayer()
@@ -808,8 +814,8 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
                 gray_layer.setBlendMode(QPainter.CompositionMode_Multiply)
                 if self._save_named_style(gray_layer, os.path.join(preset_dir, "dem_gray.qml")):
                     exported.append("dem_gray.qml")
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("map_styling_dialog.export_qml_preset", _exc)
 
             try:
                 color_layer = dem_layer.clone()
@@ -831,16 +837,16 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
                 color_layer.setOpacity(0.7)
                 if self._save_named_style(color_layer, os.path.join(preset_dir, "dem_color.qml")):
                     exported.append("dem_color.qml")
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("map_styling_dialog.export_qml_preset", _exc)
 
         # Mapping config snapshot
         try:
             with open(os.path.join(preset_dir, "map_styling_codes.json"), "w", encoding="utf-8") as f:
                 json.dump(self.code_config, f, ensure_ascii=False, indent=2)
             exported.append("map_styling_codes.json")
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("map_styling_dialog.export_qml_preset", _exc)
 
         # Minimal manifest
         try:
@@ -860,8 +866,8 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
             with open(os.path.join(preset_dir, "preset_manifest.json"), "w", encoding="utf-8") as f:
                 json.dump(manifest, f, ensure_ascii=False, indent=2)
             exported.append("preset_manifest.json")
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("map_styling_dialog.export_qml_preset", _exc)
 
         push_message(self.iface, "완료", f"프리셋을 저장했습니다: {preset_dir}", level=0)
 

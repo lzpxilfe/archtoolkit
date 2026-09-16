@@ -75,6 +75,8 @@ CI(`.github/workflows/ci.yml`)가 위 스위트 전체와 정적 검사, blockin
 (`E9,F63,F7,F82`), 릴리스 정합성을 매 push마다 실행합니다.
 
 ### 기여 규칙
+- 예외를 삼키고 계속 진행할 때는 `except Exception as _exc: log_swallowed("module.func", _exc)`를 쓰세요. 맨 `pass`는 툴팁·아이콘 같은 순수 장식에만 허용합니다. 계산·레이어·파일 작업이 조용히 실패하면 틀린 결과가 보고서까지 흔적 없이 흘러갑니다 — `[swallowed]` 접두어로 로그에서 걸러볼 수 있어야 합니다.
+- 같은 헬퍼를 두 모듈에 복사하지 마세요. 본문이 같아도 한쪽만 고쳐지는 순간 버그가 됩니다(`is_categorical_raster_meta`가 그렇게 몇 년을 틀려 있었습니다). `utils.py`/`raster_io.py`에 두고 import하세요.
 - 새 수치 로직은 **먼저 QGIS 비의존 함수로** 작성하고 단위 테스트를 추가한 뒤,
   대화상자에서 호출하세요(가능하면 별칭 import로 호출부를 유지).
 - 새 테스트 파일을 만들면 **`ci.yml`의 unittest 목록에 반드시 추가**하세요

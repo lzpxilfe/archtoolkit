@@ -25,7 +25,7 @@ from . import ai_aoi_summary
 from . import ai_gemini
 from . import ai_local_summarizer
 from .live_log_dialog import ensure_live_log_dialog
-from .utils import log_message, push_message, restore_ui_focus
+from .utils import log_swallowed, log_message, push_message, restore_ui_focus
 
 
 _SETTINGS_PREFIX = "ArchToolkit/ai/report"
@@ -254,8 +254,8 @@ class AiAoiReportDialog(QtWidgets.QDialog):
                 if os.path.exists(icon_path):
                     self.setWindowIcon(QIcon(icon_path))
                     break
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("ai_report_dialog._setup_ui", _exc)
 
         layout = QtWidgets.QVBoxLayout(self)
 
@@ -629,8 +629,8 @@ class AiAoiReportDialog(QtWidgets.QDialog):
             )
             self._settings_set("reference_name_field", self._get_reference_name_field())
             self._settings_set("reference_max_features", int(self.spinReferenceMax.value()))
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("ai_report_dialog._on_reference_option_changed", _exc)
         self._update_reference_ui()
 
     def _on_provider_changed(self):
@@ -945,8 +945,8 @@ class AiAoiReportDialog(QtWidgets.QDialog):
                         level=0,
                         duration=6,
                     )
-                except Exception:
-                    pass
+                except Exception as _exc:
+                    log_swallowed("ai_report_dialog._get_or_build_ctx", _exc)
 
         if ctx:
             self._last_ctx = ctx
@@ -1054,8 +1054,8 @@ class AiAoiReportDialog(QtWidgets.QDialog):
                         # Provider now reflects reality: local, not gemini.
                         self._last_provider = "local"
                         push_message(self.iface, "AI 요약", "로컬 요약으로 대체 완료", level=1, duration=6)
-                except Exception:
-                    pass
+                except Exception as _exc:
+                    log_swallowed("ai_report_dialog._on_generate", _exc)
                 return
 
             self.txtOutput.setPlainText(text or "")

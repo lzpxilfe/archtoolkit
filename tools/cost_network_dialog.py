@@ -64,6 +64,7 @@ from .cost_surface_dialog import (
     _window_geotransform,
 )
 from .utils import (
+    log_swallowed,
     is_metric_crs,
     log_message,
     push_message,
@@ -313,8 +314,8 @@ class CostNetworkWorker(QgsTask):
                         if (nodata is not None and z == float(nodata)) or math.isnan(z):
                             removed += 1
                             continue
-                except Exception:
-                    pass
+                except Exception as _exc:
+                    log_swallowed("cost_network_dialog._run_impl", _exc)
                 valid_nodes.append(n)
             except Exception:
                 removed += 1
@@ -430,8 +431,8 @@ class CostNetworkWorker(QgsTask):
                         f"CostNetwork: computing pair costs… {bucket * 10}% ({done_dir}/{total_dir})",
                         level=Qgis.Info,
                     )
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("cost_network_dialog.update_progress", _exc)
 
         for a, b in candidate_pairs:
             if self._is_cancelled():
@@ -658,8 +659,8 @@ class CostNetworkWorker(QgsTask):
                             f"CostNetwork: MST paths… {int(100.0 * mst_done / mst_total)}% ({mst_done}/{mst_total})",
                             level=Qgis.Info,
                         )
-                except Exception:
-                    pass
+                except Exception as _exc:
+                    log_swallowed("cost_network_dialog._run_impl", _exc)
 
                 ax, ay = coords[a, 0], coords[a, 1]
                 bx, by = coords[b, 0], coords[b, 1]
@@ -1087,8 +1088,8 @@ class CostNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
             fallback_icon = os.path.join(plugin_dir, "cost_icon.png")
             if os.path.exists(network_icon or fallback_icon):
                 self.setWindowIcon(QIcon(network_icon or fallback_icon))
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("cost_network_dialog.__init__", _exc)
 
         self._setup_help_button()
 
@@ -1207,8 +1208,8 @@ class CostNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                     self.btnInterpretGuide.clicked.connect(self._show_interpretation_guide)
                 except Exception:
                     pass
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("cost_network_dialog.__init__", _exc)
 
         self.btnRun.clicked.connect(self.run_analysis)
         self.btnClose.clicked.connect(self.reject)
@@ -1235,8 +1236,8 @@ class CostNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                         self.horizontalLayout_Buttons.addWidget(self.btnHelp)
                     except Exception:
                         pass
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("cost_network_dialog._setup_help_button", _exc)
 
     def _on_help(self):
         html = """
@@ -1413,8 +1414,8 @@ MST/k-NN/Hub 네트워크를 생성합니다.
                     layout.addWidget(group, r, 0, 1, 3)
                     layout.addWidget(help_lbl, r + 1, 0, 1, 3)
                     return
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("cost_network_dialog._init_sna_controls", _exc)
 
         try:
             layout.addWidget(group, int(layout.rowCount()), 0, 1, 3)
@@ -1769,8 +1770,8 @@ MST/k-NN/Hub 네트워크를 생성합니다.
             else:
                 self.cmbCostMode.setCurrentIndex(0)
                 self.cmbCostMode.setEnabled(False)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("cost_network_dialog._on_model_changed", _exc)
 
     def _model_help_text(self, model_key: str) -> str:
         if model_key == MODEL_TOBLER:
@@ -2299,7 +2300,8 @@ MST/k-NN/Hub 네트워크를 생성합니다.
                     try:
                         a = int(e.a)
                         b = int(e.b)
-                    except Exception:
+                    except Exception as _exc:
+                        log_swallowed("cost_network_dialog._add_result_layers", _exc)
                         continue
                     if a == b:
                         continue
@@ -2409,8 +2411,8 @@ MST/k-NN/Hub 네트워크를 생성합니다.
                     _set_alias("closeness", "근접 중심성(closeness)")
                 if do_betw:
                     _set_alias("betweenness", "매개 중심성(betweenness)")
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("cost_network_dialog._add_result_layers", _exc)
 
         feats = []
         for i, n in enumerate(nodes):
@@ -2573,8 +2575,8 @@ MST/k-NN/Hub 네트워크를 생성합니다.
                     "model_label": str(res.model_label or ""),
                 },
             )
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("cost_network_dialog._add_result_layers", _exc)
 
         project.addMapLayer(line_layer, False)
         project.addMapLayer(pt_layer, False)
@@ -2587,8 +2589,8 @@ MST/k-NN/Hub 네트워크를 생성합니다.
                 if idx != 0:
                     root.removeChildNode(parent_group)
                     root.insertChildNode(0, parent_group)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("cost_network_dialog._add_result_layers", _exc)
 
 
 class _ValuePickerDialog(QtWidgets.QDialog):

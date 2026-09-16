@@ -43,6 +43,22 @@ def transform_point(point, src_crs, dest_crs):
             pass
         return point
 
+def split_qgis_source_path(source) -> str:
+    """Strip QGIS URI options (``|layername=...``, ``|layerid=...``) for GDAL/OGR.
+
+    Four modules carried their own copy of this. They agreed, but four copies
+    of a rule is how the categorical-metadata bug happened: one drifts and
+    nobody notices. This is the only implementation now.
+    """
+    try:
+        text = str(source or "").strip()
+    except Exception:
+        return ""
+    if not text:
+        return ""
+    return (text.split("|", 1)[0] or "").strip()
+
+
 def cleanup_files(file_paths):
     """Safely remove a list of file paths"""
     for path in file_paths:
@@ -245,6 +261,27 @@ def log_message(message, level=Qgis.Info):
                 pass
     except Exception:
         # Never crash due to logging
+        pass
+
+
+def log_swallowed(context: str, exc: Exception = None) -> None:
+    """Record an exception a handler is about to swallow on purpose.
+
+    The plugin guards a great deal of optional work with ``except Exception``
+    and continues, which is the right call for a tooltip that failed to set
+    and the wrong call for a statistic that failed to compute - and until now
+    the two looked identical: nothing was written anywhere. A wrong number
+    could reach a report with no trace of the failure that produced it.
+
+    This does not change what the handler does. It logs at Info under a fixed
+    ``[swallowed]`` prefix so a normal run is not flooded with warnings, while
+    anyone chasing a wrong result can filter the log for that prefix and see
+    every place a computation quietly gave up.
+    """
+    try:
+        _write_log_line("SWALLOWED", f"[swallowed] {context}: {exc!r}")
+        _queue_ui_log(f"[swallowed] {context}: {exc}", Qgis.Info)
+    except Exception:
         pass
 
 

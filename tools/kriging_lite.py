@@ -33,7 +33,7 @@ from qgis.core import (
     QgsWkbTypes,
 )
 
-from .utils import is_metric_crs, log_message
+from .utils import log_swallowed, is_metric_crs, log_message
 
 
 @dataclass(frozen=True)
@@ -329,8 +329,8 @@ def _write_geotiff(
     if crs_wkt:
         try:
             ds.SetProjection(str(crs_wkt))
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("kriging_lite._write_geotiff", _exc)
 
     band = ds.GetRasterBand(1)
     band.SetNoDataValue(float(nodata))
@@ -501,8 +501,8 @@ def ordinary_kriging_lite_to_geotiff(
             try:
                 pct = int((r + 1) * 100 / max(1, nrows))
                 progress_cb(pct, f"Kriging 계산 중… ({r + 1}/{nrows})")
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("kriging_lite.ordinary_kriging_lite_to_geotiff", _exc)
 
     crs_wkt = ""
     try:

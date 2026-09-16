@@ -74,3 +74,23 @@ def write_single_band_geotiff(
             except OSError:
                 pass
     return True
+
+
+def inv_geotransform(gt):
+    """Invert a GDAL geotransform across GDAL's two return conventions.
+
+    Older GDAL returns ``(success, inverse)``; newer builds return the inverse
+    tuple directly or ``None``. Three modules each carried a copy of this
+    branch; this is the one implementation.
+    """
+    from osgeo import gdal
+
+    inv = gdal.InvGeoTransform(gt)
+    if isinstance(inv, (list, tuple)) and len(inv) == 2:
+        ok, inv_gt = inv
+        if not ok:
+            raise Exception("geotransform inverse failed")
+        return inv_gt
+    if isinstance(inv, (list, tuple)) and len(inv) == 6:
+        return inv
+    raise Exception("geotransform inverse failed")

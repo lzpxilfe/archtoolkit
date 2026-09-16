@@ -36,6 +36,7 @@ from qgis.core import (
 )
 from qgis.gui import QgsMapLayerComboBox, QgsMapToolEmitPoint, QgsRubberBand
 from .utils import (
+    log_swallowed,
     log_message,
     new_run_id,
     push_message,
@@ -309,7 +310,8 @@ class ProfileChartWidget(QWidget):
                 try:
                     a = float(a)
                     b = float(b)
-                except Exception:
+                except Exception as _exc:
+                    log_swallowed("terrain_profile_dialog.set_highlight_ranges", _exc)
                     continue
                 if not math.isfinite(a) or not math.isfinite(b):
                     continue
@@ -338,7 +340,8 @@ class ProfileChartWidget(QWidget):
                 try:
                     a = float(a)
                     b = float(b)
-                except Exception:
+                except Exception as _exc:
+                    log_swallowed("terrain_profile_dialog.set_overlay_ranges", _exc)
                     continue
                 if not math.isfinite(a) or not math.isfinite(b):
                     continue
@@ -365,7 +368,8 @@ class ProfileChartWidget(QWidget):
             for d, lbl in markers or []:
                 try:
                     d = float(d)
-                except Exception:
+                except Exception as _exc:
+                    log_swallowed("terrain_profile_dialog.set_overlay_markers", _exc)
                     continue
                 if not math.isfinite(d):
                     continue
@@ -552,8 +556,8 @@ class ProfileChartWidget(QWidget):
                             painter.setPen(QPen(self.overlay_marker_color, 2))
                             painter.setBrush(QBrush(QColor(255, 255, 255)))
                             painter.drawEllipse(QPointF(x, y), 4, 4)
-                    except Exception:
-                        pass
+                    except Exception as _exc:
+                        log_swallowed("terrain_profile_dialog.draw_chart", _exc)
 
                     if show_labels and lbl:
                         painter.setPen(QPen(QColor(30, 30, 30)))
@@ -918,8 +922,8 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
                 layout.insertWidget(idx, self.btnHelp)
             else:
                 layout.addWidget(self.btnHelp)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("terrain_profile_dialog._setup_help_button", _exc)
 
     def _on_help(self):
         try:
@@ -1007,8 +1011,8 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
                 cur = float(self.spinFixedLength.value())
                 if cur <= 0 and self._last_profile_length_m is not None and math.isfinite(self._last_profile_length_m):
                     self.spinFixedLength.setValue(float(self._last_profile_length_m))
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("terrain_profile_dialog._update_fixed_length_ui", _exc)
 
         try:
             if self.btnUseLastLength is not None:
@@ -1021,8 +1025,8 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
                     )
                 )
                 self.btnUseLastLength.setEnabled(bool(can_use))
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("terrain_profile_dialog._update_fixed_length_ui", _exc)
 
     def _use_last_length(self):
         try:
@@ -1032,8 +1036,8 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
                 self.spinFixedLength.setValue(float(self._last_profile_length_m))
             if self.chkFixedLength is not None:
                 self.chkFixedLength.setChecked(True)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("terrain_profile_dialog._use_last_length", _exc)
 
     def _fixed_length_m(self) -> Optional[float]:
         try:
@@ -1044,8 +1048,8 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
             v = float(self.spinFixedLength.value())
             if math.isfinite(v) and v > 0:
                 return v
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("terrain_profile_dialog._fixed_length_m", _exc)
         return None
 
     def _distance_area_canvas(self) -> QgsDistanceArea:
@@ -1107,8 +1111,8 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
             self.rubber_band.addPoint(start)
             self.rubber_band.addPoint(end)
             self.rubber_band.show()
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("terrain_profile_dialog.update_preview", _exc)
 
     def _compute_aoi_highlight_ranges(self) -> List[Tuple[float, float]]:
         """Return AOI intersection ranges along distance axis using current profile_data (sample-based)."""
@@ -1154,7 +1158,8 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
                 if g is None or g.isEmpty():
                     continue
                 geoms.append(g)
-            except Exception:
+            except Exception as _exc:
+                log_swallowed("terrain_profile_dialog._compute_aoi_highlight_ranges", _exc)
                 continue
         if not geoms:
             return []
@@ -1258,8 +1263,8 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
                 self.update_stats()
             except Exception:
                 pass
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("terrain_profile_dialog._refresh_aoi_highlight", _exc)
 
     def _on_overlay_layer_changed(self, layer):
         """Reconnect selectionChanged handler for the overlay layer and refresh overlay."""
@@ -1445,8 +1450,8 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
                             v = ft.attribute(name)
                             if v is not None and str(v).strip():
                                 return str(v).strip()
-                except Exception:
-                    pass
+                except Exception as _exc:
+                    log_swallowed("terrain_profile_dialog._feature_label", _exc)
                 try:
                     for fld in layer.fields():
                         if fld.type() == QVariant.String:
@@ -1481,7 +1486,8 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
                     g2 = QgsGeometry(g)
                     if ct is not None:
                         g2.transform(ct)
-                except Exception:
+                except Exception as _exc:
+                    log_swallowed("terrain_profile_dialog._refresh_overlay", _exc)
                     continue
 
                 # Polygon: inside-segments on the profile line
@@ -1510,7 +1516,8 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
                                 for p in (seg[0], seg[-1]):
                                     try:
                                         t_vals.append(_fraction_for_xy(float(p.x()), float(p.y())))
-                                    except Exception:
+                                    except Exception as _exc:
+                                        log_swallowed("terrain_profile_dialog._refresh_overlay", _exc)
                                         continue
                                 if len(t_vals) < 2:
                                     continue
@@ -1530,9 +1537,11 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
                                     d = t * total_distance_m
                                     if math.isfinite(d):
                                         markers.append((d, _feature_label(ft)))
-                                except Exception:
+                                except Exception as _exc:
+                                    log_swallowed("terrain_profile_dialog._refresh_overlay", _exc)
                                     continue
-                    except Exception:
+                    except Exception as _exc:
+                        log_swallowed("terrain_profile_dialog._refresh_overlay", _exc)
                         continue
                     continue
 
@@ -1558,7 +1567,8 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
                                     d = t * total_distance_m
                                     if math.isfinite(d):
                                         markers.append((d, lbl))
-                                except Exception:
+                                except Exception as _exc:
+                                    log_swallowed("terrain_profile_dialog._refresh_overlay", _exc)
                                     continue
                         elif inter.type() == QgsWkbTypes.LineGeometry:
                             segs = []
@@ -1579,9 +1589,11 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
                                     if math.isfinite(d0) and math.isfinite(d1) and d1 > d0:
                                         markers.append((d0, lbl))
                                         markers.append((d1, lbl))
-                                except Exception:
+                                except Exception as _exc:
+                                    log_swallowed("terrain_profile_dialog._refresh_overlay", _exc)
                                     continue
-                    except Exception:
+                    except Exception as _exc:
+                        log_swallowed("terrain_profile_dialog._refresh_overlay", _exc)
                         continue
                     continue
 
@@ -1607,9 +1619,11 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
                                 d = t * total_distance_m
                                 if math.isfinite(d):
                                     markers.append((d, lbl))
-                            except Exception:
+                            except Exception as _exc:
+                                log_swallowed("terrain_profile_dialog._refresh_overlay", _exc)
                                 continue
-                    except Exception:
+                    except Exception as _exc:
+                        log_swallowed("terrain_profile_dialog._refresh_overlay", _exc)
                         continue
 
             # Merge overlapping ranges
@@ -1658,8 +1672,8 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
                 self.chart.set_overlay_markers(merged_markers)
             except Exception:
                 pass
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("terrain_profile_dialog._refresh_overlay", _exc)
     
     def start_drawing(self):
         """Start drawing profile line on map"""
@@ -1760,8 +1774,8 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
             try:
                 self._last_profile_length_m = float(total_distance_m)
                 self._update_fixed_length_ui()
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("terrain_profile_dialog.calculate_profile", _exc)
             
             push_message(
                 self.iface,
@@ -1966,8 +1980,8 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
             g = int(ft.attribute("g"))
             b = int(ft.attribute("b"))
             self.chart.set_profile_color(QColor(r, g, b))
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("terrain_profile_dialog._open_profile_from_feature", _exc)
 
         geom = ft.geometry()
         if geom is None or geom.isEmpty():
@@ -2032,8 +2046,8 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
         try:
             self._last_profile_length_m = float(total_distance_m)
             self._update_fixed_length_ui()
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("terrain_profile_dialog._compute_profile_for_points", _exc)
 
         push_message(
             self.iface,
@@ -2073,8 +2087,8 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
                     elev, float(nd), rel_tol=1e-6, abs_tol=1e-6
                 ):
                     continue
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("terrain_profile_dialog._compute_profile_for_points", _exc)
             dist = fraction * total_distance_m
             self.profile_data.append({"distance": dist, "elevation": elev, "x": x_canvas, "y": y_canvas})
             valid_samples += 1
@@ -2168,8 +2182,8 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
                     if changes:
                         pr.changeAttributeValues(changes)
                         layer.triggerRepaint()
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("terrain_profile_dialog._ensure_profile_layer_schema", _exc)
 
         # Ensure renderer uses per-feature colors when possible.
         try:
@@ -2183,8 +2197,8 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
                     )
                 layer.setRenderer(QgsSingleSymbolRenderer(symbol))
                 layer.triggerRepaint()
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("terrain_profile_dialog._ensure_profile_layer_schema", _exc)
 
     def _ensure_single_group(self):
         project = QgsProject.instance()
@@ -2269,8 +2283,8 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
                 }
             )
             layer.setRenderer(QgsSingleSymbolRenderer(symbol))
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("terrain_profile_dialog._create_single_profile_layer", _exc)
 
         try:
             layer.setCustomProperty(PROFILE_KIND_PROP, PROFILE_KIND_SINGLE)
@@ -2289,8 +2303,8 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
                     "samples": int(num_samples or 0),
                 },
             )
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("terrain_profile_dialog._create_single_profile_layer", _exc)
 
         project = QgsProject.instance()
         sub = self._ensure_single_group()
@@ -2324,8 +2338,8 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
                         kind="profile_lines",
                         units="m",
                     )
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("terrain_profile_dialog.get_or_create_profile_layer", _exc)
             return layer
         
         # Create new memory layer
@@ -2356,8 +2370,8 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
                     QgsSymbolLayer.PropertyStrokeColor,
                     QgsProperty.fromExpression('color_rgba("r","g","b",220)'),
                 )
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("terrain_profile_dialog.get_or_create_profile_layer", _exc)
         layer.setRenderer(QgsSingleSymbolRenderer(symbol))
 
         project = QgsProject.instance()
@@ -2373,8 +2387,8 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
                 kind="profile_lines",
                 units="m",
             )
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("terrain_profile_dialog.get_or_create_profile_layer", _exc)
         project.addMapLayer(layer, False)
         group.insertLayer(0, layer)
 
@@ -2385,8 +2399,8 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
                 if idx != 0:
                     root.removeChildNode(group)
                     root.insertChildNode(0, group)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("terrain_profile_dialog.get_or_create_profile_layer", _exc)
 
         try:
             self._ensure_profile_layer_schema(layer)
@@ -2439,8 +2453,8 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
                 pass
             try:
                 layer.selectByExpression(f"\"no\" = {int(next_no)}")
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("terrain_profile_dialog.save_line_to_layer", _exc)
         finally:
             self._ignore_selection_changed = False
 
@@ -2457,8 +2471,8 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
                 num_samples=int(num_samples or 0),
                 color=color,
             )
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("terrain_profile_dialog.save_line_to_layer", _exc)
 
         return color
     
@@ -2528,15 +2542,15 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
                     run_sum += overlap
                 seg0_mean_abs_slope = (abs_dz_sum / run_sum * 100.0) if run_sum > 1e-9 else 0.0
                 stats += f" | 0–{seg0_end:.0f}m 평균경사: {seg0_mean_abs_slope:.1f}%"
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("terrain_profile_dialog.update_stats", _exc)
 
         try:
             inside = float(self._last_aoi_inside_m) if self._last_aoi_inside_m is not None else None
             if inside is not None and math.isfinite(inside) and inside > 0:
                 stats += f" | AOI 구간: {inside:.1f}m"
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("terrain_profile_dialog.update_stats", _exc)
         # Disclose the chart smoothing: the curve is a ±3-sample moving average
         # while these stats (and CSV/hover) use raw samples — undisclosed, the
         # drawn peak visibly disagreeing with "최대" reads as a bug.
@@ -2606,8 +2620,8 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
                     inside = float(self._last_aoi_inside_m) if self._last_aoi_inside_m is not None else None
                     if inside is not None and math.isfinite(inside) and inside > 0:
                         writer.writerow(["aoi_inside_m", round(float(inside), 3)])
-                except Exception:
-                    pass
+                except Exception as _exc:
+                    log_swallowed("terrain_profile_dialog.export_csv", _exc)
 
                 writer.writerow([])
 

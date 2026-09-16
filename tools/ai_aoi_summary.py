@@ -41,7 +41,8 @@ from qgis.core import (
     QgsWkbTypes,
 )
 
-from .utils import get_archtoolkit_layer_metadata, is_metric_crs, log_message
+from .utils import log_swallowed, get_archtoolkit_layer_metadata, is_metric_crs, log_message
+from .utils import split_qgis_source_path
 
 
 _NUMERIC_FIELD_CANDIDATES = (
@@ -165,12 +166,7 @@ def _compass8_ko(bearing_deg) -> str:
     return _COMPASS_8_KO[idx]
 
 
-def _split_qgis_source_path(src: str) -> str:
-    try:
-        s = str(src or "")
-        return (s.split("|", 1)[0] or "").strip()
-    except Exception:
-        return str(src or "").strip()
+_split_qgis_source_path = split_qgis_source_path
 
 
 def _safe_distance_area(crs) -> QgsDistanceArea:
@@ -195,7 +191,8 @@ def _unary_union_geoms(layer: QgsVectorLayer, *, selected_only: bool) -> Tuple[O
     for f in feats:
         try:
             g = f.geometry()
-        except Exception:
+        except Exception as _exc:
+            log_swallowed("ai_aoi_summary._unary_union_geoms", _exc)
             continue
         if not g or g.isEmpty():
             continue
@@ -262,8 +259,8 @@ def is_archtoolkit_layer(layer: QgsMapLayer) -> bool:
                 cur = cur.parent()
             except Exception:
                 break
-    except Exception:
-        pass
+    except Exception as _exc:
+        log_swallowed("ai_aoi_summary.is_archtoolkit_layer", _exc)
     return False
 
 
@@ -287,8 +284,8 @@ def _layer_archtoolkit_meta(layer: QgsMapLayer) -> Dict[str, Any]:
             if k:
                 out["kind"] = str(k)
             return out
-    except Exception:
-        pass
+    except Exception as _exc:
+        log_swallowed("ai_aoi_summary._layer_archtoolkit_meta", _exc)
     return {}
 
 
@@ -388,35 +385,37 @@ def _vector_layer_stats_in_geom(
             break
         try:
             g = feat.geometry()
-        except Exception:
+        except Exception as _exc:
+            log_swallowed("ai_aoi_summary._vector_layer_stats_in_geom", _exc)
             continue
         if not g or g.isEmpty():
             continue
         try:
             if not g.intersects(geom):
                 continue
-        except Exception:
+        except Exception as _exc:
+            log_swallowed("ai_aoi_summary._vector_layer_stats_in_geom", _exc)
             continue
 
         n += 1
         if geom_type == QgsWkbTypes.LineGeometry:
             try:
                 total_len += float(da.measureLength(g.intersection(geom)))
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("ai_aoi_summary._vector_layer_stats_in_geom", _exc)
         elif geom_type == QgsWkbTypes.PolygonGeometry:
             try:
                 total_area += float(da.measureArea(g.intersection(geom)))
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("ai_aoi_summary._vector_layer_stats_in_geom", _exc)
 
         if hist is not None and hist_field is not None:
             try:
                 v = feat[hist_field]
                 k = str(v) if v is not None else "(null)"
                 hist[k] = int(hist.get(k, 0)) + 1
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("ai_aoi_summary._vector_layer_stats_in_geom", _exc)
 
         for f, acc in num_acc.items():
             try:
@@ -430,7 +429,8 @@ def _vector_layer_stats_in_geom(
                 acc["min"] = float(min(float(acc["min"]), float(x)))
                 acc["max"] = float(max(float(acc["max"]), float(x)))
                 acc["n"] = int(acc["n"]) + 1
-            except Exception:
+            except Exception as _exc:
+                log_swallowed("ai_aoi_summary._vector_layer_stats_in_geom", _exc)
                 continue
 
         if dist_acc is not None:
@@ -445,8 +445,8 @@ def _vector_layer_stats_in_geom(
                     dist_acc["min"] = float(min(float(dist_acc["min"]), dist))
                     dist_acc["max"] = float(max(float(dist_acc["max"]), dist))
                     dist_acc["n"] = int(dist_acc["n"]) + 1
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("ai_aoi_summary._vector_layer_stats_in_geom", _exc)
 
     out["features"] = int(n)
     out["scanned"] = int(scanned)
@@ -473,7 +473,8 @@ def _vector_layer_stats_in_geom(
                 "max": float(acc.get("max")),
                 "mean": float(s0 / float(n0)),
             }
-        except Exception:
+        except Exception as _exc:
+            log_swallowed("ai_aoi_summary._vector_layer_stats_in_geom", _exc)
             continue
     if numeric_out:
         out["numeric_fields"] = numeric_out
@@ -489,8 +490,8 @@ def _vector_layer_stats_in_geom(
                     "max": float(dist_acc.get("max")),
                     "mean": float(ds / float(dn)),
                 }
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("ai_aoi_summary._vector_layer_stats_in_geom", _exc)
     return out
 
 
@@ -532,8 +533,8 @@ def _pick_reference_name_field(layer: QgsVectorLayer, preferred: str = "") -> st
         for f in layer.fields():
             if int(f.type()) == int(QVariant.String):
                 return str(f.name() or "")
-    except Exception:
-        pass
+    except Exception as _exc:
+        log_swallowed("ai_aoi_summary._pick_reference_name_field", _exc)
     return ""
 
 
@@ -547,8 +548,8 @@ def _feature_ref_name(feature, *, name_field: str) -> str:
                 s = str(v).strip()
                 if s:
                     return s
-    except Exception:
-        pass
+    except Exception as _exc:
+        log_swallowed("ai_aoi_summary._feature_ref_name", _exc)
     try:
         return f"FID {int(feature.id())}"
     except Exception:
@@ -566,21 +567,21 @@ def _extract_representative_point(geom: QgsGeometry) -> Optional[QgsPointXY]:
                     return QgsPointXY(pts[0])
             else:
                 return QgsPointXY(geom.asPoint())
-    except Exception:
-        pass
+    except Exception as _exc:
+        log_swallowed("ai_aoi_summary._extract_representative_point", _exc)
 
     try:
         p = geom.pointOnSurface()
         if p is not None and (not p.isEmpty()):
             return QgsPointXY(p.asPoint())
-    except Exception:
-        pass
+    except Exception as _exc:
+        log_swallowed("ai_aoi_summary._extract_representative_point", _exc)
     try:
         c = geom.centroid()
         if c is not None and (not c.isEmpty()):
             return QgsPointXY(c.asPoint())
-    except Exception:
-        pass
+    except Exception as _exc:
+        log_swallowed("ai_aoi_summary._extract_representative_point", _exc)
     return None
 
 
@@ -657,7 +658,8 @@ def _reference_sites_summary(
 
         try:
             g0 = ft.geometry()
-        except Exception:
+        except Exception as _exc:
+            log_swallowed("ai_aoi_summary._reference_sites_summary", _exc)
             continue
         if g0 is None or g0.isEmpty():
             continue
@@ -667,8 +669,8 @@ def _reference_sites_summary(
                 if not g0.intersects(g_buf_on_layer):
                     # When not using explicit selection, keep the scan focused around AOI.
                     continue
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("ai_aoi_summary._reference_sites_summary", _exc)
 
         g = _transform_geom(g0, layer.crs(), aoi_crs)
         if g is None or g.isEmpty():
@@ -796,8 +798,8 @@ def _reference_sites_summary(
                     outside_aoi_area_pct = max(0.0, min(100.0, (outside_aoi_area_m2 / float(feature_area_m2)) * 100.0))
                     inside_buffer_area_pct = max(0.0, min(100.0, (in_buf / float(feature_area_m2)) * 100.0))
                     outside_buffer_area_pct = max(0.0, min(100.0, (outside_buffer_area_m2 / float(feature_area_m2)) * 100.0))
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("ai_aoi_summary._reference_sites_summary", _exc)
         elif gt == int(QgsWkbTypes.LineGeometry):
             try:
                 feature_length_m = float(da.measureLength(g))
@@ -826,8 +828,8 @@ def _reference_sites_summary(
                     outside_aoi_length_pct = max(0.0, min(100.0, (outside_aoi_length_m / float(feature_length_m)) * 100.0))
                     inside_buffer_length_pct = max(0.0, min(100.0, (in_buf_l / float(feature_length_m)) * 100.0))
                     outside_buffer_length_pct = max(0.0, min(100.0, (outside_buffer_length_m / float(feature_length_m)) * 100.0))
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("ai_aoi_summary._reference_sites_summary", _exc)
 
         item = {
             "fid": int(ft.id()) if hasattr(ft, "id") else None,
@@ -896,8 +898,8 @@ def _reference_sites_summary(
                 str(d.get("name") or ""),
             )
         )
-    except Exception:
-        pass
+    except Exception as _exc:
+        log_swallowed("ai_aoi_summary._reference_sites_summary", _exc)
 
     return {
         "layer_id": str(layer.id() or ""),
@@ -999,8 +1001,8 @@ def _raster_stats_in_geom(
 
     try:
         arr = arr.astype(np.float32, copy=False)
-    except Exception:
-        pass
+    except Exception as _exc:
+        log_swallowed("ai_aoi_summary._raster_stats_in_geom", _exc)
 
     # Rasterize polygon mask into the same (possibly downsampled) window. The
     # pixel size scales by w/read_width so the mask aligns with the read buffer.
@@ -1054,8 +1056,8 @@ def _raster_stats_in_geom(
     if nodata is not None:
         try:
             valid &= arr != float(nodata)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("ai_aoi_summary._raster_stats_in_geom", _exc)
 
     if not np.any(valid):
         return None
@@ -1083,8 +1085,8 @@ def _raster_stats_in_geom(
                 if frac >= 0.98:
                     vis = float(np.count_nonzero(vals > 0.5)) / float(vals.size) * 100.0
                     out["gt_0_5_pct"] = float(vis)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("ai_aoi_summary._raster_stats_in_geom", _exc)
         return out
     except Exception:
         return None
@@ -1207,8 +1209,8 @@ def build_aoi_context(
         try:
             if not lyr.extent().intersects(g_layer.boundingBox()):
                 continue
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("ai_aoi_summary.build_aoi_context", _exc)
 
         item: Dict[str, Any] = {
             "id": lyr.id(),
@@ -1341,15 +1343,15 @@ def export_aoi_context_csv(
         out_dir = os.path.dirname(str(layers_csv_path or ""))
         if out_dir:
             os.makedirs(out_dir, exist_ok=True)
-    except Exception:
-        pass
+    except Exception as _exc:
+        log_swallowed("ai_aoi_summary.export_aoi_context_csv", _exc)
 
     try:
         out_dir = os.path.dirname(str(numeric_fields_csv_path or ""))
         if out_dir:
             os.makedirs(out_dir, exist_ok=True)
-    except Exception:
-        pass
+    except Exception as _exc:
+        log_swallowed("ai_aoi_summary.export_aoi_context_csv", _exc)
 
     def _as_text(v: Any) -> str:
         try:

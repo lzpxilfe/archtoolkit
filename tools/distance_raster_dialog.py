@@ -59,6 +59,7 @@ from .help_dialog import show_help_dialog
 from .live_log_dialog import ensure_live_log_dialog
 from .predictor_naming import distance_variable_key, sanitize_key
 from .utils import (
+    log_swallowed,
     cleanup_files,
     log_exception,
     log_message,
@@ -90,8 +91,8 @@ class DistanceRasterDialog(QtWidgets.QDialog):
                 if os.path.exists(path):
                     self.setWindowIcon(QIcon(path))
                     break
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("distance_raster_dialog._setup_ui", _exc)
 
         layout = QtWidgets.QVBoxLayout(self)
         header = QtWidgets.QLabel(
@@ -117,8 +118,8 @@ class DistanceRasterDialog(QtWidgets.QDialog):
                 | QgsMapLayerProxyModel.LineLayer
                 | QgsMapLayerProxyModel.PolygonLayer
             )
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("distance_raster_dialog._setup_ui", _exc)
         self.cmbSource.layerChanged.connect(self._on_source_changed)
         form_src.addRow("대상 레이어:", self.cmbSource)
         self.chkSelectedOnly = QtWidgets.QCheckBox("선택한 피처만 사용")

@@ -58,6 +58,7 @@ from qgis.core import (
 from qgis.gui import QgsMapToolEmitPoint, QgsRubberBand, QgsSnapIndicator
 
 from .utils import (
+    log_swallowed,
     cleanup_files,
     is_metric_crs,
     log_message,
@@ -82,6 +83,8 @@ from .cost_models import (
 from .live_log_dialog import ensure_live_log_dialog
 from .help_dialog import show_help_dialog
 from .i18n import is_english_ui
+from .utils import split_qgis_source_path
+from .raster_io import inv_geotransform
 
 
 FORM_CLASS, _ = uic.loadUiType(
@@ -121,26 +124,7 @@ class CostTaskResult:
     corridor_percent: Optional[float] = None
 
 
-def _inv_geotransform(gt):
-    """
-    Return inverse geotransform in a GDAL-version-safe way.
-
-    Some GDAL builds return `(success, inv_gt)` while others return `inv_gt` directly.
-    """
-    inv = gdal.InvGeoTransform(gt)
-
-    # Variant A: (success, inv_gt)
-    if isinstance(inv, (list, tuple)) and len(inv) == 2:
-        ok, inv_gt = inv
-        if not ok:
-            raise Exception("geotransform inverse failed")
-        return inv_gt
-
-    # Variant B: inv_gt (6-tuple)
-    if isinstance(inv, (list, tuple)) and len(inv) == 6:
-        return inv
-
-    raise Exception("geotransform inverse failed")
+_inv_geotransform = inv_geotransform
 
 
 def _clamp_int(v, lo, hi):
@@ -163,12 +147,7 @@ def _window_geotransform(gt, xoff, yoff):
     )
 
 
-def _split_qgis_source_path(source: str) -> str:
-    """Best-effort: strip QGIS URI options (e.g., `|layername=...`) for GDAL/OGR."""
-    s = (str(source or "")).strip()
-    if not s:
-        return ""
-    return (s.split("|", 1)[0] or "").strip()
+_split_qgis_source_path = split_qgis_source_path
 
 
 def _split_qgis_ogr_uri(source: str):
@@ -253,8 +232,8 @@ def _resample_raster_to_window(raster_source: str, *, win_gt, win_proj_wkt: str,
     if nodata is not None:
         try:
             arr[arr == float(nodata)] = np.nan
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("cost_surface_dialog._resample_raster_to_window", _exc)
     arr[~np.isfinite(arr)] = np.nan
     return arr
 
@@ -393,8 +372,8 @@ def _estimate_straight_line_cost(
                 f = float(friction[r, c])
                 if math.isfinite(f) and f > 0:
                     return f
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("cost_surface_dialog._friction_at", _exc)
         return 1.0
 
     z_prev = _bilinear_elevation(dem, nodata_mask, inv_win_gt, sx, sy)
@@ -523,8 +502,8 @@ def _create_corridor_gpkg(corridor_raster_path, output_gpkg_path):
         try:
             if os.path.exists(output_gpkg_path):
                 os.remove(output_gpkg_path)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("cost_surface_dialog._create_corridor_gpkg", _exc)
         return None
 
 
@@ -619,8 +598,8 @@ def _create_fixed_contours_gpkg(
         try:
             if os.path.exists(output_gpkg_path):
                 os.remove(output_gpkg_path)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("cost_surface_dialog._create_fixed_contours_gpkg", _exc)
         return None
 
 
@@ -783,8 +762,8 @@ def _astar_path(
                     f0 = float(friction[r, c])
                     f1 = float(friction[nr, nc])
                     w *= 0.5 * (f0 + f1)
-                except Exception:
-                    pass
+                except Exception as _exc:
+                    log_swallowed("cost_surface_dialog._astar_path", _exc)
 
             nidx = nr * cols + nc
             ng = g + w
@@ -868,8 +847,8 @@ def _dijkstra_full(
                     f0 = float(friction[r, c])
                     f1 = float(friction[nr, nc])
                     w *= 0.5 * (f0 + f1)
-                except Exception:
-                    pass
+                except Exception as _exc:
+                    log_swallowed("cost_surface_dialog._dijkstra_full", _exc)
             nidx = nr * cols + nc
             nd = d + w
             if nd < dist[nidx]:
@@ -1095,8 +1074,8 @@ class CostSurfaceWorker(QgsTask):
         def progress_cb(p):
             try:
                 self.setProgress(float(p))
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("cost_surface_dialog.progress_cb", _exc)
 
         def make_progress_cb(stage: str, *, offset: float, scale: float):
             last_bucket = -1
@@ -1183,8 +1162,8 @@ class CostSurfaceWorker(QgsTask):
                     mult = 1.0
                 try:
                     friction[mask] *= float(mult)
-                except Exception:
-                    pass
+                except Exception as _exc:
+                    log_swallowed("cost_surface_dialog._run_impl", _exc)
 
             try:
                 friction[nodata_mask] = 1.0
@@ -1684,8 +1663,8 @@ class MultiLineChartWidget(QtWidgets.QWidget):
             if self.on_hover_distance:
                 try:
                     self.on_hover_distance(None)
-                except Exception:
-                    pass
+                except Exception as _exc:
+                    log_swallowed("cost_surface_dialog.mouseMoveEvent", _exc)
             return
         rel = float(event.x() - self.margin_left) / float(w)
         d = self.pan_offset + rel * visible_range
@@ -1694,8 +1673,8 @@ class MultiLineChartWidget(QtWidgets.QWidget):
             if self.on_hover_distance:
                 try:
                     self.on_hover_distance(None)
-                except Exception:
-                    pass
+                except Exception as _exc:
+                    log_swallowed("cost_surface_dialog.mouseMoveEvent", _exc)
             return
         lines = [f"{d:.0f} m"]
         for s in self.series:
@@ -1713,8 +1692,8 @@ class MultiLineChartWidget(QtWidgets.QWidget):
         if self.on_hover_distance:
             try:
                 self.on_hover_distance(float(d))
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("cost_surface_dialog.mouseMoveEvent", _exc)
 
     def paintEvent(self, _event):
         p = QPainter(self)
@@ -1883,8 +1862,8 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
                 self._on_friction_raster_toggled(bool(self.chkUseFrictionRaster.isChecked()))
             if hasattr(self, "chkUseFrictionVector"):
                 self._on_friction_vector_toggled(bool(self.chkUseFrictionVector.isChecked()))
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("cost_surface_dialog.__init__", _exc)
 
     def _setup_help_button(self):
         try:
@@ -1992,8 +1971,8 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
                 self._update_preview()
                 self._update_labels()
             self._update_point_help()
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("cost_surface_dialog._on_create_corridor_toggled", _exc)
 
     def _on_friction_raster_toggled(self, checked):
         try:
@@ -2033,8 +2012,8 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
                 else:
                     self.chkCreateEnergyRaster.setChecked(False)
                     self.chkCreateEnergyRaster.setEnabled(False)
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("cost_surface_dialog._on_model_changed", _exc)
 
             if model_key == MODEL_TOBLER:
                 self.groupToblerParams.setVisible(True)
@@ -2111,8 +2090,8 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
                     "• 누적 시간(분): (체크 시) 속도 기반 이동시간을 별도로 출력할 수 있습니다<br>"
                     "<br><b>참고</b>: 에너지(kcal)=J/4184 로 변환하여 저장합니다."
                 )
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("cost_surface_dialog._on_model_changed", _exc)
 
     def _on_dem_changed(self):
         dem_layer = self.cmbDemLayer.currentLayer()
@@ -2183,8 +2162,8 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
             self._rb_end.hide()
             self._rb_line.reset(QgsWkbTypes.LineGeometry)
             self._rb_line.hide()
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("cost_surface_dialog._reset_preview", _exc)
 
     def _update_preview(self):
         self._reset_preview()
@@ -2731,8 +2710,8 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
                 pal.setFormat(fmt)
                 path_layer.setLabeling(QgsVectorLayerSimpleLabeling(pal))
                 path_layer.setLabelsEnabled(True)
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("cost_surface_dialog._add_result_layers", _exc)
 
             # Store payload so selecting the line can reopen a profile.
             try:
@@ -2788,8 +2767,8 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
                 if idx != 0:
                     root.removeChildNode(parent_group)
                     root.insertChildNode(0, parent_group)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("cost_surface_dialog._add_result_layers", _exc)
 
     def _tag_cost_surface_layer(self, layer: QgsMapLayer, run_id: str, kind: str):
         """Attach metadata to result layers for later cleanup (e.g., transient rubberbands)."""
@@ -2813,8 +2792,8 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
                 kind=str(kind or ""),
                 units=units,
             )
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("cost_surface_dialog._tag_cost_surface_layer", _exc)
 
     def _track_layer_output(self, layer: QgsMapLayer, path: Optional[str]):
         if not layer or not path:
@@ -2832,8 +2811,8 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
                     layer = QgsProject.instance().mapLayer(lid)
                     if layer and layer.customProperty("archtoolkit/cost_surface/run_id", None) is not None:
                         remove_preview = True
-                except Exception:
-                    pass
+                except Exception as _exc:
+                    log_swallowed("cost_surface_dialog._cleanup_layer_outputs", _exc)
                 try:
                     handler = self._profile_selection_handlers.pop(lid, None)
                     if layer and handler:
@@ -2848,14 +2827,14 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
                             dlg.deleteLater()
                         except Exception:
                             pass
-                except Exception:
-                    pass
+                except Exception as _exc:
+                    log_swallowed("cost_surface_dialog._cleanup_layer_outputs", _exc)
                 try:
                     self._profile_payloads.pop(lid, None)
                 except Exception:
                     pass
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("cost_surface_dialog._cleanup_layer_outputs", _exc)
 
         if remove_preview:
             self._reset_preview()
@@ -3039,8 +3018,8 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
             try:
                 renderer.setClassificationMin(float(vmin))
                 renderer.setClassificationMax(float(vmax))
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("cost_surface_dialog._apply_cost_raster_style", _exc)
             layer.setRenderer(renderer)
             layer.setOpacity(0.7)
             layer.triggerRepaint()
@@ -3111,8 +3090,8 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
             try:
                 renderer.setClassificationMin(float(vmin))
                 renderer.setClassificationMax(float(vmax))
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("cost_surface_dialog._apply_energy_raster_style", _exc)
             layer.setRenderer(renderer)
             layer.setOpacity(0.7)
             layer.triggerRepaint()
@@ -3498,8 +3477,8 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
                 rb.reset(QgsWkbTypes.PointGeometry)
                 rb.addPoint(QgsPointXY(pt[0], pt[1]))
                 rb.show()
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("cost_surface_dialog.on_hover", _exc)
 
         elev_chart.on_hover_distance = on_hover
         time_chart.on_hover_distance = on_hover
@@ -3559,8 +3538,8 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
 
             if self.original_tool:
                 self.canvas.setMapTool(self.original_tool)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("cost_surface_dialog._cleanup_for_close", _exc)
 
     def _cleanup_for_unload(self):
         """Full cleanup for plugin unload/reload (disconnect signals, release handlers, clear temp tracking)."""
@@ -3572,8 +3551,8 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
                     pass
             self._task_running = False
             self._task = None
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("cost_surface_dialog._cleanup_for_unload", _exc)
 
         try:
             self._reset_preview()
@@ -3587,11 +3566,11 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
                     layer = QgsProject.instance().mapLayer(lid)
                     if layer and handler:
                         layer.selectionChanged.disconnect(handler)
-                except Exception:
-                    pass
+                except Exception as _exc:
+                    log_swallowed("cost_surface_dialog._cleanup_for_unload", _exc)
             self._profile_selection_handlers.clear()
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("cost_surface_dialog._cleanup_for_unload", _exc)
 
         # Close any open profile dialogs (best-effort).
         try:
@@ -3606,8 +3585,8 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
                     pass
             self._profile_dialogs.clear()
             self._profile_payloads.clear()
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("cost_surface_dialog._cleanup_for_unload", _exc)
 
         try:
             if self.original_tool:

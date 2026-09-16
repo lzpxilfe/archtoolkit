@@ -80,6 +80,7 @@ from .raster_grid_contract import (
 )
 from .raster_semantics import choose_nodata_sentinel
 from .utils import (
+    log_swallowed,
     get_archtoolkit_layer_metadata,
     is_categorical_raster_meta,
     log_exception,
@@ -362,8 +363,8 @@ class AlignExportDialog(QtWidgets.QDialog):
                 if os.path.exists(p):
                     self.setWindowIcon(QIcon(p))
                     break
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("align_export_dialog._setup_ui", _exc)
 
         layout = QtWidgets.QVBoxLayout(self)
         header = QtWidgets.QLabel(
@@ -464,8 +465,8 @@ class AlignExportDialog(QtWidgets.QDialog):
                     combo.setFilters(QgsMapLayerProxyModel.Filter.PolygonLayer)
                 except Exception:
                     combo.setFilters(QgsMapLayerProxyModel.PolygonLayer)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("align_export_dialog._set_filter", _exc)
 
     def _populate_layers(self):
         self.listLayers.clear()

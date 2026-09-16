@@ -7,7 +7,7 @@ from qgis.PyQt.QtCore import QDateTime, QPoint, Qt, QEvent
 from qgis.PyQt.QtGui import QFontDatabase
 from qgis.core import Qgis
 
-from .utils import add_ui_log_listener, get_log_path, remove_ui_log_listener, start_ui_log_pump
+from .utils import log_swallowed, add_ui_log_listener, get_log_path, remove_ui_log_listener, start_ui_log_pump
 
 _live_log_dialog = None
 
@@ -20,8 +20,8 @@ def _level_name(level) -> str:
             return "ERROR"
         if level == Qgis.Success:
             return "OK"
-    except Exception:
-        pass
+    except Exception as _exc:
+        log_swallowed("live_log_dialog._level_name", _exc)
     return "INFO"
 
 
@@ -208,8 +208,8 @@ class ArchToolkitLiveLogDialog(QtWidgets.QDialog):
                     y = int(g.top())
 
                 self.move(QPoint(x, y))
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("live_log_dialog._reposition_near_owner", _exc)
 
     def attach_owner(self, owner=None):
         if owner is self._owner:
@@ -245,8 +245,8 @@ class ArchToolkitLiveLogDialog(QtWidgets.QDialog):
                 if et in (QEvent.Move, QEvent.Resize, QEvent.Show, QEvent.WindowStateChange):
                     if self.isVisible():
                         self._reposition_near_owner()
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("live_log_dialog.eventFilter", _exc)
         return super().eventFilter(obj, event)
 
     def show_near(self, owner=None):

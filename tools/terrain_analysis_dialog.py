@@ -42,6 +42,7 @@ from qgis.core import (
 )
 import processing
 from .utils import (
+    log_swallowed,
     cleanup_files, log_message, push_message, restore_ui_focus, set_archtoolkit_layer_metadata,
 )
 from .raster_io import write_single_band_geotiff
@@ -181,8 +182,8 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                 layout.insertWidget(idx, self.btnHelp)
             else:
                 layout.addWidget(self.btnHelp)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("terrain_analysis_dialog._setup_help_button", _exc)
 
     def _on_help(self):
         try:
@@ -343,8 +344,8 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                 )
                 restore_ui_focus(self)
                 return
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("terrain_analysis_dialog.run_analysis", _exc)
 
         # Live log window (non-modal) so users can see progress in real time.
         ensure_live_log_dialog(self.iface, owner=self, show=True, clear=True)
@@ -387,8 +388,8 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                             units="deg",
                             params={"classification": str(cls_key)},
                         )
-                    except Exception:
-                        pass
+                    except Exception as _exc:
+                        log_swallowed("terrain_analysis_dialog.run_analysis", _exc)
                     QgsProject.instance().addMapLayer(layer)
                     self.apply_style(layer, cls_info['classes'], 90)
                     results.append("경사도")
@@ -409,8 +410,8 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                             kind="aspect",
                             units="deg",
                         )
-                    except Exception:
-                        pass
+                    except Exception as _exc:
+                        log_swallowed("terrain_analysis_dialog.run_analysis", _exc)
                     QgsProject.instance().addMapLayer(layer)
                     self.apply_style(layer, self.ASPECT_CLASSES, 360)
                     results.append("사면방향")
@@ -443,8 +444,8 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                                 units="index",
                                 params={"tri_max": float(tri_max), "radius": 1},
                             )
-                        except Exception:
-                            pass
+                        except Exception as _exc:
+                            log_swallowed("terrain_analysis_dialog.run_analysis", _exc)
                         QgsProject.instance().addMapLayer(layer)
                         self.apply_style(layer, tri_classes, tri_max * 2.5)
                         results.append("TRI")
@@ -469,8 +470,8 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                             kind="roughness",
                             units="index",
                         )
-                    except Exception:
-                        pass
+                    except Exception as _exc:
+                        log_swallowed("terrain_analysis_dialog.run_analysis", _exc)
                     QgsProject.instance().addMapLayer(layer)
                     self.apply_style(layer, self.ROUGHNESS_CLASSES, 20)
                     results.append("Roughness")
@@ -618,8 +619,8 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                         units="index",
                         params={"radius": int(radius), "threshold": float(threshold)},
                     )
-                except Exception:
-                    pass
+                except Exception as _exc:
+                    log_swallowed("terrain_analysis_dialog.run_tpi_analysis", _exc)
                 QgsProject.instance().addMapLayer(layer)
                 self.apply_style(layer, tpi_classes, 10)
                 results.append("TPI")
@@ -761,13 +762,13 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                                 "tpi_high": float(tpi_high),
                             },
                         )
-                    except Exception:
-                        pass
+                    except Exception as _exc:
+                        log_swallowed("terrain_analysis_dialog.run_slope_position_analysis", _exc)
                     # Class 0 = masked NoData -> transparent
                     try:
                         layer.dataProvider().setNoDataValue(1, 0)
-                    except Exception:
-                        pass
+                    except Exception as _exc:
+                        log_swallowed("terrain_analysis_dialog.run_slope_position_analysis", _exc)
                     QgsProject.instance().addMapLayer(layer)
                     self.apply_style(layer, self.SLOPE_POSITION_CLASSES, 6)
                     results.append("지형분류")
@@ -873,8 +874,8 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                         "note": "Riley (1999) normalised by sqrt(N); not comparable to the 3x3 TRI",
                     },
                 )
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("terrain_analysis_dialog.run_tri_radius_analysis", _exc)
             QgsProject.instance().addMapLayer(layer)
             valid_vals = result[np.isfinite(result)]
             if valid_vals.size:
@@ -951,8 +952,8 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                     z0 = float(np.mean(z[valid]))
                     if np.isfinite(z0):
                         z = z - np.float32(z0)
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("terrain_analysis_dialog.run_curvature_analysis", _exc)
 
             profile, plan = self._zt_curvature(z, cell)
 
@@ -993,8 +994,8 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                         kind=kind, units="1/m",
                         params={"method": "Zevenbergen & Thorne 1987", "cell_size": float(cell)},
                     )
-                except Exception:
-                    pass
+                except Exception as _exc:
+                    log_swallowed("terrain_analysis_dialog.run_curvature_analysis", _exc)
                 QgsProject.instance().addMapLayer(layer)
                 self._apply_diverging_style(layer, arr[good], neg_lab, pos_lab)
 
@@ -1046,8 +1047,8 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
             renderer.setClassificationMax(absmax)
             layer.setRenderer(renderer)
             layer.triggerRepaint()
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("terrain_analysis_dialog._apply_diverging_style", _exc)
 
     def _log_curvature_summary(self, profile_valid, plan_valid):
         """Emit an interpretation (area % per curvature class) to the live log + message bar."""
@@ -1068,8 +1069,8 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
             )
             log_message(msg)
             push_message(self.iface, "곡률 해석", msg, level=0, duration=12)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("terrain_analysis_dialog._log_curvature_summary", _exc)
 
     def run_aspect_derivatives(self, dem_layer, dem_source, results, run_id):
         """Model-ready aspect transforms: northness, eastness, TRASP + interpretation.
@@ -1213,8 +1214,8 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
             renderer.setClassificationMax(vmax)
             layer.setRenderer(renderer)
             layer.triggerRepaint()
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("terrain_analysis_dialog._apply_sequential_style", _exc)
 
     def _log_aspect_summary(self, north, east, trasp, nd):
         try:
@@ -1233,5 +1234,5 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
             )
             log_message(msg)
             push_message(self.iface, "사면 파생 해석", msg, level=0, duration=12)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("terrain_analysis_dialog._log_aspect_summary", _exc)

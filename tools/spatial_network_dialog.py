@@ -52,6 +52,7 @@ from qgis.core import (
 from qgis.gui import QgsMapLayerComboBox  # noqa: F401 (needed for .ui custom widget loading)
 
 from .utils import (
+    log_swallowed,
     is_metric_crs,
     log_message,
     push_message,
@@ -118,8 +119,8 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                 if os.path.exists(icon_path):
                     self.setWindowIcon(QIcon(icon_path))
                     break
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("spatial_network_dialog.__init__", _exc)
 
         # Layer filters
         self.cmbSiteLayer.setFilters(QgsMapLayerProxyModel.VectorLayer)
@@ -151,8 +152,8 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
             self.cmbPpaGraph.addItem("Delaunay (삼각망)", PPA_DELAUNAY)
             self.cmbPpaGraph.addItem("Gabriel graph", PPA_GABRIEL)
             self.cmbPpaGraph.addItem("RNG (Relative neighbor graph)", PPA_RNG)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("spatial_network_dialog.__init__", _exc)
 
         # Visibility edge rule (for node metrics/components)
         try:
@@ -202,8 +203,8 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                         self.horizontalLayout_Buttons.addWidget(self.btnHelp)
                     except Exception:
                         pass
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("spatial_network_dialog._setup_help_button", _exc)
 
     def _on_help(self):
         html = """
@@ -365,8 +366,8 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
             except Exception:
                 pass
             _sync_ppa_graph_tooltip()
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("spatial_network_dialog._setup_tooltips", _exc)
 
         try:
             vis_rule_tips = {
@@ -399,8 +400,8 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
             except Exception:
                 pass
             _sync_vis_rule_tooltip()
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("spatial_network_dialog._setup_tooltips", _exc)
 
         try:
             self.chkCreateNodeMetrics.setToolTip(
@@ -453,8 +454,8 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                 self.gridLayout_Ppa.addWidget(self.cmbPpaGraph, row, 1)
                 self.gridLayout_Ppa.addWidget(self.lblPpaMaxDist, row + 1, 0)
                 self.gridLayout_Ppa.addWidget(self.spinPpaMaxDist, row + 1, 1)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("spatial_network_dialog._ensure_extra_widgets", _exc)
 
         # --- SNA metrics group ---
         try:
@@ -496,8 +497,8 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                         self.verticalLayout.addWidget(self.groupSna)
                     except Exception:
                         pass
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("spatial_network_dialog._ensure_extra_widgets", _exc)
 
         # --- Interpretation guide button (kept in the button row to avoid increasing dialog height) ---
         try:
@@ -528,8 +529,8 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                     self.btnInterpretGuide.clicked.connect(self._show_interpretation_guide)
                 except Exception:
                     pass
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("spatial_network_dialog._ensure_extra_widgets", _exc)
 
     def _update_ppa_controls(self):
         """Enable/disable PPA controls depending on the selected graph rule."""
@@ -1105,7 +1106,8 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
             try:
                 pt = p.asPoint()
                 pts.append((float(pt.x()), float(pt.y())))
-            except Exception:
+            except Exception as _exc:
+                log_swallowed("spatial_network_dialog._sample_polygon_boundary_points", _exc)
                 continue
 
         # Deduplicate (rounded to reduce near-duplicates from interpolation).
@@ -1404,7 +1406,8 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
             try:
                 deg[int(a)] += 1
                 deg[int(b)] += 1
-            except Exception:
+            except Exception as _exc:
+                log_swallowed("spatial_network_dialog._degrees", _exc)
                 continue
         return deg
 
@@ -1435,7 +1438,8 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
         for a, b in edges:
             try:
                 union(int(a), int(b))
-            except Exception:
+            except Exception as _exc:
+                log_swallowed("spatial_network_dialog._components", _exc)
                 continue
 
         roots = [find(i) for i in range(int(n))]
@@ -1466,7 +1470,8 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                 dy = float(coords[a, 1] - coords[b, 1])
                 if (dx * dx + dy * dy) <= r2:
                     out.add((int(a), int(b)))
-            except Exception:
+            except Exception as _exc:
+                log_swallowed("spatial_network_dialog._filter_edges_max_dist", _exc)
                 continue
         return out
 
@@ -1566,7 +1571,8 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                     uu, vv = (u, v) if u < v else (v, u)
                     if uu != vv:
                         edges.add((uu, vv))
-            except Exception:
+            except Exception as _exc:
+                log_swallowed("spatial_network_dialog._ppa_delaunay_edges", _exc)
                 continue
 
         return edges
@@ -1662,8 +1668,8 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                     level=1,
                     duration=8,
                 )
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("spatial_network_dialog._add_node_metrics_layer", _exc)
             compute_closeness = False
             compute_betweenness = False
 
@@ -1749,8 +1755,8 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                     ranges.append(QgsRendererRange(lo, hi, sym, label))
                 renderer = QgsGraduatedSymbolRenderer("degree", ranges)
                 layer.setRenderer(renderer)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("spatial_network_dialog._add_node_metrics_layer", _exc)
 
         # Labels (name)
         try:
@@ -1768,8 +1774,8 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
             pal.setFormat(fmt)
             layer.setLabeling(QgsVectorLayerSimpleLabeling(pal))
             layer.setLabelsEnabled(True)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("spatial_network_dialog._add_node_metrics_layer", _exc)
 
         project = QgsProject.instance()
         try:
@@ -1781,8 +1787,8 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                 units="",
                 params={"title": str(title or "")},
             )
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("spatial_network_dialog._add_node_metrics_layer", _exc)
         project.addMapLayer(layer, False)
         try:
             run_group.addLayer(layer)
@@ -1927,8 +1933,8 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                     if res != QtWidgets.QMessageBox.Yes:
                         restore_ui_focus(self)
                         return
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("spatial_network_dialog._run_visibility_network", _exc)
 
             progress = QtWidgets.QProgressDialog(
                 f"가시성 네트워크(LOS) 계산 중... (쌍 {total_pairs}개 검사)",
@@ -2192,7 +2198,8 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                     else:
                         if va and vb:
                             edges_for_metrics.add((int(a), int(b)))
-                except Exception:
+                except Exception as _exc:
+                    log_swallowed("spatial_network_dialog._run_visibility_network", _exc)
                     continue
 
             extra_node_fields = [
@@ -2379,8 +2386,8 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
             else:
                 pal.enabled = False
                 layer.setLabeling(QgsVectorLayerSimpleLabeling(pal))
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("spatial_network_dialog._add_edge_layer", _exc)
 
         try:
             set_archtoolkit_layer_metadata(
@@ -2396,8 +2403,8 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                     "has_ratio": bool(ratio_by_edge is not None),
                 },
             )
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("spatial_network_dialog._add_edge_layer", _exc)
         project.addMapLayer(layer, False)
         run_group.addLayer(layer)
 
@@ -2408,7 +2415,7 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                 if idx != 0:
                     root.removeChildNode(parent_group)
                     root.insertChildNode(0, parent_group)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("spatial_network_dialog._add_edge_layer", _exc)
 
         return layer, run_group, run_id

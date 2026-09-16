@@ -25,7 +25,7 @@ from qgis.core import QgsProject, QgsVectorLayer
 from qgis.PyQt.QtGui import QIcon
 import processing
 import tempfile
-from .utils import new_run_id, push_message, restore_ui_focus, set_archtoolkit_layer_metadata
+from .utils import log_swallowed, new_run_id, push_message, restore_ui_focus, set_archtoolkit_layer_metadata
 from .atomic_output import (
     atomic_publish_file,
     atomic_publish_files,
@@ -213,8 +213,8 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
                 layout.insertWidget(idx, self.btnHelp)
             else:
                 layout.addWidget(self.btnHelp)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("dem_generator_dialog._setup_help_button", _exc)
 
     def _on_help(self):
         try:
@@ -340,8 +340,8 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
                                 cmb.addItem(f.name(), f.name())
                         except Exception:
                             continue
-                except Exception:
-                    pass
+                except Exception as _exc:
+                    log_swallowed("dem_generator_dialog._refresh_kriging_value_fields", _exc)
         finally:
             cmb.blockSignals(False)
     
@@ -465,8 +465,8 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
                     "구 수치지형도는 레이어가 숫자 코드로 들어오는 경우가 있습니다. (예: 7111, 7114, 2121, 2122)",
                     Qt.ToolTipRole,
                 )
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("dem_generator_dialog.setup_layer_presets", _exc)
 
             self.lblLayerPreset = QtWidgets.QLabel("프리셋", self)
             self.cmbLayerPreset = QtWidgets.QComboBox(self)
@@ -536,8 +536,8 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
                 self._selected_codes_by_era[str(self._current_dxf_era)] = set(self.get_selected_layer_codes())
             except Exception:
                 pass
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("dem_generator_dialog.setup_layer_presets", _exc)
 
     def _code_era(self, code: str) -> str:
         code = str(code or "")
@@ -569,7 +569,8 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
             try:
                 show = self._code_era(code) == era
                 self.tblLayers.setRowHidden(int(row), not bool(show))
-            except Exception:
+            except Exception as _exc:
+                log_swallowed("dem_generator_dialog._apply_dxf_era_filter", _exc)
                 continue
 
     def _refresh_layer_preset_items(self):
@@ -932,8 +933,8 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
                         try:
                             progress.setValue(int(pct))
                             progress.setLabelText(str(msg))
-                        except Exception:
-                            pass
+                        except Exception as _exc:
+                            log_swallowed("dem_generator_dialog.progress_cb", _exc)
                         try:
                             QtWidgets.QApplication.processEvents()
                         except Exception:
@@ -995,8 +996,8 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
                                         },
                                     },
                                 )
-                        except Exception:
-                            pass
+                        except Exception as _exc:
+                            log_swallowed("dem_generator_dialog.run_process", _exc)
 
                         try:
                             if variance_path and os.path.exists(variance_path):
@@ -1016,8 +1017,8 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
                                             "kriging": dict(info.get("params") or {}),
                                         },
                                     )
-                        except Exception:
-                            pass
+                        except Exception as _exc:
+                            log_swallowed("dem_generator_dialog.run_process", _exc)
 
                         push_message(self.iface, "완료", "Kriging 보간 완료!", level=0, duration=6)
                         self.accept()
@@ -1083,8 +1084,8 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
                                 "algorithm": str(algorithm or ""),
                             },
                         )
-                except Exception:
-                    pass
+                except Exception as _exc:
+                    log_swallowed("dem_generator_dialog.run_process", _exc)
                 push_message(self.iface, "완료", f"DEM 생성 완료! ({len(selected_layers)}개 레이어 병합)", level=0)
                 self.accept()
             else:

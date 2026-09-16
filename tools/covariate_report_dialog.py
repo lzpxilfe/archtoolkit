@@ -57,6 +57,7 @@ from qgis.core import (
 from .help_dialog import show_help_dialog
 from .aoi_extent import resolve_aoi_extent
 from .utils import (
+    log_swallowed,
     get_archtoolkit_layer_metadata,
     is_categorical_raster_meta,
     log_exception,
@@ -136,8 +137,8 @@ class CovariateReportDialog(QtWidgets.QDialog):
                 if os.path.exists(p):
                     self.setWindowIcon(QIcon(p))
                     break
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("covariate_report_dialog._setup_ui", _exc)
 
         layout = QtWidgets.QVBoxLayout(self)
         header = QtWidgets.QLabel(
@@ -184,8 +185,8 @@ class CovariateReportDialog(QtWidgets.QDialog):
             except Exception:
                 self.cmbAoi.setFilters(QgsMapLayerProxyModel.PolygonLayer)
             self.cmbAoi.setAllowEmptyLayer(True)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("covariate_report_dialog._setup_ui", _exc)
         form.addRow("AOI 제한(선택):", self.cmbAoi)
         self.chkAoiSelected = QtWidgets.QCheckBox("AOI 선택 피처만 사용")
         form.addRow("", self.chkAoiSelected)
