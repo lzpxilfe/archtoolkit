@@ -328,6 +328,15 @@ def is_metric_crs(crs):
     except Exception:
         return False
 
+def move_group_to_top(root, group):
+    if group.parent() != root or root.children().index(group) == 0:
+        return group
+    clone = group.clone()
+    root.insertChildNode(0, clone)
+    root.removeChildNode(group)
+    return clone
+
+
 def restore_ui_focus(dialog):
     """Ensure the dialog is visible and has focus"""
     if dialog is None:

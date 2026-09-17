@@ -64,6 +64,7 @@ from .utils import (
     log_message,
     push_message,
     restore_ui_focus,
+    move_group_to_top,
     set_archtoolkit_layer_metadata,
     transform_point,
 )
@@ -2491,6 +2492,7 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
         parent_group = root.findGroup(parent_name)
         if parent_group is None:
             parent_group = root.insertGroup(0, parent_name)
+        parent_group = move_group_to_top(root, parent_group)
 
         run_id = uuid.uuid4().hex[:6]
         model_tag = _safe_layer_name_fragment(res.model_label or "")
@@ -2760,15 +2762,6 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
             project.addMapLayer(lyr, False)
             run_group.insertLayer(0, lyr)
 
-        try:
-            # Keep results visible even when rasters are added later.
-            if parent_group.parent() == root:
-                idx = root.children().index(parent_group)
-                if idx != 0:
-                    root.removeChildNode(parent_group)
-                    root.insertChildNode(0, parent_group)
-        except Exception as _exc:
-            log_swallowed("cost_surface_dialog._add_result_layers", _exc)
 
     def _tag_cost_surface_layer(self, layer: QgsMapLayer, run_id: str, kind: str):
         """Attach metadata to result layers for later cleanup (e.g., transient rubberbands)."""

@@ -70,6 +70,7 @@ from .utils import (
     log_message,
     push_message,
     restore_ui_focus,
+    move_group_to_top,
     set_archtoolkit_layer_metadata,
     transform_point,
 )
@@ -2290,6 +2291,7 @@ MST/k-NN/Hub 네트워크를 생성합니다.
         parent_group = root.findGroup(parent_name)
         if parent_group is None:
             parent_group = root.insertGroup(0, parent_name)
+        parent_group = move_group_to_top(root, parent_group)
 
         run_id = uuid.uuid4().hex[:6]
         model_tag = _safe_layer_name_fragment(res.model_label or "")
@@ -2610,14 +2612,6 @@ MST/k-NN/Hub 네트워크를 생성합니다.
         run_group.insertLayer(0, line_layer)
         run_group.insertLayer(0, pt_layer)
 
-        try:
-            if parent_group.parent() == root:
-                idx = root.children().index(parent_group)
-                if idx != 0:
-                    root.removeChildNode(parent_group)
-                    root.insertChildNode(0, parent_group)
-        except Exception as _exc:
-            log_swallowed("cost_network_dialog._add_result_layers", _exc)
 
 
 class _ValuePickerDialog(QtWidgets.QDialog):

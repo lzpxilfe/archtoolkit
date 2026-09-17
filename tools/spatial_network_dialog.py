@@ -57,6 +57,7 @@ from .utils import (
     log_message,
     push_message,
     restore_ui_focus,
+    move_group_to_top,
     set_archtoolkit_layer_metadata,
 )
 from .live_log_dialog import ensure_live_log_dialog
@@ -2267,6 +2268,7 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
         parent_group = root.findGroup(parent_name)
         if parent_group is None:
             parent_group = root.insertGroup(0, parent_name)
+        parent_group = move_group_to_top(root, parent_group)
 
         run_id = uuid.uuid4().hex[:6]
         run_group = parent_group.insertGroup(0, f"{layer_name}_{run_id}")
@@ -2407,15 +2409,5 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
             log_swallowed("spatial_network_dialog._add_edge_layer", _exc)
         project.addMapLayer(layer, False)
         run_group.addLayer(layer)
-
-        try:
-            # Keep group near top
-            if parent_group.parent() == root:
-                idx = root.children().index(parent_group)
-                if idx != 0:
-                    root.removeChildNode(parent_group)
-                    root.insertChildNode(0, parent_group)
-        except Exception as _exc:
-            log_swallowed("spatial_network_dialog._add_edge_layer", _exc)
 
         return layer, run_group, run_id
