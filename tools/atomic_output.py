@@ -14,6 +14,7 @@ import shutil
 import stat
 import tempfile
 from pathlib import Path
+from .swallow_log import log_swallowed
 
 
 MARKER_NAME = ".archtoolkit-staging.json"
@@ -42,8 +43,8 @@ def _ensure_private_owner_access(path: Path) -> None:
         current_mode = stat.S_IMODE(path.stat().st_mode)
         private_mode = stat.S_IRWXU | (current_mode & stat.S_ISGID)
         os.chmod(path, private_mode)
-    except (OSError, NotImplementedError):
-        pass
+    except (OSError, NotImplementedError) as _exc:
+        log_swallowed("tools/atomic_output.py:45 (_ensure_private_owner_access)", _exc)
 
 
 def _ensure_marker_owner_access(path: Path) -> None:
@@ -52,10 +53,10 @@ def _ensure_marker_owner_access(path: Path) -> None:
         return
     try:
         os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
-    except (OSError, NotImplementedError):
+    except (OSError, NotImplementedError) as _exc:
         # With an ordinary umask the marker is already owner-readable.  If it
         # is not, a later validation fails closed instead of deleting blindly.
-        pass
+        log_swallowed("tools/atomic_output.py:55 (_ensure_marker_owner_access)", _exc)
 
 
 def _shared_directory_mode(parent_mode: int) -> int:
@@ -105,10 +106,10 @@ def _chmod_without_following(path: Path, mode: int, *, directory: bool) -> None:
                 os.fchmod(descriptor, mode)
         finally:
             os.close(descriptor)
-    except (OSError, NotImplementedError):
+    except (OSError, NotImplementedError) as _exc:
         # Sharing permissions are a convenience.  A chmod failure must not
         # discard a complete bundle or undo its atomic rename.
-        pass
+        log_swallowed("tools/atomic_output.py:108 (_chmod_without_following)", _exc)
 
 
 def _prepare_children_for_publication(staging: Path, parent_mode: int) -> None:
@@ -131,9 +132,13 @@ def _prepare_children_for_publication(staging: Path, parent_mode: int) -> None:
         traversable_names = []
         for name in directory_names:
             child = root_path / name
+            _skip_134 = False
             try:
                 child_mode = os.lstat(child).st_mode
-            except OSError:
+            except OSError as _exc:
+                log_swallowed("tools/atomic_output.py:136 (_prepare_children_for_publication)", _exc)
+                _skip_134 = True
+            if _skip_134:
                 continue
             if stat.S_ISLNK(child_mode) or not stat.S_ISDIR(child_mode):
                 continue
@@ -361,10 +366,10 @@ def publish_staging_dir(path: str, parent_dir: str, final_name: str) -> str:
     os.replace(staging, final_dir)
     try:
         (final_dir / MARKER_NAME).unlink()
-    except Exception:
+    except Exception as _exc:
         # The output bundle is already complete and published.  A stale marker
         # is harmless, while rolling back a successful atomic rename is riskier.
-        pass
+        log_swallowed("tools/atomic_output.py:364 (publish_staging_dir)", _exc)
     # The root stays private through descendant preparation, rename, and marker
     # removal.  Widening it last exposes only a complete published bundle.
     if parent_mode is not None:

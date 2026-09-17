@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import os
 from typing import Any, Optional
+from .utils import log_swallowed
 
 _CONFIG_CACHE: Optional[dict] = None
 _CONFIG_LOADED = False
@@ -97,8 +98,8 @@ def get_ui_language() -> str:
         value = str(QSettings().value(_LANGUAGE_SETTINGS_KEY, "") or "").strip().lower()
         if value in ("ko", "en", "auto"):
             return value
-    except Exception:
-        pass
+    except Exception as _exc:
+        log_swallowed("tools/i18n.py:100 (get_ui_language)", _exc)
     cfg = str(get_plugin_config_value("ui", "language", default="") or "").strip().lower()
     if cfg in ("ko", "en", "auto"):
         return cfg
@@ -114,8 +115,8 @@ def set_ui_language(lang: str) -> None:
         from qgis.PyQt.QtCore import QSettings
 
         QSettings().setValue(_LANGUAGE_SETTINGS_KEY, value)
-    except Exception:
-        pass
+    except Exception as _exc:
+        log_swallowed("tools/i18n.py:117 (set_ui_language)", _exc)
 
 
 def _qgis_locale_is_english() -> bool:

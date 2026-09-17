@@ -161,8 +161,8 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
             self.cmbVisEdgeRule.clear()
             self.cmbVisEdgeRule.addItem("상호 보임만 (Mutual)", VIS_RULE_MUTUAL)
             self.cmbVisEdgeRule.addItem("단방향 포함 (Either direction)", VIS_RULE_EITHER)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/spatial_network_dialog.py:164 (__init__)", _exc)
 
         self._setup_tooltips()
 
@@ -171,16 +171,16 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
         self.cmbSiteLayer.layerChanged.connect(self._on_site_layer_changed)
         try:
             self.cmbPpaGraph.currentIndexChanged.connect(self._update_ppa_controls)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/spatial_network_dialog.py:174 (__init__)", _exc)
         try:
             self.chkVisAllPairs.toggled.connect(self._update_visibility_controls)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/spatial_network_dialog.py:178 (__init__)", _exc)
         try:
             self.chkPolyBoundaryVis.toggled.connect(self._update_visibility_controls)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/spatial_network_dialog.py:182 (__init__)", _exc)
         self.btnRun.clicked.connect(self.run_analysis)
         self.btnClose.clicked.connect(self.reject)
 
@@ -202,8 +202,8 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                 except Exception:
                     try:
                         self.horizontalLayout_Buttons.addWidget(self.btnHelp)
-                    except Exception:
-                        pass
+                    except Exception as _exc:
+                        log_swallowed("tools/spatial_network_dialog.py:205 (_setup_help_button)", _exc)
         except Exception as _exc:
             log_swallowed("spatial_network_dialog._setup_help_button", _exc)
 
@@ -236,8 +236,8 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
         try:
             plugin_dir = os.path.dirname(os.path.dirname(__file__))
             show_help_dialog(parent=self, title="Spatial / Visibility Network 도움말", html=html, plugin_dir=plugin_dir)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/spatial_network_dialog.py:239 (_on_help)", _exc)
 
     def _setup_tooltips(self):
         # Keep the main UI compact; provide detailed explanations via tooltips.
@@ -268,21 +268,21 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
         try:
             self.cmbNetworkType.setItemData(0, tooltip_ppa, Qt.ToolTipRole)
             self.cmbNetworkType.setItemData(1, tooltip_vis, Qt.ToolTipRole)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/spatial_network_dialog.py:271 (_setup_tooltips)", _exc)
 
         # Show the currently selected item's tooltip even when the dropdown is closed.
         def _sync_network_type_tooltip():
             try:
                 tip = self.cmbNetworkType.itemData(self.cmbNetworkType.currentIndex(), Qt.ToolTipRole) or ""
                 self.cmbNetworkType.setToolTip(str(tip))
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("tools/spatial_network_dialog.py:279 (_sync_network_type_tooltip)", _exc)
 
         try:
             self.cmbNetworkType.currentIndexChanged.connect(_sync_network_type_tooltip)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/spatial_network_dialog.py:284 (_setup_tooltips)", _exc)
         _sync_network_type_tooltip()
 
         try:
@@ -291,8 +291,8 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                 "상호 최근접(Mutual)일 때만 간선을 남깁니다.\n"
                 "예) A의 최근접에 B가 포함되고, B의 최근접에도 A가 포함될 때만 연결."
             )
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/spatial_network_dialog.py:294 (_setup_tooltips)", _exc)
 
         try:
             self.cmbPpaGraph.setToolTip(
@@ -305,8 +305,8 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                 "PPA 최대 거리(m) 필터입니다. 0이면 제한 없음.\n"
                 "Threshold 그래프에서는 필수 파라미터(0이면 오류)입니다."
             )
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/spatial_network_dialog.py:308 (_setup_tooltips)", _exc)
 
         try:
             # Per-item tooltip (shown on hover in the dropdown)
@@ -359,13 +359,13 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                 try:
                     tip = self.cmbPpaGraph.itemData(self.cmbPpaGraph.currentIndex(), Qt.ToolTipRole) or ""
                     self.cmbPpaGraph.setToolTip(str(tip))
-                except Exception:
-                    pass
+                except Exception as _exc:
+                    log_swallowed("tools/spatial_network_dialog.py:362 (_sync_ppa_graph_tooltip)", _exc)
 
             try:
                 self.cmbPpaGraph.currentIndexChanged.connect(_sync_ppa_graph_tooltip)
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("tools/spatial_network_dialog.py:367 (_setup_tooltips)", _exc)
             _sync_ppa_graph_tooltip()
         except Exception as _exc:
             log_swallowed("spatial_network_dialog._setup_tooltips", _exc)
@@ -393,13 +393,13 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                 try:
                     tip = self.cmbVisEdgeRule.itemData(self.cmbVisEdgeRule.currentIndex(), Qt.ToolTipRole) or ""
                     self.cmbVisEdgeRule.setToolTip(str(tip))
-                except Exception:
-                    pass
+                except Exception as _exc:
+                    log_swallowed("tools/spatial_network_dialog.py:396 (_sync_vis_rule_tooltip)", _exc)
 
             try:
                 self.cmbVisEdgeRule.currentIndexChanged.connect(_sync_vis_rule_tooltip)
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("tools/spatial_network_dialog.py:401 (_setup_tooltips)", _exc)
             _sync_vis_rule_tooltip()
         except Exception as _exc:
             log_swallowed("spatial_network_dialog._setup_tooltips", _exc)
@@ -416,16 +416,16 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                 "- Mutual: A↔B 모두 보일 때만 연결\n"
                 "- Either: A→B 또는 B→A 중 하나라도 보이면 연결"
             )
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/spatial_network_dialog.py:419 (_setup_tooltips)", _exc)
 
         try:
             self.btnInterpretGuide.setToolTip(
                 "현재 선택한 네트워크(PPA/가시성) 결과를 어떻게 읽어야 하는지\n"
                 "해석 가이드를 작은 창으로 표시합니다."
             )
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/spatial_network_dialog.py:427 (_setup_tooltips)", _exc)
 
     def _ensure_extra_widgets(self):
         """Create optional widgets at runtime (keeps .ui stable and avoids regressions)."""
@@ -496,8 +496,8 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                 except Exception:
                     try:
                         self.verticalLayout.addWidget(self.groupSna)
-                    except Exception:
-                        pass
+                    except Exception as _exc:
+                        log_swallowed("tools/spatial_network_dialog.py:499 (_ensure_extra_widgets)", _exc)
         except Exception as _exc:
             log_swallowed("spatial_network_dialog._ensure_extra_widgets", _exc)
 
@@ -510,8 +510,8 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                     from qgis.core import QgsApplication
 
                     self.btnInterpretGuide.setIcon(QgsApplication.getThemeIcon("/mActionHelpContents.svg"))
-                except Exception:
-                    pass
+                except Exception as _exc:
+                    log_swallowed("tools/spatial_network_dialog.py:513 (_ensure_extra_widgets)", _exc)
 
                 # Insert just before "실행" so the main buttons stay at the right.
                 try:
@@ -523,13 +523,13 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                 except Exception:
                     try:
                         self.horizontalLayout_Buttons.addWidget(self.btnInterpretGuide)
-                    except Exception:
-                        pass
+                    except Exception as _exc:
+                        log_swallowed("tools/spatial_network_dialog.py:526 (_ensure_extra_widgets)", _exc)
 
                 try:
                     self.btnInterpretGuide.clicked.connect(self._show_interpretation_guide)
-                except Exception:
-                    pass
+                except Exception as _exc:
+                    log_swallowed("tools/spatial_network_dialog.py:531 (_ensure_extra_widgets)", _exc)
         except Exception as _exc:
             log_swallowed("spatial_network_dialog._ensure_extra_widgets", _exc)
 
@@ -547,18 +547,18 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
         try:
             self.spinPpaK.setEnabled(use_knn)
             self.lblPpaK.setEnabled(use_knn)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/spatial_network_dialog.py:550 (_update_ppa_controls)", _exc)
         try:
             self.chkPpaMutualOnly.setEnabled(use_knn)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/spatial_network_dialog.py:554 (_update_ppa_controls)", _exc)
 
         try:
             self.spinPpaMaxDist.setEnabled((not use_knn))
             self.lblPpaMaxDist.setEnabled((not use_knn))
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/spatial_network_dialog.py:560 (_update_ppa_controls)", _exc)
 
         # If threshold mode is selected, make it visually clear that max distance is required.
         try:
@@ -566,8 +566,8 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                 self.spinPpaMaxDist.setStyleSheet("font-weight: bold;")
             else:
                 self.spinPpaMaxDist.setStyleSheet("")
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/spatial_network_dialog.py:569 (_update_ppa_controls)", _exc)
 
         try:
             self.cmbPolyPointMode.setToolTip(
@@ -575,8 +575,8 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                 "- Point on surface: 폴리곤 내부 보장(권장)\n"
                 "- Centroid: 중심점(폴리곤이 오목하면 밖으로 나갈 수 있음)"
             )
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/spatial_network_dialog.py:578 (_update_ppa_controls)", _exc)
 
         try:
             self.spinObsHeight.setToolTip("관측자 높이(m): DEM 지표면 위 추가 높이.")
@@ -603,8 +603,8 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
             )
             self.spinPolyBoundaryStep.setToolTip("폴리곤 경계에서 샘플 점을 뽑는 간격(m)입니다.")
             self.spinPolyMaxBoundaryPts.setToolTip("폴리곤 1개당 경계 샘플 점의 최대 개수(속도 제한)입니다.")
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/spatial_network_dialog.py:606 (_update_ppa_controls)", _exc)
 
     def _interpretation_guide_html(self) -> str:
         mode = None
@@ -782,8 +782,8 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                         self._interpretGuideDialog.raise_()
                         self._interpretGuideDialog.activateWindow()
                         return
-                except Exception:
-                    pass
+                except Exception as _exc:
+                    log_swallowed("tools/spatial_network_dialog.py:785 (_show_interpretation_guide)", _exc)
 
             dlg = QtWidgets.QDialog(self)
             dlg.setAttribute(Qt.WA_DeleteOnClose, True)
@@ -811,8 +811,8 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
             def _copy():
                 try:
                     QtWidgets.QApplication.clipboard().setText(browser.toPlainText())
-                except Exception:
-                    pass
+                except Exception as _exc:
+                    log_swallowed("tools/spatial_network_dialog.py:814 (_copy)", _exc)
 
             btn_copy.clicked.connect(_copy)
             btn_close.clicked.connect(dlg.close)
@@ -825,13 +825,13 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                 try:
                     self._interpretGuideDialog = None
                     self._interpretGuideBrowser = None
-                except Exception:
-                    pass
+                except Exception as _exc:
+                    log_swallowed("tools/spatial_network_dialog.py:828 (_clear_refs)", _exc)
 
             try:
                 dlg.destroyed.connect(lambda _=None: _clear_refs())
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("tools/spatial_network_dialog.py:833 (_show_interpretation_guide)", _exc)
 
             dlg.show()
         except Exception as e:
@@ -844,23 +844,23 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
 
         try:
             self.groupPpa.setVisible(is_ppa)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/spatial_network_dialog.py:847 (_on_mode_changed)", _exc)
         try:
             self.groupVisibility.setVisible(is_vis)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/spatial_network_dialog.py:851 (_on_mode_changed)", _exc)
         try:
             # Visibility edge rule is only meaningful for LOS.
             self.lblVisEdgeRule.setEnabled(is_vis)
             self.cmbVisEdgeRule.setEnabled(is_vis)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/spatial_network_dialog.py:857 (_on_mode_changed)", _exc)
 
         try:
             self._update_ppa_controls()
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/spatial_network_dialog.py:862 (_on_mode_changed)", _exc)
         self._update_visibility_controls()
 
     def _update_visibility_controls(self):
@@ -895,8 +895,8 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
         try:
             self.spinCandidateK.setEnabled(is_vis and (not all_pairs))
             self.lblCandidateK.setEnabled(is_vis and (not all_pairs))
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/spatial_network_dialog.py:898 (_update_visibility_controls)", _exc)
 
         show_poly = bool(is_vis and is_polygon_layer)
         poly_enabled = False
@@ -908,14 +908,14 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
         for w in ("chkPolyBoundaryVis",):
             try:
                 getattr(self, w).setVisible(show_poly)
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("tools/spatial_network_dialog.py:911 (_update_visibility_controls)", _exc)
 
         for w in ("lblPolyBoundaryStep", "spinPolyBoundaryStep", "lblPolyMaxPts", "spinPolyMaxBoundaryPts"):
             try:
                 getattr(self, w).setVisible(show_poly and poly_enabled)
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("tools/spatial_network_dialog.py:917 (_update_visibility_controls)", _exc)
 
     def _on_site_layer_changed(self, layer):
         # Populate name fields (string-ish fields only)
@@ -926,16 +926,20 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
 
             if layer and layer.isValid():
                 for f in layer.fields():
+                    _skip_929 = False
                     try:
                         if f.type() in (QVariant.String, QVariant.Int, QVariant.LongLong):
                             self.cmbNameField.addItem(f.name(), f.name())
-                    except Exception:
+                    except Exception as _exc:
+                        log_swallowed("tools/spatial_network_dialog.py:932 (_on_site_layer_changed)", _exc)
+                        _skip_929 = True
+                    if _skip_929:
                         continue
         finally:
             try:
                 self.cmbNameField.blockSignals(False)
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("tools/spatial_network_dialog.py:937 (_on_site_layer_changed)", _exc)
 
         self._update_visibility_controls()
 
@@ -1016,8 +1020,8 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                         v = ft[name_field]
                         if v is not None and str(v).strip() != "":
                             name = str(v)
-                    except Exception:
-                        pass
+                    except Exception as _exc:
+                        log_swallowed("tools/spatial_network_dialog.py:1019 (_collect_nodes)", _exc)
 
                 samples: Tuple[Tuple[float, float], ...] = ((float(pt_t.x()), float(pt_t.y())),)
                 if is_polygon and collect_polygon_boundary:
@@ -1104,11 +1108,15 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                 p = None
             if p is None or p.isEmpty():
                 continue
+            _skip_1107 = False
             try:
                 pt = p.asPoint()
                 pts.append((float(pt.x()), float(pt.y())))
             except Exception as _exc:
                 log_swallowed("spatial_network_dialog._sample_polygon_boundary_points", _exc)
+                log_swallowed("tools/spatial_network_dialog.py:1110 (_sample_polygon_boundary_points)", _exc)
+                _skip_1107 = True
+            if _skip_1107:
                 continue
 
         # Deduplicate (rounded to reduce near-duplicates from interpolation).
@@ -1404,11 +1412,15 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
     def _degrees(self, n: int, edges: Set[Tuple[int, int]]) -> List[int]:
         deg = [0] * int(n)
         for a, b in edges:
+            _skip_1407 = False
             try:
                 deg[int(a)] += 1
                 deg[int(b)] += 1
             except Exception as _exc:
                 log_swallowed("spatial_network_dialog._degrees", _exc)
+                log_swallowed("tools/spatial_network_dialog.py:1410 (_degrees)", _exc)
+                _skip_1407 = True
+            if _skip_1407:
                 continue
         return deg
 
@@ -1437,10 +1449,14 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                 rank[ra] += 1
 
         for a, b in edges:
+            _skip_1440 = False
             try:
                 union(int(a), int(b))
             except Exception as _exc:
                 log_swallowed("spatial_network_dialog._components", _exc)
+                log_swallowed("tools/spatial_network_dialog.py:1442 (_components)", _exc)
+                _skip_1440 = True
+            if _skip_1440:
                 continue
 
         roots = [find(i) for i in range(int(n))]
@@ -1466,6 +1482,7 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
         r2 = float(max_dist_m) ** 2
         out: Set[Tuple[int, int]] = set()
         for a, b in edges:
+            _skip_1469 = False
             try:
                 dx = float(coords[a, 0] - coords[b, 0])
                 dy = float(coords[a, 1] - coords[b, 1])
@@ -1473,6 +1490,9 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                     out.add((int(a), int(b)))
             except Exception as _exc:
                 log_swallowed("spatial_network_dialog._filter_edges_max_dist", _exc)
+                log_swallowed("tools/spatial_network_dialog.py:1474 (_filter_edges_max_dist)", _exc)
+                _skip_1469 = True
+            if _skip_1469:
                 continue
         return out
 
@@ -1544,6 +1564,7 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
 
         edges: Set[Tuple[int, int]] = set()
         for ft in tri_layer.getFeatures():
+            _skip_1547 = False
             try:
                 geom = ft.geometry()
                 if geom is None or geom.isEmpty():
@@ -1574,6 +1595,9 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                         edges.add((uu, vv))
             except Exception as _exc:
                 log_swallowed("spatial_network_dialog._ppa_delaunay_edges", _exc)
+                log_swallowed("tools/spatial_network_dialog.py:1575 (_ppa_delaunay_edges)", _exc)
+                _skip_1547 = True
+            if _skip_1547:
                 continue
 
         return edges
@@ -1723,8 +1747,8 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                 for k, v in (extra_values_by_node.get(i) or {}).items():
                     try:
                         f[str(k)] = v
-                    except Exception:
-                        pass
+                    except Exception as _exc:
+                        log_swallowed("tools/spatial_network_dialog.py:1726 (_add_node_metrics_layer)", _exc)
             feats.append(f)
 
         pr.addFeatures(feats)
@@ -2185,6 +2209,7 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
             out_deg = [0] * int(n)
             in_deg = [0] * int(n)
             for (a, b), ex in extra_by_edge.items():
+                _skip_2188 = False
                 try:
                     va = int(ex.get("vis_ab", 0))
                     vb = int(ex.get("vis_ba", 0))
@@ -2201,6 +2226,9 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                             edges_for_metrics.add((int(a), int(b)))
                 except Exception as _exc:
                     log_swallowed("spatial_network_dialog._run_visibility_network", _exc)
+                    log_swallowed("tools/spatial_network_dialog.py:2202 (_run_visibility_network)", _exc)
+                    _skip_2188 = True
+                if _skip_2188:
                     continue
 
             extra_node_fields = [
@@ -2324,8 +2352,8 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                 for k, v in (extra_values_by_edge.get((a, b)) or {}).items():
                     try:
                         f[str(k)] = v
-                    except Exception:
-                        pass
+                    except Exception as _exc:
+                        log_swallowed("tools/spatial_network_dialog.py:2327 (_add_edge_layer)", _exc)
             feats.append(f)
         pr.addFeatures(feats)
         layer.updateExtents()
@@ -2345,8 +2373,8 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                     try:
                         ls = "dash" if dashed else "dot"
                         sym.symbolLayer(0).setPenStyle(Qt.DashLine if ls == "dash" else Qt.DotLine)
-                    except Exception:
-                        pass
+                    except Exception as _exc:
+                        log_swallowed("tools/spatial_network_dialog.py:2348 (_mk_sym)", _exc)
                 return sym
 
             # Backward compatible labels (older builds used "보임/안보임").

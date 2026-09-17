@@ -39,8 +39,8 @@ def transform_point(point, src_crs, dest_crs):
     except Exception as e:
         try:
             log_message(f"CRS transform failed (fallback to original point): {e}", level=Qgis.Warning)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/utils.py:42 (transform_point)", _exc)
         return point
 
 def is_null_value(value) -> bool:
@@ -56,8 +56,8 @@ def is_null_value(value) -> bool:
     try:
         if hasattr(value, "isNull") and value.isNull():
             return True
-    except Exception:
-        pass
+    except Exception as _exc:
+        log_swallowed("tools/utils.py:59 (is_null_value)", _exc)
     try:
         from qgis.core import NULL
         return value == NULL
@@ -87,8 +87,8 @@ def cleanup_files(file_paths):
         if path and os.path.exists(path):
             try:
                 os.remove(path)
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("tools/utils.py:90 (cleanup_files)", _exc)
 
 def _log_file_path():
     """Return a writable log file path (best-effort)."""
@@ -124,7 +124,7 @@ def _write_log_line(level_name: str, message: str):
         with open(_log_file_path(), "a", encoding="utf-8") as f:
             f.write(line)
     except Exception:
-        pass
+        return
 
 
 def _is_main_thread():
@@ -146,7 +146,7 @@ def _queue_ui_log(message: str, level=Qgis.Info):
         _ui_log_queue.put_nowait((str(message), level))
     except Exception:
         # full or unavailable -> drop
-        pass
+        return
 
 
 def _flush_ui_log_queue(max_items: int = 200):
@@ -162,8 +162,8 @@ def _flush_ui_log_queue(max_items: int = 200):
                 break
             try:
                 QgsMessageLog.logMessage(str(msg), "ArchToolkit", level)
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("tools/utils.py:165 (_flush_ui_log_queue)", _exc)
 
             # Also forward to any in-plugin live log UIs.
             try:
@@ -173,11 +173,11 @@ def _flush_ui_log_queue(max_items: int = 200):
             for cb in listeners:
                 try:
                     cb(str(msg), level)
-                except Exception:
-                    pass
+                except Exception as _exc:
+                    log_swallowed("tools/utils.py:176 (_flush_ui_log_queue)", _exc)
             n += 1
-    except Exception:
-        pass
+    except Exception as _exc:
+        log_swallowed("tools/utils.py:179 (_flush_ui_log_queue)", _exc)
 
 
 def start_ui_log_pump(interval_ms: int = 200):
@@ -211,12 +211,12 @@ def stop_ui_log_pump():
         if _ui_log_timer is not None:
             try:
                 _ui_log_timer.stop()
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("tools/utils.py:214 (stop_ui_log_pump)", _exc)
             try:
                 _ui_log_timer.deleteLater()
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("tools/utils.py:218 (stop_ui_log_pump)", _exc)
     finally:
         _ui_log_timer = None
 
@@ -225,16 +225,16 @@ def add_ui_log_listener(callback):
     """Register a main-thread callback (msg: str, level: Qgis) for real-time log UIs."""
     try:
         _ui_log_listeners.add(callback)
-    except Exception:
-        pass
+    except Exception as _exc:
+        log_swallowed("tools/utils.py:228 (add_ui_log_listener)", _exc)
 
 
 def remove_ui_log_listener(callback):
     """Unregister a previously-registered UI log callback."""
     try:
         _ui_log_listeners.discard(callback)
-    except Exception:
-        pass
+    except Exception as _exc:
+        log_swallowed("tools/utils.py:236 (remove_ui_log_listener)", _exc)
 
 
 def ensure_log_panel_visible(iface, show_hint: bool = True):
@@ -245,8 +245,8 @@ def ensure_log_panel_visible(iface, show_hint: bool = True):
     """
     try:
         start_ui_log_pump()
-    except Exception:
-        pass
+    except Exception as _exc:
+        log_swallowed("tools/utils.py:248 (ensure_log_panel_visible)", _exc)
 
 
 def log_message(message, level=Qgis.Info):
@@ -258,8 +258,8 @@ def log_message(message, level=Qgis.Info):
         elif level == Qgis.Critical:
             level_name = "ERROR"
         _write_log_line(level_name, str(message))
-    except Exception:
-        pass
+    except Exception as _exc:
+        log_swallowed("tools/utils.py:261 (log_message)", _exc)
 
     # QgsMessageLog may not be safe off the main thread on some setups.
     if not _is_main_thread():
@@ -279,11 +279,11 @@ def log_message(message, level=Qgis.Info):
         for cb in listeners:
             try:
                 cb(str(message), level)
-            except Exception:
-                pass
-    except Exception:
+            except Exception as _exc:
+                log_swallowed("tools/utils.py:282 (log_message)", _exc)
+    except Exception as _exc:
         # Never crash due to logging
-        pass
+        log_swallowed("tools/utils.py:284 (log_message)", _exc)
 
 
 def log_swallowed(context: str, exc: Exception = None) -> None:
@@ -304,7 +304,7 @@ def log_swallowed(context: str, exc: Exception = None) -> None:
         _write_log_line("SWALLOWED", f"[swallowed] {context}: {exc!r}")
         _queue_ui_log(f"[swallowed] {context}: {exc}", Qgis.Info)
     except Exception:
-        pass
+        return
 
 
 def log_exception(context: str, exc: Exception = None, level=Qgis.Critical):
@@ -318,8 +318,8 @@ def log_exception(context: str, exc: Exception = None, level=Qgis.Critical):
         log_message(msg, level=level)
         if tb and "Traceback" in tb:
             log_message(tb, level=level)
-    except Exception:
-        pass
+    except Exception as _exc:
+        log_swallowed("tools/utils.py:321 (log_exception)", _exc)
 
 def is_metric_crs(crs):
     """Return True if CRS map units are meters (recommended for distance-based tools)."""
@@ -343,16 +343,16 @@ def restore_ui_focus(dialog):
         return
     try:
         dialog.show()
-    except Exception:
-        pass
+    except Exception as _exc:
+        log_swallowed("tools/utils.py:346 (restore_ui_focus)", _exc)
     try:
         dialog.raise_()
-    except Exception:
-        pass
+    except Exception as _exc:
+        log_swallowed("tools/utils.py:350 (restore_ui_focus)", _exc)
     try:
         dialog.activateWindow()
-    except Exception:
-        pass
+    except Exception as _exc:
+        log_swallowed("tools/utils.py:354 (restore_ui_focus)", _exc)
 
 def push_message(iface, title, text, level=0, duration=3):
     """Helper to push message to QGIS message bar"""
@@ -363,8 +363,8 @@ def push_message(iface, title, text, level=0, duration=3):
         elif level == 2:
             lvl = Qgis.Critical
         log_message(f"{title}: {text}", level=lvl)
-    except Exception:
-        pass
+    except Exception as _exc:
+        log_swallowed("tools/utils.py:366 (push_message)", _exc)
     try:
         if iface is None:
             return
@@ -376,8 +376,8 @@ def push_message(iface, title, text, level=0, duration=3):
         # Never crash due to message bar errors
         try:
             log_message(f"(messageBar failed) {title}: {text}", level=Qgis.Warning)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/utils.py:379 (push_message)", _exc)
 
 
 def new_run_id(prefix: str = "run") -> str:
@@ -427,11 +427,11 @@ def set_archtoolkit_layer_metadata(
                     "archtoolkit/params_json",
                     json.dumps(params, ensure_ascii=False, separators=(",", ":")),
                 )
-            except Exception:
-                pass
-    except Exception:
+            except Exception as _exc:
+                log_swallowed("tools/utils.py:430 (set_archtoolkit_layer_metadata)", _exc)
+    except Exception as _exc:
         # Never crash due to metadata tagging.
-        pass
+        log_swallowed("tools/utils.py:432 (set_archtoolkit_layer_metadata)", _exc)
 
 
 def get_archtoolkit_layer_metadata(layer) -> dict:

@@ -11,6 +11,7 @@ imported lazily inside the function so importing this module never requires
 from __future__ import annotations
 
 import os
+from .swallow_log import log_swallowed
 
 
 def write_single_band_geotiff(
@@ -71,8 +72,8 @@ def write_single_band_geotiff(
         if not ok and os.path.exists(str(out_path)):
             try:
                 os.remove(str(out_path))
-            except OSError:
-                pass
+            except OSError as _exc:
+                log_swallowed("tools/raster_io.py:74 (write_single_band_geotiff)", _exc)
     return True
 
 

@@ -281,6 +281,7 @@ class KigamZipProcessor:
             in_use = {os.path.normcase(os.path.abspath(p)) for p in self._extract_dirs_in_use()}
             for name in os.listdir(self.extract_root):
                 path = os.path.join(self.extract_root, name)
+                _skip_284 = False
                 try:
                     if os.path.normcase(os.path.abspath(path)) in in_use:
                         self._touch_extract_dir(path)
@@ -289,6 +290,9 @@ class KigamZipProcessor:
                         shutil.rmtree(path, ignore_errors=True)
                 except Exception as _exc:
                     log_swallowed("geology_zip_dialog._cleanup_old_extracts", _exc)
+                    log_swallowed("tools/geology_zip_dialog.py:290 (_cleanup_old_extracts)", _exc)
+                    _skip_284 = True
+                if _skip_284:
                     continue
         except Exception as _exc:
             log_swallowed("geology_zip_dialog._cleanup_old_extracts", _exc)
@@ -300,6 +304,7 @@ class KigamZipProcessor:
         try:
             root = os.path.normcase(os.path.abspath(self.extract_root))
             for lyr in QgsProject.instance().mapLayers().values():
+                _skip_303 = False
                 try:
                     src = str(lyr.source() or "").split("|", 1)[0]
                     src = os.path.normcase(os.path.abspath(src))
@@ -309,6 +314,9 @@ class KigamZipProcessor:
                         used.add(os.path.join(root, top))
                 except Exception as _exc:
                     log_swallowed("geology_zip_dialog._extract_dirs_in_use", _exc)
+                    log_swallowed("tools/geology_zip_dialog.py:310 (_extract_dirs_in_use)", _exc)
+                    _skip_303 = True
+                if _skip_303:
                     continue
         except Exception as _exc:
             log_swallowed("geology_zip_dialog._extract_dirs_in_use", _exc)
@@ -319,8 +327,8 @@ class KigamZipProcessor:
         """Refresh mtime so _cleanup_old_extracts treats the folder as in use."""
         try:
             os.utime(path, None)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/geology_zip_dialog.py:322 (_touch_extract_dir)", _exc)
 
     @staticmethod
     def _safe_extract_basename(zip_path: str) -> str:
@@ -410,8 +418,8 @@ class KigamZipProcessor:
                 layer = QgsVectorLayer(shp_path, layer_name, "ogr")
                 try:
                     layer.setProviderEncoding("cp949")
-                except Exception:
-                    pass
+                except Exception as _exc:
+                    log_swallowed("tools/geology_zip_dialog.py:413 (process_zip)", _exc)
                 if not layer.isValid():
                     log_message(f"KIGAM 레이어 로드 실패: {shp_path}", level=Qgis.Warning)
                     continue
@@ -428,8 +436,8 @@ class KigamZipProcessor:
                 if apply_labels and ("Litho" in layer_name or "LITHO" in layer_name):
                     try:
                         self.apply_labeling(layer, font_family, font_size)
-                    except Exception:
-                        pass
+                    except Exception as _exc:
+                        log_swallowed("tools/geology_zip_dialog.py:431 (process_zip)", _exc)
 
                 try:
                     set_archtoolkit_layer_metadata(
@@ -588,8 +596,8 @@ class KigamZipProcessor:
             if _hide_by_default(layer):
                 try:
                     node.setItemVisibilityChecked(False)
-                except Exception:
-                    pass
+                except Exception as _exc:
+                    log_swallowed("tools/geology_zip_dialog.py:591 (organize_layers)", _exc)
         run_group.setExpanded(True)
         parent.setExpanded(True)
 
@@ -604,8 +612,8 @@ class GeologyZipDialog(QtWidgets.QDialog):
             icon_path = os.path.join(plugin_dir, "geochem.png")
             if os.path.exists(icon_path):
                 self.setWindowIcon(QIcon(icon_path))
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/geology_zip_dialog.py:607 (__init__)", _exc)
 
         layout = QtWidgets.QVBoxLayout(self)
 
@@ -823,25 +831,30 @@ class GeologyZipDialog(QtWidgets.QDialog):
         try:
             kigam_only = bool(self.chkKigamOnly.isChecked())
             litho_only = bool(self.chkLithoOnly.isChecked())
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/geology_zip_dialog.py:826 (refresh_layer_list)", _exc)
 
         scored = []
         for layer in layers:
             if not isinstance(layer, QgsVectorLayer):
                 continue
             if kigam_only:
+                _skip_834 = False
                 try:
                     tool_id = str(layer.customProperty("archtoolkit/tool_id", "") or "").strip()
                     if tool_id != "kigam_zip":
                         continue
-                except Exception:
+                except Exception as _exc:
+                    log_swallowed("tools/geology_zip_dialog.py:838 (refresh_layer_list)", _exc)
+                    _skip_834 = True
+                if _skip_834:
                     continue
 
             geom = layer.geometryType()
             if litho_only:
                 if geom != QgsWkbTypes.PolygonGeometry:
                     continue
+                _skip_845 = False
                 try:
                     lname = str(layer.name() or "").lower()
                     fields_up = {str(f.name() or "").upper() for f in layer.fields()}
@@ -852,6 +865,9 @@ class GeologyZipDialog(QtWidgets.QDialog):
                         continue
                 except Exception as _exc:
                     log_swallowed("geology_zip_dialog.refresh_layer_list", _exc)
+                    log_swallowed("tools/geology_zip_dialog.py:853 (refresh_layer_list)", _exc)
+                    _skip_845 = True
+                if _skip_845:
                     continue
 
             region = self._kigam_region_for_layer(layer)
@@ -1029,8 +1045,8 @@ class GeologyZipDialog(QtWidgets.QDialog):
         try:
             if target_crs is not None and target_crs.isValid():
                 out_layer.setCrs(target_crs)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/geology_zip_dialog.py:1032 (_build_numeric_merge_layer)", _exc)
 
         pr = out_layer.dataProvider()
         pr.addAttributes([QgsField("ATK_VAL", QVariant.Int)])
@@ -1049,15 +1065,20 @@ class GeologyZipDialog(QtWidgets.QDialog):
                 continue
             transform = None
             if lyr.crs() != target_crs:
+                _skip_1052 = False
                 try:
                     transform = QgsCoordinateTransform(lyr.crs(), target_crs, QgsProject.instance())
-                except Exception:
+                except Exception as _exc:
                     # Can't reproject this layer — skip it rather than merge its
                     # features untransformed (mixed CRS → misplaced polygons).
                     log_message(f"좌표계 변환 실패로 레이어 제외: {lyr.name()}", level=Qgis.Warning)
+                    log_swallowed("tools/geology_zip_dialog.py:1054 (_build_numeric_merge_layer)", _exc)
+                    _skip_1052 = True
+                if _skip_1052:
                     continue
 
             for f in lyr.getFeatures():
+                _skip_1061 = False
                 try:
                     geom = f.geometry()
                     if geom is None or geom.isEmpty():
@@ -1070,10 +1091,14 @@ class GeologyZipDialog(QtWidgets.QDialog):
                     if val is None or str(val).strip() == "":
                         continue
                     if numeric:
+                        _skip_1073 = False
                         try:
                             out_int = int(float(val))
                         except Exception as _exc:
                             log_swallowed("geology_zip_dialog._build_numeric_merge_layer", _exc)
+                            log_swallowed("tools/geology_zip_dialog.py:1075 (_build_numeric_merge_layer)", _exc)
+                            _skip_1073 = True
+                        if _skip_1073:
                             continue
                         code = str(out_int)
                         mapping[code] = out_int
@@ -1082,8 +1107,8 @@ class GeologyZipDialog(QtWidgets.QDialog):
                                 lbl = f[label_field]
                                 if lbl is not None and str(lbl).strip():
                                     labels[code] = str(lbl).strip()
-                            except Exception:
-                                pass
+                            except Exception as _exc:
+                                log_swallowed("tools/geology_zip_dialog.py:1085 (_build_numeric_merge_layer)", _exc)
                         out_val = float(out_int)
                     else:
                         key = str(val)
@@ -1106,6 +1131,9 @@ class GeologyZipDialog(QtWidgets.QDialog):
                     pr.addFeatures([nf])
                 except Exception as _exc:
                     log_swallowed("geology_zip_dialog._build_numeric_merge_layer", _exc)
+                    log_swallowed("tools/geology_zip_dialog.py:1107 (_build_numeric_merge_layer)", _exc)
+                    _skip_1061 = True
+                if _skip_1061:
                     continue
 
         out_layer.updateExtents()
@@ -1322,8 +1350,8 @@ class GeologyZipDialog(QtWidgets.QDialog):
         # If we get here, we couldn't verify a raster file on disk.
         try:
             log_message(f"KIGAM rasterize raw result={result}", level=Qgis.Warning)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/geology_zip_dialog.py:1325 (_rasterize_layer)", _exc)
         raise RuntimeError("래스터 파일이 생성되지 않았습니다. 출력 경로/권한/로그를 확인하세요.")
 
     def _run_rasterize(self):
@@ -1541,5 +1569,5 @@ KIGAM 1:50,000 지질도 ZIP(도엽)을 바로 로드하고, 지질 코드 기�
         try:
             plugin_dir = os.path.dirname(os.path.dirname(__file__))
             show_help_dialog(parent=self, title="지질도 ZIP/MaxEnt 도움말", html=html, plugin_dir=plugin_dir)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/geology_zip_dialog.py:1544 (_on_help)", _exc)

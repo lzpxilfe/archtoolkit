@@ -242,8 +242,8 @@ class CostNetworkWorker(QgsTask):
         # Avoid calling QgsTask.isCanceled() from worker thread (can be unstable on some setups).
         try:
             self._cancel_event.set()
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/cost_network_dialog.py:245 (cancel)", _exc)
         try:
             return super().cancel()
         except Exception:
@@ -1062,8 +1062,8 @@ class CostNetworkWorker(QgsTask):
 
         try:
             self.setProgress(100.0)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/cost_network_dialog.py:1065 (_run_impl)", _exc)
         log_message(f"CostNetwork: done ({msg})", level=Qgis.Info)
 
         return NetworkTaskResult(
@@ -1087,8 +1087,8 @@ class CostNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
 
         try:
             self._wrap_in_scroll_area()
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/cost_network_dialog.py:1090 (__init__)", _exc)
 
         # Make DEM selector a bit more compact.
         try:
@@ -1096,14 +1096,14 @@ class CostNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
             if dem_layout is not None:
                 dem_layout.setContentsMargins(6, 2, 6, 2)
                 dem_layout.setSpacing(2)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/cost_network_dialog.py:1099 (__init__)", _exc)
 
         # Social Network Analysis (SNA) options (compact; details via tooltips).
         try:
             self._init_sna_controls()
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/cost_network_dialog.py:1105 (__init__)", _exc)
 
         try:
             plugin_dir = os.path.dirname(os.path.dirname(__file__))
@@ -1206,8 +1206,8 @@ class CostNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
 
         try:
             self.btnPickHubValues.clicked.connect(self._pick_hub_values)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/cost_network_dialog.py:1209 (__init__)", _exc)
 
         # --- Interpretation guide button (kept in the button row to avoid increasing dialog height) ---
         try:
@@ -1216,8 +1216,8 @@ class CostNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                 self.btnInterpretGuide.setObjectName("btnInterpretGuide")
                 try:
                     self.btnInterpretGuide.setIcon(QgsApplication.getThemeIcon("/mActionHelpContents.svg"))
-                except Exception:
-                    pass
+                except Exception as _exc:
+                    log_swallowed("tools/cost_network_dialog.py:1219 (__init__)", _exc)
 
                 # Insert just before "분석 실행".
                 try:
@@ -1229,13 +1229,13 @@ class CostNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                 except Exception:
                     try:
                         self.horizontalLayout_Buttons.addWidget(self.btnInterpretGuide)
-                    except Exception:
-                        pass
+                    except Exception as _exc:
+                        log_swallowed("tools/cost_network_dialog.py:1232 (__init__)", _exc)
 
                 try:
                     self.btnInterpretGuide.clicked.connect(self._show_interpretation_guide)
-                except Exception:
-                    pass
+                except Exception as _exc:
+                    log_swallowed("tools/cost_network_dialog.py:1237 (__init__)", _exc)
         except Exception as _exc:
             log_swallowed("cost_network_dialog.__init__", _exc)
 
@@ -1244,8 +1244,8 @@ class CostNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
 
         try:
             self._apply_help_texts()
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/cost_network_dialog.py:1247 (__init__)", _exc)
 
     def _setup_help_button(self):
         try:
@@ -1262,8 +1262,8 @@ class CostNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                 except Exception:
                     try:
                         self.horizontalLayout_Buttons.addWidget(self.btnHelp)
-                    except Exception:
-                        pass
+                    except Exception as _exc:
+                        log_swallowed("tools/cost_network_dialog.py:1265 (_setup_help_button)", _exc)
         except Exception as _exc:
             log_swallowed("cost_network_dialog._setup_help_button", _exc)
 
@@ -1298,8 +1298,8 @@ MST/k-NN/Hub 네트워크를 생성합니다.
         try:
             plugin_dir = os.path.dirname(os.path.dirname(__file__))
             show_help_dialog(parent=self, title="Least-cost Network 도움말", html=html, plugin_dir=plugin_dir)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/cost_network_dialog.py:1301 (_on_help)", _exc)
 
     def reject(self):
         self._cleanup_for_close()
@@ -1315,10 +1315,10 @@ MST/k-NN/Hub 네트워크를 생성합니다.
             if self._task_running and self._task is not None:
                 try:
                     self._task.cancel()
-                except Exception:
-                    pass
-        except Exception:
-            pass
+                except Exception as _exc:
+                    log_swallowed("tools/cost_network_dialog.py:1318 (_cleanup_for_close)", _exc)
+        except Exception as _exc:
+            log_swallowed("tools/cost_network_dialog.py:1320 (_cleanup_for_close)", _exc)
         self._task_running = False
         self._task = None
 
@@ -1350,8 +1350,8 @@ MST/k-NN/Hub 네트워크를 생성합니다.
         for w in content:
             try:
                 layout.removeWidget(w)
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("tools/cost_network_dialog.py:1353 (_wrap_in_scroll_area)", _exc)
             container_layout.addWidget(w)
 
         container_layout.addStretch(1)
@@ -1427,8 +1427,8 @@ MST/k-NN/Hub 네트워크를 생성합니다.
 
         try:
             self.chkSnaEnable.toggled.connect(_sync_enabled)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/cost_network_dialog.py:1430 (_init_sna_controls)", _exc)
         _sync_enabled(self.chkSnaEnable.isChecked())
 
         # Place it near the bottom of the Network group, just above the long help text if present.
@@ -1467,8 +1467,8 @@ MST/k-NN/Hub 네트워크를 생성합니다.
             ss = self.lblDescription.styleSheet() or ""
             if "font-size" not in ss:
                 self.lblDescription.setStyleSheet(ss + " font-size: 8pt;")
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/cost_network_dialog.py:1470 (_apply_help_texts)", _exc)
 
         self.lblInputHelp.setText(
             "<html>"
@@ -1549,15 +1549,15 @@ MST/k-NN/Hub 네트워크를 생성합니다.
         )
         try:
             self.btnPickHubValues.setToolTip("허브 필드의 고유 값을 목록에서 선택합니다.")
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/cost_network_dialog.py:1552 (_apply_help_texts)", _exc)
 
         # Model parameter tooltips (hover on both label and spinbox)
         def tt(w, text: str):
             try:
                 w.setToolTip(text)
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("tools/cost_network_dialog.py:1559 (tt)", _exc)
 
         tt(self.cmbModel, "모델을 선택하면 아래 변수들이 해당 모델에 맞게 적용됩니다.")
 
@@ -1711,8 +1711,8 @@ MST/k-NN/Hub 네트워크를 생성합니다.
         vals = set()
         try:
             vals = set(layer.uniqueValues(idx))
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/cost_network_dialog.py:1714 (_pick_hub_values)", _exc)
         if not vals:
             # Fallback: iterate a bit
             try:
@@ -1977,8 +1977,8 @@ MST/k-NN/Hub 네트워크를 생성합니다.
                         self._interpretGuideDialog.raise_()
                         self._interpretGuideDialog.activateWindow()
                         return
-                except Exception:
-                    pass
+                except Exception as _exc:
+                    log_swallowed("tools/cost_network_dialog.py:1980 (_show_interpretation_guide)", _exc)
 
             dlg = QtWidgets.QDialog(self)
             dlg.setAttribute(Qt.WA_DeleteOnClose, True)
@@ -2006,8 +2006,8 @@ MST/k-NN/Hub 네트워크를 생성합니다.
             def _copy():
                 try:
                     QtWidgets.QApplication.clipboard().setText(browser.toPlainText())
-                except Exception:
-                    pass
+                except Exception as _exc:
+                    log_swallowed("tools/cost_network_dialog.py:2009 (_copy)", _exc)
 
             btn_copy.clicked.connect(_copy)
             btn_close.clicked.connect(dlg.close)
@@ -2020,13 +2020,13 @@ MST/k-NN/Hub 네트워크를 생성합니다.
                 try:
                     self._interpretGuideDialog = None
                     self._interpretGuideBrowser = None
-                except Exception:
-                    pass
+                except Exception as _exc:
+                    log_swallowed("tools/cost_network_dialog.py:2023 (_clear_refs)", _exc)
 
             try:
                 dlg.destroyed.connect(lambda _=None: _clear_refs())
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("tools/cost_network_dialog.py:2028 (_show_interpretation_guide)", _exc)
 
             dlg.show()
         except Exception as e:
@@ -2056,8 +2056,8 @@ MST/k-NN/Hub 네트워크를 생성합니다.
         for w in (self.lblCandidateKHint, self.lblPairBufferHint, self.lblNetworkHelp):
             try:
                 w.setVisible(not compact)
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("tools/cost_network_dialog.py:2059 (_on_mode_changed)", _exc)
 
     def _on_site_layer_changed(self):
         layer = self.cmbSiteLayer.currentLayer()
@@ -2071,8 +2071,8 @@ MST/k-NN/Hub 네트워크를 생성합니다.
                 try:
                     for f in layer.fields():
                         combo.addItem(f.name(), f.name())
-                except Exception:
-                    pass
+                except Exception as _exc:
+                    log_swallowed("tools/cost_network_dialog.py:2074 (fill_combo)", _exc)
             combo.blockSignals(False)
 
         fill_combo(self.cmbNameField, True, "(피처 ID 사용)")
@@ -2177,8 +2177,8 @@ MST/k-NN/Hub 네트워크를 생성합니다.
                         v = ft[name_field]
                         if v is not None and str(v).strip() != "":
                             name = str(v)
-                    except Exception:
-                        pass
+                    except Exception as _exc:
+                        log_swallowed("tools/cost_network_dialog.py:2180 (run_analysis)", _exc)
 
                 is_hub = False
                 if mode in (NETWORK_HUB, NETWORK_ALL) and hub_field and hub_values:
@@ -2326,11 +2326,15 @@ MST/k-NN/Hub 네트워크를 생성합니다.
                 n_nodes = int(len(nodes))
                 edge_weights: Dict[Tuple[int, int], float] = {}
                 for e in edges:
+                    _skip_2329 = False
                     try:
                         a = int(e.a)
                         b = int(e.b)
                     except Exception as _exc:
                         log_swallowed("cost_network_dialog._add_result_layers", _exc)
+                        log_swallowed("tools/cost_network_dialog.py:2332 (_add_result_layers)", _exc)
+                        _skip_2329 = True
+                    if _skip_2329:
                         continue
                     if a == b:
                         continue

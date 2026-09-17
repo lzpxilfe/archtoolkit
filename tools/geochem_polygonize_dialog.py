@@ -404,6 +404,7 @@ def _legend_points_from_csv(csv_path: str) -> List[LegendPoint]:
                 continue
             if row[0].lower() in ("value", "val"):
                 continue
+            _skip_407 = False
             try:
                 v = float(row[0])
                 r = int(float(row[1]))
@@ -411,6 +412,9 @@ def _legend_points_from_csv(csv_path: str) -> List[LegendPoint]:
                 b = int(float(row[3]))
             except Exception as _exc:
                 log_swallowed("geochem_polygonize_dialog._legend_points_from_csv", _exc)
+                log_swallowed("tools/geochem_polygonize_dialog.py:412 (_legend_points_from_csv)", _exc)
+                _skip_407 = True
+            if _skip_407:
                 continue
             r = max(0, min(255, r))
             g = max(0, min(255, g))
@@ -433,10 +437,14 @@ def _parse_float_list(text: str) -> List[float]:
         t = part.strip()
         if not t:
             continue
+        _skip_436 = False
         try:
             vals.append(float(t))
         except Exception as _exc:
             log_swallowed("geochem_polygonize_dialog._parse_float_list", _exc)
+            log_swallowed("tools/geochem_polygonize_dialog.py:438 (_parse_float_list)", _exc)
+            _skip_436 = True
+        if _skip_436:
             continue
     return vals
 
@@ -462,6 +470,7 @@ def _sample_qimage_rgb(image: QImage, x: int, y: int, radius: int = 1) -> Tuple[
     n = 0
     for yy in range(c0, c1 + 1):
         for xx in range(r0, r1 + 1):
+            _skip_465 = False
             try:
                 col = QColor(image.pixel(xx, yy))
                 rs += int(col.red())
@@ -470,6 +479,9 @@ def _sample_qimage_rgb(image: QImage, x: int, y: int, radius: int = 1) -> Tuple[
                 n += 1
             except Exception as _exc:
                 log_swallowed("geochem_polygonize_dialog._sample_qimage_rgb", _exc)
+                log_swallowed("tools/geochem_polygonize_dialog.py:471 (_sample_qimage_rgb)", _exc)
+                _skip_465 = True
+            if _skip_465:
                 continue
     if n <= 0:
         return (204, 204, 204)
@@ -560,8 +572,8 @@ class GeoChemPolygonizeDialog(QtWidgets.QDialog):
             act_img = menu.addAction("범례 이미지에서 샘플링…")
             act_img.triggered.connect(self._import_preset_from_legend_image)
             self.btnPresetImport.setMenu(menu)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/geochem_polygonize_dialog.py:563 (__init__)", _exc)
         h.addWidget(QtWidgets.QLabel("프리셋"))
         h.addWidget(self.cmbPreset, 1)
         h.addWidget(QtWidgets.QLabel("단위"))
@@ -881,8 +893,8 @@ class GeoChemPolygonizeDialog(QtWidgets.QDialog):
             )
             self.btnRun.setToolTip("실행합니다. (중간 산출물은 창을 닫을 때 정리됩니다)")
             self.btnClose.setToolTip("닫기")
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/geochem_polygonize_dialog.py:884 (__init__)", _exc)
 
         self.resize(700, 650)
 
@@ -918,8 +930,8 @@ value/class 래스터와 폴리곤을 생성합니다.
         try:
             plugin_dir = os.path.dirname(os.path.dirname(__file__))
             show_help_dialog(parent=self, title="GeoChem 도움말", html=html, plugin_dir=plugin_dir)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/geochem_polygonize_dialog.py:921 (_on_help)", _exc)
 
     def _on_preset_changed(self):
         try:
@@ -927,8 +939,8 @@ value/class 래스터와 폴리곤을 생성합니다.
             p = PRESETS.get(key)
             if p:
                 self.txtUnit.setText(p.unit or "")
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/geochem_polygonize_dialog.py:930 (_on_preset_changed)", _exc)
 
     def _import_preset_from_csv(self):
         try:
@@ -976,12 +988,12 @@ value/class 래스터와 폴리곤을 생성합니다.
             self.cmbPreset.addItem(preset.label, preset.key)
             self.cmbPreset.setCurrentIndex(self.cmbPreset.count() - 1)
             self.txtUnit.setText(preset.unit or "")
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/geochem_polygonize_dialog.py:979 (_import_preset_from_csv)", _exc)
         try:
             push_message(self.iface, "프리셋", f"사용자 프리셋을 추가했습니다: {preset.label}", level=0, duration=5)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/geochem_polygonize_dialog.py:983 (_import_preset_from_csv)", _exc)
 
     def _import_preset_from_legend_image(self):
         try:
@@ -1097,27 +1109,27 @@ value/class 래스터와 폴리곤을 생성합니다.
             self.cmbPreset.addItem(preset.label, preset.key)
             self.cmbPreset.setCurrentIndex(self.cmbPreset.count() - 1)
             self.txtUnit.setText(preset.unit or "")
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/geochem_polygonize_dialog.py:1100 (_import_preset_from_legend_image)", _exc)
         try:
             push_message(self.iface, "프리셋", f"범례 이미지에서 프리셋을 추가했습니다: {preset.label}", level=0, duration=5)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/geochem_polygonize_dialog.py:1104 (_import_preset_from_legend_image)", _exc)
 
     def _on_add_rasters_changed(self):
         try:
             if self.chkAddRasters.isChecked():
                 self.chkSaveRasters.setChecked(True)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/geochem_polygonize_dialog.py:1111 (_on_add_rasters_changed)", _exc)
 
     def _update_polygon_ui(self):
         try:
             enabled = bool(self.chkMakePolygons.isChecked())
             self.chkDissolve.setEnabled(enabled)
             self.chkDropNoData.setEnabled(enabled)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/geochem_polygonize_dialog.py:1119 (_update_polygon_ui)", _exc)
 
     def _update_zonal_ui(self):
         try:
@@ -1126,8 +1138,8 @@ value/class 래스터와 폴리곤을 생성합니다.
                 self.cmbZoneLayer.setEnabled(enabled)
             if getattr(self, "chkZoneSelectedOnly", None):
                 self.chkZoneSelectedOnly.setEnabled(enabled)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/geochem_polygonize_dialog.py:1129 (_update_zonal_ui)", _exc)
 
     def _update_weight_ui(self):
         try:
@@ -1167,9 +1179,13 @@ value/class 래스터와 폴리곤을 생성합니다.
             return False
 
         for layer in layers:
+            _skip_1170 = False
             try:
                 src = str(layer.source() or "")
-            except Exception:
+            except Exception as _exc:
+                log_swallowed("tools/geochem_polygonize_dialog.py:1172 (_tmp_dir_in_use)", _exc)
+                _skip_1170 = True
+            if _skip_1170:
                 continue
             if not src:
                 continue
@@ -1179,10 +1195,11 @@ value/class 래스터와 폴리곤을 생성합니다.
                 src_norm = os.path.normcase(src).replace("\\", "/")
                 if tmp_norm and tmp_norm in src_norm:
                     return True
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("tools/geochem_polygonize_dialog.py:1182 (_tmp_dir_in_use)", _exc)
 
             # Typical "path|layername=..." sources.
+            _skip_1186 = False
             try:
                 path = (src.split("|", 1)[0] or "").strip()
                 if not path:
@@ -1192,6 +1209,9 @@ value/class 래스터와 폴리곤을 생성합니다.
                     return True
             except Exception as _exc:
                 log_swallowed("geochem_polygonize_dialog._tmp_dir_in_use", _exc)
+                log_swallowed("tools/geochem_polygonize_dialog.py:1193 (_tmp_dir_in_use)", _exc)
+                _skip_1186 = True
+            if _skip_1186:
                 continue
 
         return False
@@ -1206,8 +1226,8 @@ value/class 래스터와 폴리곤을 생성합니다.
             if self._tmp_dir_in_use(tmp_dir):
                 log_message(f"GeoChem: tmp dir still in use, skip cleanup: {tmp_dir}", level=Qgis.Warning)
                 return
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/geochem_polygonize_dialog.py:1209 (_cleanup_tmp)", _exc)
 
         try:
             shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -1226,8 +1246,8 @@ value/class 래스터와 폴리곤을 생성합니다.
     def run(self):
         try:
             ensure_live_log_dialog(self.iface, owner=self, show=True, clear=True)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/geochem_polygonize_dialog.py:1229 (run)", _exc)
 
         raster = self.cmbRaster.currentLayer()
         aoi = self.cmbAoi.currentLayer()
@@ -1322,8 +1342,8 @@ value/class 래스터와 폴리곤을 생성합니다.
             try:
                 if aoi.crs().isGeographic():
                     grow_units = buf / 111320.0
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("tools/geochem_polygonize_dialog.py:1325 (run)", _exc)
             extent_aoi.grow(grow_units)
 
         # Keep a canvas-compatible extent for zooming (destination CRS).
@@ -1333,8 +1353,8 @@ value/class 래스터와 폴리곤을 생성합니다.
             if dest_crs and aoi.crs() != dest_crs:
                 ct_canvas = QgsCoordinateTransform(aoi.crs(), dest_crs, QgsProject.instance())
                 extent_canvas = ct_canvas.transformBoundingBox(extent_canvas)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/geochem_polygonize_dialog.py:1336 (run)", _exc)
 
         # Transform survey-area extent to raster CRS for export.
         extent_export = QgsRectangle(extent_aoi)
@@ -1466,8 +1486,8 @@ value/class 래스터와 폴리곤을 생성합니다.
                     f"GeoChem: exported bands={band_count} shape={getattr(r, 'shape', None)} dtype={getattr(r, 'dtype', None)}",
                     level=Qgis.Info,
                 )
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("tools/geochem_polygonize_dialog.py:1469 (run)", _exc)
 
             log_message("GeoChem: RGB -> value mapping…", level=Qgis.Info)
             if do_snap_max:
@@ -1667,9 +1687,9 @@ value/class 래스터와 폴리곤을 생성합니다.
                     except Exception:
                         pix_counts = {}
                     self._last_geochem_pix_counts = pix_counts
-                except Exception:
+                except Exception as _exc:
                     self._last_geochem_pix_counts = {}
-                    pass
+                    log_swallowed("tools/geochem_polygonize_dialog.py:1670 (run)", _exc)
 
                 # Per-class mean value (useful as a representative numeric attribute on dissolved polygons).
                 try:
@@ -1767,8 +1787,8 @@ value/class 래스터와 폴리곤을 생성합니다.
                             "GeoChem: AOI 마스크가 꺼져 있어 가중 중심점이 경계 사각형(extent) 기준으로 계산됩니다.",
                             level=Qgis.Warning,
                         )
-                except Exception:
-                    pass
+                except Exception as _exc:
+                    log_swallowed("tools/geochem_polygonize_dialog.py:1770 (run)", _exc)
                 try:
                     center_layer = self._make_weighted_center_layer(
                         values=out,
@@ -1825,8 +1845,8 @@ value/class 래스터와 폴리곤을 생성합니다.
                         exists = os.path.exists(poly_path)
                         size = os.path.getsize(poly_path) if exists else 0
                         log_message(f"GeoChem: polygonize file exists={exists} size={size}", level=Qgis.Info)
-                    except Exception:
-                        pass
+                    except Exception as _exc:
+                        log_swallowed("tools/geochem_polygonize_dialog.py:1828 (run)", _exc)
 
                     # Try to discover the layer name from the GeoPackage and load it reliably.
                     layer_name = None
@@ -1839,11 +1859,15 @@ value/class 래스터와 폴리곤을 생성합니다.
                             except Exception:
                                 n = 0
                             for i in range(n):
+                                _skip_1842 = False
                                 try:
                                     lyr = vds.GetLayerByIndex(i)
                                     if lyr is not None:
                                         names.append(str(lyr.GetName()))
-                                except Exception:
+                                except Exception as _exc:
+                                    log_swallowed("tools/geochem_polygonize_dialog.py:1846 (run)", _exc)
+                                    _skip_1842 = True
+                                if _skip_1842:
                                     continue
                             vds = None
                             log_message(f"GeoChem: gpkg layers={names}", level=Qgis.Info)
@@ -1858,6 +1882,7 @@ value/class 래스터와 폴리곤을 생성합니다.
                     uri_candidates.append(poly_path)
 
                     for uri in uri_candidates:
+                        _skip_1861 = False
                         try:
                             cand = QgsVectorLayer(uri, f"{preset.label} polygons", "ogr")
                             if cand.isValid():
@@ -1865,6 +1890,9 @@ value/class 래스터와 폴리곤을 생성합니다.
                                 break
                         except Exception as _exc:
                             log_swallowed("geochem_polygonize_dialog.run", _exc)
+                            log_swallowed("tools/geochem_polygonize_dialog.py:1866 (run)", _exc)
+                            _skip_1861 = True
+                        if _skip_1861:
                             continue
 
                 if poly is None or not isinstance(poly, QgsVectorLayer) or not poly.isValid():
@@ -1907,8 +1935,8 @@ value/class 래스터와 폴리곤을 생성합니다.
             log_exception("GeoChem error", e)
             try:
                 log_message(f"GeoChem: kept temp folder for debug: {self._tmp_dir}", level=Qgis.Warning)
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("tools/geochem_polygonize_dialog.py:1910 (run)", _exc)
             push_message(self.iface, "오류", f"처리 실패: {e}", level=2, duration=10)
         finally:
             restore_ui_focus(self)
@@ -2219,8 +2247,8 @@ value/class 래스터와 폴리곤을 생성합니다.
             auth = (crs.authid() or "").strip() if crs else ""
             if auth:
                 uri = f"Point?crs={auth}"
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/geochem_polygonize_dialog.py:2222 (_make_weighted_center_layer)", _exc)
 
         layer = QgsVectorLayer(uri, f"{preset.key}_중심점_{run_id}", "memory")
         if not layer.isValid():
@@ -2228,8 +2256,8 @@ value/class 래스터와 폴리곤을 생성합니다.
         try:
             if crs:
                 layer.setCrs(crs)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/geochem_polygonize_dialog.py:2231 (_make_weighted_center_layer)", _exc)
 
         pr = layer.dataProvider()
         pr.addAttributes(
@@ -2267,8 +2295,8 @@ value/class 래스터와 폴리곤을 생성합니다.
 
             sym = QgsMarkerSymbol.createSimple({"name": "circle", "color": "230,0,0,255", "size": "4"})
             layer.setRenderer(QgsSingleSymbolRenderer(sym))
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/geochem_polygonize_dialog.py:2270 (_make_weighted_center_layer)", _exc)
 
         try:
             extra = ""
@@ -2330,8 +2358,8 @@ value/class 래스터와 폴리곤을 생성합니다.
             auth = (crs.authid() or "").strip() if crs else ""
             if auth:
                 uri = f"Polygon?crs={auth}"
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/geochem_polygonize_dialog.py:2333 (_make_zonal_stats_layer)", _exc)
 
         out_layer = QgsVectorLayer(uri, f"{preset.key}_zonal_{run_id}", "memory")
         if not out_layer.isValid():
@@ -2339,8 +2367,8 @@ value/class 래스터와 폴리곤을 생성합니다.
         try:
             if crs:
                 out_layer.setCrs(crs)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/geochem_polygonize_dialog.py:2342 (_make_zonal_stats_layer)", _exc)
 
         pr = out_layer.dataProvider()
         try:
@@ -2418,15 +2446,20 @@ value/class 래스터와 폴리곤을 생성합니다.
                 except Exception as _exc:
                     log_swallowed("geochem_polygonize_dialog._make_zonal_stats_layer", _exc)
 
+            _skip_2421 = False
             try:
                 bbox = geom_r.boundingBox()
             except Exception as _exc:
                 log_swallowed("geochem_polygonize_dialog._make_zonal_stats_layer", _exc)
+                log_swallowed("tools/geochem_polygonize_dialog.py:2423 (_make_zonal_stats_layer)", _exc)
+                _skip_2421 = True
+            if _skip_2421:
                 continue
             if bbox.isEmpty():
                 continue
 
             # Compute pixel window from bbox (fast crop)
+            _skip_2430 = False
             try:
                 corners = [
                     (bbox.xMinimum(), bbox.yMinimum()),
@@ -2446,6 +2479,9 @@ value/class 래스터와 폴리곤을 생성합니다.
                 max_row = int(math.ceil(max(rows)))
             except Exception as _exc:
                 log_swallowed("geochem_polygonize_dialog._make_zonal_stats_layer", _exc)
+                log_swallowed("tools/geochem_polygonize_dialog.py:2447 (_make_zonal_stats_layer)", _exc)
+                _skip_2430 = True
+            if _skip_2430:
                 continue
 
             xoff = max(0, min(full_xsize - 1, min_col))
@@ -2521,8 +2557,8 @@ value/class 래스터와 폴리곤을 생성합니다.
             out_ft = QgsFeature(out_layer.fields())
             try:
                 out_ft.setGeometry(out_geom)
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("tools/geochem_polygonize_dialog.py:2524 (_make_zonal_stats_layer)", _exc)
 
             try:
                 attrs = list(zft.attributes())
@@ -2530,8 +2566,8 @@ value/class 래스터와 폴리곤을 생성합니다.
                 attrs = []
             try:
                 out_ft.setAttributes(attrs + [None] * len(extra_fields))
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("tools/geochem_polygonize_dialog.py:2533 (_make_zonal_stats_layer)", _exc)
 
             try:
                 out_ft["element"] = preset.label
@@ -2556,17 +2592,21 @@ value/class 래스터와 폴리곤을 생성합니다.
             except Exception as _exc:
                 log_swallowed("geochem_polygonize_dialog._make_zonal_stats_layer", _exc)
 
+            _skip_2559 = False
             try:
                 pr.addFeatures([out_ft])
                 added += 1
-            except Exception:
+            except Exception as _exc:
+                log_swallowed("tools/geochem_polygonize_dialog.py:2562 (_make_zonal_stats_layer)", _exc)
+                _skip_2559 = True
+            if _skip_2559:
                 continue
 
         out_layer.updateExtents()
         try:
             log_message(f"GeoChem: zonal stats features={added}", level=Qgis.Info)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/geochem_polygonize_dialog.py:2568 (_make_zonal_stats_layer)", _exc)
         return out_layer
 
     def _style_value_raster(self, *, layer: QgsRasterLayer, preset: GeoChemPreset, unit: str):
@@ -2579,12 +2619,16 @@ value/class 래스터와 폴리곤을 생성합니다.
             ramp.setColorRampType(QgsColorRampShader.Interpolated)
             items = []
             for p in preset.points:
+                _skip_2582 = False
                 try:
                     val = float(p.value)
                     col = QColor(int(p.rgb[0]), int(p.rgb[1]), int(p.rgb[2]))
                     items.append(QgsColorRampShader.ColorRampItem(val, col, f"{val:g}{unit}"))
                 except Exception as _exc:
                     log_swallowed("geochem_polygonize_dialog._style_value_raster", _exc)
+                    log_swallowed("tools/geochem_polygonize_dialog.py:2586 (_style_value_raster)", _exc)
+                    _skip_2582 = True
+                if _skip_2582:
                     continue
             if not items:
                 return
@@ -2727,8 +2771,8 @@ value/class 래스터와 폴리곤을 생성합니다.
 
         try:
             layer.setRenderer(QgsCategorizedSymbolRenderer("class_id", cats))
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/geochem_polygonize_dialog.py:2730 (_decorate_polygons)", _exc)
 
         # Compute per-feature geometry area (m²) for statistics fields.
         # When dissolve is enabled, there is typically 1 feature per class_id.
@@ -2746,10 +2790,11 @@ value/class 래스터와 폴리곤을 생성합니다.
                     ell = "WGS84"
                 dist.setEllipsoid(ell)
                 dist.setEllipsoidalMode(True)
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("tools/geochem_polygonize_dialog.py:2749 (_decorate_polygons)", _exc)
 
             for ft in layer.getFeatures():
+                _skip_2753 = False
                 try:
                     try:
                         cid = int(ft["class_id"]) if ft["class_id"] is not None else 0
@@ -2768,6 +2813,9 @@ value/class 래스터와 폴리곤을 생성합니다.
                         area_by_fid[int(ft.id())] = area_m2
                 except Exception as _exc:
                     log_swallowed("geochem_polygonize_dialog._decorate_polygons", _exc)
+                    log_swallowed("tools/geochem_polygonize_dialog.py:2769 (_decorate_polygons)", _exc)
+                    _skip_2753 = True
+                if _skip_2753:
                     continue
         except Exception:
             area_by_fid = {}
@@ -2805,8 +2853,8 @@ value/class 래스터와 폴리곤을 생성합니다.
                     "GeoChem: dissolve가 꺼져 있어 class_id별 픽셀 통계를 폴리곤 피처에 직접 기록하지 않습니다.",
                     level=Qgis.Warning,
                 )
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("tools/geochem_polygonize_dialog.py:2808 (_decorate_polygons)", _exc)
         total_pix = 0
         try:
             for cid, n in pix_n_by_cid.items():
@@ -2916,18 +2964,18 @@ value/class 래스터와 폴리곤을 생성합니다.
             try:
                 name = f"{preset.key}_구간폴리곤_{run_id}"
                 layer.setName(name)
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("tools/geochem_polygonize_dialog.py:2919 (_add_to_project)", _exc)
         if center_layer is not None:
             try:
                 center_layer.setName(f"{preset.key}_중심점_{run_id}")
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("tools/geochem_polygonize_dialog.py:2924 (_add_to_project)", _exc)
         if zone_stats_layer is not None:
             try:
                 zone_stats_layer.setName(f"{preset.key}_구역통계_{run_id}")
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("tools/geochem_polygonize_dialog.py:2929 (_add_to_project)", _exc)
 
         layers_to_add = []
         val_layer = None
@@ -2994,8 +3042,8 @@ value/class 래스터와 폴리곤을 생성합니다.
 
         try:
             parent.setExpanded(True)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/geochem_polygonize_dialog.py:2997 (_add_to_project)", _exc)
 
         try:
             # Keep group near top
@@ -3010,5 +3058,5 @@ value/class 래스터와 폴리곤을 생성합니다.
         try:
             self.iface.mapCanvas().setExtent(extent)
             self.iface.mapCanvas().refresh()
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/geochem_polygonize_dialog.py:3013 (_add_to_project)", _exc)

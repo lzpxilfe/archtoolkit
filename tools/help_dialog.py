@@ -5,6 +5,7 @@ from qgis.PyQt import QtGui, QtWidgets
 from qgis.PyQt.QtCore import Qt
 
 from .i18n import get_plugin_config_value, tr
+from .utils import log_swallowed
 
 
 class ArchToolkitHelpDialog(QtWidgets.QDialog):
@@ -99,8 +100,8 @@ class ArchToolkitHelpDialog(QtWidgets.QDialog):
     def _copy_text(self):
         try:
             QtWidgets.QApplication.clipboard().setText(self.browser.toPlainText())
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/help_dialog.py:102 (_copy_text)", _exc)
 
     def _find_next(self):
         self._find(backward=False)

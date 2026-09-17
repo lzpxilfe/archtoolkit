@@ -18,7 +18,7 @@
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import QAction, QMenu, QToolButton, QMessageBox
 
-from .tools.utils import log_exception, start_ui_log_pump, stop_ui_log_pump
+from .tools.utils import log_exception, log_swallowed, start_ui_log_pump, stop_ui_log_pump
 import os.path
 
 class ArchToolkit:
@@ -40,8 +40,8 @@ class ArchToolkit:
             # Enable real-time logs in the QGIS "Log Messages" panel.
             try:
                 start_ui_log_pump()
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("arch_toolkit.py:43 (initGui)", _exc)
 
             plugin_dir = os.path.dirname(__file__)
             
@@ -296,8 +296,8 @@ class ArchToolkit:
                 title_font = self.menu_title_action.font()
                 title_font.setBold(True)
                 self.menu_title_action.setFont(title_font)
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("arch_toolkit.py:299 (initGui)", _exc)
             self.tool_menu.addSeparator()
             self.tool_menu.addAction(self.dem_action)
             self.tool_menu.addAction(self.contour_action)
@@ -344,73 +344,73 @@ class ArchToolkit:
         for action in self.actions:
             try:
                 self.iface.removePluginMenu(self.menu_name, action)
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("arch_toolkit.py:347 (unload)", _exc)
 
         try:
             stop_ui_log_pump()
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("arch_toolkit.py:352 (unload)", _exc)
 
         # Close persistent dialogs and disconnect long-lived signals (prevents stale callbacks after reload)
         if self.viewshed_dlg is not None:
             try:
                 if hasattr(self.viewshed_dlg, "cleanup_for_unload"):
                     self.viewshed_dlg.cleanup_for_unload()
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("arch_toolkit.py:360 (unload)", _exc)
             try:
                 self.viewshed_dlg.close()
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("arch_toolkit.py:364 (unload)", _exc)
             try:
                 self.viewshed_dlg.deleteLater()
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("arch_toolkit.py:368 (unload)", _exc)
             self.viewshed_dlg = None
 
         if self.cost_dlg is not None:
             try:
                 if hasattr(self.cost_dlg, "cleanup_for_unload"):
                     self.cost_dlg.cleanup_for_unload()
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("arch_toolkit.py:376 (unload)", _exc)
             try:
                 self.cost_dlg.close()
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("arch_toolkit.py:380 (unload)", _exc)
             try:
                 self.cost_dlg.deleteLater()
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("arch_toolkit.py:384 (unload)", _exc)
             self.cost_dlg = None
 
         if self.profile_dlg is not None:
             try:
                 if hasattr(self.profile_dlg, "cleanup_for_unload"):
                     self.profile_dlg.cleanup_for_unload()
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("arch_toolkit.py:392 (unload)", _exc)
             try:
                 self.profile_dlg.close()
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("arch_toolkit.py:396 (unload)", _exc)
             try:
                 self.profile_dlg.deleteLater()
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("arch_toolkit.py:400 (unload)", _exc)
             self.profile_dlg = None
              
         # Remove toolbar cleanly from mainWindow
         if self.toolbar:
             try:
                 self.iface.mainWindow().removeToolBar(self.toolbar)
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("arch_toolkit.py:408 (unload)", _exc)
             try:
                 self.toolbar.deleteLater()
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("arch_toolkit.py:412 (unload)", _exc)
             self.toolbar = None
 
         # The dropdown menu, its title action and every QAction are parented to
@@ -421,19 +421,19 @@ class ArchToolkit:
             if getattr(self, "tool_menu", None) is not None:
                 self.tool_menu.deleteLater()
                 self.tool_menu = None
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("arch_toolkit.py:424 (unload)", _exc)
         try:
             if getattr(self, "menu_title_action", None) is not None:
                 self.menu_title_action.deleteLater()
                 self.menu_title_action = None
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("arch_toolkit.py:430 (unload)", _exc)
         for action in list(self.actions or []):
             try:
                 action.deleteLater()
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("arch_toolkit.py:435 (unload)", _exc)
         self.actions = []
 
     def run_dem_tool(self):

@@ -40,8 +40,8 @@ def _settings_get(key: str, default=None):
 def _settings_set(key: str, value) -> None:
     try:
         QSettings().setValue(f"{_SETTINGS_PREFIX}/{key}", value)
-    except Exception:
-        pass
+    except Exception as _exc:
+        log_swallowed("tools/ai_gemini.py:43 (_settings_set)", _exc)
 
 
 def get_configured_model(default: str = DEFAULT_MODEL) -> str:
@@ -83,9 +83,13 @@ def _store_auth_config(auth_cfg) -> bool:
         fn = getattr(authm, name, None)
         if fn is None:
             continue
+        _skip_86 = False
         try:
             return bool(fn(auth_cfg))
-        except Exception:
+        except Exception as _exc:
+            log_swallowed("tools/ai_gemini.py:88 (_store_auth_config)", _exc)
+            _skip_86 = True
+        if _skip_86:
             continue
     return False
 
@@ -99,9 +103,13 @@ def _update_auth_config(auth_cfg) -> bool:
         fn = getattr(authm, name, None)
         if fn is None:
             continue
+        _skip_102 = False
         try:
             return bool(fn(auth_cfg))
-        except Exception:
+        except Exception as _exc:
+            log_swallowed("tools/ai_gemini.py:104 (_update_auth_config)", _exc)
+            _skip_102 = True
+        if _skip_102:
             continue
     return False
 
@@ -119,19 +127,27 @@ def _load_auth_config(authcfg_id: str):
         fn = getattr(authm, name, None)
         if fn is None:
             continue
+        _skip_122 = False
         try:
             # Signature is typically (authcfg, config, full=True)
             ok = fn(str(authcfg_id), auth_cfg, True)
             if ok:
                 return auth_cfg
         except TypeError:
+            _skip_128 = False
             try:
                 ok = fn(str(authcfg_id), auth_cfg)
                 if ok:
                     return auth_cfg
-            except Exception:
+            except Exception as _exc:
+                log_swallowed("tools/ai_gemini.py:132 (_load_auth_config)", _exc)
+                _skip_128 = True
+            if _skip_128:
                 continue
-        except Exception:
+        except Exception as _exc:
+            log_swallowed("tools/ai_gemini.py:134 (_load_auth_config)", _exc)
+            _skip_122 = True
+        if _skip_122:
             continue
 
     return None
@@ -307,18 +323,18 @@ def generate_text(
     def _on_timeout():
         try:
             reply.abort()
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/ai_gemini.py:310 (_on_timeout)", _exc)
         try:
             loop.quit()
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/ai_gemini.py:314 (_on_timeout)", _exc)
 
     def _on_finished():
         try:
             loop.quit()
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/ai_gemini.py:320 (_on_finished)", _exc)
 
     try:
         timer.timeout.connect(_on_timeout)
@@ -331,8 +347,8 @@ def generate_text(
     try:
         if timer.isActive():
             timer.stop()
-    except Exception:
-        pass
+    except Exception as _exc:
+        log_swallowed("tools/ai_gemini.py:334 (generate_text)", _exc)
 
     try:
         if reply.error():

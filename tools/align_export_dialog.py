@@ -393,8 +393,8 @@ class AlignExportDialog(QtWidgets.QDialog):
         self._set_filter(self.cmbAoi, raster=False)
         try:
             self.cmbAoi.setAllowEmptyLayer(True)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/align_export_dialog.py:396 (_setup_ui)", _exc)
         form.addRow("AOI 자르기(선택):", self.cmbAoi)
         self.chkAoiSelected = QtWidgets.QCheckBox("AOI 선택 피처만 사용")
         form.addRow("", self.chkAoiSelected)
@@ -633,8 +633,8 @@ class AlignExportDialog(QtWidgets.QDialog):
         run_id = new_run_id("align")
         try:
             ensure_live_log_dialog(self.iface, owner=self, show=True, clear=True)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/align_export_dialog.py:636 (_on_run)", _exc)
 
         # The variable name is what the user will see in a model report, and it
         # is no longer the layer name, so show the mapping before the run
@@ -753,8 +753,8 @@ class AlignExportDialog(QtWidgets.QDialog):
             self.btnRun.setEnabled(True)
             try:
                 progress.close()
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("tools/align_export_dialog.py:756 (_on_run)", _exc)
 
         grid = {
             "crs": str(ref.crs().authid() or ""),
@@ -799,8 +799,8 @@ class AlignExportDialog(QtWidgets.QDialog):
         except Exception as e:
             try:
                 cleanup_staging_dir(staging_dir)
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("tools/align_export_dialog.py:802 (_on_run)", _exc)
             log_exception("Align output publication error", e)
             push_message(self.iface, "오류", f"완성된 결과를 게시하지 못했습니다: {e}", level=2, duration=10)
             restore_ui_focus(self)
@@ -880,8 +880,8 @@ class AlignExportDialog(QtWidgets.QDialog):
         finally:
             try:
                 progress.canceled.disconnect(_cancel_active_warp)
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("tools/align_export_dialog.py:883 (_warp)", _exc)
 
         if progress.wasCanceled() or feedback.isCanceled() or task.algorithmCanceled():
             raise _Cancelled()
@@ -1054,5 +1054,5 @@ class AlignExportDialog(QtWidgets.QDialog):
         try:
             plugin_dir = os.path.dirname(os.path.dirname(__file__))
             show_help_dialog(parent=self, title="정렬/내보내기 도움말", html=html, plugin_dir=plugin_dir)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/align_export_dialog.py:1057 (_on_help)", _exc)

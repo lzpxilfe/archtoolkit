@@ -105,8 +105,8 @@ class ContourExtractorDialog(QtWidgets.QDialog, FORM_CLASS):
         except Exception:
             try:
                 QtWidgets.QMessageBox.information(self, "도움말", "README.md를 참고하세요.")
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("tools/contour_extractor_dialog.py:108 (_on_help)", _exc)
     
     def refresh_layer_list(self):
         """Populate the vector layer list"""
@@ -195,8 +195,8 @@ class ContourExtractorDialog(QtWidgets.QDialog, FORM_CLASS):
                         layer.setSubsetString(layer.customProperty(prop_key, "") or "")
                         layer.removeCustomProperty(prop_key)
                         self.original_filters.pop(layer.id(), None)
-                    except Exception:
-                        pass
+                    except Exception as _exc:
+                        log_swallowed("tools/contour_extractor_dialog.py:198 (extract_from_dxf)", _exc)
 
             msg = f"{filtered_count}개 레이어에 등고선 필터 적용 완료 ({len(codes)}개 유형)"
             if failed_names:
@@ -218,6 +218,7 @@ class ContourExtractorDialog(QtWidgets.QDialog, FORM_CLASS):
             # No selection: reset every layer this tool tagged (project-wide).
             reset_count = 0
             for layer in QgsProject.instance().mapLayers().values():
+                _skip_221 = False
                 try:
                     orig = layer.customProperty(prop_key, None)
                     if orig is not None:
@@ -227,6 +228,9 @@ class ContourExtractorDialog(QtWidgets.QDialog, FORM_CLASS):
                         reset_count += 1
                 except Exception as _exc:
                     log_swallowed("contour_extractor_dialog.reset_filters", _exc)
+                    log_swallowed("tools/contour_extractor_dialog.py:228 (reset_filters)", _exc)
+                    _skip_221 = True
+                if _skip_221:
                     continue
             self.iface.messageBar().pushMessage("완료", f"{reset_count}개 레이어 필터 초기화 완료", level=0)
         else:

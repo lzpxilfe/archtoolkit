@@ -86,8 +86,8 @@ def _auto_value_field(layer: QgsVectorLayer) -> Optional[str]:
             idx = layer.fields().indexFromName(name)
             if idx >= 0:
                 return name
-    except Exception:
-        pass
+    except Exception as _exc:
+        log_swallowed("tools/kriging_lite.py:89 (_auto_value_field)", _exc)
     return None
 
 

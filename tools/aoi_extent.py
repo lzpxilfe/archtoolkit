@@ -27,6 +27,7 @@ from qgis.core import (
     QgsProject,
     QgsWkbTypes,
 )
+from .utils import log_swallowed
 
 STATUS_OK = "ok"
 STATUS_NO_LAYER = "no_layer"
@@ -95,8 +96,8 @@ def _is_usable(geom) -> bool:
     try:
         if geom.isNull():
             return False
-    except Exception:
-        pass
+    except Exception as _exc:
+        log_swallowed("tools/aoi_extent.py:98 (_is_usable)", _exc)
     try:
         return not geom.isEmpty()
     except Exception:
@@ -130,10 +131,14 @@ def resolve_aoi_extent(aoi_layer, *, selected_only: bool, dst_crs) -> AoiExtentR
     used = 0
     skipped = 0
     for feature in features:
+        _skip_133 = False
         try:
             candidate = feature.geometry()
-        except Exception:
+        except Exception as _exc:
             skipped += 1
+            log_swallowed("tools/aoi_extent.py:135 (resolve_aoi_extent)", _exc)
+            _skip_133 = True
+        if _skip_133:
             continue
         if not _is_usable(candidate):
             skipped += 1

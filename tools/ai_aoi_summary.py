@@ -119,10 +119,14 @@ def _classify_fields(layer, *, max_numeric: int = 12):
 
     string_candidates: List[str] = []
     for f in fields:
+        _skip_122 = False
         try:
             name = str(f.name() or "")
             ftype = f.type()
-        except Exception:
+        except Exception as _exc:
+            log_swallowed("tools/ai_aoi_summary.py:125 (_classify_fields)", _exc)
+            _skip_122 = True
+        if _skip_122:
             continue
         if not name:
             continue
@@ -173,14 +177,14 @@ def _safe_distance_area(crs) -> QgsDistanceArea:
     da = QgsDistanceArea()
     try:
         da.setSourceCrs(crs, QgsProject.instance().transformContext())
-    except Exception:
-        pass
+    except Exception as _exc:
+        log_swallowed("tools/ai_aoi_summary.py:176 (_safe_distance_area)", _exc)
     try:
         ellps = QgsProject.instance().ellipsoid()
         if ellps:
             da.setEllipsoid(ellps)
-    except Exception:
-        pass
+    except Exception as _exc:
+        log_swallowed("tools/ai_aoi_summary.py:182 (_safe_distance_area)", _exc)
     return da
 
 
@@ -189,10 +193,14 @@ def _unary_union_geoms(layer: QgsVectorLayer, *, selected_only: bool) -> Tuple[O
     count = 0
     feats = layer.selectedFeatures() if selected_only and layer.selectedFeatureCount() > 0 else layer.getFeatures()
     for f in feats:
+        _skip_192 = False
         try:
             g = f.geometry()
         except Exception as _exc:
             log_swallowed("ai_aoi_summary._unary_union_geoms", _exc)
+            log_swallowed("tools/ai_aoi_summary.py:194 (_unary_union_geoms)", _exc)
+            _skip_192 = True
+        if _skip_192:
             continue
         if not g or g.isEmpty():
             continue
@@ -223,27 +231,27 @@ def is_archtoolkit_layer(layer: QgsMapLayer) -> bool:
         meta = get_archtoolkit_layer_metadata(layer)
         if meta and (meta.get("tool_id") or meta.get("run_id")):
             return True
-    except Exception:
-        pass
+    except Exception as _exc:
+        log_swallowed("tools/ai_aoi_summary.py:226 (is_archtoolkit_layer)", _exc)
     try:
         name = str(layer.name() or "")
         if name.startswith("Style:") or name.startswith("AOI_"):
             return True
-    except Exception:
-        pass
+    except Exception as _exc:
+        log_swallowed("tools/ai_aoi_summary.py:232 (is_archtoolkit_layer)", _exc)
     try:
         src = str(layer.source() or "")
         src_l = src.lower()
         if "archtoolkit_" in src_l or "archt_" in src_l or "archtoolkit" in src_l:
             return True
-    except Exception:
-        pass
+    except Exception as _exc:
+        log_swallowed("tools/ai_aoi_summary.py:239 (is_archtoolkit_layer)", _exc)
     try:
         # Cost tool tags
         if layer.customProperty("archtoolkit/cost_surface/run_id", None) is not None:
             return True
-    except Exception:
-        pass
+    except Exception as _exc:
+        log_swallowed("tools/ai_aoi_summary.py:245 (is_archtoolkit_layer)", _exc)
     try:
         # Many tools place outputs under an "ArchToolkit - ..." layer tree group.
         root = QgsProject.instance().layerTreeRoot()
@@ -253,8 +261,8 @@ def is_archtoolkit_layer(layer: QgsMapLayer) -> bool:
             try:
                 if str(cur.name() or "").startswith("ArchToolkit -"):
                     return True
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("tools/ai_aoi_summary.py:256 (is_archtoolkit_layer)", _exc)
             try:
                 cur = cur.parent()
             except Exception:
@@ -302,8 +310,8 @@ def _layer_group_path(layer_id: str) -> str:
             try:
                 if cur.name():
                     parts.append(cur.name())
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("tools/ai_aoi_summary.py:305 (_layer_group_path)", _exc)
             cur = cur.parent()
             if cur == root:
                 break
@@ -319,8 +327,8 @@ def _transform_geom(geom: QgsGeometry, src_crs, dst_crs) -> Optional[QgsGeometry
     try:
         if src_crs == dst_crs:
             return QgsGeometry(geom)
-    except Exception:
-        pass
+    except Exception as _exc:
+        log_swallowed("tools/ai_aoi_summary.py:322 (_transform_geom)", _exc)
     try:
         tr = QgsCoordinateTransform(src_crs, dst_crs, QgsProject.instance())
     except Exception:
@@ -388,18 +396,26 @@ def _vector_layer_stats_in_geom(
         scanned += 1
         if scanned > int(max_features_scan):
             break
+        _skip_391 = False
         try:
             g = feat.geometry()
         except Exception as _exc:
             log_swallowed("ai_aoi_summary._vector_layer_stats_in_geom", _exc)
+            log_swallowed("tools/ai_aoi_summary.py:393 (_vector_layer_stats_in_geom)", _exc)
+            _skip_391 = True
+        if _skip_391:
             continue
         if not g or g.isEmpty():
             continue
+        _skip_398 = False
         try:
             if not g.intersects(geom):
                 continue
         except Exception as _exc:
             log_swallowed("ai_aoi_summary._vector_layer_stats_in_geom", _exc)
+            log_swallowed("tools/ai_aoi_summary.py:401 (_vector_layer_stats_in_geom)", _exc)
+            _skip_398 = True
+        if _skip_398:
             continue
 
         n += 1
@@ -423,6 +439,7 @@ def _vector_layer_stats_in_geom(
                 log_swallowed("ai_aoi_summary._vector_layer_stats_in_geom", _exc)
 
         for f, acc in num_acc.items():
+            _skip_426 = False
             try:
                 v = feat[f]
                 # PyQGIS hands back NULL (not None) for a null attribute, and
@@ -437,8 +454,11 @@ def _vector_layer_stats_in_geom(
                 acc["min"] = float(min(float(acc["min"]), float(x)))
                 acc["max"] = float(max(float(acc["max"]), float(x)))
                 acc["n"] = int(acc["n"]) + 1
-            except Exception:
+            except Exception as _exc:
                 convert_failures[str(f)] = convert_failures.get(str(f), 0) + 1
+                log_swallowed("tools/ai_aoi_summary.py:440 (_vector_layer_stats_in_geom)", _exc)
+                _skip_426 = True
+            if _skip_426:
                 continue
 
         if dist_acc is not None:
@@ -475,6 +495,7 @@ def _vector_layer_stats_in_geom(
             ValueError(f"field '{field_name}': {count} value(s) not numeric; skipped"),
         )
     for f, acc in num_acc.items():
+        _skip_478 = False
         try:
             n0 = int(acc.get("n") or 0)
             if n0 <= 0:
@@ -488,6 +509,9 @@ def _vector_layer_stats_in_geom(
             }
         except Exception as _exc:
             log_swallowed("ai_aoi_summary._vector_layer_stats_in_geom", _exc)
+            log_swallowed("tools/ai_aoi_summary.py:489 (_vector_layer_stats_in_geom)", _exc)
+            _skip_478 = True
+        if _skip_478:
             continue
     if numeric_out:
         out["numeric_fields"] = numeric_out
@@ -515,8 +539,8 @@ def _pick_reference_name_field(layer: QgsVectorLayer, preferred: str = "") -> st
     try:
         if pref and layer.fields().indexFromName(pref) >= 0:
             return pref
-    except Exception:
-        pass
+    except Exception as _exc:
+        log_swallowed("tools/ai_aoi_summary.py:518 (_pick_reference_name_field)", _exc)
 
     try:
         fields = [f.name() for f in layer.fields()]
@@ -669,10 +693,14 @@ def _reference_sites_summary(
         if scanned > max_scan:
             break
 
+        _skip_672 = False
         try:
             g0 = ft.geometry()
         except Exception as _exc:
             log_swallowed("ai_aoi_summary._reference_sites_summary", _exc)
+            log_swallowed("tools/ai_aoi_summary.py:674 (_reference_sites_summary)", _exc)
+            _skip_672 = True
+        if _skip_672:
             continue
         if g0 is None or g0.isEmpty():
             continue
@@ -860,8 +888,8 @@ def _reference_sites_summary(
         }
         try:
             item["wkb"] = QgsWkbTypes.displayString(layer.wkbType())
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/ai_aoi_summary.py:863 (_reference_sites_summary)", _exc)
         if overlap_aoi_area_m2 is not None:
             item["overlap_aoi_area_m2"] = overlap_aoi_area_m2
         if overlap_buffer_area_m2 is not None:
@@ -1200,13 +1228,13 @@ def build_aoi_context(
             try:
                 if str(lyr.name() or "").startswith("Style:"):
                     continue
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("tools/ai_aoi_summary.py:1203 (build_aoi_context)", _exc)
             try:
                 if (meta or {}).get("tool_id") == "map_styling":
                     continue
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("tools/ai_aoi_summary.py:1208 (build_aoi_context)", _exc)
 
         if only_archtoolkit_layers and (not meta) and (not is_archtoolkit_layer(lyr)):
             continue
@@ -1239,12 +1267,12 @@ def build_aoi_context(
             item["geometry_type"] = int(lyr.geometryType())
             try:
                 item["wkb"] = QgsWkbTypes.displayString(lyr.wkbType())
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("tools/ai_aoi_summary.py:1242 (build_aoi_context)", _exc)
             try:
                 item["provider"] = str(lyr.providerType() or "")
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("tools/ai_aoi_summary.py:1246 (build_aoi_context)", _exc)
 
             try:
                 item["stats"] = _vector_layer_stats_in_geom(
@@ -1259,8 +1287,8 @@ def build_aoi_context(
         elif isinstance(lyr, QgsRasterLayer):
             try:
                 item["provider"] = str(lyr.providerType() or "")
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("tools/ai_aoi_summary.py:1262 (build_aoi_context)", _exc)
             src_path = _split_qgis_source_path(lyr.source())
             item["source"] = os.path.basename(src_path) if src_path else ""
             if src_path and os.path.exists(src_path):
@@ -1320,8 +1348,8 @@ def build_aoi_context(
 
     try:
         log_message(f"AI AOI summary: layers={len(summaries)} (archtoolkit_only={only_archtoolkit_layers})", level=Qgis.Info)
-    except Exception:
-        pass
+    except Exception as _exc:
+        log_swallowed("tools/ai_aoi_summary.py:1323 (build_aoi_context)", _exc)
 
     return ctx, None
 

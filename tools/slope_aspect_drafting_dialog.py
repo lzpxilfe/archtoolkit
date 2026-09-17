@@ -131,8 +131,8 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
         except Exception:
             try:
                 QtWidgets.QMessageBox.information(self, "도움말", "README.md를 참고하세요.")
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("tools/slope_aspect_drafting_dialog.py:134 (_on_help)", _exc)
 
     def create_mask_layer(self):
         dem_layer = self.cmbDemLayer.currentLayer()
@@ -152,13 +152,13 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
 
         try:
             self.cmbMaskLayer.setLayer(layer)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/slope_aspect_drafting_dialog.py:155 (create_mask_layer)", _exc)
         try:
             layer.startEditing()
             self.iface.setActiveLayer(layer)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/slope_aspect_drafting_dialog.py:160 (create_mask_layer)", _exc)
 
         push_message(
             self.iface,
@@ -443,12 +443,16 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
                     col2 = min(col + step_cells, xsize)
                     if col2 <= col:
                         continue
+                    _skip_446 = False
                     try:
                         sample_r = dr + ((row2 - row) // 2)
                         sample_c = col + ((col2 - col) // 2)
                         slope = float(arr[sample_r, sample_c])
                     except Exception as _exc:
                         log_swallowed("slope_aspect_drafting_dialog._build_slope_grid_layer", _exc)
+                        log_swallowed("tools/slope_aspect_drafting_dialog.py:450 (_build_slope_grid_layer)", _exc)
+                        _skip_446 = True
+                    if _skip_446:
                         continue
                     if not math.isfinite(slope):
                         continue
@@ -508,8 +512,8 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
             }
             try:
                 dissolve_params["SEPARATE_DISJOINT"] = True
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("tools/slope_aspect_drafting_dialog.py:511 (_build_slope_grid_layer)", _exc)
             out_layer = processing.run("native:dissolve", dissolve_params)["OUTPUT"]
             try:
                 out_layer = processing.run(
@@ -530,8 +534,8 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
                 label_size_pt=label_size_pt,
                 slope_class_step=slope_class_step,
             )
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/slope_aspect_drafting_dialog.py:533 (_build_slope_grid_layer)", _exc)
 
         ds = None
         return out_layer
@@ -603,10 +607,14 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
 
             changes = {}
             for ft in layer.getFeatures():
+                _skip_606 = False
                 try:
                     slope_deg = int(ft["slope_deg"])
                 except Exception as _exc:
                     log_swallowed("slope_aspect_drafting_dialog._apply_slope_grid_style", _exc)
+                    log_swallowed("tools/slope_aspect_drafting_dialog.py:608 (_apply_slope_grid_style)", _exc)
+                    _skip_606 = True
+                if _skip_606:
                     continue
                 if slope_deg < 0:
                     slope_deg = 0
@@ -667,13 +675,13 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
             pal.fieldName = "label"
             try:
                 pal.isExpression = False
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("tools/slope_aspect_drafting_dialog.py:670 (_apply_slope_grid_style)", _exc)
             try:
                 pal.displayAll = True
                 pal.allowOverlap = True
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("tools/slope_aspect_drafting_dialog.py:675 (_apply_slope_grid_style)", _exc)
             try:
                 pal.placement = QgsPalLayerSettings.OverPoint
                 pal.centroidInside = True
@@ -754,11 +762,15 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
             for dr in range(0, rows_to_read, step_cells):
                 row = row0 + dr
                 for col in range(0, xsize, step_cells):
+                    _skip_757 = False
                     try:
                         slope = float(slope_arr[dr, col])
                         aspect = float(aspect_arr[dr, col])
                     except Exception as _exc:
                         log_swallowed("slope_aspect_drafting_dialog._build_aspect_arrow_layer", _exc)
+                        log_swallowed("tools/slope_aspect_drafting_dialog.py:760 (_build_aspect_arrow_layer)", _exc)
+                        _skip_757 = True
+                    if _skip_757:
                         continue
                     if not math.isfinite(slope) or not math.isfinite(aspect):
                         continue
@@ -805,8 +817,8 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
                 sl.setDataDefinedProperty(
                     QgsSymbolLayer.PropertyAngle, QgsProperty.fromField("aspect_45")
                 )
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/slope_aspect_drafting_dialog.py:808 (_build_aspect_arrow_layer)", _exc)
 
         colors = {
             "N": "228,26,28,200",

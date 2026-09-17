@@ -14,6 +14,7 @@ import heapq
 import math
 from collections import deque
 from typing import List, Tuple
+from .swallow_log import log_swallowed
 
 
 def dijkstra_weighted(*, start: int, adj: List[List[Tuple[int, float]]]) -> List[float]:
@@ -30,9 +31,13 @@ def dijkstra_weighted(*, start: int, adj: List[List[Tuple[int, float]]]) -> List
         if dv > dist[v] + eps:
             continue
         for w, weight in adj[v]:
+            _skip_33 = False
             try:
                 ww = float(weight)
-            except Exception:
+            except Exception as _exc:
+                log_swallowed("tools/network_metrics.py:35 (dijkstra_weighted)", _exc)
+                _skip_33 = True
+            if _skip_33:
                 continue
             if not math.isfinite(ww) or ww <= 0:
                 continue
@@ -84,9 +89,13 @@ def betweenness_centrality_weighted(*, n: int, adj: List[List[Tuple[int, float]]
                 continue
             stack.append(int(v))
             for w, weight in adj[v]:
+                _skip_87 = False
                 try:
                     ww = float(weight)
-                except Exception:
+                except Exception as _exc:
+                    log_swallowed("tools/network_metrics.py:89 (betweenness_centrality_weighted)", _exc)
+                    _skip_87 = True
+                if _skip_87:
                     continue
                 if not math.isfinite(ww) or ww <= 0:
                     continue

@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import math
 import os
+from .swallow_log import log_swallowed
 
 # Measured at 1,000,000 cells (128 B/cell, 10.2 us/cell), rounded up for
 # headroom: real DEMs vary, and a friction raster adds another float32 plane.
@@ -82,8 +83,8 @@ def available_memory_bytes():
             for line in handle:
                 if line.startswith("MemAvailable:"):
                     return int(line.split()[1]) * 1024
-    except Exception:
-        pass
+    except Exception as _exc:
+        log_swallowed("tools/cost_budget.py:85 (available_memory_bytes)", _exc)
 
     # Windows.
     try:
@@ -106,14 +107,14 @@ def available_memory_bytes():
         status.dwLength = ctypes.sizeof(_MemoryStatusEx)
         if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
             return int(status.ullAvailPhys)
-    except Exception:
-        pass
+    except Exception as _exc:
+        log_swallowed("tools/cost_budget.py:109 (available_memory_bytes)", _exc)
 
     # POSIX fallback (macOS and Linux without /proc).
     try:
         return int(os.sysconf("SC_PAGE_SIZE")) * int(os.sysconf("SC_AVPHYS_PAGES"))
-    except Exception:
-        pass
+    except Exception as _exc:
+        log_swallowed("tools/cost_budget.py:115 (available_memory_bytes)", _exc)
     return None
 
 

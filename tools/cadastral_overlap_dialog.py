@@ -55,14 +55,14 @@ def _safe_make_valid(geom: QgsGeometry) -> QgsGeometry:
             return geom
         if geom.isGeosValid():
             return geom
-    except Exception:
-        pass
+    except Exception as _exc:
+        log_swallowed("tools/cadastral_overlap_dialog.py:58 (_safe_make_valid)", _exc)
     try:
         mv = geom.makeValid()
         if mv and (not mv.isEmpty()):
             return mv
-    except Exception:
-        pass
+    except Exception as _exc:
+        log_swallowed("tools/cadastral_overlap_dialog.py:64 (_safe_make_valid)", _exc)
     return geom
 
 
@@ -74,12 +74,16 @@ def _iter_layer_geoms(layer: QgsVectorLayer, *, selected_only: bool) -> List[Qgs
     else:
         feats = layer.getFeatures()
     for f in feats:
+        _skip_77 = False
         try:
             g = f.geometry()
             if g and (not g.isEmpty()):
                 geoms.append(_safe_make_valid(g))
         except Exception as _exc:
             log_swallowed("cadastral_overlap_dialog._iter_layer_geoms", _exc)
+            log_swallowed("tools/cadastral_overlap_dialog.py:81 (_iter_layer_geoms)", _exc)
+            _skip_77 = True
+        if _skip_77:
             continue
     return geoms
 
@@ -223,8 +227,8 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
         try:
             plugin_dir = os.path.dirname(os.path.dirname(__file__))
             show_help_dialog(parent=self, title="Cadastral Overlap 도움말", html=html, plugin_dir=plugin_dir)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/cadastral_overlap_dialog.py:226 (_on_help)", _exc)
 
     def _validate_layer(self, layer, *, name: str) -> Optional[QgsVectorLayer]:
         if layer is None or (not layer.isValid()):
@@ -245,14 +249,14 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
         da = QgsDistanceArea()
         try:
             da.setSourceCrs(crs, QgsProject.instance().transformContext())
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/cadastral_overlap_dialog.py:248 (_distance_area)", _exc)
         try:
             ell = QgsProject.instance().ellipsoid() or "WGS84"
             if str(ell).strip():
                 da.setEllipsoid(str(ell))
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/cadastral_overlap_dialog.py:254 (_distance_area)", _exc)
         return da
 
     def _area_m2(self, da: QgsDistanceArea, geom: QgsGeometry, crs=None) -> float:
@@ -415,15 +419,20 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
             # Build AOI geometries per survey feature
             aoi_items: List[Tuple[int, QgsGeometry]] = []
             for sf in iter_survey_features():
+                _skip_418 = False
                 try:
                     g = sf.geometry()
                 except Exception as _exc:
                     log_swallowed("cadastral_overlap_dialog.run", _exc)
+                    log_swallowed("tools/cadastral_overlap_dialog.py:420 (run)", _exc)
+                    _skip_418 = True
+                if _skip_418:
                     continue
                 if not g or g.isEmpty():
                     continue
                 g = _safe_make_valid(g)
                 if ct is not None:
+                    _skip_427 = False
                     try:
                         gt = QgsGeometry(g)
                         gt.transform(ct)
@@ -432,6 +441,9 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
                         # Skip rather than keep the untransformed geometry —
                         # wrong-CRS coordinates would just yield "no overlap".
                         log_swallowed("cadastral_overlap_dialog.run", _exc)
+                        log_swallowed("tools/cadastral_overlap_dialog.py:431 (run)", _exc)
+                        _skip_427 = True
+                    if _skip_427:
                         continue
                 if g and (not g.isEmpty()):
                     try:
@@ -472,8 +484,8 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
                         progress.setLabelText(f"Processing AOI {idx + 1}/{len(aoi_items)}... (fid={aoi_fid})")
                     else:
                         progress.setLabelText(f"조사지역 {idx + 1}/{len(aoi_items)} 처리 중... (fid={aoi_fid})")
-                except Exception:
-                    pass
+                except Exception as _exc:
+                    log_swallowed("tools/cadastral_overlap_dialog.py:475 (run)", _exc)
                 QtWidgets.QApplication.processEvents()
 
                 aoi_geom = _safe_make_valid(aoi_geom)
@@ -487,19 +499,23 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
                 feats: List[QgsFeature] = []
                 if cad_selected_feats is not None:
                     for cf in cad_selected_feats:
+                        _skip_490 = False
                         try:
                             cg = cf.geometry()
                             if cg and (not cg.isEmpty()) and cg.boundingBox().intersects(aoi_bbox):
                                 feats.append(cf)
                         except Exception as _exc:
                             log_swallowed("cadastral_overlap_dialog.run", _exc)
+                            log_swallowed("tools/cadastral_overlap_dialog.py:494 (run)", _exc)
+                            _skip_490 = True
+                        if _skip_490:
                             continue
                 else:
                     req = QgsFeatureRequest()
                     try:
                         req.setFilterRect(aoi_bbox)
-                    except Exception:
-                        pass
+                    except Exception as _exc:
+                        log_swallowed("tools/cadastral_overlap_dialog.py:501 (run)", _exc)
                     try:
                         feats = list(cad.getFeatures(req))
                     except Exception:
@@ -531,10 +547,14 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
                     if i % 200 == 0:
                         QtWidgets.QApplication.processEvents()
 
+                    _skip_534 = False
                     try:
                         g = f.geometry()
                     except Exception as _exc:
                         log_swallowed("cadastral_overlap_dialog.run", _exc)
+                        log_swallowed("tools/cadastral_overlap_dialog.py:536 (run)", _exc)
+                        _skip_534 = True
+                    if _skip_534:
                         continue
                     if not g or g.isEmpty():
                         continue
@@ -639,19 +659,23 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
         feats: List[QgsFeature] = []
         if cad_selected_feats is not None:
             for cf in cad_selected_feats:
+                _skip_642 = False
                 try:
                     cg = cf.geometry()
                     if cg and (not cg.isEmpty()) and cg.boundingBox().intersects(aoi_bbox):
                         feats.append(cf)
                 except Exception as _exc:
                     log_swallowed("cadastral_overlap_dialog.run", _exc)
+                    log_swallowed("tools/cadastral_overlap_dialog.py:646 (run)", _exc)
+                    _skip_642 = True
+                if _skip_642:
                     continue
         else:
             req = QgsFeatureRequest()
             try:
                 req.setFilterRect(aoi_bbox)
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("tools/cadastral_overlap_dialog.py:653 (run)", _exc)
             try:
                 feats = list(cad.getFeatures(req))
             except Exception:
@@ -695,10 +719,14 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
                 progress.setValue(min(total, i))
                 QtWidgets.QApplication.processEvents()
 
+            _skip_698 = False
             try:
                 g = f.geometry()
             except Exception as _exc:
                 log_swallowed("cadastral_overlap_dialog.run", _exc)
+                log_swallowed("tools/cadastral_overlap_dialog.py:700 (run)", _exc)
+                _skip_698 = True
+            if _skip_698:
                 continue
             if not g or g.isEmpty():
                 continue

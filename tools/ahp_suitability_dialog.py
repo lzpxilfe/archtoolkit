@@ -258,12 +258,16 @@ class _CriterionReclassDialog(QtWidgets.QDialog):
     def values(self) -> List[Dict[str, float]]:
         out: List[Dict[str, float]] = []
         for r in range(int(self.table.rowCount())):
+            _skip_261 = False
             try:
                 mn = float(self.table.item(r, 0).text())
                 mx = float(self.table.item(r, 1).text())
                 score = float(self.table.item(r, 2).text())
             except Exception as _exc:
                 log_swallowed("ahp_suitability_dialog.values", _exc)
+                log_swallowed("tools/ahp_suitability_dialog.py:265 (values)", _exc)
+                _skip_261 = True
+            if _skip_261:
                 continue
             if not (math.isfinite(mn) and math.isfinite(mx) and math.isfinite(score)):
                 continue
@@ -295,8 +299,8 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
         try:
             if self._weight_input_note:
                 self.lblConsistency.setToolTip(self._weight_input_note)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/ahp_suitability_dialog.py:298 (_set_weight_input_mode)", _exc)
 
     def _setup_ui(self):
         self.setWindowTitle("AHP 입지적합도 (Suitability) - ArchToolkit")
@@ -341,8 +345,8 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
         try:
             self.cmbAoi.setAllowEmptyLayer(True)
             self.cmbAoi.setCurrentIndex(0)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/ahp_suitability_dialog.py:344 (_setup_ui)", _exc)
         form.addRow("AOI(선택):", self.cmbAoi)
 
         self.chkAoiSelectedOnly = QtWidgets.QCheckBox("AOI 선택 피처만 사용")
@@ -434,8 +438,8 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
         self.lblConsistency.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
         try:
             self.lblConsistency.setToolTip("일관성비율(CR). 일반적으로 CR ≤ 0.10 권장 (Saaty, 1980).")
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/ahp_suitability_dialog.py:437 (_setup_ui)", _exc)
         row_w.addWidget(self.btnResetPairwise)
         row_w.addStretch(1)
         row_w.addWidget(self.lblConsistency)
@@ -543,8 +547,8 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
         try:
             plugin_dir = os.path.dirname(os.path.dirname(__file__))
             show_help_dialog(parent=self, title="AHP 적합도 도움말", html=html, plugin_dir=plugin_dir)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/ahp_suitability_dialog.py:546 (_on_help)", _exc)
 
     def _criterion_layer(self, crit: _Criterion) -> Optional[QgsRasterLayer]:
         try:
@@ -831,8 +835,8 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
             for r in rows:
                 if 0 <= r < len(self._criteria):
                     del self._criteria[r]
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/ahp_suitability_dialog.py:834 (_on_remove_selected_criteria)", _exc)
         self._refresh_criteria_table()
         self._rebuild_pairwise_table()
 
@@ -858,8 +862,8 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
                 idx = cmb.findData(str(crit.direction or "benefit"))
                 if idx >= 0:
                     cmb.setCurrentIndex(idx)
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("tools/ahp_suitability_dialog.py:861 (_refresh_criteria_table)", _exc)
 
             def _on_dir_changed(_=None, row=i, w=cmb):
                 try:
@@ -909,8 +913,8 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
 
         try:
             self.tblCriteria.resizeColumnsToContents()
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/ahp_suitability_dialog.py:912 (_refresh_criteria_table)", _exc)
 
         self._update_consistency_and_weights()
 
@@ -929,10 +933,14 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
                 ib = id_to_idx.get(str(key[1]))
                 if ia is None or ib is None or ia == ib:
                     continue
+                _skip_932 = False
                 try:
                     v = float(value)
                 except Exception as _exc:
                     log_swallowed("ahp_suitability_dialog._rebuild_pairwise_table", _exc)
+                    log_swallowed("tools/ahp_suitability_dialog.py:934 (_rebuild_pairwise_table)", _exc)
+                    _skip_932 = True
+                if _skip_932:
                     continue
                 if not math.isfinite(v) or v <= 0:
                     continue
@@ -998,18 +1006,22 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
         # Reciprocal cells are plain items created above; sync them to the
         # (possibly seeded) upper-triangle values once the grid exists.
         for (pi, pj), pv in dict(self._pairwise).items():
+            _skip_1001 = False
             try:
                 if abs(float(pv) - 1.0) > 1e-12:
                     self._set_reciprocal_cell(int(pi), int(pj), float(pv))
             except Exception as _exc:
                 log_swallowed("ahp_suitability_dialog._rebuild_pairwise_table", _exc)
+                log_swallowed("tools/ahp_suitability_dialog.py:1004 (_rebuild_pairwise_table)", _exc)
+                _skip_1001 = True
+            if _skip_1001:
                 continue
 
         try:
             self.tblPairwise.resizeColumnsToContents()
             self.tblPairwise.resizeRowsToContents()
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/ahp_suitability_dialog.py:1011 (_rebuild_pairwise_table)", _exc)
         self._update_consistency_and_weights()
 
     def _set_reciprocal_cell(self, i: int, j: int, v: float):
@@ -1021,12 +1033,16 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
         try:
             label = None
             for s_label, s_val in _SCALE_OPTIONS:
+                _skip_1024 = False
                 try:
                     if abs(float(s_val) - float(vv)) <= 1e-9:
                         label = str(s_label)
                         break
                 except Exception as _exc:
                     log_swallowed("ahp_suitability_dialog._set_reciprocal_cell", _exc)
+                    log_swallowed("tools/ahp_suitability_dialog.py:1028 (_set_reciprocal_cell)", _exc)
+                    _skip_1024 = True
+                if _skip_1024:
                     continue
             if label is None:
                 label = _fmt_float(vv, digits=4)
@@ -1050,6 +1066,7 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
             return None
         mat = np.ones((n, n), dtype=float)
         for (i, j), v in (self._pairwise or {}).items():
+            _skip_1053 = False
             try:
                 i0 = int(i)
                 j0 = int(j)
@@ -1062,6 +1079,9 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
                 mat[j0, i0] = 1.0 / v0
             except Exception as _exc:
                 log_swallowed("ahp_suitability_dialog._build_pairwise_matrix", _exc)
+                log_swallowed("tools/ahp_suitability_dialog.py:1063 (_build_pairwise_matrix)", _exc)
+                _skip_1053 = True
+            if _skip_1053:
                 continue
         return mat
 
@@ -1324,12 +1344,17 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
             pt = self._extract_sample_point(feat)
             if pt is None:
                 continue
+            _skip_1327 = False
             try:
                 if ct is not None:
                     pt = ct.transform(pt)
             except Exception as _exc:
                 log_swallowed("ahp_suitability_dialog._quick_validate_output", _exc)
+                log_swallowed("tools/ahp_suitability_dialog.py:1330 (_quick_validate_output)", _exc)
+                _skip_1327 = True
+            if _skip_1327:
                 continue
+            _skip_1333 = False
             try:
                 sampled += 1
                 sample = raster_layer.dataProvider().sample(pt, 1)
@@ -1346,6 +1371,9 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
                     values.append(value_f)
             except Exception as _exc:
                 log_swallowed("ahp_suitability_dialog._quick_validate_output", _exc)
+                log_swallowed("tools/ahp_suitability_dialog.py:1347 (_quick_validate_output)", _exc)
+                _skip_1333 = True
+            if _skip_1333:
                 continue
 
         scale_factor = 100.0 if self.chkScale100.isChecked() else 1.0
@@ -1484,8 +1512,8 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
                 aoi = self.cmbAoi.currentLayer()
                 if aoi is not None:
                     layer_name = f"AHP Suitability ({aoi.name()})"
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("tools/ahp_suitability_dialog.py:1487 (_add_output_to_project)", _exc)
             layer = QgsRasterLayer(str(out_path), layer_name)
         except Exception:
             return None
@@ -1572,8 +1600,8 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
 
         try:
             ensure_live_log_dialog(self.iface, owner=self, show=True, clear=True)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/ahp_suitability_dialog.py:1575 (_on_run)", _exc)
 
         run_id = new_run_id("ahp")
         push_message(self.iface, "AHP", "가중치/통계 계산 중…", level=0, duration=4)
@@ -1603,8 +1631,8 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
         try:
             if cr is not None and cr > 0.10:
                 push_message(self.iface, "주의", f"AHP 일관성비율(CR)이 높습니다: {cr:.3f} (권장 ≤ 0.10)", level=1, duration=8)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/ahp_suitability_dialog.py:1606 (_on_run)", _exc)
 
         # 2) Stats - through the guarded path, so a failed AOI never leaves
         #    whole-raster min/max stored on a criterion for a later run.
@@ -1632,8 +1660,8 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
                 if aoi_layer.geometryType() != QgsWkbTypes.PolygonGeometry:
                     push_message(self.iface, "오류", "AOI는 폴리곤 레이어여야 합니다.", level=2, duration=7)
                     return
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("tools/ahp_suitability_dialog.py:1635 (_on_run)", _exc)
 
         extent_str = None
         extent_crs = None
@@ -1701,8 +1729,8 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
                     if re0 is not None and (not re0.isEmpty()):
                         extent_str = f"{re0.xMinimum()},{re0.xMaximum()},{re0.yMinimum()},{re0.yMaximum()}"
                         extent_crs = str(ref_layer.crs().authid() or "")
-                except Exception:
-                    pass
+                except Exception as _exc:
+                    log_swallowed("tools/ahp_suitability_dialog.py:1704 (_on_run)", _exc)
 
             def _grid_signature(lyr0):
                 try:

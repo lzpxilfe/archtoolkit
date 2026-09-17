@@ -171,8 +171,8 @@ class AiAoiReportDialog(QtWidgets.QDialog):
     def _settings_set(self, key: str, value) -> None:
         try:
             QSettings().setValue(f"{_SETTINGS_PREFIX}/{key}", value)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/ai_report_dialog.py:174 (_settings_set)", _exc)
 
     def _get_provider(self) -> str:
         try:
@@ -215,35 +215,35 @@ class AiAoiReportDialog(QtWidgets.QDialog):
             self.btnExportCsv.setEnabled(not busy)
             self.btnExport.setEnabled(not busy)
             self.btnClose.setEnabled(not busy)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/ai_report_dialog.py:218 (_set_busy_state)", _exc)
         try:
             self.lblBusy.setVisible(bool(busy))
             self.prgBusy.setVisible(bool(busy))
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/ai_report_dialog.py:223 (_set_busy_state)", _exc)
         if busy and message:
             try:
                 self.lblBusy.setText(str(message))
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("tools/ai_report_dialog.py:228 (_set_busy_state)", _exc)
         if (not busy) and hasattr(self, "lblBusy"):
             try:
                 self.lblBusy.setText("")
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("tools/ai_report_dialog.py:233 (_set_busy_state)", _exc)
         try:
             QtWidgets.QApplication.processEvents()
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/ai_report_dialog.py:237 (_set_busy_state)", _exc)
 
     def _set_busy_message(self, message: str) -> None:
         try:
             if self.prgBusy.isVisible():
                 self.lblBusy.setText(str(message or "처리 중…"))
                 QtWidgets.QApplication.processEvents()
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/ai_report_dialog.py:245 (_set_busy_message)", _exc)
 
     def _setup_ui(self):
         self.setWindowTitle("AI 조사요약 (AOI Report) - ArchToolkit")
@@ -317,8 +317,8 @@ class AiAoiReportDialog(QtWidgets.QDialog):
             idx = self.cmbLayerScope.findData(saved_scope)
             if idx >= 0:
                 self.cmbLayerScope.setCurrentIndex(idx)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/ai_report_dialog.py:320 (_setup_ui)", _exc)
         self.cmbLayerScope.currentIndexChanged.connect(self._on_layer_scope_changed)
         form.addRow("대상 레이어:", self.cmbLayerScope)
 
@@ -395,8 +395,8 @@ class AiAoiReportDialog(QtWidgets.QDialog):
             idx = self.cmbProvider.findData(saved_provider)
             if idx >= 0:
                 self.cmbProvider.setCurrentIndex(idx)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/ai_report_dialog.py:398 (_setup_ui)", _exc)
         self.cmbProvider.currentIndexChanged.connect(self._on_provider_changed)
 
         self.lblKeyStatus = QtWidgets.QLabel("(키 상태: 확인 중)")
@@ -519,8 +519,8 @@ class AiAoiReportDialog(QtWidgets.QDialog):
             ids.append(lid)
             try:
                 names.append(str(lyr.name() or ""))
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("tools/ai_report_dialog.py:522 (_update_selected_layers_label)", _exc)
         self._selected_layer_ids = ids
 
         if not ids:
@@ -539,20 +539,20 @@ class AiAoiReportDialog(QtWidgets.QDialog):
 
         try:
             self.chkOnlyArchToolkit.setEnabled(is_auto)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/ai_report_dialog.py:542 (_update_layer_scope_ui)", _exc)
 
         try:
             self.cmbTargetGroup.setEnabled(is_group)
             self.btnRefreshGroups.setEnabled(is_group)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/ai_report_dialog.py:548 (_update_layer_scope_ui)", _exc)
 
         try:
             self.btnSelectLayers.setEnabled(is_layers)
             self.btnClearLayers.setEnabled(is_layers)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/ai_report_dialog.py:554 (_update_layer_scope_ui)", _exc)
 
         self._update_selected_layers_label()
 
@@ -596,8 +596,8 @@ class AiAoiReportDialog(QtWidgets.QDialog):
                         fn = str(f.name() or "").strip()
                         if fn:
                             self.cmbReferenceNameField.addItem(fn, fn)
-                except Exception:
-                    pass
+                except Exception as _exc:
+                    log_swallowed("tools/ai_report_dialog.py:599 (_refresh_reference_name_fields)", _exc)
             if keep:
                 idx = self.cmbReferenceNameField.findData(keep)
                 if idx >= 0:
@@ -612,8 +612,8 @@ class AiAoiReportDialog(QtWidgets.QDialog):
             self.chkReferenceSelectedOnly.setEnabled(enabled)
             self.cmbReferenceNameField.setEnabled(enabled)
             self.spinReferenceMax.setEnabled(enabled)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/ai_report_dialog.py:615 (_update_reference_ui)", _exc)
         self._refresh_reference_name_fields()
 
     def _on_reference_layer_changed(self, _layer=None):
@@ -647,14 +647,14 @@ class AiAoiReportDialog(QtWidgets.QDialog):
             self.btnSetKey.setEnabled(is_gemini)
             self.txtModel.setEnabled(is_gemini)
             self.btnSaveModel.setEnabled(is_gemini)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/ai_report_dialog.py:650 (_update_provider_ui)", _exc)
 
         try:
             self.lblAuthHint.setVisible(is_gemini)
             self.lblLocalHint.setVisible(not is_gemini)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/ai_report_dialog.py:656 (_update_provider_ui)", _exc)
 
     def _refresh_key_status(self):
         if self._get_provider() != "gemini":
@@ -676,8 +676,8 @@ class AiAoiReportDialog(QtWidgets.QDialog):
             return
         try:
             ensure_live_log_dialog(self.iface, owner=self, show=True, clear=True)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/ai_report_dialog.py:679 (_on_set_key)", _exc)
         ai_gemini.configure_api_key(self, iface=self.iface)
         self._refresh_key_status()
 
@@ -1032,8 +1032,8 @@ class AiAoiReportDialog(QtWidgets.QDialog):
                     self._last_model = str(used_model)
                     if str(used_model) != str(model or ""):
                         log_message(f"Gemini fallback model used: {used_model}")
-                except Exception:
-                    pass
+                except Exception as _exc:
+                    log_swallowed("tools/ai_report_dialog.py:1035 (_on_generate)", _exc)
 
             # An empty/whitespace response is a failure, not a silent success.
             if (not api_err) and (not str(text or "").strip()):
@@ -1171,8 +1171,8 @@ class AiAoiReportDialog(QtWidgets.QDialog):
                     canvas.saveAsImage(str(path))
                     if os.path.exists(str(path)):
                         return None
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("tools/ai_report_dialog.py:1174 (_save_canvas_snapshot)", _exc)
 
             # Fallback (Qt)
             try:
@@ -1181,8 +1181,8 @@ class AiAoiReportDialog(QtWidgets.QDialog):
                     ok = pm.save(str(path))
                     if ok and os.path.exists(str(path)):
                         return None
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("tools/ai_report_dialog.py:1184 (_save_canvas_snapshot)", _exc)
             return "snapshot failed"
         except Exception as e:
             return str(e)
@@ -1283,8 +1283,8 @@ class AiAoiReportDialog(QtWidgets.QDialog):
             try:
                 for w in warnings[:8]:
                     log_message(f"[bundle] {w}")
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("tools/ai_report_dialog.py:1286 (_on_export_bundle)", _exc)
             return
 
         push_message(self.iface, "번들 저장", f"완료: {bundle_dir}", level=0, duration=8)

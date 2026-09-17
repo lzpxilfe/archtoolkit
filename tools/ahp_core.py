@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import math
 from typing import Any, Dict, List, Optional, Tuple
+from .swallow_log import log_swallowed
 
 try:
     import numpy as np
@@ -139,9 +140,13 @@ def matrix_from_pairs(keys: List[str], pairs: Dict[Tuple[str, str], float]) -> O
         ib = index.get(str(b))
         if ia is None or ib is None or ia == ib:
             continue
+        _skip_142 = False
         try:
             v0 = float(v)
-        except Exception:
+        except Exception as _exc:
+            log_swallowed("tools/ahp_core.py:144 (matrix_from_pairs)", _exc)
+            _skip_142 = True
+        if _skip_142:
             continue
         if not math.isfinite(v0) or v0 <= 0:
             continue
@@ -247,11 +252,15 @@ def validated_score_ranges(score_ranges):
     rows_in = score_ranges or []
     rows = []
     for row in rows_in:
+        _skip_250 = False
         try:
             min_v = float(row.get("min"))
             max_v = float(row.get("max"))
             score = float(row.get("score"))
-        except Exception:
+        except Exception as _exc:
+            log_swallowed("tools/ahp_core.py:254 (validated_score_ranges)", _exc)
+            _skip_250 = True
+        if _skip_250:
             continue
         if max_v < min_v:
             min_v, max_v = max_v, min_v

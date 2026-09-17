@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import re
 import unittest
 from pathlib import Path
@@ -61,6 +62,45 @@ class UiAssetTests(unittest.TestCase):
         self.assertEqual(new_run.parent(), moved)
         self.assertIs(move_group_to_top(root, moved), moved)
         self.assertEqual(len(moved.children()), 2)
+
+    def test_no_silent_try_except_pass_or_continue(self):
+        # The QGIS plugin directory's Bandit scan blocks uploads over bare
+        # try/except/pass (B110) and try/except/continue (B112). Beyond the
+        # scanner, DEVELOPMENT.md requires swallowed exceptions to leave a
+        # [swallowed] log line, so neither construct is acceptable anywhere
+        # in the shipped sources: every handler must record via log_swallowed
+        # (or, inside the logging machinery itself, return without recursing).
+        offenders = []
+
+        def in_loop(parents, node):
+            while node in parents:
+                node = parents[node]
+                if isinstance(node, (ast.For, ast.AsyncFor, ast.While)):
+                    return True
+            return False
+
+        targets = [ROOT / "arch_toolkit.py", ROOT / "__init__.py"]
+        targets.extend(sorted((ROOT / "tools").glob("*.py")))
+        for path in targets:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            parents = {}
+            for parent in ast.walk(tree):
+                for child in ast.iter_child_nodes(parent):
+                    parents[child] = parent
+            for node in ast.walk(tree):
+                if not (isinstance(node, ast.ExceptHandler) and node.body):
+                    continue
+                last = node.body[-1]
+                if isinstance(last, ast.Pass) or (
+                    isinstance(last, ast.Continue) and in_loop(parents, node)
+                ):
+                    offenders.append(f"{path.name}:{last.lineno}")
+        self.assertEqual(
+            offenders,
+            [],
+            "bare except-pass/continue found (use log_swallowed): "
+            + ", ".join(offenders),
+        )
 
     def test_align_export_action_uses_its_dedicated_icon(self):
         source = (ROOT / "arch_toolkit.py").read_text(encoding="utf-8")

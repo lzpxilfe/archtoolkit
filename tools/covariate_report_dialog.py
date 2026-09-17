@@ -76,12 +76,16 @@ _VIF_BAD = 10.0
 def _common_extent(layers, dst_crs) -> Optional[QgsRectangle]:
     rect = None
     for lyr in layers:
+        _skip_79 = False
         try:
             e = lyr.extent()
             if lyr.crs() != dst_crs:
                 ct = QgsCoordinateTransform(lyr.crs(), dst_crs, QgsProject.instance())
                 e = ct.transformBoundingBox(e)
-        except Exception:
+        except Exception as _exc:
+            log_swallowed("tools/covariate_report_dialog.py:84 (_common_extent)", _exc)
+            _skip_79 = True
+        if _skip_79:
             continue
         if rect is None:
             rect = QgsRectangle(e)
@@ -474,5 +478,5 @@ class CovariateReportDialog(QtWidgets.QDialog):
         try:
             plugin_dir = os.path.dirname(os.path.dirname(__file__))
             show_help_dialog(parent=self, title="상관/VIF 리포트 도움말", html=html, plugin_dir=plugin_dir)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/covariate_report_dialog.py:477 (_on_help)", _exc)

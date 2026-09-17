@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
+from .swallow_log import log_swallowed
 
 
 @dataclass(frozen=True)
@@ -81,8 +82,8 @@ def interp_rgb_to_value(
             # Important: apply snap BEFORE distance comparison (affects which segment wins).
             try:
                 t[t > np.float32(snap_last)] = np.float32(1.0)
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("tools/geochem_legend.py:84 (interp_rgb_to_value)", _exc)
         pr = c1r + t * vr
         pg = c1g + t * vg
         pb = c1b + t * vb

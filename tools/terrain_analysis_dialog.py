@@ -228,8 +228,8 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
         except Exception:
             try:
                 QtWidgets.QMessageBox.information(self, "도움말", "README.md를 참고하세요.")
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("tools/terrain_analysis_dialog.py:231 (_on_help)", _exc)
     
     def on_auto_sd_changed(self, state):
         """Enable/disable manual TPI threshold inputs based on auto-SD checkbox"""
@@ -1235,8 +1235,8 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                         kind=key, units="index",
                         params={"source": "aspect", "flat_handling": "north/east=0, TRASP=0.5"},
                     )
-                except Exception:
-                    pass
+                except Exception as _exc:
+                    log_swallowed("tools/terrain_analysis_dialog.py:1238 (run_aspect_derivatives)", _exc)
                 QgsProject.instance().addMapLayer(layer)
                 valid_vals = arr[arr != nd]
                 if style == "diverging":

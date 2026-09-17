@@ -141,12 +141,16 @@ def _unary_union_geom(layer: QgsVectorLayer, *, selected_only: bool) -> Tuple[Op
         feats = []
     for ft in feats:
         n += 1
+        _skip_144 = False
         try:
             g = ft.geometry()
             if g is not None and (not g.isEmpty()):
                 geoms.append(g)
         except Exception as _exc:
             log_swallowed("trench_suggestion_dialog._unary_union_geom", _exc)
+            log_swallowed("tools/trench_suggestion_dialog.py:148 (_unary_union_geom)", _exc)
+            _skip_144 = True
+        if _skip_144:
             continue
     if not geoms:
         return None, 0
@@ -271,8 +275,8 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
         try:
             self.cmbAhp.setAllowEmptyLayer(True)
             self.cmbAhp.setCurrentIndex(0)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/trench_suggestion_dialog.py:274 (_setup_ui)", _exc)
         form_in.addRow("AHP 적합도 래스터(선택):", self.cmbAhp)
         layout.addWidget(grp_in)
 
@@ -348,8 +352,8 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
         try:
             self.cmbRefSites.setAllowEmptyLayer(True)
             self.cmbRefSites.setCurrentIndex(0)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/trench_suggestion_dialog.py:351 (_setup_ui)", _exc)
         form_ctx.addRow("주변 유적 레이어(선택):", self.cmbRefSites)
 
         self.spinRefRadius = QtWidgets.QDoubleSpinBox()
@@ -368,8 +372,8 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
         try:
             self.cmbTopo.setAllowEmptyLayer(True)
             self.cmbTopo.setCurrentIndex(0)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/trench_suggestion_dialog.py:371 (_setup_ui)", _exc)
         self.cmbTopo.layerChanged.connect(self._on_topo_layer_changed)
         form_ctx.addRow("수치지형도 벡터(선택):", self.cmbTopo)
 
@@ -463,8 +467,8 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
         try:
             self.lblBusy.setText(str(message or ""))
             QtWidgets.QApplication.processEvents()
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/trench_suggestion_dialog.py:466 (_set_busy)", _exc)
 
     def _on_topo_layer_changed(self):
         self.cmbTopoCodeField.clear()
@@ -476,8 +480,8 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
             for f in lyr.fields():
                 n = str(f.name() or "")
                 self.cmbTopoCodeField.addItem(n, n)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/trench_suggestion_dialog.py:479 (_on_topo_layer_changed)", _exc)
 
     def _hidden_xls_path(self) -> str:
         plugin_dir = os.path.dirname(os.path.dirname(__file__))
@@ -504,12 +508,16 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
         except Exception:
             return []
         for _sheet_name, df in (sheets or {}).items():
+            _skip_507 = False
             try:
                 for _idx, row in df.fillna("").iterrows():
                     vals = [str(v).strip() for v in row.tolist() if str(v).strip()]
                     if vals:
                         rows.append(vals)
-            except Exception:
+            except Exception as _exc:
+                log_swallowed("tools/trench_suggestion_dialog.py:512 (_iter_rows_from_xls_pandas)", _exc)
+                _skip_507 = True
+            if _skip_507:
                 continue
         return rows
 
@@ -530,8 +538,8 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
                 if "!!::!!" in name:
                     try:
                         name = name.split("!!::!!", 1)[1]
-                    except Exception:
-                        pass
+                    except Exception as _exc:
+                        log_swallowed("tools/trench_suggestion_dialog.py:533 (_iter_rows_from_xls_qgis)", _exc)
                 uri = f"{xls_path}|layername={name}"
                 lyr = QgsVectorLayer(uri, f"legend_{name}", "ogr")
                 if lyr.isValid():
@@ -632,8 +640,8 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
             try:
                 if lyr.fields().indexFromName(sel) >= 0:
                     return sel
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("tools/trench_suggestion_dialog.py:635 (_pick_code_field)", _exc)
         cands = (
             "code",
             "CODE",
@@ -711,10 +719,14 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
         except Exception as _exc:
             log_swallowed("trench_suggestion_dialog._build_reference_index", _exc)
         for ft in layer.getFeatures(req):
+            _skip_714 = False
             try:
                 g0 = ft.geometry()
             except Exception as _exc:
                 log_swallowed("trench_suggestion_dialog._build_reference_index", _exc)
+                log_swallowed("tools/trench_suggestion_dialog.py:716 (_build_reference_index)", _exc)
+                _skip_714 = True
+            if _skip_714:
                 continue
             if g0 is None or g0.isEmpty():
                 continue
@@ -724,11 +736,15 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
             f2 = QgsFeature()
             f2.setId(int(ft.id()))
             f2.setGeometry(g)
+            _skip_727 = False
             try:
                 idx.addFeature(f2)
                 geom_by_id[int(ft.id())] = g
             except Exception as _exc:
                 log_swallowed("trench_suggestion_dialog._build_reference_index", _exc)
+                log_swallowed("tools/trench_suggestion_dialog.py:730 (_build_reference_index)", _exc)
+                _skip_727 = True
+            if _skip_727:
                 continue
         return idx, geom_by_id
 
@@ -745,10 +761,14 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
             g = geom_by_id.get(int(fid))
             if g is None:
                 continue
+            _skip_748 = False
             try:
                 d = float(g.distance(ptg))
             except Exception as _exc:
                 log_swallowed("trench_suggestion_dialog._nearest_reference_distance", _exc)
+                log_swallowed("tools/trench_suggestion_dialog.py:750 (_nearest_reference_distance)", _exc)
+                _skip_748 = True
+            if _skip_748:
                 continue
             if (dmin is None) or (d < dmin):
                 dmin = d
@@ -786,10 +806,14 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
         for ft in topo_layer.getFeatures(req):
             if not self._feature_has_grave_hint(ft, code_field=code_field, grave_codes=grave_codes):
                 continue
+            _skip_789 = False
             try:
                 g0 = ft.geometry()
             except Exception as _exc:
                 log_swallowed("trench_suggestion_dialog._build_grave_avoid_union", _exc)
+                log_swallowed("tools/trench_suggestion_dialog.py:791 (_build_grave_avoid_union)", _exc)
+                _skip_789 = True
+            if _skip_789:
                 continue
             if g0 is None or g0.isEmpty():
                 continue
@@ -1245,8 +1269,8 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
                 if aoi_engine is not None:
                     try:
                         return bool(aoi_engine.contains(pt_geom0.constGet()))
-                    except Exception:
-                        pass
+                    except Exception as _exc:
+                        log_swallowed("tools/trench_suggestion_dialog.py:1248 (_pt_in_aoi)", _exc)
                 return bool(aoi_geom.contains(pt_geom0))
 
             x = x0
@@ -1408,6 +1432,7 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
 
             def _conflicts(g: QgsGeometry) -> bool:
                 for sg in selected_geoms:
+                    _skip_1411 = False
                     try:
                         if g.intersects(sg):
                             return True
@@ -1415,6 +1440,9 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
                             return True
                     except Exception as _exc:
                         log_swallowed("trench_suggestion_dialog._conflicts", _exc)
+                        log_swallowed("tools/trench_suggestion_dialog.py:1416 (_conflicts)", _exc)
+                        _skip_1411 = True
+                    if _skip_1411:
                         continue
                 return False
 
@@ -1503,13 +1531,13 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
                     {"color": "255,99,71,40", "outline_color": "200,30,0,220", "outline_width": "0.6"}
                 )
                 trench_layer.setRenderer(QgsSingleSymbolRenderer(t_sym))
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("tools/trench_suggestion_dialog.py:1506 (_run)", _exc)
             try:
                 c_sym = QgsMarkerSymbol.createSimple({"name": "circle", "size": "2.0", "color": "40,120,220,220"})
                 center_layer.setRenderer(QgsSingleSymbolRenderer(c_sym))
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("tools/trench_suggestion_dialog.py:1511 (_run)", _exc)
 
             set_archtoolkit_layer_metadata(
                 trench_layer,

@@ -59,12 +59,12 @@ class ArchToolkitLiveLogDialog(QtWidgets.QDialog):
         self.setWindowTitle("ArchToolkit 작업 로그")
         try:
             self.setWindowFlag(Qt.Tool, True)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/live_log_dialog.py:62 (__init__)", _exc)
         try:
             self.setModal(False)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/live_log_dialog.py:66 (__init__)", _exc)
 
         self._owner = None
 
@@ -73,14 +73,14 @@ class ArchToolkitLiveLogDialog(QtWidgets.QDialog):
         self._txt.setLineWrapMode(QtWidgets.QPlainTextEdit.NoWrap)
         try:
             self._txt.document().setMaximumBlockCount(5000)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/live_log_dialog.py:76 (__init__)", _exc)
         try:
             fixed_font = QFontDatabase.systemFont(QFontDatabase.FixedFont)
             if fixed_font is not None:
                 self._txt.setFont(fixed_font)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/live_log_dialog.py:82 (__init__)", _exc)
 
         btn_clear = QtWidgets.QPushButton("비우기", self)
         btn_close = QtWidgets.QPushButton("닫기", self)
@@ -101,29 +101,29 @@ class ArchToolkitLiveLogDialog(QtWidgets.QDialog):
         add_ui_log_listener(self._listener)
         try:
             self.destroyed.connect(lambda *_: remove_ui_log_listener(self._listener))
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/live_log_dialog.py:104 (__init__)", _exc)
 
         try:
             self.resize(520, 360)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/live_log_dialog.py:109 (__init__)", _exc)
 
         # Initial header (helps users know where to report errors / license).
         try:
             self.write_header()
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/live_log_dialog.py:115 (__init__)", _exc)
 
     def clear(self):
         try:
             self._txt.clear()
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/live_log_dialog.py:121 (clear)", _exc)
         try:
             self.write_header()
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/live_log_dialog.py:125 (clear)", _exc)
 
     def write_header(self):
         meta = _read_metadata()
@@ -141,24 +141,24 @@ class ArchToolkitLiveLogDialog(QtWidgets.QDialog):
             lines.append("- 오류/제안 제보: GitHub Issues (repo tracker)")
         try:
             lines.append(f"- 로그 파일: {get_log_path()}")
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/live_log_dialog.py:144 (write_header)", _exc)
         lines.append(f"- Copyright (C) 2026 {author}  ·  License: {license_name}")
         lines.append("- 참고문헌/모델 출처: REFERENCES.md")
         lines.append("-" * 60)
         for ln in lines:
             try:
                 self._txt.appendPlainText(str(ln))
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("tools/live_log_dialog.py:152 (write_header)", _exc)
 
     def _on_log(self, message: str, level):
         try:
             ts = QDateTime.currentDateTime().toString("HH:mm:ss")
             lvl = _level_name(level)
             self._txt.appendPlainText(f"[{ts}] [{lvl}] {message}")
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/live_log_dialog.py:160 (_on_log)", _exc)
 
     def _reposition_near_owner(self):
         try:
@@ -174,11 +174,15 @@ class ArchToolkitLiveLogDialog(QtWidgets.QDialog):
                     center = g.center()
                     # Use the screen where the owner window is located (multi-monitor safe).
                     for s in QtWidgets.QApplication.screens() or []:
+                        _skip_177 = False
                         try:
                             if s.availableGeometry().contains(center):
                                 screen = s
                                 break
-                        except Exception:
+                        except Exception as _exc:
+                            log_swallowed("tools/live_log_dialog.py:181 (_reposition_near_owner)", _exc)
+                            _skip_177 = True
+                        if _skip_177:
                             continue
                 except Exception:
                     screen = None
@@ -220,10 +224,10 @@ class ArchToolkitLiveLogDialog(QtWidgets.QDialog):
             if self._owner is not None:
                 try:
                     self._owner.removeEventFilter(self)
-                except Exception:
-                    pass
-        except Exception:
-            pass
+                except Exception as _exc:
+                    log_swallowed("tools/live_log_dialog.py:223 (attach_owner)", _exc)
+        except Exception as _exc:
+            log_swallowed("tools/live_log_dialog.py:225 (attach_owner)", _exc)
 
         self._owner = owner
         if owner is None:
@@ -231,8 +235,8 @@ class ArchToolkitLiveLogDialog(QtWidgets.QDialog):
 
         try:
             owner.installEventFilter(self)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/live_log_dialog.py:234 (attach_owner)", _exc)
 
         # Position immediately if we're already visible.
         if self.isVisible():
@@ -253,19 +257,19 @@ class ArchToolkitLiveLogDialog(QtWidgets.QDialog):
         """Show window near the owner dialog (sticky), best-effort."""
         try:
             self.attach_owner(owner)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/live_log_dialog.py:256 (show_near)", _exc)
 
         self._reposition_near_owner()
 
         try:
             self.show()
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/live_log_dialog.py:263 (show_near)", _exc)
         try:
             self.raise_()
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/live_log_dialog.py:267 (show_near)", _exc)
 
 
 def ensure_live_log_dialog(iface=None, *, owner=None, show: bool = True, clear: bool = False):
@@ -274,8 +278,8 @@ def ensure_live_log_dialog(iface=None, *, owner=None, show: bool = True, clear: 
 
     try:
         start_ui_log_pump()
-    except Exception:
-        pass
+    except Exception as _exc:
+        log_swallowed("tools/live_log_dialog.py:277 (ensure_live_log_dialog)", _exc)
 
     parent = None
     try:
@@ -291,19 +295,19 @@ def ensure_live_log_dialog(iface=None, *, owner=None, show: bool = True, clear: 
         try:
             if parent is not None and _live_log_dialog.parent() is None:
                 _live_log_dialog.setParent(parent)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/live_log_dialog.py:294 (ensure_live_log_dialog)", _exc)
 
     if clear:
         try:
             _live_log_dialog.clear()
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/live_log_dialog.py:300 (ensure_live_log_dialog)", _exc)
 
     if show:
         try:
             _live_log_dialog.show_near(owner)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/live_log_dialog.py:306 (ensure_live_log_dialog)", _exc)
 
     return _live_log_dialog

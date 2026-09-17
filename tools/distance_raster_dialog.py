@@ -133,8 +133,8 @@ class DistanceRasterDialog(QtWidgets.QDialog):
         try:
             from qgis.core import QgsMapLayerProxyModel
             self.cmbRef.setFilters(QgsMapLayerProxyModel.RasterLayer)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/distance_raster_dialog.py:136 (_setup_ui)", _exc)
         form_grid.addRow("기준 래스터:", self.cmbRef)
         self.lblGridInfo = QtWidgets.QLabel("")
         self.lblGridInfo.setStyleSheet("color:#455a64; font-size:9pt;")
@@ -295,8 +295,8 @@ class DistanceRasterDialog(QtWidgets.QDialog):
         run_id = new_run_id("dist")
         try:
             ensure_live_log_dialog(self.iface, owner=self, show=True, clear=True)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/distance_raster_dialog.py:298 (_on_run)", _exc)
 
         temp_files = []
         self.btnRun.setEnabled(False)
@@ -455,8 +455,8 @@ class DistanceRasterDialog(QtWidgets.QDialog):
             self.btnRun.setEnabled(True)
             try:
                 progress.close()
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("tools/distance_raster_dialog.py:458 (_on_run)", _exc)
             # The burned mask and any reprojection are scratch; the distance
             # raster itself is referenced by the new layer and must survive.
             cleanup_files(temp_files)
@@ -517,5 +517,5 @@ class DistanceRasterDialog(QtWidgets.QDialog):
             plugin_dir = os.path.dirname(os.path.dirname(__file__))
             show_help_dialog(parent=self, title="거리 래스터 도움말", html=html,
                              plugin_dir=plugin_dir)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/distance_raster_dialog.py:520 (_on_help)", _exc)

@@ -152,8 +152,8 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
         except Exception:
             try:
                 QtWidgets.QMessageBox.information(self, "도움말", "README.md를 참고하세요.")
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("tools/map_styling_dialog.py:155 (_on_help)", _exc)
 
     def _code_config_path(self):
         return os.path.join(os.path.dirname(__file__), "map_styling_codes.json")
@@ -198,10 +198,14 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
                         label = item.get("label", "")
                         if not (isinstance(code, str) and code.strip()):
                             continue
+                        _skip_201 = False
                         try:
                             width_f = float(width)
                         except Exception as _exc:
                             log_swallowed("map_styling_dialog._load_code_config", _exc)
+                            log_swallowed("tools/map_styling_dialog.py:203 (_load_code_config)", _exc)
+                            _skip_201 = True
+                        if _skip_201:
                             continue
                         if not isinstance(label, str):
                             label = str(label)
@@ -233,8 +237,8 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
         try:
             if hasattr(self, "lblCodeConfigPath"):
                 self.lblCodeConfigPath.setText(self._code_config_path())
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/map_styling_dialog.py:236 (_sync_code_config_ui)", _exc)
 
     def open_code_config_file(self):
         path = self._code_config_path()
@@ -294,8 +298,8 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
                 sl for sl in source_layers
                 if str((get_archtoolkit_layer_metadata(sl) or {}).get("tool_id") or "") != "map_styling"
             ]
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/map_styling_dialog.py:297 (apply_styling)", _exc)
 
         if not source_layers and not (self.chkDemStyling.isChecked() and dem_layer):
             push_message(self.iface, "오류", "시각화를 적용할 레이어를 선택해주세요.", level=2)
@@ -369,8 +373,8 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
                         self._teardown_style_group(old_group, root)
                     try:
                         vec_group.setName(vector_group_name)
-                    except Exception:
-                        pass
+                    except Exception as _exc:
+                        log_swallowed("tools/map_styling_dialog.py:372 (apply_styling)", _exc)
 
                     # 3. Move source layers into a hidden sub-group.
                     source_group_name = "원본 레이어 (숨김)"
@@ -430,12 +434,16 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
                 lyr = node.layer()
                 if lyr is None:
                     continue
+                _skip_433 = False
                 try:
                     meta = get_archtoolkit_layer_metadata(lyr) or {}
                     if str(meta.get("tool_id") or "") == "map_styling":
                         project.removeMapLayer(lyr.id())
                 except Exception as _exc:
                     log_swallowed("map_styling_dialog._teardown_style_group", _exc)
+                    log_swallowed("tools/map_styling_dialog.py:437 (_teardown_style_group)", _exc)
+                    _skip_433 = True
+                if _skip_433:
                     continue
         except Exception as _exc:
             log_swallowed("map_styling_dialog._teardown_style_group", _exc)
@@ -589,11 +597,15 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
 
                 geom = feat.geometry()
                 if layer_ct is not None:
+                    _skip_592 = False
                     try:
                         geom = QgsGeometry(geom)
                         geom.transform(layer_ct)
                     except Exception as _exc:
                         log_swallowed("map_styling_dialog.aggregate_features", _exc)
+                        log_swallowed("tools/map_styling_dialog.py:595 (aggregate_features)", _exc)
+                        _skip_592 = True
+                    if _skip_592:
                         continue
                 if is_building:
                     # Robust polygonization for buildings
@@ -662,10 +674,14 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
             label = item.get("label", "")
             if not (isinstance(code, str) and code):
                 continue
+            _skip_665 = False
             try:
                 width_f = float(width)
             except Exception as _exc:
                 log_swallowed("map_styling_dialog.style_road_layer", _exc)
+                log_swallowed("tools/map_styling_dialog.py:667 (style_road_layer)", _exc)
+                _skip_665 = True
+            if _skip_665:
                 continue
             sym = QgsLineSymbol.createSimple({'color': color.name(), 'width': str(width_f)})
             rule = QgsRuleBasedRenderer.Rule(sym, 0, 0, f"\"{field_name}\" = '{code}'", str(label))
@@ -690,10 +706,14 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
             label = item.get("label", "")
             if not (isinstance(code, str) and code):
                 continue
+            _skip_693 = False
             try:
                 width_f = float(width)
             except Exception as _exc:
                 log_swallowed("map_styling_dialog.style_river_layer", _exc)
+                log_swallowed("tools/map_styling_dialog.py:695 (style_river_layer)", _exc)
+                _skip_693 = True
+            if _skip_693:
                 continue
             sym = QgsLineSymbol.createSimple({'color': color.name(), 'width': str(width_f)})
             rule = QgsRuleBasedRenderer.Rule(sym, 0, 0, f"\"{field_name}\" = '{code}'", str(label))
@@ -804,8 +824,8 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
                 hillshade_layer.setRenderer(QgsHillshadeRenderer(hillshade_layer.dataProvider(), 1, 315, 45))
                 if self._save_named_style(hillshade_layer, os.path.join(preset_dir, "dem_hillshade.qml")):
                     exported.append("dem_hillshade.qml")
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("tools/map_styling_dialog.py:807 (export_qml_preset)", _exc)
 
             try:
                 gray_layer = dem_layer.clone()

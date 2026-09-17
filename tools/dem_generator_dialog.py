@@ -239,8 +239,8 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
         except Exception:
             try:
                 QtWidgets.QMessageBox.information(self, "도움말", "README.md를 참고하세요.")
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("tools/dem_generator_dialog.py:242 (_on_help)", _exc)
     
     def setup_layer_list(self):
         """Setup multi-select layer list with checkboxes"""
@@ -264,8 +264,8 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
                     "- 자동(추천): Z_COORD/Elevation 등 흔한 필드를 자동 탐색\n"
                     "- 3D geometry Z: 3차원 포인트의 Z값 사용"
                 )
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("tools/dem_generator_dialog.py:267 (_setup_kriging_controls)", _exc)
 
             self.lblKrigingNeighbors = QtWidgets.QLabel("Kriging 이웃점 수:", self)
             self.spinKrigingNeighbors = QtWidgets.QSpinBox(self)
@@ -273,8 +273,8 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
             self.spinKrigingNeighbors.setValue(16)
             try:
                 self.spinKrigingNeighbors.setToolTip("셀마다 가장 가까운 N개 점만 사용합니다. (N이 클수록 느리지만 매끈해질 수 있음)")
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("tools/dem_generator_dialog.py:276 (_setup_kriging_controls)", _exc)
 
             # Place below interpolation method rows (existing rows: 0..3)
             layout.addWidget(self.lblZField, 4, 0)
@@ -290,8 +290,8 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
             self.lblKrigingHint.setWordWrap(True)
             try:
                 self.lblKrigingHint.setStyleSheet("background:#fff3e0; padding:8px; border-radius:3px;")
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("tools/dem_generator_dialog.py:293 (_setup_kriging_controls)", _exc)
             layout.addWidget(self.lblKrigingHint, 6, 0, 1, 2)
 
             # Fill initial items; shown only when Kriging is selected.
@@ -301,9 +301,9 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
             self.lblKrigingNeighbors.hide()
             self.spinKrigingNeighbors.hide()
             self.lblKrigingHint.hide()
-        except Exception:
+        except Exception as _exc:
             # Never block dialog load due to optional UI widgets.
-            pass
+            log_swallowed("tools/dem_generator_dialog.py:304 (_setup_kriging_controls)", _exc)
 
     def _is_kriging_selected(self) -> bool:
         try:
@@ -335,10 +335,14 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
                 layer = layers[0]
                 try:
                     for f in layer.fields():
+                        _skip_338 = False
                         try:
                             if f.isNumeric():
                                 cmb.addItem(f.name(), f.name())
-                        except Exception:
+                        except Exception as _exc:
+                            log_swallowed("tools/dem_generator_dialog.py:341 (_refresh_kriging_value_fields)", _exc)
+                            _skip_338 = True
+                        if _skip_338:
                             continue
                 except Exception as _exc:
                     log_swallowed("dem_generator_dialog._refresh_kriging_value_fields", _exc)
@@ -364,8 +368,8 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
         try:
             if self._is_kriging_selected():
                 self._refresh_kriging_value_fields()
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/dem_generator_dialog.py:367 (on_layer_item_changed)", _exc)
     
     def populate_layers(self):
         """Populate layer list with vector layers (checkboxes)"""
@@ -388,8 +392,8 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
         try:
             if self._is_kriging_selected():
                 self._refresh_kriging_value_fields()
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/dem_generator_dialog.py:391 (populate_layers)", _exc)
     
     def setup_layer_table(self):
         """Setup the layer selection table with predefined DXF layers"""
@@ -480,8 +484,8 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
                     self.cmbLayerPreset.setToolTip(
                         str(self.cmbLayerPreset.itemData(self.cmbLayerPreset.currentIndex(), Qt.ToolTipRole) or "")
                     )
-                except Exception:
-                    pass
+                except Exception as _exc:
+                    log_swallowed("tools/dem_generator_dialog.py:483 (_sync_tip)", _exc)
 
             self.cmbLayerPreset.currentIndexChanged.connect(self.on_layer_preset_changed)
             self.cmbLayerPreset.currentIndexChanged.connect(_sync_tip)
@@ -492,8 +496,8 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
                     self.cmbDxfEra.setToolTip(
                         str(self.cmbDxfEra.itemData(self.cmbDxfEra.currentIndex(), Qt.ToolTipRole) or "")
                     )
-                except Exception:
-                    pass
+                except Exception as _exc:
+                    log_swallowed("tools/dem_generator_dialog.py:495 (_sync_era_tip)", _exc)
 
             # Set default era before connecting (avoids early signal cascades)
             try:
@@ -501,8 +505,8 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
                     self.cmbDxfEra.setCurrentIndex(1)
                 else:
                     self.cmbDxfEra.setCurrentIndex(0)
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("tools/dem_generator_dialog.py:504 (setup_layer_presets)", _exc)
 
             self.cmbDxfEra.currentIndexChanged.connect(self.on_dxf_era_changed)
             self.cmbDxfEra.currentIndexChanged.connect(_sync_era_tip)
@@ -527,15 +531,15 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
                     layout.insertWidget(1, self.cmbDxfEra)
                     layout.insertWidget(2, self.lblLayerPreset)
                     layout.insertWidget(3, self.cmbLayerPreset)
-                except Exception:
-                    pass
+                except Exception as _exc:
+                    log_swallowed("tools/dem_generator_dialog.py:530 (setup_layer_presets)", _exc)
 
             # Apply initial filter + remember current selection
             self._apply_dxf_era_filter()
             try:
                 self._selected_codes_by_era[str(self._current_dxf_era)] = set(self.get_selected_layer_codes())
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("tools/dem_generator_dialog.py:537 (setup_layer_presets)", _exc)
         except Exception as _exc:
             log_swallowed("dem_generator_dialog.setup_layer_presets", _exc)
 
@@ -558,27 +562,35 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
         for code, checkbox in (self.layer_checkboxes or {}).items():
             if not self._is_code_visible(code):
                 continue
+            _skip_561 = False
             try:
                 checkbox.setChecked(str(code) in codes)
-            except Exception:
+            except Exception as _exc:
+                log_swallowed("tools/dem_generator_dialog.py:563 (_set_visible_checked_codes)", _exc)
+                _skip_561 = True
+            if _skip_561:
                 continue
 
     def _apply_dxf_era_filter(self):
         era = str(getattr(self, "_current_dxf_era", "modern") or "modern")
         for code, row in (self.layer_row_by_code or {}).items():
+            _skip_569 = False
             try:
                 show = self._code_era(code) == era
                 self.tblLayers.setRowHidden(int(row), not bool(show))
             except Exception as _exc:
                 log_swallowed("dem_generator_dialog._apply_dxf_era_filter", _exc)
+                log_swallowed("tools/dem_generator_dialog.py:572 (_apply_dxf_era_filter)", _exc)
+                _skip_569 = True
+            if _skip_569:
                 continue
 
     def _refresh_layer_preset_items(self):
         era = str(getattr(self, "_current_dxf_era", "modern") or "modern")
         try:
             self.cmbLayerPreset.blockSignals(True)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/dem_generator_dialog.py:580 (_refresh_layer_preset_items)", _exc)
         try:
             self.cmbLayerPreset.clear()
             self.cmbLayerPreset.addItem("프리셋 선택…", "")
@@ -593,8 +605,8 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
         finally:
             try:
                 self.cmbLayerPreset.blockSignals(False)
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("tools/dem_generator_dialog.py:596 (_refresh_layer_preset_items)", _exc)
 
     def on_dxf_era_changed(self):
         new_era = ""
@@ -608,8 +620,8 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
         # Save current era selections (visible only)
         try:
             self._selected_codes_by_era[str(self._current_dxf_era)] = set(self.get_selected_layer_codes())
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/dem_generator_dialog.py:611 (on_dxf_era_changed)", _exc)
 
         self._current_dxf_era = str(new_era)
         self._apply_dxf_era_filter()
@@ -640,8 +652,8 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
         self._set_visible_checked_codes(codes)
         try:
             self._selected_codes_by_era[str(self._current_dxf_era)] = set(self.get_selected_layer_codes())
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/dem_generator_dialog.py:643 (on_layer_preset_changed)", _exc)
     
     def select_all_layers(self):
         for code, checkbox in (self.layer_checkboxes or {}).items():
@@ -649,8 +661,8 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
                 continue
             try:
                 checkbox.setChecked(True)
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("tools/dem_generator_dialog.py:652 (select_all_layers)", _exc)
     
     def deselect_all_layers(self):
         for code, checkbox in (self.layer_checkboxes or {}).items():
@@ -658,8 +670,8 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
                 continue
             try:
                 checkbox.setChecked(False)
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("tools/dem_generator_dialog.py:661 (deselect_all_layers)", _exc)
     
     def get_selected_layer_codes(self):
         """All CHECKED codes, regardless of which era tab is currently shown.
@@ -670,10 +682,14 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
         """
         selected = []
         for code, checkbox in (self.layer_checkboxes or {}).items():
+            _skip_673 = False
             try:
                 if checkbox.isChecked():
                     selected.append(str(code))
-            except Exception:
+            except Exception as _exc:
+                log_swallowed("tools/dem_generator_dialog.py:676 (get_selected_layer_codes)", _exc)
+                _skip_673 = True
+            if _skip_673:
                 continue
         return selected
     
@@ -757,14 +773,14 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
                 continue
             try:
                 w.setVisible(bool(show_kriging))
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("tools/dem_generator_dialog.py:760 (on_interpolation_changed)", _exc)
 
         if show_kriging:
             try:
                 self._refresh_kriging_value_fields()
-            except Exception:
-                pass
+            except Exception as _exc:
+                log_swallowed("tools/dem_generator_dialog.py:766 (on_interpolation_changed)", _exc)
 
     def get_selected_layers(self):
         """Get list of checked layers from the list widget"""
@@ -925,8 +941,8 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
                     try:
                         progress.setWindowModality(Qt.WindowModal)
                         progress.setMinimumDuration(0)
-                    except Exception:
-                        pass
+                    except Exception as _exc:
+                        log_swallowed("tools/dem_generator_dialog.py:928 (run_process)", _exc)
                     progress.show()
 
                     def progress_cb(pct: int, msg: str):
@@ -937,8 +953,8 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
                             log_swallowed("dem_generator_dialog.progress_cb", _exc)
                         try:
                             QtWidgets.QApplication.processEvents()
-                        except Exception:
-                            pass
+                        except Exception as _exc:
+                            log_swallowed("tools/dem_generator_dialog.py:940 (progress_cb)", _exc)
 
                     def is_cancelled() -> bool:
                         try:
@@ -962,8 +978,8 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
                     try:
                         progress.setValue(100)
                         progress.close()
-                    except Exception:
-                        pass
+                    except Exception as _exc:
+                        log_swallowed("tools/dem_generator_dialog.py:965 (run_process)", _exc)
 
                     # Both rasters finished writing: publish them together.
                     atomic_publish_files([
@@ -1030,8 +1046,8 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
                     try:
                         if progress is not None:
                             progress.close()
-                    except Exception:
-                        pass
+                    except Exception as _exc:
+                        log_swallowed("tools/dem_generator_dialog.py:1033 (run_process)", _exc)
                     push_message(self.iface, "오류", f"Kriging 처리 중 오류: {str(e)}", level=2, duration=10)
                     restore_ui_focus(self)
                     return

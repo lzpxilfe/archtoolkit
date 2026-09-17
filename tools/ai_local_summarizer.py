@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import math
 from typing import Any, Dict, List, Optional
+from .swallow_log import log_swallowed
 
 
 def _fmt_int(v: Any) -> str:
@@ -250,8 +251,8 @@ def _narrative_lines(ctx: Dict[str, Any]) -> List[str]:
     for lyr in layers:
         try:
             total_feats += int(((lyr.get("stats") or {}).get("features")) or 0)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log_swallowed("tools/ai_local_summarizer.py:253 (_narrative_lines)", _exc)
 
     lines: List[str] = []
     area_txt = _fmt_float(aoi_area, digits=0)
@@ -448,8 +449,8 @@ def generate_report(ctx: Dict[str, Any]) -> str:
         vec.sort(reverse=True)
         if vec and vec[0][0] > 0:
             observations.append(f"- 주변에서 가장 많은 피처가 겹치는 레이어: `{vec[0][1]}` ({_fmt_int(vec[0][0])}개)")
-    except Exception:
-        pass
+    except Exception as _exc:
+        log_swallowed("tools/ai_local_summarizer.py:451 (generate_report)", _exc)
 
     try:
         ras_vis = []
@@ -464,8 +465,8 @@ def generate_report(ctx: Dict[str, Any]) -> str:
             observations.append(
                 f"- (힌트) 0.5 초과 비율이 높은 래스터: `{ras_vis[0][1]}` ({_fmt_float(ras_vis[0][0], digits=1)}%)"
             )
-    except Exception:
-        pass
+    except Exception as _exc:
+        log_swallowed("tools/ai_local_summarizer.py:467 (generate_report)", _exc)
 
     if not observations:
         observations.append("- (특이사항 자동 추출 없음) 위 레이어별 통계를 참고해 해석하세요.")
