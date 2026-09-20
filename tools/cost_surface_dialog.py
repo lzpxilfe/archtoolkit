@@ -669,6 +669,19 @@ def _bbox_window(gt, xsize, ysize, minx, miny, maxx, maxy):
 
 
 def _neighbors(allow_diagonal, dx, dy):
+    """Return the (d_row, d_col, step_length) moves available from one cell.
+
+    Known limitation, disclosed rather than fixed: this is an 8-neighbour (or,
+    with the diagonal option off, 4-neighbour) grid walk, so every path is
+    quantised to 45-degree increments. A true straight line at 22.5 degrees can
+    only be approximated by alternating 0/45-degree steps, which overestimates
+    accumulated cost by up to roughly 8% (1/cos(22.5 deg)) against a geodesic -
+    the classic grid metrication error. GRASS r.cost offers knight's moves to
+    reduce it; this tool does not. Switching the diagonal option OFF makes it
+    worse, not better: 4-neighbour paths are quantised to 90 degrees and
+    overestimate by up to about 41% (sqrt(2)). Changing the move set here would
+    change every existing result, so the tool help states the bias instead.
+    """
     moves = [(-1, 0, dy), (1, 0, dy), (0, -1, dx), (0, 1, dx)]
     if allow_diagonal:
         dxy = math.hypot(dx, dy)
@@ -1902,6 +1915,15 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
   <li>필요하면 마찰요인(추가 비용) 옵션을 켠 뒤 실행합니다.</li>
 </ol>
 
+<h4>격자 연결성(8방향) 한계</h4>
+<ul>
+  <li>경로 탐색은 격자 위에서 <b>8방향</b>(대각 이동 허용 시)으로만 진행하므로, 경로 방향이 <b>45° 단위로 양자화</b>됩니다.</li>
+  <li>이 때문에 누적 비용은 실제 최단 경로(측지선) 대비 <b>최대 약 8%까지 과대평가</b>될 수 있습니다(격자 metrication 오차).
+      GRASS r.cost의 knight's move 같은 완화 옵션은 이 도구에 없습니다.</li>
+  <li>'대각 이동 허용(8방향)'을 <b>끄면 오차가 더 커집니다</b>: 4방향 경로는 90° 단위로만 꺾여 최대 약 41%까지 과대평가됩니다.</li>
+  <li>따라서 절대 비용값(분/kcal)을 보고할 때는 이 한계를 함께 밝히고, 지점 간 <b>상대 비교</b> 위주로 해석하는 것이 안전합니다.</li>
+</ul>
+
 <h4>팁</h4>
 <ul>
   <li>DEM NoData/해상도/CRS가 결과 품질에 크게 영향합니다.</li>
@@ -1923,7 +1945,10 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
         self.cmbModel.addItem("토블러 보행함수 (Tobler Hiking Function)", MODEL_TOBLER)
         self.cmbModel.addItem("나이스미스 규칙 (Naismith's Rule)", MODEL_NAISMITH)
         self.cmbModel.addItem("허조그 메타볼릭 (Herzog metabolic, via Čučković)", MODEL_HERZOG_METABOLIC)
-        self.cmbModel.addItem("코놀리&레이크 경사비용 (Conolly & Lake, 2006)", MODEL_CONOLLY_LAKE)
+        # Named for what the branch actually is: a plugin-defined relative-slope
+        # penalty informed by the Conolly & Lake (2006) discussion, not an
+        # equation published in that book.
+        self.cmbModel.addItem("상대경사 비용 (relative-slope cost, Conolly & Lake 2006 논의 기반)", MODEL_CONOLLY_LAKE)
         self.cmbModel.addItem("허조그 차량/수레 (Herzog wheeled vehicle, via Čučković)", MODEL_HERZOG_WHEELED)
         self.cmbModel.addItem("판돌프 운반 에너지 (Pandolf load carriage, 1977)", MODEL_PANDOLF)
 
@@ -2053,12 +2078,22 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
                 )
             elif model_key == MODEL_CONOLLY_LAKE:
                 self.groupConollyLakeParams.setVisible(True)
+                # The reference slope sets the ENTIRE magnitude of this penalty
+                # (cost scales as tan(theta)/tan(ref)), so it is part of the
+                # result rather than a tuning knob - hence the explicit
+                # calibration figures and the "report the reference" line.
                 self.lblModelHelp.setText(
-                    "<b>코놀리&레이크 경사비용 (Conolly & Lake, 2006)</b><br>"
-                    "경사(절대값)에 비례한 상대 비용을 적용합니다. (상·하행 동일하게 취급)<br>"
+                    "<b>상대경사 비용 (relative-slope cost)</b><br>"
+                    "경사(절대값)를 기준경사로 나눈 값을 비용 배수로 쓰는 <u>플러그인 자체 정의</u> 페널티입니다. (상·하행 동일하게 취급)<br>"
+                    "<br><b>출처 주의</b>: Conolly &amp; Lake(2006)가 논의한 '상대 경사 비용' 개념에 근거했을 뿐, "
+                    "그 책에 실린 수식이 아닙니다. 결과를 인용할 때 '코놀리-레이크 공식'이라고 부르지 마세요.<br>"
                     "<br><b>변수 해석</b><br>"
                     "• 기본속도: 평지 기준 속도. 값↑ → 전체 시간이↓<br>"
-                    "• 기준경사(°): 값↓ → 약한 경사에도 페널티가 빨리 커짐(민감). 값↑ → 완만한 지형에서는 차이가 줄어듦<br>"
+                    "• 기준경사(°): 비용 전체가 기준경사에 <u>반비례</u>합니다. 기준을 절반으로 낮추면 모든 경사의 비용이 2배가 됩니다.<br>"
+                    "<br><b>보정(calibration) 참고</b>: 같은 거리의 평지 대비 30° 경사 비용은 기준경사 1°에서 약 33배, "
+                    "기준경사 5°(기본값)에서 약 6.6배입니다(참고: 토블러는 약 7.5배). "
+                    "즉 기준경사 값 하나로 결과가 완전히 달라지므로, "
+                    "<b>결과를 보고할 때 사용한 기준경사(°)를 반드시 함께 밝혀야 합니다.</b><br>"
                     "<br><b>주의</b>: 완만한 지형이 '더 빠르게' 나오지 않도록, 기준경사 이하에서는 페널티를 1로 고정합니다.<br>"
                     "<br><b>누적 비용</b>: 출발점→각 셀 최소 이동시간(분)"
                 )
@@ -2082,13 +2117,20 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
                     "<b>판돌프 운반 에너지 (Pandolf load carriage, 1977)</b><br>"
                     "운반(체중/짐)과 지면계수(η), 경사(%)를 고려해 에너지 소모를 계산합니다.<br>"
                     "<br><b>핵심</b>: 이 모델은 <u>시간</u>이 아니라 <u>에너지(소모)</u>를 최소화하는 경로를 찾는 데 적합합니다.<br>"
+                    "<br><b>경고 - 시간 출력은 경사에 반응하지 않습니다</b>: 판돌프는 에너지 모델이고 속도(V)는 고정 입력값입니다. "
+                    "따라서 시간 비용은 '거리/고정속도'인 등방성(isotropic) 값이며 경사를 전혀 반영하지 않습니다. "
+                    "그 결과 '누적 시간(분)' 래스터와 그로부터 만든 등시선은 사실상 직선거리 지도가 됩니다. "
+                    "(이 도구의 판돌프 경로/회랑은 시간이 아니라 에너지 기준으로 계산하므로 여기서는 예외입니다.)<br>"
+                    "경사가 반영된 <u>시간</u> 표면이 필요하면 토블러 또는 나이스미스를 사용하세요. "
+                    "(경사는 에너지 모드에만 0.35·V·G 항으로 들어갑니다.)<br>"
                     "<br><b>변수 해석</b><br>"
                     "• 체중/짐: 값↑ → 에너지 비용↑ (특히 짐/체중 비율 영향)<br>"
                     "• 속도: 시간은 거리/속도이지만, 에너지(수식)도 속도에 따라 변합니다<br>"
                     "• 지면계수 η: 1.0=단단한 지면, 값↑ → 같은 경사에서도 에너지 비용↑<br>"
                     "<br><b>출력</b><br>"
                     "• 누적 에너지(kcal): 출발점→각 셀 최소 누적 에너지 (체크 시 생성)<br>"
-                    "• 누적 시간(분): (체크 시) 속도 기반 이동시간을 별도로 출력할 수 있습니다<br>"
+                    "• 누적 시간(분): (체크 시) 속도 기반 이동시간을 별도로 출력할 수 있습니다 "
+                    "(단, 위 경고대로 경사 무반응 = 거리/고정속도)<br>"
                     "<br><b>참고</b>: 에너지(kcal)=J/4184 로 변환하여 저장합니다."
                 )
         except Exception as _exc:
@@ -2310,6 +2352,21 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
         # away from the person who knows whether they want to wait.
         if not self._confirm_analysis_size(dem_layer, start_dem, end_dem, buffer_m):
             return
+
+        # Pandolf is an energy model: in time mode edge_cost() returns
+        # distance / V with a CONSTANT V, so the time surface is isotropic and
+        # its least-cost path degenerates to the straight line. The user has to
+        # be told on the run that produces the layer, not only in the model
+        # help text they may never open.
+        if model_key == MODEL_PANDOLF and create_cost_raster:
+            push_message(
+                self.iface,
+                "비용표면/최소비용경로",
+                "판돌프는 에너지 모델입니다. '누적 시간(분)' 출력은 거리/고정속도(등방성)라 경사에 반응하지 않으며, "
+                "사실상 직선거리 지도가 됩니다. 경사가 반영된 시간 표면이 필요하면 토블러/나이스미스를 사용하세요.",
+                level=1,
+                duration=10,
+            )
 
         self._set_running_ui(True)
 
@@ -2732,7 +2789,11 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
                 "path_coords": res.path_coords,
             }
             try:
-                handler = lambda *_args, lid=path_layer.id(): self._on_path_layer_selection_changed(lid)
+                def handler(*_args, lid=path_layer.id()):
+                    # lid is bound as a default so each layer's handler keeps
+                    # its own id even after path_layer is rebound.
+                    self._on_path_layer_selection_changed(lid)
+
                 self._profile_selection_handlers[path_layer.id()] = handler
                 path_layer.selectionChanged.connect(handler)
             except Exception as _exc:
@@ -2761,7 +2822,6 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
         for lyr in bottom_to_top:
             project.addMapLayer(lyr, False)
             run_group.insertLayer(0, lyr)
-
 
     def _tag_cost_surface_layer(self, layer: QgsMapLayer, run_id: str, kind: str):
         """Attach metadata to result layers for later cleanup (e.g., transient rubberbands)."""

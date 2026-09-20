@@ -2,10 +2,30 @@
 """QGIS-free movement-cost models for the least-cost surface tool.
 
 Each model maps an edge (horizontal distance + elevation change) to a
-traversal cost in seconds or, for Pandolf, joules.  The formulae (Tobler
-1993, Naismith 1892, Pandolf et al. 1977, Herzog, Conolly & Lake) are pure
-functions of geometry and parameters with no QGIS dependency, so they live
-here where they can be regression-tested against published values.
+traversal cost in seconds or, for Pandolf, joules.  They are pure functions
+of geometry and parameters with no QGIS dependency, so they live here where
+they can be regression-tested against published values.
+
+Published formulae implemented here:
+  - Tobler (1993) hiking function
+  - Naismith (1892) rule
+  - Pandolf et al. (1977) load-carriage energy equation
+  - Herzog slope-cost polynomials (metabolic / wheeled)
+
+NOT a published formula:
+  - MODEL_CONOLLY_LAKE is a PLUGIN-DEFINED relative-slope penalty, written
+    for this plugin and informed by the discussion of relative slope cost in
+    Conolly & Lake (2006).  Conolly & Lake do not publish this equation.  Its
+    magnitude is set entirely by ``conolly_ref_slope_deg`` (the penalty
+    scales inversely with that reference), so the reference slope must be
+    reported alongside any result produced with this model.  See the branch
+    comment in :func:`edge_cost` for the calibration note.
+
+Pandolf caveat: Pandolf is an ENERGY model.  Its ``cost_mode="time_s"``
+output is isotropic ``distance / speed`` with NO slope response whatsoever,
+so a Pandolf time surface degenerates to straight-line distance and its
+least-cost path is the shortest path.  Only the energy mode reacts to grade.
+Use Tobler or Naismith when a slope-responsive TIME surface is wanted.
 """
 
 from __future__ import annotations
@@ -73,12 +93,20 @@ def edge_cost(model_key, horiz_m, dz_m, model_params, *, cost_mode="time_s"):
         #
         # Edge energy (J) = M * (distance / V)
         # Edge time (s)   = distance / V
+        #
+        # WARNING - Pandolf is an ENERGY model; its TIME output ignores slope.
+        # V is a constant parameter, so cost_mode="time_s" below returns
+        # distance / V: an isotropic surface with no slope response at all,
+        # whose least-cost path is effectively the straight-line shortest path.
+        # Only the energy mode reacts to grade, through the 0.35*V*G term.
+        # A slope-responsive TIME surface needs Tobler or Naismith instead.
         W = max(1.0, float(model_params.get("pandolf_body_kg", 70.0)))
         L = max(0.0, float(model_params.get("pandolf_load_kg", 0.0)))
         eta = max(0.1, float(model_params.get("pandolf_terrain_factor", 1.0)))
         V = max(0.05, float(model_params.get("pandolf_speed_mps", 5.0 * 1000.0 / 3600.0)))
 
         if cost_mode == "time_s":
+            # Isotropic by design (see the WARNING above): distance / constant speed.
             return float(horiz_m) / V
 
         grade_percent = (float(dz_m) / float(horiz_m)) * 100.0
@@ -122,9 +150,24 @@ def edge_cost(model_key, horiz_m, dz_m, model_params, *, cost_mode="time_s"):
         return float(horiz_m) / speed_mps
 
     if model_key == MODEL_CONOLLY_LAKE:
-        # Conolly & Lake: relative slope penalty anchored at a reference slope.
+        # PLUGIN-DEFINED relative-slope penalty anchored at a reference slope.
+        # This is NOT an equation published by Conolly & Lake (2006): they
+        # discuss relative slope cost, and this formulation is informed by that
+        # discussion, but the equation below is ours. Cost scales with
+        # tan(theta) / tan(ref), so the whole penalty scales INVERSELY with the
+        # reference slope - halving the reference doubles every slope cost.
+        # The reference slope is therefore part of the result and must be
+        # reported alongside it.
+        #
+        # Calibration note - cost relative to flat ground over the same distance,
+        # with the 5 deg default, next to Tobler for the same slopes:
+        #   10 deg -> 2.02x flat  (Tobler 1.85x)
+        #   30 deg -> 6.60x flat  (Tobler 7.54x)
+        # The former 1 deg default gave 10.1x / 33.1x, i.e. 4-6x more punitive
+        # than Tobler, which is why the default reference is 5 deg.
+        #
         # We clamp the factor to >=1 so gentle slopes do not become "faster than flat".
-        ref_deg = max(0.1, float(model_params.get("conolly_ref_slope_deg", 1.0)))
+        ref_deg = max(0.1, float(model_params.get("conolly_ref_slope_deg", 5.0)))
         ref_tan = math.tan(math.radians(ref_deg))
         factor = max(1.0, slope_abs / max(1e-9, ref_tan))
         base_mps = max(min_speed_mps, float(model_params.get("conolly_base_kmh", 5.0)) * 1000.0 / 3600.0)

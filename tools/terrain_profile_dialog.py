@@ -954,6 +954,12 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
                 "<ul>"
                 "<li>저장된 단면선 레이어에서 선을 선택하면 해당 단면이 자동으로 열립니다.</li>"
                 "<li>고정 길이 옵션은 여러 단면을 같은 길이로 비교할 때 유용합니다.</li>"
+                "<li><b>샘플링 방식:</b> 고도는 샘플 지점이 속한 DEM 셀의 값을 그대로 읽습니다"
+                "(보간 없음 - QGIS 기본 단면 도구와 동일). 따라서 <b>샘플 간격(단면 길이 / 샘플 수)이"
+                " DEM 셀 크기와 비슷해지도록</b> 샘플 수를 정하세요. 셀 크기보다 훨씬 촘촘하게 잡으면"
+                " 같은 셀 값이 반복되는 계단만 늘어날 뿐 실제 정보가 늘지 않고, 훨씬 성기게 잡으면"
+                " 좁은 능선이나 구곡을 통째로 건너뛸 수 있습니다."
+                " (예: 5m DEM, 1,000m 단면 → 샘플 200개 내외)</li>"
                 "</ul>"
             )
             show_help_dialog(parent=self, title="지형 단면 도움말", html=html, plugin_dir=plugin_dir)
@@ -1791,7 +1797,86 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
         self.rubber_band.show()
         self.calculate_profile()
     
+    def _dem_cell_size_m(self, dem_layer) -> Optional[float]:
+        """Return the DEM cell size in meters, or None when it cannot be determined.
+
+        A geographic DEM reports its pixel size in degrees, so comparing it
+        straight against a meter-based sample spacing would be off by ~1e5 and
+        every profile would look "far too dense". Convert with the same
+        111320 m/deg approximation the other tools use - this only feeds an
+        order-of-magnitude warning, so a geodesic is not needed.
+        """
+        if dem_layer is None:
+            return None
+        try:
+            px = abs(float(dem_layer.rasterUnitsPerPixelX() or 0.0))
+            py = abs(float(dem_layer.rasterUnitsPerPixelY() or 0.0))
+        except Exception as _exc:
+            log_swallowed("terrain_profile_dialog._dem_cell_size_m", _exc)
+            return None
+        sizes = [v for v in (px, py) if v > 0]
+        if not sizes:
+            return None
+        # Narrowest axis: that is the resolution a ridge/gully has to survive.
+        cell_m = min(sizes)
+        try:
+            crs = dem_layer.crs()
+            if crs is not None and crs.isValid() and crs.isGeographic():
+                cell_m *= 111320.0
+        except Exception as _exc:
+            log_swallowed("terrain_profile_dialog._dem_cell_size_m", _exc)
+        return float(cell_m)
+
+    def _check_sample_spacing(self, *, dem_layer, total_distance_m: float, num_samples: int) -> Optional[float]:
+        """Return meters-per-sample, warning when it is badly matched to the DEM grid.
+
+        Sampling is nearest-cell (see the sampling loops), so the DEM cell size
+        is the real resolution limit: a spacing much finer than a cell only
+        repeats the same cell value (a staircase, not extra detail), and a
+        spacing much coarser can step straight over a narrow ridge or gully.
+        A misconfigured sample count should announce itself in the log rather
+        than quietly producing a plausible-looking but wrong profile.
+        """
+        try:
+            num_samples = int(num_samples)
+            spacing_m = float(total_distance_m) / num_samples if num_samples > 0 else 0.0
+        except (TypeError, ValueError, ZeroDivisionError) as _exc:
+            log_swallowed("terrain_profile_dialog._check_sample_spacing", _exc)
+            return None
+        if spacing_m <= 0:
+            return None
+
+        cell_m = self._dem_cell_size_m(dem_layer)
+        if cell_m is None or cell_m <= 0:
+            return spacing_m
+
+        # Thresholds are deliberately loose: within 4x finer / 2x coarser of the
+        # cell size is normal practice and must not cry wolf on every run.
+        if spacing_m * 4.0 < cell_m:
+            log_message(
+                f"TerrainProfile: 샘플 간격 {spacing_m:.2f}m가 DEM 셀 크기 {cell_m:.2f}m보다 훨씬 촘촘합니다. "
+                "최근접 셀 추출이라 같은 값이 반복되는 계단만 늘어납니다. 샘플 수를 줄이세요.",
+                level=Qgis.Warning,
+            )
+        elif spacing_m > cell_m * 2.0:
+            log_message(
+                f"TerrainProfile: 샘플 간격 {spacing_m:.2f}m가 DEM 셀 크기 {cell_m:.2f}m보다 훨씬 성깁니다. "
+                "좁은 능선이나 구곡이 통째로 누락될 수 있습니다. 샘플 수를 늘리세요.",
+                level=Qgis.Warning,
+            )
+        return spacing_m
+
     def calculate_profile(self):
+        """Sample the DEM along the drawn line and draw/store the elevation profile.
+
+        Elevation comes from ``identify(..., IdentifyFormatValue)``, i.e. the
+        value of the cell each sample point falls in - nearest-cell, no
+        bilinear interpolation. That is deliberate: it matches QGIS's own
+        elevation-profile tool, so ArchToolkit's numbers agree with the
+        built-in tool instead of quietly differing by a smoothed half-cell.
+        The cost is that the DEM cell size, not the sample count, sets the real
+        resolution - hence the spacing check below.
+        """
         dem_layer = self.cmbDemLayer.currentLayer()
         if not dem_layer or len(self.points) < 2:
             push_message(self.iface, "오류", "DEM 레이어가 선택되지 않았거나 점이 부족합니다.", level=2)
@@ -1829,6 +1914,12 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
             except Exception as _exc:
                 log_swallowed("terrain_profile_dialog.calculate_profile", _exc)
             
+            sample_spacing_m = self._check_sample_spacing(
+                dem_layer=dem_layer,
+                total_distance_m=total_distance_m,
+                num_samples=num_samples,
+            )
+
             push_message(
                 self.iface,
                 "단면 분석",
@@ -1846,6 +1937,9 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
                 # Identify expects coordinates in DEM CRS.
                 sample_dem = transform_point(sample_canvas, canvas_crs, dem_crs)
                 
+                # Nearest-cell: identify() returns the value of the cell the
+                # point lands in, with no bilinear interpolation. See the
+                # method docstring - this mirrors QGIS's own profile tool.
                 result = dem_layer.dataProvider().identify(
                     sample_dem,
                     QgsRaster.IdentifyFormatValue
@@ -1891,7 +1985,12 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
                 # Save line to persistent layer first (assigns a per-profile color).
                 profile_color = None
                 try:
-                    profile_color = self.save_line_to_layer(total_distance_m, dem_layer=dem_layer, num_samples=num_samples)
+                    profile_color = self.save_line_to_layer(
+                        total_distance_m,
+                        dem_layer=dem_layer,
+                        num_samples=num_samples,
+                        sample_spacing_m=sample_spacing_m,
+                    )
                 except Exception:
                     profile_color = None
 
@@ -2074,6 +2173,13 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
         restore_ui_focus(self)
 
     def _compute_profile_for_points(self, *, dem_layer, start_canvas: QgsPointXY, end_canvas: QgsPointXY, num_samples: int):
+        """Recompute a stored profile line's chart from its endpoints.
+
+        Same nearest-cell sampling as ``calculate_profile``: ``identify`` with
+        ``IdentifyFormatValue`` reads the cell the sample point falls in, with
+        no interpolation, so reopening a saved line reproduces QGIS's own
+        profile numbers rather than a smoothed variant of them.
+        """
         if dem_layer is None:
             return
         if num_samples <= 0:
@@ -2101,6 +2207,12 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
         except Exception as _exc:
             log_swallowed("terrain_profile_dialog._compute_profile_for_points", _exc)
 
+        self._check_sample_spacing(
+            dem_layer=dem_layer,
+            total_distance_m=total_distance_m,
+            num_samples=num_samples,
+        )
+
         push_message(
             self.iface,
             "단면 분석",
@@ -2116,6 +2228,7 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
             sample_canvas = QgsPointXY(x_canvas, y_canvas)
 
             sample_dem = transform_point(sample_canvas, canvas_crs, dem_crs)
+            # Nearest-cell, no interpolation (see the method docstring).
             result = dem_layer.dataProvider().identify(sample_dem, QgsRaster.IdentifyFormatValue)
             if not result.isValid():
                 continue
@@ -2286,6 +2399,7 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
         dem_layer,
         num_samples: int,
         color: QColor,
+        sample_spacing_m: Optional[float] = None,
     ):
         """Create a '1 profile = 1 layer' line layer so users can click the layer to reopen the chart."""
         if not self._single_layers_enabled:
@@ -2347,17 +2461,27 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
         except Exception as _exc:
             log_swallowed("tools/terrain_profile_dialog.py:2291 (_create_single_profile_layer)", _exc)
         try:
+            # Record HOW the elevations were sampled, not just how many: the
+            # numbers are only reproducible/comparable if a later reader knows
+            # they are nearest-cell reads at this spacing (see calculate_profile).
+            params = {
+                "no": int(no),
+                "distance_m": float(total_distance),
+                "samples": int(num_samples or 0),
+                "sampling": "nearest_cell_identify",
+            }
+            spacing = sample_spacing_m
+            if spacing is None and num_samples:
+                spacing = float(total_distance) / float(num_samples)
+            if spacing is not None and float(spacing) > 0:
+                params["sample_spacing_m"] = round(float(spacing), 4)
             set_archtoolkit_layer_metadata(
                 layer,
                 tool_id="terrain_profile",
                 run_id=new_run_id("terrain_profile"),
                 kind="profile_single",
                 units="m",
-                params={
-                    "no": int(no),
-                    "distance_m": float(total_distance),
-                    "samples": int(num_samples or 0),
-                },
+                params=params,
             )
         except Exception as _exc:
             log_swallowed("terrain_profile_dialog._create_single_profile_layer", _exc)
@@ -2465,7 +2589,14 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
             log_swallowed("tools/terrain_profile_dialog.py:2408 (get_or_create_profile_layer)", _exc)
         return layer
 
-    def save_line_to_layer(self, total_distance, *, dem_layer=None, num_samples: int = 0) -> Optional[QColor]:
+    def save_line_to_layer(
+        self,
+        total_distance,
+        *,
+        dem_layer=None,
+        num_samples: int = 0,
+        sample_spacing_m: Optional[float] = None,
+    ) -> Optional[QColor]:
         """Save the profile line to the memory layer"""
         layer = self.get_or_create_profile_layer()
         if not layer: return
@@ -2526,6 +2657,7 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
                 dem_layer=dem_layer,
                 num_samples=int(num_samples or 0),
                 color=color,
+                sample_spacing_m=sample_spacing_m,
             )
         except Exception as _exc:
             log_swallowed("terrain_profile_dialog.save_line_to_layer", _exc)

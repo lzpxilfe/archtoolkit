@@ -610,6 +610,10 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
             member_ids = [layer_id for layer_id, _label in criteria_rows if assignments.get(layer_id) == group_name]
             local_pairs[group_name] = _sanitize_pair_values(local_pairs_raw.get(group_name), member_ids)
 
+        # `computed` (including the Saaty-clamp flags) is always re-derived
+        # from the stored group/local pairs rather than trusted from `raw`, so
+        # a config coming back from a saved project still reports clamping
+        # instead of silently losing the caveat on reload.
         summary = _compute_hierarchy_summary(
             criteria_rows=criteria_rows,
             criterion_groups=assignments,
@@ -624,6 +628,51 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
             "computed": summary,
         }
 
+    @staticmethod
+    def _hierarchy_clamp_info(summary: Optional[Dict[str, Any]]) -> Tuple[bool, Optional[int]]:
+        """Report whether `ahp_core` had to clamp any synthesized global ratio.
+
+        A hierarchy can produce weight ratios far outside the Saaty scale
+        [1/9, 9] (two levels of 9:1 multiply out to 81:1), and `ahp_core`
+        clamps them when it seeds the flat pairwise table.  Read the reporting
+        keys defensively: a partly-updated plugin folder can still hold an
+        older `ahp_core` that does not emit them at all, and a missing key must
+        mean "nothing to report" rather than a KeyError in the dialog.
+
+        Returns `(clamped, count)`; `count` is None when the module flagged
+        clamping without listing the pairs, so callers can say "some" instead
+        of inventing a number.
+        """
+        data = dict(summary or {})
+        pairs = data.get("global_pairwise_clamped_pairs")
+        if isinstance(pairs, (list, tuple)):
+            return (bool(pairs), int(len(pairs)))
+        raw_count = data.get("global_pairwise_clamped_count")
+        if isinstance(raw_count, int) and not isinstance(raw_count, bool):
+            return (raw_count > 0, int(raw_count))
+        return (bool(data.get("global_pairwise_clamped")), None)
+
+    def _hierarchy_clamp_caveat(self, summary: Optional[Dict[str, Any]]) -> str:
+        """One-line caveat for a flat seed that no longer reproduces the hierarchy.
+
+        Empty string when nothing was clamped, so callers can use it as a flag.
+        """
+        clamped, count = self._hierarchy_clamp_info(summary)
+        if not clamped:
+            return ""
+        if is_english_ui():
+            how_many = f"{count} pair(s)" if count is not None else "some pairs"
+            return (
+                f"Warning: {how_many} of the synthesized ratios fell outside the Saaty scale (1/9-9) "
+                "and were clamped, so the pairwise table is only an approximation; the hierarchical "
+                "global weights are the ones actually used."
+            )
+        how_many = f"{count}쌍이" if count is not None else "일부가"
+        return (
+            f"주의: 계층 가중치 비율 중 {how_many} Saaty 척도(1/9-9)를 벗어나 보정되었습니다. "
+            "쌍대비교표는 근사값이며, 실제 사용되는 값은 계층 전역가중치(global_weights)입니다."
+        )
+
     def _hierarchy_note(self, config: Optional[Dict[str, Any]] = None) -> str:
         config0 = self._sanitize_hierarchy_config(config)
         if not config0:
@@ -633,8 +682,16 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
         if len(groups) > 4:
             preview = f"{preview} / ..."
         if preview:
-            return f"{len(groups)} parent groups: {preview}" if is_english_ui() else f"{len(groups)}개 상위그룹: {preview}"
-        return "Hierarchical AHP" if is_english_ui() else "계층형 AHP"
+            note = f"{len(groups)} parent groups: {preview}" if is_english_ui() else f"{len(groups)}개 상위그룹: {preview}"
+        else:
+            note = "Hierarchical AHP" if is_english_ui() else "계층형 AHP"
+        # The message bar clears itself after a few seconds, so the clamp
+        # caveat has to live in the persistent note as well or the user loses
+        # the only warning that the table they are looking at is approximate.
+        caveat = self._hierarchy_clamp_caveat(config0.get("computed"))
+        if caveat:
+            note = f"{note} | {caveat}"
+        return note
 
     def _apply_hierarchy_config(self, config: Optional[Dict[str, Any]], *, note_prefix: str = "") -> bool:
         config0 = self._sanitize_hierarchy_config(config)
@@ -648,6 +705,12 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
         if note_prefix:
             note = f"{str(note_prefix).strip()} {note}".strip()
         self._set_weight_input_mode("hierarchy", note)
+        # Seeding the flat table from clamped ratios silently would let the
+        # user re-derive weights that disagree with the hierarchy they just
+        # built, so say so up front as well as in the note.
+        caveat = self._hierarchy_clamp_caveat(summary)
+        if caveat:
+            push_message(self.iface, "주의", caveat, level=1, duration=10)
         return True
 
     def _serialized_hierarchy_config(self) -> Optional[Dict[str, Any]]:
@@ -658,6 +721,7 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
             return None
         summary = dict(config.get("computed") or {})
         criteria_rows = dict(self._criterion_rows())
+        clamped, clamped_count = self._hierarchy_clamp_info(summary)
         return {
             "criterion_groups": [
                 {
@@ -710,6 +774,22 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
                 }
                 for layer_id, weight in sorted(dict(summary.get("global_weights") or {}).items())
             ],
+            # The serialized record is what reports and reloads read back, so
+            # the clamp caveat travels with it -- otherwise the approximate
+            # flat seed would later be presented as if it were exact.
+            "global_pairwise_clamped": bool(clamped),
+            "global_pairwise_clamped_count": clamped_count,
+            "global_pairwise_clamped_pairs": [
+                {
+                    "left_layer_id": str(key[0] or ""),
+                    "left_layer_name": criteria_rows.get(str(key[0] or ""), ""),
+                    "right_layer_id": str(key[1] or ""),
+                    "right_layer_name": criteria_rows.get(str(key[1] or ""), ""),
+                }
+                for key in (summary.get("global_pairwise_clamped_pairs") or [])
+                if isinstance(key, (list, tuple)) and len(key) >= 2
+            ],
+            "global_pairwise_note": self._hierarchy_clamp_caveat(summary),
         }
 
     def _ensure_criterion_preference_defaults(self, crit: _Criterion) -> None:

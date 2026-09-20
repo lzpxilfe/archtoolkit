@@ -49,6 +49,31 @@ from .help_dialog import show_help_dialog
 from .i18n import is_english_ui
 
 
+def _is_geographic_crs(crs) -> bool:
+    """True when `crs` is measured in degrees (planar areas would be square degrees)."""
+    try:
+        return bool(crs is not None and crs.isValid() and crs.isGeographic())
+    except Exception as _exc:
+        log_swallowed("cadastral_overlap_dialog._is_geographic_crs", _exc)
+        return False
+
+
+def _will_use_ellipsoid(da: QgsDistanceArea) -> bool:
+    """True when `da` is actually configured to measure on an ellipsoid.
+
+    Guarded with hasattr/try because willUseEllipsoid() is not exposed by every
+    QGIS build. When we cannot tell, assume the measurement is sound: this check
+    exists to reject a bad number, never to zero out a correct one.
+    """
+    try:
+        if not hasattr(da, "willUseEllipsoid"):
+            return True
+        return bool(da.willUseEllipsoid())
+    except Exception as _exc:
+        log_swallowed("cadastral_overlap_dialog._will_use_ellipsoid", _exc)
+        return True
+
+
 def _safe_make_valid(geom: QgsGeometry) -> QgsGeometry:
     try:
         if geom is None or geom.isEmpty():
@@ -252,9 +277,21 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
         except Exception as _exc:
             log_swallowed("tools/cadastral_overlap_dialog.py:248 (_distance_area)", _exc)
         try:
-            ell = QgsProject.instance().ellipsoid() or "WGS84"
-            if str(ell).strip():
-                da.setEllipsoid(str(ell))
+            ell = str(QgsProject.instance().ellipsoid() or "WGS84").strip() or "WGS84"
+            # An ellipsoid of "NONE" tells QGIS to measure planar areas in the
+            # source CRS units. On a geographic CRS that is SQUARE DEGREES, and
+            # measureArea() returns them without raising, so the planar fallback
+            # in _area_m2 never sees the problem. Substitute a real ellipsoid so
+            # an ellipsoidal measurement is genuinely performed; every other
+            # case keeps honouring whatever the project is configured with.
+            if ell.upper() == "NONE" and _is_geographic_crs(crs):
+                ell = "WGS84"
+                log_message(
+                    "CadastralOverlap: 프로젝트 타원체가 'NONE'이고 레이어가 지리좌표계여서 "
+                    "면적 계산에 WGS84 타원체를 대신 사용합니다.",
+                    level=Qgis.Warning,
+                )
+            da.setEllipsoid(ell)
         except Exception as _exc:
             log_swallowed("tools/cadastral_overlap_dialog.py:254 (_distance_area)", _exc)
         return da
@@ -269,14 +306,24 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
         would be a wrong figure presented as a measurement. So the fallback is
         used only when the units are metres, and otherwise the row reports 0
         with a logged warning.
+
+        The willUseEllipsoid() check below covers the case the try/except
+        cannot: with no ellipsoid in effect, measureArea() does not fail on a
+        geographic CRS, it succeeds and returns square degrees, which
+        convertAreaMeasurement() then rescales by a nominal degree-to-metre
+        factor (~25% too large at Korean latitudes). That is a wrong figure
+        presented as a measurement, so it is routed to the same "report 0 with
+        a logged warning" path rather than into the parcel_m2 column.
         """
         if geom is None or geom.isEmpty():
             return 0.0
-        try:
-            a = float(da.measureArea(geom))
-            return float(da.convertAreaMeasurement(a, QgsUnitTypes.AreaSquareMeters))
-        except Exception as _exc:
-            log_swallowed("cadastral_overlap_dialog._area_m2", _exc)
+        degrees_not_ellipsoidal = _is_geographic_crs(crs) and not _will_use_ellipsoid(da)
+        if not degrees_not_ellipsoidal:
+            try:
+                a = float(da.measureArea(geom))
+                return float(da.convertAreaMeasurement(a, QgsUnitTypes.AreaSquareMeters))
+            except Exception as _exc:
+                log_swallowed("cadastral_overlap_dialog._area_m2", _exc)
         try:
             if crs is not None and crs.isValid() and not crs.isGeographic():
                 if crs.mapUnits() == QgsUnitTypes.DistanceMeters:
@@ -325,6 +372,27 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
                     f"{'/'.join(notices)} 레이어에 선택된 피처가 없어 전체 피처로 계산합니다.",
                     level=1,
                     duration=7,
+                )
+        except Exception as _exc:
+            log_swallowed("cadastral_overlap_dialog.run", _exc)
+
+        # A geographic input cannot fail loudly: measureArea() just hands back
+        # square degrees. The overlap geometry stays usable, but the area table
+        # this tool exists to produce does not, so warn without blocking.
+        try:
+            geo_names = []
+            if _is_geographic_crs(cad.crs()):
+                geo_names.append("지적도")
+            if _is_geographic_crs(survey.crs()):
+                geo_names.append("조사지역")
+            if geo_names:
+                push_message(
+                    self.iface,
+                    "주의",
+                    f"{'/'.join(geo_names)} 레이어가 지리좌표계(도)입니다. 면적표를 신뢰하려면 "
+                    "미터 단위 투영좌표계(예: EPSG:5186)로 재투영한 뒤 실행하세요.",
+                    level=1,
+                    duration=10,
                 )
         except Exception as _exc:
             log_swallowed("cadastral_overlap_dialog.run", _exc)

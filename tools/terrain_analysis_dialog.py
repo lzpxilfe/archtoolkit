@@ -136,7 +136,10 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
         {'max': 6, 'label': '6 | 급경사 능선 (Steep Ridge)', 'color': '#8c2d04'},
     ]
 
-    # Roughness - Wilson (2000) - Greens to Purple.
+    # Roughness - gdaldem's roughness, i.e. Wilson et al. (2007) - Greens
+    # to Purple. The 0-1 / 1-3 / 3-6 / 6-15 / 15m+ breaks below are THIS
+    # PLUGIN's display convention for Korean terrain, NOT classes published
+    # by Wilson et al.; the metadata records them as plugin_defined_5class.
     # The last break is inf: QGIS Discrete shaders render values above the last
     # entry as TRANSPARENT, so a finite 500 cap made extreme cells invisible
     # while the legend claimed "15m+".
@@ -204,6 +207,9 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                 "<b>양(+)=오목</b>(감속→퇴적 경향).</li>"
                 "<li><b>횡단(plan)</b>: 등고선 방향 곡률. <b>음(−)=수렴</b>(곡저·물 모임), "
                 "<b>양(+)=발산</b>(능선·분산).</li>"
+                "<li><b>부호 규약 주의</b>: 본 플러그인은 <b>음(−)=볼록/수렴</b> 규약을 씁니다. "
+                "Z&amp;T·ESRI에 인쇄된 공식과 GRASS <code>r.slope.aspect</code>·SAGA는 "
+                "<b>반대 부호</b>(볼록=양)이므로 교차 검증 시 값의 부호가 뒤집혀 보입니다.</li>"
                 "<li>실행 후 <b>해석 요약</b>(볼록/평탄/오목·수렴/평탄/발산 면적 %)을 로그와 메시지바에 표시합니다.</li>"
                 "</ul>"
                 "<h3>사면 파생 (모델용)</h3>"
@@ -275,6 +281,14 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
     
     def get_tri_classes(self, max_rugged):
         """Generate TRI classification classes based on user-defined max ruggedness threshold
+
+        These 5 classes are NOT Riley, DeGloria & Elliot's (1999)
+        classification. Riley publishes SEVEN classes on an absolute metre
+        scale (0-80 level, 81-116 nearly level, 117-161 slightly rugged,
+        162-239 intermediately rugged, 240-497 moderately rugged, 498-958
+        highly rugged, 959-4367 extremely rugged). The breaks below are
+        scaled to the user's own max_rugged instead, so only the INDEX is
+        Riley's - the classification is this plugin's own.
         
         Parameters:
         - max_rugged: The threshold above which terrain is classified as 'rugged' (V)
@@ -378,6 +392,10 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
             # Slope
             if self.chkSlope.isChecked():
                 output = os.path.join(tempfile.gettempdir(), f'archtoolkit_slope_{run_id}.tif')
+                # SCALE=1 (the toolbox default) assumes z units == horizontal
+                # units; the geographic-CRS guard above is what keeps that true.
+                # COMPUTE_EDGES is left at the toolbox default (False), so the
+                # 1-px border stays NoData instead of a half-window estimate.
                 processing.run("gdal:slope", {
                     'INPUT': dem_source, 'BAND': 1, 'SCALE': 1, 'AS_PERCENT': False, 'OUTPUT': output
                 })
@@ -403,10 +421,16 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
             # Aspect
             if self.chkAspect.isChecked():
                 output = os.path.join(tempfile.gettempdir(), f'archtoolkit_aspect_{run_id}.tif')
+                # ZERO_FLAT=True overrides the QGIS toolbox default (False):
+                # ASPECT_CLASSES pins its 평탄 legend class at 0, which only
+                # exists if flats are written as 0 rather than -9999.
+                # COMPUTE_EDGES stays at the toolbox default (False) so the
+                # 1-px border is NoData instead of a half-window guess.
+                # Both choices are recorded in the layer metadata below.
                 processing.run("gdal:aspect", {
                     'INPUT': dem_source, 'BAND': 1, 'TRIG_ANGLE': False, 'ZERO_FLAT': True, 'OUTPUT': output
                 })
-                layer = QgsRasterLayer(output, "사면방향_8방위")
+                layer = QgsRasterLayer(output, "사면방향_8방위 (평탄=0)")
                 if layer.isValid():
                     try:
                         set_archtoolkit_layer_metadata(
@@ -415,6 +439,7 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                             run_id=str(run_id),
                             kind="aspect",
                             units="deg",
+                            params={"zero_flat": True, "compute_edges": False},
                         )
                     except Exception as _exc:
                         log_swallowed("terrain_analysis_dialog.run_analysis", _exc)
@@ -438,7 +463,11 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                         'INPUT': dem_source, 'BAND': 1, 'OUTPUT': output
                     })
                     tri_classes = self.get_tri_classes(tri_max)
-                    layer_name = f"TRI Riley 1999 (험준기준:{tri_max})"
+                    # The INDEX is Riley's (gdaldem -alg Riley, its default);
+                    # the 5 display classes are ours, scaled to tri_max. Riley's
+                    # own classification is a different 7-class absolute scheme,
+                    # so the name keeps index and classification apart.
+                    layer_name = f"TRI (Riley et al. 1999 지수, 사용자 정의 5등급, 험준기준:{tri_max})"
                     layer = QgsRasterLayer(output, layer_name)
                     if layer.isValid():
                         try:
@@ -448,7 +477,16 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                                 run_id=str(run_id),
                                 kind="tri",
                                 units="index",
-                                params={"tri_max": float(tri_max), "radius": 1},
+                                params={
+                                    "tri_max": float(tri_max),
+                                    "radius": 1,
+                                    "classification": "user_scaled_5class",
+                                    "classification_note": (
+                                        "5 display classes scaled to tri_max; Riley et al. "
+                                        "(1999) publish a different 7-class absolute (metre) "
+                                        "classification"
+                                    ),
+                                },
                             )
                         except Exception as _exc:
                             log_swallowed("terrain_analysis_dialog.run_analysis", _exc)
@@ -463,10 +501,13 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
             # Roughness
             if self.chkRoughness.isChecked():
                 output = os.path.join(tempfile.gettempdir(), f'archtoolkit_roughness_{run_id}.tif')
+                # gdaldem's roughness is Wilson, O'Connell, Brown, Guinan &
+                # Grehan (2007), Marine Geodesy 30(1-2), 3-35 - NOT Wilson &
+                # Gallant (2000), a different work by a different author.
                 processing.run("gdal:roughness", {
                     'INPUT': dem_source, 'BAND': 1, 'OUTPUT': output
                 })
-                layer = QgsRasterLayer(output, "Roughness Wilson 2000")
+                layer = QgsRasterLayer(output, "Roughness (Wilson et al. 2007)")
                 if layer.isValid():
                     try:
                         set_archtoolkit_layer_metadata(
@@ -475,6 +516,13 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                             run_id=str(run_id),
                             kind="roughness",
                             units="index",
+                            params={
+                                "classification": "plugin_defined_5class",
+                                "classification_note": (
+                                    "0-1 / 1-3 / 3-6 / 6-15 / 15+ m breaks are this plugin's "
+                                    "display convention, not classes published by Wilson et al."
+                                ),
+                            },
                         )
                     except Exception as _exc:
                         log_swallowed("terrain_analysis_dialog.run_analysis", _exc)
@@ -523,8 +571,11 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
 
         For radius > 1 the neighbourhood mean is approximated by block-averaging
         down and resampling back up, which is the pure-GDAL route this plugin is
-        limited to (DEVELOPMENT.md). It is an approximation at scale ~radius
-        cells, not a true (2r+1)^2 focal mean, and the caller labels it as such.
+        limited to (DEVELOPMENT.md). The coarse block is (2*radius+1) cells wide,
+        i.e. the same span a true (2r+1)^2 focal mean covers: a block of `radius`
+        cells would have delivered only about half the radius the label claims.
+        It is still a block average plus bilinear resampling, not an exact focal
+        mean, and the caller labels it as such.
         ``effective_radius`` is 1 when the approximation could not be built and
         the 3x3 result was used instead, so the caller never claims a radius it
         did not get.
@@ -544,9 +595,12 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
 
         pixel_size_x = dem_layer.rasterUnitsPerPixelX()
         pixel_size_y = dem_layer.rasterUnitsPerPixelY()
-        new_res = max(pixel_size_x, pixel_size_y) * radius
+        # (2r+1), not r: a focal mean of radius r spans (2r+1) cells across, so
+        # averaging blocks of r cells approximated a window of only ~radius/2
+        # while the layer name promised `radius`.
+        new_res = max(pixel_size_x, pixel_size_y) * (2 * radius + 1)
 
-        # Step 1: block average = approximate focal mean at ~radius scale.
+        # Step 1: block average = approximate focal mean over a (2r+1)-cell window.
         downsampled = os.path.join(
             tempfile.gettempdir(), f'archtoolkit_tpi_down_{tag}_{run_id}.tif')
         scratch.append(downsampled)
@@ -566,14 +620,25 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
         extent = dem_layer.extent()
         extent_str = (f"{extent.xMinimum()},{extent.xMaximum()},"
                       f"{extent.yMinimum()},{extent.yMaximum()}")
+        # TARGET_RESOLUTION is a single value gdalwarp applies to BOTH axes, so
+        # on a non-square-pixel DEM it would rebuild the grid at x-by-x and the
+        # row count would no longer match the DEM - step 3's gdal:rastercalculator
+        # A-B then aborts on mismatched grids. Hand gdalwarp both pixel sizes via
+        # -tr in that case, and keep the plain single-value path for square pixels.
+        if abs(pixel_size_x - pixel_size_y) > 1e-6 * max(abs(pixel_size_x), abs(pixel_size_y)):
+            target_res = None
+            extra_res = f'-tr {pixel_size_x} {pixel_size_y}'
+        else:
+            target_res = pixel_size_x
+            extra_res = ''
         processing.run("gdal:warpreproject", {
             'INPUT': downsampled, 'SOURCE_CRS': None, 'TARGET_CRS': None,
             'RESAMPLING': 1,  # Bilinear
-            'NODATA': None, 'TARGET_RESOLUTION': pixel_size_x, 'OPTIONS': '',
+            'NODATA': None, 'TARGET_RESOLUTION': target_res, 'OPTIONS': '',
             'DATA_TYPE': 6,
             'TARGET_EXTENT': extent_str,
             'TARGET_EXTENT_CRS': dem_layer.crs().authid(),
-            'MULTITHREADING': False, 'EXTRA': '', 'OUTPUT': mean_approx,
+            'MULTITHREADING': False, 'EXTRA': extra_res, 'OUTPUT': mean_approx,
         })
 
         if not os.path.exists(mean_approx):
@@ -612,7 +677,7 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
             tpi_classes = self.get_tpi_classes(threshold)
             if radius > 1:
                 # Honest label: the custom radius is a block-average + bilinear
-                # approximation at scale ~radius cells, not a true (2r+1)² focal mean.
+                # approximation of the (2r+1)² focal mean, not an exact one.
                 layer_name = f"TPI (근사 반경≈{radius}셀, 임계값:±{threshold:.2f})"
             else:
                 # radius 1 (or a radius that fell back) is gdaldem's fixed 3x3.
@@ -765,8 +830,11 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                             units="class",
                             params={
                                 "tpi_radius_cells": int(tpi_radius),
-                                "tpi_window": ("3x3" if tpi_radius <= 1
-                                               else f"block_average_approx_r{int(tpi_radius)}"),
+                                # State the real averaged window, not the radius:
+                                # the block is (2r+1) cells wide.
+                                "tpi_window": ("3x3" if tpi_radius <= 1 else
+                                               f"block_average_approx_{2 * int(tpi_radius) + 1}"
+                                               f"x{2 * int(tpi_radius) + 1}"),
                                 "slope_thresh_deg": float(slope_thresh),
                                 "tpi_low": float(tpi_low),
                                 "tpi_high": float(tpi_high),
@@ -978,7 +1046,10 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                 )
                 ds = None
                 return
-            z = band.ReadAsArray().astype("float32")
+            # Read, then check, then cast: ReadAsArray() returns None on a failed
+            # read, so casting first turned that into an AttributeError and left
+            # the None branch below unreachable.
+            z = band.ReadAsArray()
             gt = ds.GetGeoTransform()
             proj = ds.GetProjection()
             nodata = band.GetNoDataValue()
@@ -986,6 +1057,7 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
             if z is None or z.ndim != 2:
                 push_message(self.iface, "경고", "DEM 배열을 읽을 수 없습니다(곡률).", level=1)
                 return
+            z = z.astype("float32")
 
             cell = (abs(float(gt[1])) + abs(float(gt[5]))) / 2.0
             if cell <= 0:
@@ -1035,9 +1107,12 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
             self._write_geotiff(plan_path, plan.astype("float32"), gt, proj, nd)
 
             for path, name, kind, arr, neg_lab, pos_lab in (
-                (prof_path, "곡률-종단 profile (Zevenbergen & Thorne 1987)", "curvature_profile",
+                # The sign convention belongs in the name: users cross-checking
+                # against GRASS/SAGA (convex = positive) otherwise see every value
+                # inverted with nothing on the layer to explain it.
+                (prof_path, "곡률-종단 profile (Z&T 1987, 부호규약: 음=볼록)", "curvature_profile",
                  profile, "볼록 convex (침식)", "오목 concave (퇴적)"),
-                (plan_path, "곡률-횡단 plan (Zevenbergen & Thorne 1987)", "curvature_plan",
+                (plan_path, "곡률-횡단 plan (Z&T 1987, 부호규약: 음=수렴)", "curvature_plan",
                  plan, "수렴 convergent (물모임)", "발산 divergent (능선)"),
             ):
                 layer = QgsRasterLayer(path, name)
@@ -1047,7 +1122,15 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                     set_archtoolkit_layer_metadata(
                         layer, tool_id="terrain_analysis", run_id=str(run_id),
                         kind=kind, units="1/m",
-                        params={"method": "Zevenbergen & Thorne 1987", "cell_size": float(cell)},
+                        params={
+                            "method": "Zevenbergen & Thorne 1987",
+                            "cell_size": float(cell),
+                            "sign_convention": (
+                                "negative = convex (profile) / convergent (plan); this is the "
+                                "NEGATION of the Z&T formula as printed by ESRI and most "
+                                "textbooks, and GRASS r.slope.aspect / SAGA use the opposite sign"
+                            ),
+                        },
                     )
                 except Exception as _exc:
                     log_swallowed("terrain_analysis_dialog.run_curvature_analysis", _exc)
@@ -1106,7 +1189,13 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
             log_swallowed("terrain_analysis_dialog._apply_diverging_style", _exc)
 
     def _log_curvature_summary(self, profile_valid, plan_valid):
-        """Emit an interpretation (area % per curvature class) to the live log + message bar."""
+        """Emit an interpretation (area % per curvature class) to the live log + message bar.
+
+        The 평탄 band is |curvature| < 0.1 * std of THIS DEM, so the percentages
+        are relative to each DEM's own variability and are not comparable between
+        areas. The message therefore carries the rule and the actual eps values,
+        and names erosion/deposition as tendencies rather than determinations.
+        """
         try:
             if profile_valid.size == 0:
                 return
@@ -1119,8 +1208,11 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
             converg = float(np.mean(plan_valid < -eps_c) * 100.0)
             flat_c = max(0.0, 100.0 - diverg - converg)
             msg = (
-                f"곡률 해석 — 종단: 볼록(침식) {convex:.1f}% / 평탄 {flat_p:.1f}% / 오목(퇴적) {concave:.1f}% | "
-                f"횡단: 수렴(물모임) {converg:.1f}% / 평탄 {flat_c:.1f}% / 발산(능선) {diverg:.1f}%"
+                f"곡률 해석 — 종단: 볼록(침식 경향) {convex:.1f}% / 평탄 {flat_p:.1f}% / "
+                f"오목(퇴적 경향) {concave:.1f}% | "
+                f"횡단: 수렴(물모임) {converg:.1f}% / 평탄 {flat_c:.1f}% / 발산(능선) {diverg:.1f}% | "
+                f"'평탄' 기준: 해당 DEM 자체 표준편차의 0.1배(0.1σ) — 종단 ±{eps_p:.4g}, 횡단 ±{eps_c:.4g} "
+                f"(DEM마다 달라지므로 지역 간 % 직접 비교는 불가)"
             )
             log_message(msg)
             push_message(self.iface, "곡률 해석", msg, level=0, duration=12)
@@ -1145,6 +1237,12 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
         try:
             src = str(dem_source or "").split("|", 1)[0].strip()
             aspect_path = os.path.join(tempfile.gettempdir(), f'archtoolkit_aspderiv_asp_{run_id}.tif')
+            # COMPUTE_EDGES=True overrides the QGIS toolbox default (False): with
+            # the default the 1-px border returns as 'undefined aspect', and the
+            # flat/NoData split below would read it as a true flat and fabricate
+            # neutral 0 / 0.5 values all around the DEM. ZERO_FLAT stays at the
+            # toolbox default (False) because flats must stay distinguishable to
+            # get the neutral value, not 0 deg (= due north).
             processing.run("gdal:aspect", {
                 'INPUT': src, 'BAND': 1, 'TRIG_ANGLE': False, 'ZERO_FLAT': False,
                 'COMPUTE_EDGES': True, 'ZEVENBERGEN': False, 'OUTPUT': aspect_path,
@@ -1233,7 +1331,12 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                     set_archtoolkit_layer_metadata(
                         layer, tool_id="terrain_analysis", run_id=str(run_id),
                         kind=key, units="index",
-                        params={"source": "aspect", "flat_handling": "north/east=0, TRASP=0.5"},
+                        params={
+                            "source": "aspect",
+                            "flat_handling": "north/east=0, TRASP=0.5",
+                            "compute_edges": True,
+                            "zero_flat": False,
+                        },
                     )
                 except Exception as _exc:
                     log_swallowed("tools/terrain_analysis_dialog.py:1238 (run_aspect_derivatives)", _exc)

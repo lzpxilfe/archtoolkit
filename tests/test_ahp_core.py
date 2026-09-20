@@ -202,6 +202,69 @@ class HierarchySummaryTests(unittest.TestCase):
             self.assertLessEqual(ratio, 9.0)
             self.assertGreaterEqual(ratio, 1.0 / 9.0)
 
+    def _steep_summary(self):
+        """A hierarchy whose global ratios overflow the Saaty scale.
+
+        Every input stays on the scale (group 9:1, local 3:1), but the levels
+        multiply out: c1:c2 is 12:1 and c1:c3 is 36:1.
+        """
+        return compute_hierarchy_summary(
+            criteria_rows=self._rows(["c1", "c2", "c3"]),
+            criterion_groups={"c1": "G1", "c2": "G2", "c3": "G2"},
+            group_pairs={("G1", "G2"): 9.0},
+            local_pairs={"G2": {("c2", "c3"): 3.0}},
+        )
+
+    def test_out_of_scale_ratios_are_flagged_and_listed(self):
+        summary = self._steep_summary()
+        self.assertTrue(summary["global_pairwise_clamped"])
+        self.assertEqual(
+            summary["global_pairwise_clamped_pairs"], [("c1", "c2"), ("c1", "c3")]
+        )
+        self.assertEqual(summary["global_pairwise_clamped_count"], 2)
+        # c2:c3 is 3:1, on the scale, so it is not reported.
+        self.assertNotIn(("c2", "c3"), summary["global_pairwise_clamped_pairs"])
+
+    def test_in_scale_hierarchy_reports_no_clamping(self):
+        summary = compute_hierarchy_summary(
+            criteria_rows=self._rows(["c1", "c2", "c3"]),
+            criterion_groups={"c1": "G1", "c2": "G1", "c3": "G2"},
+            group_pairs={("G1", "G2"): 2.0},
+            local_pairs={"G1": {("c1", "c2"): 3.0}},
+        )
+        self.assertFalse(summary["global_pairwise_clamped"])
+        self.assertEqual(summary["global_pairwise_clamped_pairs"], [])
+        self.assertEqual(summary["global_pairwise_clamped_count"], 0)
+
+    def test_exactly_nine_to_one_is_not_reported_as_clamped(self):
+        # The eigenvector solve returns an exact 9:1 split as 9.000000000000002;
+        # that float noise must not raise a false clamp warning.
+        summary = compute_hierarchy_summary(
+            criteria_rows=self._rows(["c1", "c2"]),
+            criterion_groups={"c1": "G1", "c2": "G2"},
+            group_pairs={("G1", "G2"): 9.0},
+            local_pairs={},
+        )
+        self.assertFalse(summary["global_pairwise_clamped"])
+        self.assertEqual(summary["global_pairwise_clamped_pairs"], [])
+
+    def test_clamped_seed_does_not_reproduce_global_weights(self):
+        # This is the whole reason the flag exists: once a ratio is clamped the
+        # flat pairwise seed is an approximation, and re-deriving weights from
+        # it drifts away from the authoritative hierarchical weights.
+        summary = self._steep_summary()
+        self.assertTrue(summary["global_pairwise_clamped"])
+        ids = ["c1", "c2", "c3"]
+        reseeded, _lam, _cr = ahp_weights_from_matrix(
+            matrix_from_pairs(ids, summary["global_pairwise"])
+        )
+        global_weights = summary["global_weights"]
+        drift = max(
+            abs(got - float(global_weights[layer_id]))
+            for layer_id, got in zip(ids, reseeded)
+        )
+        self.assertGreater(drift, 0.01)
+
     def test_empty_criteria_returns_empty_structures(self):
         summary = compute_hierarchy_summary(
             criteria_rows=[],
@@ -212,6 +275,8 @@ class HierarchySummaryTests(unittest.TestCase):
         self.assertEqual(summary["group_order"], [])
         self.assertEqual(summary["global_weights"], {})
         self.assertEqual(summary["global_pairwise"], {})
+        self.assertFalse(summary["global_pairwise_clamped"])
+        self.assertEqual(summary["global_pairwise_clamped_pairs"], [])
 
 
 class ScoreFormulaTests(unittest.TestCase):

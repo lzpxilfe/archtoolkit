@@ -223,6 +223,26 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
             restore_ui_focus(self)
             return
 
+        # gdal:slope/aspect read the cell size straight from the geotransform and
+        # SCALE=1 (gdaldem's default) is only correct when the horizontal and the
+        # vertical units are both metres. On a geographic (degree) DEM every value
+        # would be silently, plausibly wrong (slope ~89.9° everywhere) - and this
+        # tool prints those numbers as value labels on a finished drawing.
+        try:
+            if dem_layer.crs().isGeographic():
+                push_message(
+                    self.iface,
+                    "오류",
+                    "DEM이 지리좌표계(위경도)입니다. 미터 단위 투영 좌표계로 재투영 후 사용하세요. "
+                    "(위경도 DEM에서는 경사도 래스터와 도면 라벨 값이 전부 왜곡됩니다)",
+                    level=2,
+                    duration=9,
+                )
+                restore_ui_focus(self)
+                return
+        except Exception as _exc:
+            log_swallowed("slope_aspect_drafting_dialog.run_drafting", _exc)
+
         # Live log window (non-modal) so users can see progress in real time.
         ensure_live_log_dialog(self.iface, owner=self, show=True, clear=True)
 

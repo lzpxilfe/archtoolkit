@@ -167,6 +167,20 @@ def compute_hierarchy_summary(
     Returns group weights, per-group local weights/CR, global per-criterion
     weights (group weight x local weight) and a synthesized `global_pairwise`
     dict {(id_i, id_j): w_i / w_j} that can seed the flat pairwise table.
+
+    The flat table can only express ratios on the Saaty scale [1/9, 9], but a
+    hierarchy easily produces global weight ratios beyond it (two levels of 9:1
+    multiply out to 81:1).  Those ratios are clamped, which means the flat seed
+    is only an *approximation* of the hierarchy whenever clamping happened --
+    re-deriving weights from the seeded table will not reproduce these numbers.
+    `global_weights` stays authoritative.  So the clamping is reported rather
+    than applied silently:
+
+    - `global_pairwise_clamped` (bool): True if any ratio had to be clamped.
+    - `global_pairwise_clamped_pairs` (list of (id_i, id_j) tuples): the keys of
+      `global_pairwise` that were clamped, in `global_pairwise` order.
+    - `global_pairwise_clamped_count` (int): length of that list, so a caller
+      that only needs a count does not have to compute one.
     """
     ids = [str(layer_id) for layer_id, _label in (criteria_rows or [])]
     groups: List[str] = []
@@ -212,6 +226,7 @@ def compute_hierarchy_summary(
         global_weights = {k: v / total for k, v in global_weights.items()}
 
     global_pairwise: Dict[Tuple[str, str], float] = {}
+    global_pairwise_clamped_pairs: List[Tuple[str, str]] = []
     for i, a in enumerate(ids):
         for b in ids[i + 1:]:
             wa = float(global_weights.get(a, 0.0))
@@ -219,7 +234,13 @@ def compute_hierarchy_summary(
             ratio = (wa / wb) if wb > 0 else 1.0
             if not math.isfinite(ratio) or ratio <= 0:
                 ratio = 1.0
-            global_pairwise[(a, b)] = max(1.0 / 9.0, min(9.0, ratio))
+            scaled = max(1.0 / 9.0, min(9.0, ratio))
+            # Only count a clamp that really moved the ratio: the eigenvector
+            # solve returns an exact 9:1 hierarchy as 9.000000000000002, and
+            # warning the user about that float noise would be a false alarm.
+            if not math.isclose(scaled, ratio, rel_tol=1e-9):
+                global_pairwise_clamped_pairs.append((a, b))
+            global_pairwise[(a, b)] = scaled
 
     return {
         "group_order": list(groups),
@@ -230,6 +251,9 @@ def compute_hierarchy_summary(
         "criterion_groups": dict(criterion_groups or {}),
         "global_weights": global_weights,
         "global_pairwise": global_pairwise,
+        "global_pairwise_clamped": bool(global_pairwise_clamped_pairs),
+        "global_pairwise_clamped_pairs": list(global_pairwise_clamped_pairs),
+        "global_pairwise_clamped_count": len(global_pairwise_clamped_pairs),
     }
 
 

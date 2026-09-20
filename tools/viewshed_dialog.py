@@ -59,7 +59,15 @@ FORM_CLASS, _ = uic.loadUiType(os.path.join(
 
 
 class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
-    
+
+    # Higuchi (1975) defines the near/middle/far view zones by the RATIO of
+    # viewing distance to the height of the landscape element (D/H), not by
+    # fixed metric distances. The 500 m / 2,500 m breaks below are the common
+    # practical convention in GIS work, not numbers taken from the book, so
+    # they are exposed as editable defaults rather than hard-coded constants.
+    HIGUCHI_NEAR_DEFAULT_M = 500.0
+    HIGUCHI_MID_DEFAULT_M = 2500.0
+
     def __init__(self, iface, parent=None):
         super(ViewshedDialog, self).__init__(parent)
         self.setupUi(self)
@@ -192,6 +200,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         # Initialize scientific context and Higuchi signals
         if hasattr(self, 'chkHiguchi'):
             self.chkHiguchi.toggled.connect(self.on_higuchi_toggled)
+        self._setup_higuchi_threshold_widgets()
         
         # Programmatically update tooltips for scientific basis
         if hasattr(self, 'chkCurvature'):
@@ -338,6 +347,14 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
   <li><b>다중 관측점 누적/가중 Viewshed</b>: 여러 관측점의 가시권을 합산(또는 가중)해 중요도 표현</li>
   <li><b>Line of Sight(LOS)</b>: 두 지점 사이가 보이는지 단면(프로파일)로 확인</li>
   <li>(옵션) <b>AOI 통계</b>: AOI(폴리곤) 안에서 가시 면적/비율 등의 요약값을 산출</li>
+</ul>
+
+<h4>히구치 거리대(Higuchi View Zones)</h4>
+<ul>
+  <li>가시 영역을 <b>근경/중경/원경</b>으로 나눠 색으로 표시합니다.</li>
+  <li><b>중요</b>: Higuchi(1975)는 이 구역을 <b>거리 ÷ 대상 높이(D/H) 비율</b>로 정의했습니다. 미터 단위의 고정 경계값은 아닙니다.</li>
+  <li>따라서 기본값 <b>500m / 2,500m</b>는 널리 쓰이는 <b>실무 관례</b>일 뿐, 원전이 제시한 수치가 아닙니다. 대상 유적(성벽·고분·산 등)의 높이와 규모에 맞게 “근경/중경 상한”을 조정해 사용하세요.</li>
+  <li>사용한 경계값은 결과 레이어 메타데이터(<code>higuchi_near_m</code>, <code>higuchi_mid_m</code>)에 기록됩니다.</li>
 </ul>
 
 <h4>주의/팁</h4>
@@ -1995,12 +2012,17 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                 use_higuchi = self.chkHiguchi.isChecked()
                 is_reverse = self.radioReverseViewshed.isChecked()
 
+                # Resolve the zone breaks once so the raster, the legend, the
+                # rings and the layer metadata cannot drift apart.
+                higuchi_near, higuchi_mid = self._get_higuchi_thresholds()
+
                 raster_path = final_output
                 if use_higuchi:
                     layer_name = f"가시권_히구치_{int(max_dist)}m"
                     higuchi_output = os.path.join(tempfile.gettempdir(), f'archt_vs_higuchi_{run_id}.tif')
                     self._create_higuchi_viewshed_raster(
-                        final_output, higuchi_output, point, src_crs, dem_layer
+                        final_output, higuchi_output, point, src_crs, dem_layer,
+                        near_m=higuchi_near, mid_m=higuchi_mid,
                     )
                     raster_path = higuchi_output
                 elif is_reverse:
@@ -2016,24 +2038,30 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                             kind = "higuchi"
                         elif is_reverse:
                             kind = "reverse_single"
+                        meta_params = {
+                            "max_dist_m": float(max_dist),
+                            "observer_height_m": float(obs_height),
+                            "target_height_m": float(tgt_height),
+                            "use_higuchi": bool(use_higuchi),
+                            "reverse": bool(is_reverse),
+                        }
+                        if use_higuchi:
+                            # The zone breaks are user-editable, so a Higuchi result is
+                            # only traceable if the thresholds that produced it are stored.
+                            meta_params["higuchi_near_m"] = float(higuchi_near)
+                            meta_params["higuchi_mid_m"] = float(higuchi_mid)
                         set_archtoolkit_layer_metadata(
                             viewshed_layer,
                             tool_id="viewshed",
                             run_id=str(run_id),
                             kind=kind,
                             units="mask",
-                            params={
-                                "max_dist_m": float(max_dist),
-                                "observer_height_m": float(obs_height),
-                                "target_height_m": float(tgt_height),
-                                "use_higuchi": bool(use_higuchi),
-                                "reverse": bool(is_reverse),
-                            },
+                            params=meta_params,
                         )
                     except Exception as _exc:
                         log_swallowed("viewshed_dialog.run_single_viewshed", _exc)
                     if use_higuchi:
-                        self.apply_higuchi_style(viewshed_layer)
+                        self.apply_higuchi_style(viewshed_layer, near_m=higuchi_near, mid_m=higuchi_mid)
                     else:
                         self.apply_viewshed_style(viewshed_layer)
                     
@@ -2044,7 +2072,10 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                         log_swallowed("tools/viewshed_dialog.py:2023 (run_single_viewshed)", _exc)
                     if use_higuchi:
                         # Add rings after raster so they draw on top.
-                        self.create_higuchi_rings(point, src_crs, max_dist, dem_layer)
+                        self.create_higuchi_rings(
+                            point, src_crs, max_dist, dem_layer,
+                            near_m=higuchi_near, mid_m=higuchi_mid,
+                        )
                     self.link_current_marker_to_layer(viewshed_layer.id(), [(point, src_crs)])
                     
                     # Ensure label layer is on top
@@ -4504,15 +4535,134 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         layer.setOpacity(0.7)
         layer.triggerRepaint()
     
-    def _create_higuchi_viewshed_raster(self, input_raster_path, output_raster_path, observer_point, observer_crs, dem_layer):
+    def _setup_higuchi_threshold_widgets(self):
+        """Build the editable Higuchi zone breaks next to chkHiguchi.
+
+        Created in code rather than in the .ui file so the existing grid rows do
+        not have to be renumbered. Every later read goes through
+        _get_higuchi_thresholds(), which falls back to the defaults if this
+        setup failed, so the dialog still works without these widgets.
+        """
+        try:
+            layout = getattr(self, "gridLayout_Style", None)
+            if layout is None:
+                return
+
+            tip = (
+                "히구치 거리대 경계값\n"
+                "- Higuchi(1975)는 근경/중경/원경을 '거리 ÷ 대상 높이(D/H) 비율'로 정의했습니다.\n"
+                "- 기본값 500m / 2,500m는 널리 쓰이는 실무 관례일 뿐, 원전이 제시한 수치가 아닙니다.\n"
+                "- 대상 유적의 높이·규모에 맞게 조정해 사용하세요.\n"
+                "- 근경 상한이 중경 상한보다 크면 두 값을 서로 바꿔 적용합니다."
+            )
+
+            self.lblHiguchiNear = QtWidgets.QLabel("근경 상한(m):", self)
+            self.spinHiguchiNear = QtWidgets.QDoubleSpinBox(self)
+            self.spinHiguchiNear.setDecimals(0)
+            self.spinHiguchiNear.setRange(1.0, 999999.0)
+            self.spinHiguchiNear.setSingleStep(100.0)
+            self.spinHiguchiNear.setValue(self.HIGUCHI_NEAR_DEFAULT_M)
+
+            self.lblHiguchiMid = QtWidgets.QLabel("중경 상한(m):", self)
+            self.spinHiguchiMid = QtWidgets.QDoubleSpinBox(self)
+            self.spinHiguchiMid.setDecimals(0)
+            self.spinHiguchiMid.setRange(2.0, 999999.0)
+            self.spinHiguchiMid.setSingleStep(500.0)
+            self.spinHiguchiMid.setValue(self.HIGUCHI_MID_DEFAULT_M)
+
+            widgets = (self.lblHiguchiNear, self.spinHiguchiNear, self.lblHiguchiMid, self.spinHiguchiMid)
+            for _w in widgets:
+                _w.setToolTip(tip)
+
+            # Append after the existing rows instead of inserting, so the rows
+            # already defined in the .ui keep their numbering.
+            row = int(layout.rowCount())
+            layout.addWidget(self.lblHiguchiNear, row, 0)
+            layout.addWidget(self.spinHiguchiNear, row, 1)
+            layout.addWidget(self.lblHiguchiMid, row + 1, 0)
+            layout.addWidget(self.spinHiguchiMid, row + 1, 1)
+
+            checked = bool(self.chkHiguchi.isChecked()) if hasattr(self, "chkHiguchi") else False
+            for _w in widgets:
+                _w.setEnabled(checked)
+            if hasattr(self, "chkHiguchi"):
+                self.chkHiguchi.toggled.connect(self._on_higuchi_thresholds_enabled)
+        except Exception as _exc:
+            log_swallowed("viewshed_dialog._setup_higuchi_threshold_widgets", _exc)
+
+    def _on_higuchi_thresholds_enabled(self, checked):
+        """Grey out the zone breaks when Higuchi styling is off."""
+        try:
+            for _name in ("lblHiguchiNear", "spinHiguchiNear", "lblHiguchiMid", "spinHiguchiMid"):
+                _w = getattr(self, _name, None)
+                if _w is not None:
+                    _w.setEnabled(bool(checked))
+        except Exception as _exc:
+            log_swallowed("viewshed_dialog._on_higuchi_thresholds_enabled", _exc)
+
+    def _get_higuchi_thresholds(self):
+        """Return the (near, mid) Higuchi zone breaks in metres.
+
+        Falls back to the practical defaults when the programmatic spinboxes
+        could not be created. near < mid is enforced by swapping the two values
+        (the user clearly wants two breaks, and an inverted pair would silently
+        empty the middle zone); an equal pair is nudged apart by 1 m.
+        """
+        near = float(self.HIGUCHI_NEAR_DEFAULT_M)
+        mid = float(self.HIGUCHI_MID_DEFAULT_M)
+        try:
+            if hasattr(self, "spinHiguchiNear"):
+                near = float(self.spinHiguchiNear.value())
+            if hasattr(self, "spinHiguchiMid"):
+                mid = float(self.spinHiguchiMid.value())
+        except Exception as _exc:
+            log_swallowed("viewshed_dialog._get_higuchi_thresholds", _exc)
+            return (float(self.HIGUCHI_NEAR_DEFAULT_M), float(self.HIGUCHI_MID_DEFAULT_M))
+
+        if near > mid:
+            near, mid = mid, near
+        if near >= mid:
+            mid = near + 1.0
+        return (near, mid)
+
+    @staticmethod
+    def _format_higuchi_distance(value_m):
+        """Format a zone break for UI text: 500.0 -> '500m', 2500.0 -> '2.5km'."""
+        try:
+            value_m = float(value_m)
+        except (TypeError, ValueError):
+            return str(value_m)
+        if value_m >= 1000.0:
+            return "{0:g}km".format(value_m / 1000.0)
+        return "{0:g}m".format(value_m)
+
+    def _create_higuchi_viewshed_raster(
+        self,
+        input_raster_path,
+        output_raster_path,
+        observer_point,
+        observer_crs,
+        dem_layer,
+        near_m=None,
+        mid_m=None,
+    ):
         """Reclassify a binary viewshed raster into Higuchi distance zones.
 
         Output classes (Byte-like, stored as Int16 to keep NoData=-9999):
         - 0: not visible (transparent in Higuchi style)
-        - 85: near view (0~500m)
-        - 170: mid view (500m~2.5km)
-        - 255: far view (2.5km~)
+        - 85: near view (dist <= near_m)
+        - 170: mid view (near_m < dist <= mid_m)
+        - 255: far view (dist > mid_m)
+
+        near_m / mid_m default to the dialog's configurable zone breaks. Higuchi
+        defines the zones by distance-to-height ratio (D/H), so these metric
+        breaks are a practical convention, not values from Higuchi (1975).
         """
+        if near_m is None or mid_m is None:
+            near_m, mid_m = self._get_higuchi_thresholds()
+        near_m = float(near_m)
+        mid_m = float(mid_m)
+
         # Observer point must be in DEM CRS to compute metric distance per pixel.
         observer_dem = self.transform_point(observer_point, observer_crs, dem_layer.crs())
         ox = float(observer_dem.x())
@@ -4583,9 +4733,9 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
 
                     out = np.full(arr.shape, nodata_out, dtype=np.int16)
                     out[valid] = 0
-                    out[visible & (dist <= 500.0)] = 85
-                    out[visible & (dist > 500.0) & (dist <= 2500.0)] = 170
-                    out[visible & (dist > 2500.0)] = 255
+                    out[visible & (dist <= near_m)] = 85
+                    out[visible & (dist > near_m) & (dist <= mid_m)] = 170
+                    out[visible & (dist > mid_m)] = 255
 
                     out_band.WriteArray(out, xoff, yoff)
 
@@ -4599,8 +4749,18 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             out_ds = None
             ds = None
 
-    def apply_higuchi_style(self, layer):
-        """Apply Higuchi (1975) distance-based landscape zone styling"""
+    def apply_higuchi_style(self, layer, near_m=None, mid_m=None):
+        """Apply Higuchi distance-zone styling using the configured zone breaks.
+
+        The metric breaks are a practical convention; Higuchi (1975) defines the
+        zones by distance-to-height ratio (D/H), so the legend has to report the
+        thresholds actually used instead of a fixed 500 m / 2.5 km pair.
+        """
+        if near_m is None or mid_m is None:
+            near_m, mid_m = self._get_higuchi_thresholds()
+        near_txt = self._format_higuchi_distance(near_m)
+        mid_txt = self._format_higuchi_distance(mid_m)
+
         # Set NoData value to ensure corners are transparent
         layer.dataProvider().setNoDataValue(1, -9999)
 
@@ -4615,9 +4775,9 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
 
         colors = [
             QgsColorRampShader.ColorRampItem(0, not_visible_color, "보이지 않음"),
-            QgsColorRampShader.ColorRampItem(85, QColor(255, 50, 50, 200), "근경 (0~500m: 질감/세부 인지)"),     # Sharp Red
-            QgsColorRampShader.ColorRampItem(170, QColor(255, 165, 0, 200), "중경 (500m~2.5km: 형태/부피 파악)"), # Orange
-            QgsColorRampShader.ColorRampItem(255, QColor(138, 43, 226, 200), "원경 (2.5km~: 실루엣/스카이라인)"), # Purple/Blue
+            QgsColorRampShader.ColorRampItem(85, QColor(255, 50, 50, 200), f"근경 (0-{near_txt}: 질감/세부 인지)"),        # Sharp Red
+            QgsColorRampShader.ColorRampItem(170, QColor(255, 165, 0, 200), f"중경 ({near_txt}-{mid_txt}: 형태/부피 파악)"),   # Orange
+            QgsColorRampShader.ColorRampItem(255, QColor(138, 43, 226, 200), f"원경 ({mid_txt} 이상: 실루엣/스카이라인)"),     # Purple/Blue
         ]
         
         color_ramp.setColorRampItemList(colors)
@@ -4642,39 +4802,66 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         if not checked or not hasattr(self, "spinMaxDistance"):
             return
 
-        # Higuchi zones: Near(0~500m) / Mid(500m~2.5km) / Far(2.5km~)
+        # The far zone only exists beyond the configured mid break, so the
+        # prompt has to follow that value rather than a hard-coded 2,500 m.
+        near_m, mid_m = self._get_higuchi_thresholds()
+        near_txt = self._format_higuchi_distance(near_m)
+        mid_txt = self._format_higuchi_distance(mid_m)
+
         current_dist = float(self.spinMaxDistance.value())
-        if current_dist >= 2500:
+        if current_dist >= mid_m:
             return
 
         from qgis.PyQt.QtWidgets import QMessageBox
+
+        # spinMaxDistance is an integer spinbox: round and clamp to its maximum.
+        try:
+            spin_max = float(self.spinMaxDistance.maximum())
+        except Exception as _exc:
+            log_swallowed("viewshed_dialog.on_higuchi_toggled", _exc)
+            spin_max = float(mid_m) * 2.0
+        minimum_dist = int(min(round(mid_m), spin_max))
+        recommended_dist = int(min(round(mid_m * 2.0), spin_max))
 
         msg = QMessageBox(self)
         msg.setIcon(QMessageBox.Warning)
         msg.setWindowTitle("히구치 거리대 안내")
         msg.setText(
             "히구치 거리대는 '보이는 영역'을 거리별로 근경/중경/원경으로 나눠 색으로 표시합니다.\n"
+            f"현재 설정: 근경 0-{near_txt} / 중경 {near_txt}-{mid_txt} / 원경 {mid_txt} 이상\n"
             f"현재 최대거리: {current_dist:,.0f} m\n\n"
-            "원경(2.5km~)을 보려면 최소 2,500m가 필요합니다. (권장: 5,000m)"
+            f"원경({mid_txt} 이상)을 보려면 최소 {minimum_dist:,}m가 필요합니다. (권장: {recommended_dist:,}m)\n\n"
+            "※ Higuchi(1975)는 근경/중경/원경을 '거리 ÷ 대상 높이(D/H) 비율'로 정의했습니다.\n"
+            "   위 미터 경계값은 널리 쓰이는 실무 관례 기본값일 뿐 원전이 제시한 수치가 아니므로,\n"
+            "   대상 유적의 높이·규모에 맞게 '근경/중경 상한'을 조정해 사용하세요."
         )
 
-        btn_2500 = msg.addButton("2,500m로 설정", QMessageBox.AcceptRole)
-        btn_5000 = msg.addButton("5,000m로 설정(권장)", QMessageBox.AcceptRole)
+        btn_min = msg.addButton(f"{minimum_dist:,}m로 설정", QMessageBox.AcceptRole)
+        # Both suggestions collapse onto the spinbox maximum when the mid break
+        # is set very high; offering the same number twice would just confuse.
+        btn_recommended = None
+        if recommended_dist > minimum_dist:
+            btn_recommended = msg.addButton(f"{recommended_dist:,}m로 설정(권장)", QMessageBox.AcceptRole)
         btn_keep = msg.addButton("유지", QMessageBox.RejectRole)
-        msg.setDefaultButton(btn_5000)
+        msg.setDefaultButton(btn_recommended if btn_recommended is not None else btn_min)
 
         msg.exec_()
         clicked = msg.clickedButton()
-        if clicked == btn_2500:
-            self.spinMaxDistance.setValue(2500)
-        elif clicked == btn_5000:
-            self.spinMaxDistance.setValue(5000)
+        if clicked == btn_min:
+            self.spinMaxDistance.setValue(minimum_dist)
+        elif btn_recommended is not None and clicked == btn_recommended:
+            self.spinMaxDistance.setValue(recommended_dist)
         elif clicked == btn_keep:
             return
     
-    def create_higuchi_rings(self, center_point, center_crs, max_dist, dem_layer):
-        """Create buffer rings showing Higuchi distance zones"""
+    def create_higuchi_rings(self, center_point, center_crs, max_dist, dem_layer, near_m=None, mid_m=None):
+        """Create buffer rings showing the configured Higuchi distance zones."""
         english = is_english_ui()
+
+        if near_m is None or mid_m is None:
+            near_m, mid_m = self._get_higuchi_thresholds()
+        near_m = float(near_m)
+        mid_m = float(mid_m)
         
         # Use DEM CRS instead of hardcoded EPSG:5186
         layer = QgsVectorLayer("LineString?crs=" + dem_layer.crs().authid(), "히구치_거리대", "memory")
@@ -4688,12 +4875,12 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         # We need point in DEM CRS for buffer
         center_dem = self.transform_point(center_point, center_crs, dem_layer.crs())
         zones = [
-            (500, "근경 (500m)", QColor(255, 80, 80)),      # Red
-            (2500, "중경 (2.5km)", QColor(255, 200, 0)),    # Yellow
+            (near_m, f"근경 ({self._format_higuchi_distance(near_m)})", QColor(255, 80, 80)),   # Red
+            (mid_m, f"중경 ({self._format_higuchi_distance(mid_m)})", QColor(255, 200, 0)),     # Yellow
         ]
         
         # Add far zone only if max_dist is larger
-        if max_dist > 2500:
+        if max_dist > mid_m:
             max_dist_km = max_dist / 1000
             if english:
                 zone_name = f"Far View ({max_dist_km:.1f} km)"
@@ -4727,7 +4914,8 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                     ring_geom = QgsGeometry.fromPolylineXY(exterior_ring)
                     feat = QgsFeature(layer.fields())
                     feat.setGeometry(ring_geom)
-                    feat.setAttributes([zone_name, int(distance)])
+                    # Zone breaks are configurable floats now; the field is an int.
+                    feat.setAttributes([zone_name, int(round(distance))])
                     pr.addFeature(feat)
         
         layer.updateExtents()

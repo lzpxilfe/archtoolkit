@@ -88,6 +88,44 @@ class EdgeCostDispatchTests(unittest.TestCase):
         self.assertTrue(math.isinf(cost))
 
 
+class ConollyLakeReferenceSlopeTests(unittest.TestCase):
+    """The Conolly & Lake branch is a plugin-defined penalty, not a published
+    equation, and its magnitude is set entirely by conolly_ref_slope_deg. The
+    default is pinned here so a silent change to it breaks a test instead of
+    quietly rescaling every cost surface users have already published.
+    """
+
+    @staticmethod
+    def _slope_factor(slope_deg, params=None):
+        params = {} if params is None else params
+        horiz = 100.0
+        dz = horiz * math.tan(math.radians(slope_deg))
+        flat = edge_cost(MODEL_CONOLLY_LAKE, horiz, 0.0, params)
+        sloped = edge_cost(MODEL_CONOLLY_LAKE, horiz, dz, params)
+        return sloped / flat
+
+    def test_default_reference_slope_is_five_degrees(self):
+        ref = math.tan(math.radians(5.0))
+        self.assertAlmostEqual(
+            self._slope_factor(10.0), math.tan(math.radians(10.0)) / ref, places=9
+        )
+        self.assertAlmostEqual(
+            self._slope_factor(30.0), math.tan(math.radians(30.0)) / ref, places=9
+        )
+        # Same order of magnitude as Tobler (1.85x at 10 deg, 7.54x at 30 deg).
+        # The old 1 deg default gave 10.1x / 33.1x instead.
+        self.assertAlmostEqual(self._slope_factor(10.0), 2.0154, places=3)
+        self.assertAlmostEqual(self._slope_factor(30.0), 6.5991, places=3)
+
+    def test_penalty_scales_inversely_with_reference_slope(self):
+        # Halving the reference slope roughly doubles the penalty, which is why
+        # the reference must be reported alongside any result.
+        coarse = self._slope_factor(30.0, {"conolly_ref_slope_deg": 10.0})
+        fine = self._slope_factor(30.0, {"conolly_ref_slope_deg": 5.0})
+        self.assertAlmostEqual(fine / coarse, math.tan(math.radians(10.0)) / math.tan(math.radians(5.0)), places=9)
+        self.assertGreater(fine, coarse)
+
+
 def _pandolf_energy(horiz, dz, *, W=70.0, L=0.0, eta=1.0, V=_V):
     """Independent reimplementation of Pandolf et al. (1977) for cross-checking."""
     grade = (dz / horiz) * 100.0
@@ -114,6 +152,21 @@ class PandolfTests(unittest.TestCase):
         light = edge_cost(MODEL_PANDOLF, 100.0, 0.0, {"pandolf_load_kg": 0.0}, cost_mode="energy_j")
         heavy = edge_cost(MODEL_PANDOLF, 100.0, 0.0, {"pandolf_load_kg": 30.0}, cost_mode="energy_j")
         self.assertGreater(heavy, light)
+
+    def test_pandolf_time_mode_ignores_slope_by_design(self):
+        # Pandolf is an ENERGY model: V is a constant parameter, so the time
+        # mode is isotropic distance/speed and a Pandolf TIME surface has no
+        # slope response at all (its least-cost path is the shortest path).
+        # The energy mode is the one that reacts to grade. Documented here so
+        # the limitation is visible rather than mistaken for a bug.
+        flat_time = edge_cost(MODEL_PANDOLF, 100.0, 0.0, {}, cost_mode="time_s")
+        uphill_time = edge_cost(MODEL_PANDOLF, 100.0, 50.0, {}, cost_mode="time_s")
+        self.assertAlmostEqual(flat_time, uphill_time, places=9)
+        self.assertAlmostEqual(flat_time, 100.0 / _V, places=6)
+
+        flat_energy = edge_cost(MODEL_PANDOLF, 100.0, 0.0, {}, cost_mode="energy_j")
+        uphill_energy = edge_cost(MODEL_PANDOLF, 100.0, 50.0, {}, cost_mode="energy_j")
+        self.assertGreater(uphill_energy, flat_energy)
 
     def test_steep_descent_is_clamped_to_standing_floor(self):
         # Without the max(1.5W, M) floor the grade term drives M negative on

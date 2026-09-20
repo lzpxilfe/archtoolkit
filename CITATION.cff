@@ -2,7 +2,7 @@ cff-version: 1.2.0
 message: "If you use this repository in research, teaching, or applied work, please cite it using the metadata below."
 type: software
 title: "archtoolkit: 고고학 도구함"
-version: "0.1.3"
+version: "0.1.4"
 authors:
   - family-names: Hwang
     given-names: Jinseo

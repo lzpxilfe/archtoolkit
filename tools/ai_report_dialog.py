@@ -426,10 +426,26 @@ class AiAoiReportDialog(QtWidgets.QDialog):
         self.lblLocalHint.setStyleSheet("color:#455a64;")
         grid.addWidget(self.lblLocalHint, 3, 0, 1, 3)
 
+        # Counterpart to lblLocalHint: the transmission scope has to be readable at
+        # mode-selection time, not only after the user has pressed "AI 요약 생성".
+        # Built programmatically (like the rest of this grid) and guarded, so an
+        # older Qt binding that fails here still leaves the dialog usable.
+        try:
+            self.lblGeminiHint = QtWidgets.QLabel(
+                "Gemini(API) 모드는 AOI 이름/면적/반경, 레이어 이름과 통계, "
+                "추가 유적의 이름과 AOI 중심 기준 거리/방위를 Google 서버로 전송합니다. "
+                "(거리+방위로 위치 역산이 가능하니 민감정보 여부를 먼저 확인하세요)"
+            )
+            self.lblGeminiHint.setWordWrap(True)
+            self.lblGeminiHint.setStyleSheet("color:#c62828;")
+            grid.addWidget(self.lblGeminiHint, 4, 0, 1, 3)
+        except Exception as _exc:
+            log_swallowed("ai_report_dialog._setup_ui", _exc)
+
         self.lblAuthHint = QtWidgets.QLabel(ai_gemini.explain_auth_manager_once())
         self.lblAuthHint.setWordWrap(True)
         self.lblAuthHint.setStyleSheet("color:#455a64;")
-        grid.addWidget(self.lblAuthHint, 4, 0, 1, 3)
+        grid.addWidget(self.lblAuthHint, 5, 0, 1, 3)
 
         layout.addWidget(grp_ai)
 
@@ -655,6 +671,12 @@ class AiAoiReportDialog(QtWidgets.QDialog):
             self.lblLocalHint.setVisible(not is_gemini)
         except Exception as _exc:
             log_swallowed("tools/ai_report_dialog.py:656 (_update_provider_ui)", _exc)
+
+        try:
+            if hasattr(self, "lblGeminiHint"):
+                self.lblGeminiHint.setVisible(is_gemini)
+        except Exception as _exc:
+            log_swallowed("ai_report_dialog._update_provider_ui", _exc)
 
     def _refresh_key_status(self):
         if self._get_provider() != "gemini":
@@ -1012,7 +1034,17 @@ class AiAoiReportDialog(QtWidgets.QDialog):
 
             prompt = self._build_prompt(ctx)
             self._set_busy_message("Gemini 호출 중… (최대 약 45초)")
-            push_message(self.iface, "AI 요약", "Gemini 호출 중…(데이터 요약/레이어명만 전송)", level=0, duration=5)
+            # The context JSON is not "layer names only": it carries the AOI name/area,
+            # the radius, per-layer statistics, and each reference site's distance AND
+            # compass bearing from the AOI centroid - which together reconstruct that
+            # site's position. Name that explicitly so the notice matches what is sent.
+            push_message(
+                self.iface,
+                "AI 요약",
+                "Gemini 호출 중… AOI 이름/면적/반경, 레이어 이름과 통계, 추가 유적의 거리/방위가 외부로 전송됩니다.",
+                level=1,
+                duration=7,
+            )
             QtWidgets.QApplication.setOverrideCursor(Qt.WaitCursor)
             try:
                 text, api_err, used_model = ai_gemini.generate_text_with_fallback(
@@ -1092,7 +1124,11 @@ class AiAoiReportDialog(QtWidgets.QDialog):
             "- 대상 레이어가 너무 많거나 섞여 있으면, <b>대상 그룹/대상 레이어</b>를 지정해 범위를 좁히면 더 정확합니다.<br>"
             "- <b>통계 CSV</b>는 AI 없이 AOI 주변 표준 통계를 CSV로 저장합니다.<br>"
             "- <b>번들 저장</b>은 report.md + context.json + CSV + canvas.png + params.json을 한 폴더로 저장합니다.<br>"
-            "- 레이어 이름/속성에 민감정보가 있으면 Gemini 모드 사용 시 전송될 수 있으니 주의하세요.<br>"
+            "- <b>전송 범위(모드별)</b>: <b>무료(로컬)</b> 모드는 외부로 아무것도 전송하지 않습니다. "
+            "반면 <b>Gemini</b> 모드는 AOI 레이어 이름·면적·반경, 대상 레이어 이름과 통계(피처 수, 길이/면적 합, "
+            "상위 속성값, 수치 필드 min/mean/max), 그리고 추가 유적의 이름과 <b>AOI 중심 기준 거리·방위</b>까지 "
+            "프롬프트에 담아 Google 서버로 보냅니다. 거리와 방위를 합치면 유적 위치를 역산할 수 있으므로, "
+            "매장문화재 위치정보에 해당하는지 먼저 확인하세요.<br>"
             "- 도면/Style 결과는 해석에 방해가 될 수 있어 기본적으로 제외(체크)하는 것을 권장합니다."
         )
         try:

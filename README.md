@@ -10,7 +10,7 @@
 
 <p align="center">
   <img alt="QGIS 3.40+" src="https://img.shields.io/badge/QGIS-3.40%2B-589632?logo=qgis&logoColor=white">
-  <img alt="Version 0.1.3" src="https://img.shields.io/badge/version-0.1.3-2d7ff9">
+  <img alt="Version 0.1.4" src="https://img.shields.io/badge/version-0.1.4-2d7ff9">
   <img alt="Status stable" src="https://img.shields.io/badge/status-stable-2ea44f">
   <img alt="License GPL-3.0-or-later" src="https://img.shields.io/badge/license-GPL--3.0--or--later-1f6feb">
 </p>
@@ -58,7 +58,7 @@ ArchToolkit은 한국의 고고학·문화유산 조사/연구에서 자주 반�
 
 | 도구 | 핵심 기능 |
 | --- | --- |
-| `지형 분석 (Terrain Analysis)` | 경사, 사면방향, TRI, TPI, Roughness, Slope Position, 곡률(Zevenbergen & Thorne 1987), 사면파생(북향성/동향성/TRASP, Roberts & Cooper 1989) 계산과 분류/스타일·해석 요약 |
+| `지형 분석 (Terrain Analysis)` | 경사, 사면방향, TRI(Riley et al. 1999 지수), TPI, Roughness(Wilson et al. 2007 지수), Slope Position, 곡률(Zevenbergen & Thorne 1987, 부호규약: 음(-)=볼록/수렴), 사면파생(북향성/동향성/TRASP, Roberts & Cooper 1989) 계산과 분류/스타일·해석 요약 (표시 등급 구간은 플러그인 자체 관례) |
 | `거리 래스터 (Distance to Features)` | 하천·기존 유적·도로 등 대상 레이어까지의 직선거리를 기준 격자에 맞춰 계산 (예측모델에서 가장 널리 쓰이는 변수 계열, `gdal:proximity` 기반) |
 | `분석 결과 정렬/내보내기 (Align & Export Stack)` | 이미 만든 분석 결과 래스터들을 하나의 기준 격자(CRS·범위·픽셀크기·NoData)로 정렬해 실행별 원자적 스택+manifest로 내보내기 (범주형=최근접, 연속형=이중선형, 취소·실패 시 부분 결과 미게시) |
 | `변수 상관/VIF 리포트 (Correlation & VIF)` | 변수(래스터) 스택의 상관행렬과 VIF(분산팽창계수)를 계산해 예측모델 투입 전 다중공선성 점검, 상관/VIF 리포트·CSV 저장 |
@@ -98,7 +98,7 @@ ArchToolkit은 한국의 고고학·문화유산 조사/연구에서 자주 반�
 - `DEM 생성`
   - 등고선, 표고점, 3D 포인트 기반 DEM 생성
   - `TIN - Linear`, `TIN - Clough-Tocher`, `IDW`, `Kriging (Lite, Ordinary)` 지원
-  - Kriging 사용 시 예측 DEM과 함께 `_variance.tif` 불확실성 래스터도 저장
+  - Kriging 사용 시 예측 DEM과 함께 `_variance.tif` 상대 불확실성 래스터도 저장 (휴리스틱 베리오그램 기반이므로 보정된 예측분산이 아님)
   - 한국 수치지형도 DXF 코드와 프리셋을 이용해 입력 레이어 선택을 빠르게 보조
 - `등고선 추출`
   - DXF 레이어에서 지정 코드만 필터링해 등고선 벡터를 분리
@@ -113,7 +113,10 @@ ArchToolkit은 한국의 고고학·문화유산 조사/연구에서 자주 반�
 <summary><strong>분석 도구 자세히 보기</strong></summary>
 
 - `지형 분석`
-  - 경사, 사면방향, TRI, TPI, Roughness, Slope Position 계산
+  - 경사, 사면방향, TRI, TPI, Roughness, Slope Position, 곡률 계산
+  - 지수(index) 자체는 원저자 정의를 따릅니다. TRI는 Riley et al. (1999), Roughness는 Wilson et al. (2007)입니다 (Wilson & Gallant 2000이 아닙니다)
+  - 반면 화면에 표시되는 두 지수의 등급 구간(class breaks)은 원저자가 발표한 분류가 아니라 본 플러그인의 자체 관례입니다
+  - 곡률은 Zevenbergen & Thorne (1987) 기반이며, 종단은 `음(-)=볼록`, 횡단은 `음(-)=수렴` 부호 규약을 사용합니다
   - 분류 기준과 색상 스타일을 함께 적용해 바로 해석 가능한 레이어 생성
 - `AHP 입지적합도`
   - 여러 환경 래스터를 0-1로 정규화한 뒤 AHP 가중치로 가중합
@@ -125,7 +128,8 @@ ArchToolkit은 한국의 고고학·문화유산 조사/연구에서 자주 반�
   - AOI 구간 음영, 오버레이 레이어 표시, CSV/PNG/JPG 내보내기 지원
 - `가시권 분석`
   - 단일, 누적, 가중 누적, 역가시권, 선형 가시권, LOS 프로파일 지원
-  - Higuchi 거리대, 곡률, 굴절 옵션 제공
+  - Higuchi 거리대(근경/중경 상한을 직접 조정 가능), 곡률, 굴절 옵션 제공
+  - Higuchi(1975)의 원 정의는 `거리 ÷ 대상 높이(D/H) 비율`이며 고정된 미터 값이 아닙니다. 기본값 500m / 2,500m는 실무 관례일 뿐이므로 대상 유적의 높이·규모에 맞게 조정하세요
   - AOI 가시면적/가시비율 계산과 표준화(0-100%) 가능
 - `비용표면/최소비용경로`
   - DEM 경사 기반 이동 비용을 시간 또는 에너지 관점에서 계산
@@ -177,7 +181,7 @@ ArchToolkit은 한국의 고고학·문화유산 조사/연구에서 자주 반�
 
 ## 눈여겨볼 기능
 
-- `Kriging (Lite, Ordinary)`는 포인트 표고만 있어도 DEM과 분산 래스터를 함께 생성해 불확실성까지 확인할 수 있습니다.
+- `Kriging (Lite, Ordinary)`는 포인트 표고만 있어도 DEM과 분산 래스터를 함께 생성합니다. 다만 `Lite`는 경험 베리오그램을 적합하지 않는 휴리스틱 구성이므로, 분산 래스터는 보정된 예측분산이 아니라 표본 밀도를 반영한 상대 불확실성 지도로 읽어야 합니다.
 - `KIGAM 지질도 ZIP` 도구는 한국 지질도 도엽을 바로 불러오고 범주형 래스터로 바꿔 예측모델 입력으로 이어가기 좋습니다.
 - `트렌치 후보 제안`은 AOI, DEM, AHP, 주변 유적 맥락을 묶어 조사 설계 초안을 빠르게 잡는 데 도움이 됩니다.
 - `Map Styling`은 한 번 만든 스타일을 QML과 JSON 프리셋으로 내보낼 수 있어 프로젝트 간 재사용에 유리합니다.
@@ -231,7 +235,8 @@ Linux:   ~/.local/share/QGIS/QGIS3/profiles/default/python/plugins/ArchToolkit
 - `무료(로컬 요약)`
   - 외부 전송 없이 이 컴퓨터 안에서 통계를 문장으로 정리합니다.
 - `Gemini(API)`
-  - AOI 이름, 반경, 레이어 이름, 통계 요약, ArchToolkit 메타데이터를 바탕으로 더 자연스러운 보고서 문장을 생성합니다.
+  - AOI 이름·면적·반경, 대상 레이어 이름과 통계(피처 수, 길이/면적 합, 상위 속성값, 수치 필드 min/mean/max), 추가 유적의 이름과 `AOI 중심 기준 거리·방위`를 프롬프트에 담아 Google 서버로 전송한 뒤 보고서 문장을 생성합니다.
+  - 거리와 방위를 합치면 알려진 AOI를 기준으로 유적 위치를 역산할 수 있습니다. 민감한 유적 위치는 사전 검토 없이 이 모드로 보내지 마세요.
   - API 키는 가능하면 QGIS `AuthManager`에 저장합니다.
 - `추가 유적 관계 분석`
   - 별도 유적 레이어를 지정해 AOI 내부/경계/버퍼 관계와 거리 요약을 함께 넣을 수 있습니다.
@@ -253,6 +258,11 @@ Linux:   ~/.local/share/QGIS/QGIS3/profiles/default/python/plugins/ArchToolkit
 
 - 가시권, LOS, 비용, 네트워크 결과는 DEM 해상도·CRS·고도 품질에 크게 의존합니다.
 - 비용표면과 네트워크는 기본적으로 경사 기반 이동비용 모델입니다. 실제 도로·식생·토지피복은 추가 마찰을 통해 근사적으로 반영합니다.
+- 비용 누적은 8방향 격자 위에서 진행하므로 경로 방향이 45도 단위로 양자화됩니다. 이 때문에 누적 비용은 실제 측지선 대비 최대 약 8%까지 과대평가될 수 있습니다(격자 metrication 오차).
+- `최소비용 네트워크`는 유클리드 거리 기준 k-최근린으로 후보 간선을 먼저 추린 뒤 그 후보에 대해서만 LCP를 계산합니다. 따라서 MST는 전체 쌍이 아니라 후보 집합 위의 근사 MST입니다. 있어야 할 간선이 빠져 보이면 `후보 간선(k)` 값을 키워 다시 실행하세요.
+- `Pandolf`는 에너지 모델입니다. 시간 출력은 고정 보행속도를 사용해 경사에 반응하지 않으므로, 경사를 반영한 이동시간이 필요하면 `Tobler`나 `Naismith`를 사용하세요.
+- 곡률은 본 플러그인이 종단 `음(-)=볼록`, 횡단 `음(-)=수렴` 부호 규약을 사용합니다. Zevenbergen & Thorne 공식이 통상 인쇄된 형태와 GRASS `r.slope.aspect`·SAGA는 반대 부호(볼록=양)이므로, 교차 검증하면 값의 부호가 뒤집혀 보입니다.
+- `Kriging (Lite)`는 경험 베리오그램을 적합하지 않습니다. 모델은 지수형(exponential)으로 고정하고 너깃은 표본분산의 5%, 레인지는 최근린 간격 중앙값의 3배로 두며 이방성은 고려하지 않습니다. 이렇게 파라미터가 고정되므로 `_variance.tif`는 보정된 예측분산이 아니라 사실상 표본 밀도 지도에 가까운 상대 불확실성 지표입니다.
 - GeoChem 도구는 WMS 렌더링 색상을 범례로 역추정하는 방식이므로 원자료 측정값 자체가 아닙니다.
 - AHP 적합도는 선택한 기준 레이어, 정규화 범위, 가중치 설정에 따라 달라지는 상대지표입니다.
 - 트렌치 후보 제안은 조사 설계 보조 도구이며, 매장문화재 존재를 보장하는 판정 도구가 아닙니다.
@@ -282,7 +292,7 @@ Linux:   ~/.local/share/QGIS/QGIS3/profiles/default/python/plugins/ArchToolkit
   title = {ArchToolkit: Archaeology Toolkit for QGIS},
   year = {2026},
   url = {https://github.com/lzpxilfe/archtoolkit},
-  version = {0.1.3}
+  version = {0.1.4}
 }
 ```
 

@@ -166,6 +166,11 @@ class NetworkTaskResult:
     model_label: Optional[str] = None
     cost_mode: str = COST_TIME
     network_mode: str = NETWORK_MST
+    # Grid connectivity the accumulation actually ran on (8 vs 4 neighbours).
+    # Carried on the result instead of read back off the checkbox when layers
+    # are built, because the user can toggle the box while the task runs and
+    # the recorded caveat must describe the run, not the dialog.
+    allow_diagonal: bool = True
     nodes: Optional[List[NetworkNode]] = None
     edges: Optional[List[NetworkEdge]] = None
 
@@ -620,6 +625,15 @@ class CostNetworkWorker(QgsTask):
                     )
                 )
             else:
+                # Energy mode: only the energy_kcal_* values come out of the
+                # slope-aware accumulation. The solver minimises joules and
+                # never produces a travel time, so time_min_* here is nothing
+                # but dist_m / (the fixed Pandolf speed) - it has NO slope
+                # response: a steep edge and a flat edge of the same length
+                # get the same "time". Kept because a rough distance-based
+                # scale is still useful for labels and ordering, but it must
+                # not be read as a modelled travel time. The field aliases,
+                # the help text and a run-time message all say so.
                 v = max(0.05, float(self.model_params.get("pandolf_speed_mps", 5.0 * 1000.0 / 3600.0)))
                 edges_out.append(
                     NetworkEdge(
@@ -766,6 +780,8 @@ class CostNetworkWorker(QgsTask):
                         )
                     )
                 else:
+                    # Same caveat as add_edge(): in energy mode time_min_* is
+                    # dist / fixed speed, not a modelled (slope-aware) time.
                     v = max(
                         0.05,
                         float(self.model_params.get("pandolf_speed_mps", 5.0 * 1000.0 / 3600.0)),
@@ -834,6 +850,8 @@ class CostNetworkWorker(QgsTask):
                         )
                     )
                 else:
+                    # Same caveat as add_edge(): in energy mode time_min_* is
+                    # dist / fixed speed, not a modelled (slope-aware) time.
                     v = max(
                         0.05,
                         float(self.model_params.get("pandolf_speed_mps", 5.0 * 1000.0 / 3600.0)),
@@ -1036,6 +1054,8 @@ class CostNetworkWorker(QgsTask):
                         )
                     )
                 else:
+                    # Same caveat as add_edge(): in energy mode time_min_* is
+                    # dist / fixed speed, not a modelled (slope-aware) time.
                     v = max(
                         0.05,
                         float(self.model_params.get("pandolf_speed_mps", 5.0 * 1000.0 / 3600.0)),
@@ -1074,6 +1094,7 @@ class CostNetworkWorker(QgsTask):
             model_label=self.model_label,
             cost_mode=self.cost_mode,
             network_mode=self.network_mode,
+            allow_diagonal=self.allow_diagonal,
             nodes=nodes,
             edges=edges_out,
         )
@@ -1284,7 +1305,13 @@ MST/k-NN/Hub 네트워크를 생성합니다.
 
 <h4>출력</h4>
 <ul>
-  <li>네트워크 라인 레이어(간선): 비용/시간/거리 등의 속성 포함</li>
+  <li>네트워크 라인 레이어(간선): 비용/시간/거리 등의 속성 포함
+    <ul>
+      <li><b>에너지(kcal) 모드</b>에서는 <code>kcal_*</code> 열만 경사를 반영합니다.
+      <code>time_*</code> 열은 <b>거리 / 고정속도</b>로 환산한 값이라 경사가 전혀 반영되지 않습니다
+      (같은 길이면 급경사든 평지든 값이 같습니다). 이동시간 추정값으로 읽지 마세요.</li>
+    </ul>
+  </li>
   <li>(옵션) 노드 지표/중심성(SNA) 결과 레이어</li>
 </ul>
 
@@ -1938,7 +1965,11 @@ MST/k-NN/Hub 네트워크를 생성합니다.
         <h3>6) 한계와 주의</h3>
         <ul>
           <li>이 도구는 기본적으로 <b>DEM 경사</b>만 반영합니다. 도로/하천/토지피복/행정경계 같은 제약은 별도 입력이 없으면 고려되지 않습니다.</li>
-          <li>에너지(kcal) 모드는 Pandolf 모델에서 의미가 있으며, 모델/파라미터 설정에 따라 값이 크게 달라질 수 있습니다.</li>
+          <li>경로는 <b>격자(셀) 누적</b> 결과이므로 진행 방향이 격자 방향으로 <b>양자화</b>됩니다(대각 이동 허용 시 8방향·45° 단위).
+          그래서 격자 축과 어긋난 방향의 경로는 실제 최적 경로보다 길이·비용이 <b>최대 약 8%</b>까지 과대평가될 수 있습니다
+          (대각 이동을 끄면 4방향·90° 단위가 되어 오차는 더 커집니다).</li>
+          <li>에너지(kcal) 모드는 Pandolf 모델에서 의미가 있으며, 모델/파라미터 설정에 따라 값이 크게 달라질 수 있습니다.
+          이 모드의 <code>time_*</code> 열은 ‘거리 / 고정속도’ 환산값이라 경사를 반영하지 않습니다.</li>
           <li>큰 데이터(예: 200개+)는 후보 k/버퍼 조절이 중요하며, SNA의 느린 지표는 자동 생략될 수 있습니다.</li>
         </ul>
         """
@@ -2267,6 +2298,19 @@ MST/k-NN/Hub 네트워크를 생성합니다.
         self._task = task
         QgsApplication.taskManager().addTask(task)
         push_message(self.iface, "최소비용 네트워크", "분석을 시작했습니다. (QGIS 작업 관리자 확인)", level=0, duration=6)
+        if cost_mode == COST_ENERGY:
+            # The energy solver never computes a travel time (see add_edge), so
+            # warn before the user reads the time columns as modelled times.
+            push_message(
+                self.iface,
+                "에너지(kcal) 모드",
+                (
+                    "경사를 반영하는 값은 에너지 열(kcal_*)뿐입니다. "
+                    "시간 열(time_*)은 '거리 / 고정속도'로 환산한 값이라 경사가 반영되지 않습니다."
+                ),
+                level=1,
+                duration=10,
+            )
 
     def _handle_task_result(self, res: NetworkTaskResult):
         if not isinstance(res, NetworkTaskResult) or not res.ok:
@@ -2506,6 +2550,22 @@ MST/k-NN/Hub 네트워크를 생성합니다.
         )
         line_layer.updateFields()
 
+        if res.cost_mode == COST_ENERGY:
+            # Field NAMES stay as they are (styles/expressions reference them);
+            # only the aliases change, so the attribute-table header itself says
+            # that these time values are dist / fixed speed and not slope-aware.
+            try:
+                def _set_edge_alias(field_name: str, alias: str):
+                    idx = int(line_layer.fields().indexFromName(field_name))
+                    if idx >= 0:
+                        line_layer.setFieldAlias(idx, alias)
+
+                _set_edge_alias("time_ab", "시간 A→B (거리/고정속도, 경사 미반영)")
+                _set_edge_alias("time_ba", "시간 B→A (거리/고정속도, 경사 미반영)")
+                _set_edge_alias("time_sym", "시간 대칭값 (거리/고정속도, 경사 미반영)")
+            except Exception as _exc:
+                log_swallowed("cost_network_dialog._add_result_layers", _exc)
+
         feats = []
         for e in edges:
             if not e.coords or len(e.coords) < 2:
@@ -2583,6 +2643,23 @@ MST/k-NN/Hub 네트워크를 생성합니다.
         line_layer.setLabeling(QgsVectorLayerSimpleLabeling(pal))
         line_layer.setLabelsEnabled(True)
 
+        # The two approximations behind every edge here, recorded on the layers
+        # themselves so an exported/saved result still carries its own caveats
+        # when the help text is nowhere near the reader: (1) candidates are the
+        # Euclidean k nearest neighbours, so any spanning tree is the minimum
+        # over that candidate set rather than the true MST in cost space, and
+        # (2) the accumulation is a grid, so headings are quantised.
+        approx_params = {
+            "candidate_selection": "euclidean_knn",
+            "connectivity": (
+                "8-neighbour grid (45-degree quantised, cost overestimated by up to ~8%)"
+                if res.allow_diagonal
+                else "4-neighbour grid (90-degree quantised, cost overestimated by up to ~41%)"
+            ),
+        }
+        if any(str(e.kind) in ("mst", "hub_mst") for e in edges):
+            approx_params["mst"] = "approximate_over_candidates"
+
         try:
             set_archtoolkit_layer_metadata(
                 line_layer,
@@ -2594,6 +2671,7 @@ MST/k-NN/Hub 네트워크를 생성합니다.
                     "network_mode": str(res.network_mode or ""),
                     "cost_mode": str(res.cost_mode or ""),
                     "model_label": str(res.model_label or ""),
+                    **approx_params,
                 },
             )
             set_archtoolkit_layer_metadata(
@@ -2606,6 +2684,7 @@ MST/k-NN/Hub 네트워크를 생성합니다.
                     "network_mode": str(res.network_mode or ""),
                     "cost_mode": str(res.cost_mode or ""),
                     "model_label": str(res.model_label or ""),
+                    **approx_params,
                 },
             )
         except Exception as _exc:
@@ -2615,7 +2694,6 @@ MST/k-NN/Hub 네트워크를 생성합니다.
         project.addMapLayer(pt_layer, False)
         run_group.insertLayer(0, line_layer)
         run_group.insertLayer(0, pt_layer)
-
 
 
 class _ValuePickerDialog(QtWidgets.QDialog):
