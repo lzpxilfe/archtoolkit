@@ -68,27 +68,27 @@
          <string>지형분류 (Weiss 6단계) - 곡저/평지/사면/능선 (추천)</string>
         </property>
         <property name="toolTip">
-         <string>&lt;html&gt;&lt;b&gt;Weiss 6단계 지형분류 (Landform Classification)&lt;/b&gt;&lt;hr/&gt;&lt;i&gt;Weiss, A. (2001). Topographic Position and Landforms Analysis.&lt;/i&gt;&lt;br/&gt;&lt;br/&gt;TPI와 경사도를 조합하여 지형을 6가지로 자동 분류합니다:&lt;br/&gt;&lt;br/&gt;1. 깊은 곡저 (Incised Valley)&lt;br/&gt;2. 곡저/하상 (Valley Floor)&lt;br/&gt;3. 평지/단구 (Flat or Terrace)&lt;br/&gt;4. 중간 사면 (Mid Slope)&lt;br/&gt;5. 능선 평탄부 (Upland Flat)&lt;br/&gt;6. 급경사 능선 (Steep Ridge)&lt;br/&gt;&lt;br/&gt;&lt;b&gt;(추천) 유적 입지 분석에 가장 유용한 지표입니다.&lt;/b&gt;&lt;/html&gt;</string>
+         <string>&lt;html&gt;&lt;b&gt;Weiss 6단계 지형분류 (Landform Classification)&lt;/b&gt;&lt;hr/&gt;&lt;i&gt;Weiss, A. (2001). Topographic Position and Landforms Analysis.&lt;/i&gt;&lt;br/&gt;&lt;br/&gt;TPI와 경사도를 조합하여 지형을 6가지로 자동 분류합니다:&lt;br/&gt;&lt;br/&gt;1. 깊은 곡저 (Incised Valley)&lt;br/&gt;2. 하부 사면 (Lower Slope)&lt;br/&gt;3. 평지/단구 (Flat or Terrace)&lt;br/&gt;4. 중간 사면 (Mid Slope)&lt;br/&gt;5. 상부 사면 (Upper Slope)&lt;br/&gt;6. 급경사 능선 (Steep Ridge)&lt;br/&gt;&lt;br/&gt;&lt;b&gt;(추천) 유적 입지 분석에 가장 유용한 지표입니다.&lt;/b&gt;&lt;/html&gt;</string>
         </property>
        </widget>
       </item>
       <item>
        <widget class="QCheckBox" name="chkTRI">
         <property name="text">
-         <string>TRI (Riley 1999) - 지형 험준도</string>
+         <string>TRI (Riley et al. 1999 지수) - 지형 험준도</string>
         </property>
         <property name="toolTip">
-         <string>&lt;html&gt;&lt;b&gt;TRI (Terrain Ruggedness Index)&lt;/b&gt;&lt;hr/&gt;&lt;i&gt;Riley, S. J., DeGloria, S. D., &amp; Elliot, R. (1999). A Terrain Ruggedness Index That Quantifies Topographic Heterogeneity. Intermountain Journal of Sciences 5(1-4):23-27.&lt;/i&gt;&lt;br/&gt;&lt;br/&gt;중심 셀과 8개 인접 셀 간 고도차의 제곱합 평균의 제곱근입니다.&lt;br/&gt;&lt;br/&gt;&lt;b&gt;분류 기준 (Riley et al.):&lt;/b&gt;&lt;br/&gt;• 0~2: 평탄 (Level)&lt;br/&gt;• 2~5: 거의 평탄 (Nearly Level)&lt;br/&gt;• 5~10: 약간 거침 (Slightly Rugged)&lt;br/&gt;• 10~20: 중간 (Moderately Rugged)&lt;br/&gt;• 20+: 험준 (Highly Rugged)&lt;/html&gt;</string>
+         <string>&lt;html&gt;&lt;b&gt;TRI (Terrain Ruggedness Index)&lt;/b&gt;&lt;hr/&gt;&lt;i&gt;Riley, S. J., DeGloria, S. D., &amp; Elliot, R. (1999). A Terrain Ruggedness Index That Quantifies Topographic Heterogeneity. Intermountain Journal of Sciences 5(1-4):23-27.&lt;/i&gt;&lt;br/&gt;&lt;br/&gt;3x3 창에서 중심 셀과 8개 인접 셀 간 고도차의 &lt;b&gt;제곱합의 제곱근&lt;/b&gt;입니다(Riley 등 1999 원식).&lt;br/&gt;&lt;br/&gt;&lt;b&gt;표시 등급 (플러그인 자체 구분, 험준기준에 비례):&lt;/b&gt;&lt;br/&gt;• I 평탄: 험준기준의 10% 미만&lt;br/&gt;• II 거의 평탄: 10-25%&lt;br/&gt;• III 약간 거침: 25-50%&lt;br/&gt;• IV 중간: 50-100%&lt;br/&gt;• V 험준: 험준기준 이상&lt;br/&gt;&lt;br/&gt;&lt;b&gt;주의:&lt;/b&gt; 위 5등급은 Riley 등(1999)의 분류가 아닙니다. 원저자가 제시한 것은 &lt;b&gt;절대 미터값 기준의 7등급&lt;/b&gt;(0-80 / 81-116 / 117-161 / 162-239 / 240-497 / 498-958 / 959-4367)입니다. 즉 &lt;b&gt;지수는 Riley, 등급 표시는 플러그인&lt;/b&gt;입니다.&lt;/html&gt;</string>
         </property>
        </widget>
       </item>
       <item>
        <widget class="QCheckBox" name="chkRoughness">
         <property name="text">
-         <string>Roughness (Wilson 2000) - 미세지형</string>
+         <string>Roughness (Wilson et al. 2007) - 미세지형</string>
         </property>
         <property name="toolTip">
-         <string>&lt;html&gt;&lt;b&gt;Roughness (거칠기)&lt;/b&gt;&lt;hr/&gt;&lt;i&gt;Wilson, M. F. J., O'Connell, B., Brown, C., Guinan, J. C., &amp; Grehan, A. J. (2007). Multiscale Terrain Analysis of Multibeam Bathymetry Data...&lt;/i&gt;&lt;br/&gt;&lt;br/&gt;3×3 창 내에서 최대 고도와 최소 고도의 차이를 계산합니다.&lt;br/&gt;TRI와 유사하지만 계산 방식이 다릅니다.&lt;br/&gt;&lt;br/&gt;&lt;b&gt;고고학 활용:&lt;/b&gt;&lt;br/&gt;• 미세지형 변화 파악&lt;br/&gt;• 인위/자연 지형 구분&lt;/html&gt;</string>
+         <string>&lt;html&gt;&lt;b&gt;Roughness (거칠기)&lt;/b&gt;&lt;hr/&gt;&lt;i&gt;Wilson, M. F. J., O'Connell, B., Brown, C., Guinan, J. C., &amp; Grehan, A. J. (2007). Multiscale Terrain Analysis of Multibeam Bathymetry Data...&lt;/i&gt;&lt;br/&gt;&lt;br/&gt;3×3 창 내에서 최대 고도와 최소 고도의 차이를 계산합니다.&lt;br/&gt;TRI와 유사하지만 계산 방식이 다릅니다.&lt;br/&gt;화면에 표시되는 5등급 구간은 Wilson 등(2007)이 발표한 분류가 아니라 플러그인 자체 표시 관례입니다.&lt;br/&gt;&lt;br/&gt;&lt;b&gt;고고학 활용:&lt;/b&gt;&lt;br/&gt;• 미세지형 변화 파악&lt;br/&gt;• 인위/자연 지형 구분&lt;/html&gt;</string>
         </property>
        </widget>
       </item>
@@ -357,7 +357,7 @@
       <item>
        <widget class="QGroupBox" name="groupTRI">
         <property name="title">
-         <string>TRI 매개변수 (Riley 1999)</string>
+         <string>TRI 매개변수</string>
         </property>
         <layout class="QHBoxLayout" name="horizontalLayout_TRI">
          <item>
@@ -405,7 +405,7 @@
             <number>20</number>
            </property>
            <property name="toolTip">
-            <string>&lt;html&gt;&lt;b&gt;TRI 험준 기준 임계값&lt;/b&gt;&lt;hr/&gt;이 값 이상을 '험준 지형'으로 분류합니다.&lt;br/&gt;&lt;br/&gt;&lt;b&gt;권장값 (Riley et al. 1999):&lt;/b&gt;&lt;br/&gt;• 20 (기본값): 원저자 분류 기준&lt;br/&gt;• 10: 더 민감하게 험준 지형 탐지&lt;br/&gt;• 30: 극도로 험준한 지형만 탐지&lt;/html&gt;</string>
+            <string>&lt;html&gt;&lt;b&gt;TRI 험준 기준 임계값&lt;/b&gt;&lt;hr/&gt;이 값 이상을 '험준 지형'으로 분류합니다. 표시 5등급은 이 값에 비례해 나뉘는 &lt;b&gt;플러그인 자체 구분&lt;/b&gt;이며, Riley 등(1999)이 발표한 분류(절대 미터값 기준 7등급, 0-80 ~ 959-4367)가 아닙니다.&lt;br/&gt;&lt;br/&gt;&lt;b&gt;권장값:&lt;/b&gt;&lt;br/&gt;• 20 (기본값): 플러그인 기본 표시 기준&lt;br/&gt;• 10: 더 민감하게 험준 지형 탐지&lt;br/&gt;• 30: 극도로 험준한 지형만 탐지&lt;/html&gt;</string>
            </property>
           </widget>
          </item>

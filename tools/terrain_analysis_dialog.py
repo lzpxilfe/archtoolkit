@@ -613,6 +613,33 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
             'MULTITHREADING': False, 'EXTRA': '', 'OUTPUT': downsampled,
         })
 
+        # A small DEM (or a large radius - the spinbox allows 100, i.e. a 1005 m
+        # block on a 5 m DEM) can collapse step 1 to a couple of cells. Resampling
+        # that back up yields a near-constant "mean", so step 3 would return
+        # TPI = z - const and still look like a valid broad-scale index. The
+        # os.path.exists() guard below only catches a missing file, so inspect the
+        # grid itself and fall back to the honest 3x3 index when the block window
+        # has nothing left to average over.
+        if gdal is not None:
+            down_ds = gdal.Open(downsampled, gdal.GA_ReadOnly)
+            down_usable = (down_ds is not None
+                           and int(down_ds.RasterXSize) >= 3
+                           and int(down_ds.RasterYSize) >= 3)
+            down_ds = None
+            if not down_usable:
+                push_message(
+                    self.iface,
+                    "알림",
+                    f"DEM이 반경 {int(radius)}셀({2 * int(radius) + 1}셀 창) 근사에 비해 작아 "
+                    f"3x3 TPI로 대체했습니다.",
+                    level=0,
+                    duration=8,
+                )
+                processing.run("gdal:tpitopographicpositionindex", {
+                    'INPUT': dem_source, 'BAND': 1, 'OUTPUT': output
+                })
+                return output, scratch, 1
+
         # Step 2: back to the original grid.
         mean_approx = os.path.join(
             tempfile.gettempdir(), f'archtoolkit_tpi_mean_{tag}_{run_id}.tif')
@@ -692,7 +719,20 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                         run_id=str(run_id),
                         kind="tpi",
                         units="index",
-                        params={"radius": int(radius), "threshold": float(threshold)},
+                        params={
+                            "radius": int(radius),
+                            "threshold": float(threshold),
+                            # The layer name advertises a radius, so the metadata
+                            # has to state the span actually averaged - the same
+                            # disclosure the landform layer already carries.
+                            "tpi_window": ("3x3" if radius <= 1 else
+                                           f"block_average_approx_{2 * int(radius) + 1}"
+                                           f"x{2 * int(radius) + 1}"),
+                            "tpi_window_note": (
+                                "exact 3x3 focal index (gdaldem)" if radius <= 1 else
+                                "block average + bilinear resample approximating the "
+                                "(2r+1)^2 focal mean; not an exact focal mean"),
+                        },
                     )
                 except Exception as _exc:
                     log_swallowed("terrain_analysis_dialog.run_tpi_analysis", _exc)
@@ -720,10 +760,10 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
         
         Classification Logic:
         1. 깊은 곡저 (Incised Valley): TPI < tpi_low
-        2. 곡저/하상 (Valley Floor): tpi_low <= TPI < tpi_low/2
+        2. 하부 사면 (Lower Slope): tpi_low <= TPI < tpi_low/2
         3. 평지/단구 (Flat or Terrace): |TPI| <= |tpi_low/2| and Slope <= slope_thresh
         4. 중간 사면 (Mid Slope): |TPI| <= |tpi_high/2| and Slope > slope_thresh
-        5. 능선 평탄부 (Upland Flat): tpi_high/2 < TPI <= tpi_high
+        5. 상부 사면 (Upper Slope): tpi_high/2 < TPI <= tpi_high
         6. 급경사 능선 (Steep Ridge): TPI > tpi_high
         """
         # Assigned inside try; predefine so the finally-cleanup never hits
@@ -1111,7 +1151,7 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                 # against GRASS/SAGA (convex = positive) otherwise see every value
                 # inverted with nothing on the layer to explain it.
                 (prof_path, "곡률-종단 profile (Z&T 1987, 부호규약: 음=볼록)", "curvature_profile",
-                 profile, "볼록 convex (침식)", "오목 concave (퇴적)"),
+                 profile, "볼록 convex (침식 경향)", "오목 concave (퇴적 경향)"),
                 (plan_path, "곡률-횡단 plan (Z&T 1987, 부호규약: 음=수렴)", "curvature_plan",
                  plan, "수렴 convergent (물모임)", "발산 divergent (능선)"),
             ):
@@ -1263,11 +1303,18 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                 )
                 ads = None
                 return
-            aspect = aband.ReadAsArray().astype("float32")
+            # Read, then check, then cast: ReadAsArray() returns None on a failed
+            # read, so casting first turned that into an AttributeError instead of
+            # the user-facing message below.
+            aspect = aband.ReadAsArray()
             gt = ads.GetGeoTransform()
             proj = ads.GetProjection()
             a_nd = aband.GetNoDataValue()
             ads = None
+            if aspect is None or aspect.ndim != 2:
+                push_message(self.iface, "경고", "사면방향 래스터 배열을 읽을 수 없습니다(사면 파생).", level=1)
+                return
+            aspect = aspect.astype("float32")
 
             # gdaldem aspect (ZERO_FLAT=False) writes the same sentinel for
             # true flats AND for DEM NoData. Read the source DEM's validity so

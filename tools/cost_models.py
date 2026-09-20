@@ -4,13 +4,15 @@
 Each model maps an edge (horizontal distance + elevation change) to a
 traversal cost in seconds or, for Pandolf, joules.  They are pure functions
 of geometry and parameters with no QGIS dependency, so they live here where
-they can be regression-tested against published values.
+the published ones can be regression-tested against their published values.
 
 Published formulae implemented here:
   - Tobler (1993) hiking function
   - Naismith (1892) rule
   - Pandolf et al. (1977) load-carriage energy equation
-  - Herzog slope-cost polynomials (metabolic / wheeled)
+  - Herzog slope-cost model: the metabolic branch is a 6th-order
+    polynomial, the wheeled branch a critical-slope form; both follow
+    Cuckovic's Movement Analysis implementation
 
 NOT a published formula:
   - MODEL_CONOLLY_LAKE is a PLUGIN-DEFINED relative-slope penalty, written

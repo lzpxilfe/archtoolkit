@@ -86,8 +86,12 @@ def sanitize_key(value: str) -> str:
     """
     cleaned = _NON_ASCII_WORD.sub("_", str(value or "")).strip("_")
     # Collapse the runs of underscores that punctuation in a display name
-    # leaves behind: "TRI Riley 1999 (험준기준:5)" would otherwise keep the
-    # "____" that the parenthesis and the stripped Hangul produced.
+    # leaves behind. The substitution above already folds each *contiguous* run
+    # of non-word characters into a single "_", so the shipped
+    # "TRI (Riley et al. 1999 지수, 사용자 정의 5등급, 험준기준:5)" reduces cleanly to
+    # "TRI_Riley_et_al_1999_5_5" on its own. This pass is for the case that
+    # substitution cannot handle: a *literal* "_" in the name sitting next to
+    # stripped text, as in "TRI_험준기준_5" -> "TRI___5" -> "TRI_5".
     cleaned = re.sub(r"_{2,}", "_", cleaned).strip("_")
     if not cleaned:
         return ""
