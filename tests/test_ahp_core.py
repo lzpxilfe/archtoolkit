@@ -265,6 +265,47 @@ class HierarchySummaryTests(unittest.TestCase):
         )
         self.assertGreater(drift, 0.01)
 
+    def test_unassigned_criterion_is_flagged_as_substituted(self):
+        # c2 belongs to no group, so its global weight is 0 and the true ratio
+        # (1.0 / 0.0) does not exist.  The seed falls back to "equally
+        # important", which is the opposite of the truth here, so the pair has
+        # to be reported even though nothing was clamped.
+        summary = compute_hierarchy_summary(
+            criteria_rows=self._rows(["c1", "c2"]),
+            criterion_groups={"c1": "G1"},
+            group_pairs={},
+            local_pairs={},
+        )
+        self.assertEqual(summary["global_weights"], {"c1": 1.0, "c2": 0.0})
+        self.assertEqual(summary["global_pairwise"], {("c1", "c2"): 1.0})
+        self.assertTrue(summary["global_pairwise_substituted"])
+        self.assertEqual(summary["global_pairwise_substituted_pairs"], [("c1", "c2")])
+        self.assertEqual(summary["global_pairwise_substituted_count"], 1)
+        # A substituted ratio is exactly 1.0, so it is never also a clamp.
+        self.assertFalse(summary["global_pairwise_clamped"])
+        self.assertEqual(summary["global_pairwise_clamped_pairs"], [])
+
+    def test_mirrored_zero_weight_pair_is_also_flagged(self):
+        # Same hierarchy with the unassigned criterion first: the ratio is now
+        # 0.0 / 1.0 instead of 1.0 / 0.0, and that path must report too.
+        summary = compute_hierarchy_summary(
+            criteria_rows=self._rows(["c1", "c2"]),
+            criterion_groups={"c2": "G1"},
+            group_pairs={},
+            local_pairs={},
+        )
+        self.assertEqual(summary["global_weights"], {"c1": 0.0, "c2": 1.0})
+        self.assertEqual(summary["global_pairwise_substituted_pairs"], [("c1", "c2")])
+
+    def test_fully_assigned_hierarchy_reports_no_substitution(self):
+        # Clamping and substitution are separate causes: the steep hierarchy
+        # clamps but every criterion carries weight, so nothing is substituted.
+        summary = self._steep_summary()
+        self.assertTrue(summary["global_pairwise_clamped"])
+        self.assertFalse(summary["global_pairwise_substituted"])
+        self.assertEqual(summary["global_pairwise_substituted_pairs"], [])
+        self.assertEqual(summary["global_pairwise_substituted_count"], 0)
+
     def test_empty_criteria_returns_empty_structures(self):
         summary = compute_hierarchy_summary(
             criteria_rows=[],
@@ -277,6 +318,8 @@ class HierarchySummaryTests(unittest.TestCase):
         self.assertEqual(summary["global_pairwise"], {})
         self.assertFalse(summary["global_pairwise_clamped"])
         self.assertEqual(summary["global_pairwise_clamped_pairs"], [])
+        self.assertFalse(summary["global_pairwise_substituted"])
+        self.assertEqual(summary["global_pairwise_substituted_pairs"], [])
 
 
 class ScoreFormulaTests(unittest.TestCase):

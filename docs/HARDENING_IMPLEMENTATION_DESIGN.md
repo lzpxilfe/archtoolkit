@@ -92,7 +92,7 @@ QGIS 런타임 코드는 정렬 실행을 조정하고, 파일시스템 세부 �
 | `license` | README License badge의 alt 값과 shield URL, CFF `license` |
 | `tracker` | 특정 저장소 경로로 강제하지 않고 유효한 절대 HTTP(S) URL인지 확인 |
 
-현재 작업 기준 버전은 `0.1.3`이고, `experimental=false`, `deprecated=false`이므로 표시 상태는 `stable`이다. 이 상태 표시는 메타데이터 플래그의 기계적 표현이며, QGIS 런타임 통합 검증을 모두 마쳤다는 의미로 사용하지 않는다.
+현재 작업 기준 버전은 `0.1.4`이고, `experimental=false`, `deprecated=false`이므로 표시 상태는 `stable`이다. 이 상태 표시는 메타데이터 플래그의 기계적 표현이며, QGIS 런타임 통합 검증을 모두 마쳤다는 의미로 사용하지 않는다.
 
 ### 5.2 상태 결정 규칙
 

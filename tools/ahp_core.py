@@ -181,6 +181,21 @@ def compute_hierarchy_summary(
       `global_pairwise` that were clamped, in `global_pairwise` order.
     - `global_pairwise_clamped_count` (int): length of that list, so a caller
       that only needs a count does not have to compute one.
+
+    A ratio can also be unusable rather than merely out of scale: a criterion
+    left out of every group has global weight 0, so its ratio is 0, infinite or
+    0/0.  Those pairs fall back to 1.0 ("equally important"), which is just as
+    approximate as a clamp, and are reported under sibling keys so a caller can
+    tell the two causes apart:
+
+    - `global_pairwise_substituted` (bool): True if any ratio was replaced
+      because a global weight was zero or non-finite.
+    - `global_pairwise_substituted_pairs` (list of (id_i, id_j) tuples): those
+      keys of `global_pairwise`, in `global_pairwise` order.
+    - `global_pairwise_substituted_count` (int): length of that list.
+
+    The two lists never overlap: a substituted ratio is exactly 1.0, which is
+    on the Saaty scale and therefore never clamped.
     """
     ids = [str(layer_id) for layer_id, _label in (criteria_rows or [])]
     groups: List[str] = []
@@ -227,13 +242,22 @@ def compute_hierarchy_summary(
 
     global_pairwise: Dict[Tuple[str, str], float] = {}
     global_pairwise_clamped_pairs: List[Tuple[str, str]] = []
+    global_pairwise_substituted_pairs: List[Tuple[str, str]] = []
     for i, a in enumerate(ids):
         for b in ids[i + 1:]:
             wa = float(global_weights.get(a, 0.0))
             wb = float(global_weights.get(b, 0.0))
-            ratio = (wa / wb) if wb > 0 else 1.0
+            ratio = (wa / wb) if wb > 0 else float("nan")
             if not math.isfinite(ratio) or ratio <= 0:
+                # A criterion that was never assigned to a group keeps global
+                # weight 0, so its ratio against another criterion is 0, or
+                # infinite, or 0/0 -- none of which the flat table can express.
+                # Falling back to 1.0 says "equally important", which is the
+                # maximally wrong answer when one side carries all the weight,
+                # so this substitution is reported like the Saaty clamp instead
+                # of being applied in silence.
                 ratio = 1.0
+                global_pairwise_substituted_pairs.append((a, b))
             scaled = max(1.0 / 9.0, min(9.0, ratio))
             # Only count a clamp that really moved the ratio: the eigenvector
             # solve returns an exact 9:1 hierarchy as 9.000000000000002, and
@@ -254,6 +278,9 @@ def compute_hierarchy_summary(
         "global_pairwise_clamped": bool(global_pairwise_clamped_pairs),
         "global_pairwise_clamped_pairs": list(global_pairwise_clamped_pairs),
         "global_pairwise_clamped_count": len(global_pairwise_clamped_pairs),
+        "global_pairwise_substituted": bool(global_pairwise_substituted_pairs),
+        "global_pairwise_substituted_pairs": list(global_pairwise_substituted_pairs),
+        "global_pairwise_substituted_count": len(global_pairwise_substituted_pairs),
     }
 
 
@@ -298,7 +325,10 @@ def validated_score_ranges(score_ranges):
         cur = rows[idx]
         prev_exact = abs(float(prev["max"]) - float(prev["min"])) <= 1e-12
         if cur["min"] < prev["max"] or (prev_exact and abs(float(cur["min"]) - float(prev["max"])) <= 1e-12):
-            raise Exception("\uad6c\uac04 \uc810\uc218\ud45c\uc5d0 \uc11c\ub85c \uacb9\uce58\ub294 \uad6c\uac04\uc774 \uc788\uc2b5\ub2c8\ub2e4. \ubc94\uc704\ub97c \ub2e4\uc2dc \uc870\uc815\ud558\uc138\uc694.")
+            raise Exception(
+                "\uad6c\uac04 \uc810\uc218\ud45c\uc5d0 \uc11c\ub85c \uacb9\uce58\ub294 \uad6c\uac04\uc774 \uc788\uc2b5\ub2c8\ub2e4. "
+                "\ubc94\uc704\ub97c \ub2e4\uc2dc \uc870\uc815\ud558\uc138\uc694."
+            )
     return rows
 
 

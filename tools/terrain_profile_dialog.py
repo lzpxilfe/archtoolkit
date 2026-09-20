@@ -1070,11 +1070,54 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
             log_swallowed("terrain_profile_dialog._fixed_length_m", _exc)
         return None
 
+    @staticmethod
+    def _metric_ellipsoid() -> str:
+        """Return an ellipsoid acronym that makes QgsDistanceArea report meters.
+
+        QgsProject.ellipsoid() returns the literal string "NONE" when the
+        project has ellipsoidal measurement switched off, and "NONE" is truthy
+        - so the familiar ``ellipsoid() or "WGS84"`` fallback never fires and
+        measureLine() quietly hands back source-CRS units (degrees on a
+        geographic canvas). Everything downstream here is labelled in meters
+        (chart x-axis, CSV export, the layer's distance_m metadata, the
+        sample-spacing check), so normalise empty/"NONE" to WGS84 instead.
+        """
+        try:
+            ellipsoid = (QgsProject.instance().ellipsoid() or "").strip()
+        except Exception as _exc:
+            log_swallowed("terrain_profile_dialog._metric_ellipsoid", _exc)
+            ellipsoid = ""
+        if not ellipsoid or ellipsoid.upper() == "NONE":
+            return "WGS84"
+        return ellipsoid
+
+    @staticmethod
+    def _measures_in_meters(distance_area: QgsDistanceArea) -> bool:
+        """True when this QgsDistanceArea's lengths really are meters.
+
+        QgsDistanceArea only converts to meters while an ellipsoid is in use;
+        otherwise measureLine() returns raw source-CRS units. Callers that mix
+        a measured distance with a meter-converted DEM cell size must check
+        this first - without an ellipsoid the two numbers are ~1e5 apart and
+        anything derived from comparing them is noise.
+        """
+        try:
+            return bool(distance_area.willUseEllipsoid())
+        except Exception as _exc:
+            log_swallowed("terrain_profile_dialog._measures_in_meters", _exc)
+            return False
+
     def _distance_area_canvas(self) -> QgsDistanceArea:
+        """Build the QgsDistanceArea every length measurement in this dialog uses.
+
+        Centralised on purpose: the ellipsoid normalisation above is the only
+        thing standing between a geographic project and degree-valued
+        "meters", and it used to be copy-pasted (and wrong) in three places.
+        """
         canvas_crs = self.canvas.mapSettings().destinationCrs()
         distance_area = QgsDistanceArea()
         distance_area.setSourceCrs(canvas_crs, QgsProject.instance().transformContext())
-        distance_area.setEllipsoid(QgsProject.instance().ellipsoid() or "WGS84")
+        distance_area.setEllipsoid(self._metric_ellipsoid())
         try:
             distance_area.setEllipsoidalMode(True)
         except AttributeError as _exc:
@@ -1827,7 +1870,14 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
             log_swallowed("terrain_profile_dialog._dem_cell_size_m", _exc)
         return float(cell_m)
 
-    def _check_sample_spacing(self, *, dem_layer, total_distance_m: float, num_samples: int) -> Optional[float]:
+    def _check_sample_spacing(
+        self,
+        *,
+        dem_layer,
+        total_distance_m: float,
+        num_samples: int,
+        distance_area: Optional[QgsDistanceArea] = None,
+    ) -> Optional[float]:
         """Return meters-per-sample, warning when it is badly matched to the DEM grid.
 
         Sampling is nearest-cell (see the sampling loops), so the DEM cell size
@@ -1848,6 +1898,17 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
 
         cell_m = self._dem_cell_size_m(dem_layer)
         if cell_m is None or cell_m <= 0:
+            return spacing_m
+
+        # The cell size above is in meters. If the distance that produced
+        # spacing_m is not, the two are ~1e5 apart and the comparison below
+        # would fire on every run - so stay quiet instead of crying wolf.
+        if distance_area is not None and not self._measures_in_meters(distance_area):
+            log_message(
+                "TerrainProfile: 프로젝트에 타원체가 설정되지 않아 거리 단위가 미터인지 확인할 수 없어 "
+                "샘플 간격 점검을 건너뜁니다.",
+                level=Qgis.Info,
+            )
             return spacing_m
 
         # Thresholds are deliberately loose: within 4x finer / 2x coarser of the
@@ -1899,14 +1960,11 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
             
             self.profile_data = []
 
-            # Always measure in meters (ellipsoidal) so geographic CRS projects don't break stats/exports.
-            distance_area = QgsDistanceArea()
-            distance_area.setSourceCrs(canvas_crs, QgsProject.instance().transformContext())
-            distance_area.setEllipsoid(QgsProject.instance().ellipsoid() or "WGS84")
-            try:
-                distance_area.setEllipsoidalMode(True)
-            except AttributeError as _exc:
-                log_swallowed("tools/terrain_profile_dialog.py:1771 (calculate_profile)", _exc)
+            # Measure in meters (ellipsoidal) so geographic CRS projects don't break stats/exports.
+            # _distance_area_canvas() is what makes that true: it normalises a
+            # missing or "NONE" project ellipsoid to WGS84, without which
+            # measureLine() would return degrees here.
+            distance_area = self._distance_area_canvas()
             total_distance_m = float(distance_area.measureLine(start_canvas, end_canvas))
             try:
                 self._last_profile_length_m = float(total_distance_m)
@@ -1918,6 +1976,7 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
                 dem_layer=dem_layer,
                 total_distance_m=total_distance_m,
                 num_samples=num_samples,
+                distance_area=distance_area,
             )
 
             push_message(
@@ -2192,14 +2251,9 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
 
         self.profile_data = []
 
-        distance_area = QgsDistanceArea()
-        distance_area.setSourceCrs(canvas_crs, QgsProject.instance().transformContext())
-        distance_area.setEllipsoid(QgsProject.instance().ellipsoid() or "WGS84")
-        try:
-            distance_area.setEllipsoidalMode(True)
-        except AttributeError as _exc:
-            log_swallowed("tools/terrain_profile_dialog.py:2042 (_compute_profile_for_points)", _exc)
-
+        # Meters guaranteed via the shared helper's ellipsoid normalisation
+        # (see _metric_ellipsoid) - the reopen path must agree with the run path.
+        distance_area = self._distance_area_canvas()
         total_distance_m = float(distance_area.measureLine(start_canvas, end_canvas))
         try:
             self._last_profile_length_m = float(total_distance_m)
@@ -2211,6 +2265,7 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
             dem_layer=dem_layer,
             total_distance_m=total_distance_m,
             num_samples=num_samples,
+            distance_area=distance_area,
         )
 
         push_message(

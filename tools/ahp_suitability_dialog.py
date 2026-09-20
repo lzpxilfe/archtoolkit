@@ -90,6 +90,44 @@ _SCALE_OPTIONS: List[Tuple[str, float]] = [
 _split_qgis_source_path = split_qgis_source_path
 
 
+# Default tooltip for the consistency label. Kept as a constant because
+# _set_weight_input_mode borrows that tooltip for the weight-input note and has
+# to be able to put the CR explanation back when the note goes away.
+_CR_TOOLTIP = "일관성비율(CR). 일반적으로 CR ≤ 0.10 권장 (Saaty, 1980)."
+
+
+def _as_positive_float(value: Any) -> Optional[float]:
+    """`value` as a finite positive float, or None when it is not usable.
+
+    Pairwise ratios are always > 0 (a ratio of 0 or NaN has no AHP meaning), so
+    rejecting them here keeps the callers free of try/except noise.
+    """
+    try:
+        v = float(value)
+    except Exception:
+        return None
+    return v if (math.isfinite(v) and v > 0) else None
+
+
+def _nearest_scale_index(value: Any) -> int:
+    """Index in `_SCALE_OPTIONS` closest to `value` (defaults to "1").
+
+    A synthesized ratio is a continuous number (0.37, 4.6, ...) while the UI
+    only offers the Saaty steps, so the combo has to snap to the nearest step
+    rather than silently falling back to 1.
+    """
+    default = 8  # "1"
+    v = _as_positive_float(value)
+    if v is None:
+        return default
+    best_k, best_d = default, None
+    for k, (_label, val) in enumerate(_SCALE_OPTIONS):
+        d = abs(float(val) - v)
+        if best_d is None or d < best_d:
+            best_k, best_d = k, d
+    return int(best_k)
+
+
 def _fmt_float(v: Any, *, digits: int = 4) -> str:
     try:
         if v is None:
@@ -277,6 +315,278 @@ class _CriterionReclassDialog(QtWidgets.QDialog):
         return out
 
 
+class _HierarchyConfigDialog(QtWidgets.QDialog):
+    """Group the criteria and compare them one level at a time (hierarchical AHP).
+
+    Eight flat criteria mean 28 judgements; the same eight split into three
+    parent groups mean 3 group-level judgements plus a few inside each group,
+    and every group gets its own consistency ratio, so an inconsistency can be
+    traced to the group it came from.  `ahp_core.compute_hierarchy_summary`
+    multiplies the two levels back into per-criterion weights and synthesizes
+    the ratios that seed the flat table in the main dialog.
+    """
+
+    def __init__(
+        self,
+        *,
+        criteria_rows: List[Tuple[str, str]],
+        config: Optional[Dict[str, Any]] = None,
+        parent=None,
+    ):
+        super().__init__(parent)
+        english = is_english_ui()
+        self.setWindowTitle("Hierarchical AHP" if english else "계층형 AHP 구성")
+
+        self._criteria_rows: List[Tuple[str, str]] = [
+            (str(layer_id or ""), str(label or "")) for layer_id, label in (criteria_rows or [])
+        ]
+        self._labels: Dict[str, str] = {layer_id: label for layer_id, label in self._criteria_rows}
+        self._groups: List[str] = []
+        self._group_combos: Dict[str, QtWidgets.QComboBox] = {}
+        self._group_pair_combos: Dict[Tuple[str, str], QtWidgets.QComboBox] = {}
+        self._local_pair_combos: Dict[str, Dict[Tuple[str, str], QtWidgets.QComboBox]] = {}
+
+        config0 = dict(config or {})
+        assigned = dict(config0.get("criterion_groups") or {})
+        # Judgements already made are remembered across rebuilds: renaming one
+        # group regenerates the whole comparison grid, and starting the other
+        # groups over from 1 would throw away answers the user never touched.
+        self._saved_group_pairs: Dict[Any, Any] = dict(config0.get("group_pairs") or {})
+        self._saved_local_pairs: Dict[str, Dict[Any, Any]] = {
+            str(group): dict(pairs or {}) for group, pairs in dict(config0.get("local_pairs") or {}).items()
+        }
+
+        layout = QtWidgets.QVBoxLayout(self)
+
+        hint = QtWidgets.QLabel(
+            "Assign every criterion to a parent group, then compare the groups with each other and the "
+            "members inside each group.\nFinal weight = group weight x within-group weight, normalized to 1."
+            if english else
+            "각 기준을 상위그룹에 배정한 뒤, 그룹끼리 그리고 그룹 안에서만 비교합니다.\n"
+            "최종 가중치 = 그룹 가중치 x 그룹 내 가중치(합이 1이 되도록 정규화)."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color:#455a64;")
+        layout.addWidget(hint)
+
+        self.tblAssign = QtWidgets.QTableWidget()
+        self.tblAssign.setColumnCount(2)
+        self.tblAssign.setHorizontalHeaderLabels(["Criterion", "Parent group"] if english else ["기준", "상위그룹"])
+        self.tblAssign.horizontalHeader().setStretchLastSection(True)
+        self.tblAssign.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.tblAssign.setRowCount(len(self._criteria_rows))
+        for row, (layer_id, label) in enumerate(self._criteria_rows):
+            item = QtWidgets.QTableWidgetItem(label or layer_id)
+            item.setData(Qt.UserRole, layer_id)
+            self.tblAssign.setItem(row, 0, item)
+
+            cmb = QtWidgets.QComboBox()
+            cmb.setEditable(True)
+            cmb.setInsertPolicy(QtWidgets.QComboBox.NoInsert)
+            cmb.setEditText(str(assigned.get(layer_id) or label or layer_id))
+            cmb.currentIndexChanged.connect(self._rebuild_pair_sections)
+            try:
+                cmb.lineEdit().editingFinished.connect(self._rebuild_pair_sections)
+            except Exception as _exc:
+                log_swallowed("ahp_suitability_dialog._HierarchyConfigDialog.__init__", _exc)
+            self._group_combos[layer_id] = cmb
+            self.tblAssign.setCellWidget(row, 1, cmb)
+        layout.addWidget(self.tblAssign, 1)
+
+        row_btn = QtWidgets.QHBoxLayout()
+        self.btnRefresh = QtWidgets.QPushButton("Apply grouping" if english else "그룹 구성 반영")
+        self.btnRefresh.clicked.connect(self._rebuild_pair_sections)
+        row_btn.addWidget(self.btnRefresh)
+        row_btn.addStretch(1)
+        layout.addLayout(row_btn)
+
+        self.lblStatus = QtWidgets.QLabel("")
+        self.lblStatus.setWordWrap(True)
+        self.lblStatus.setStyleSheet("color:#bf360c;")
+        layout.addWidget(self.lblStatus)
+
+        self._pairs_area = QtWidgets.QScrollArea()
+        self._pairs_area.setWidgetResizable(True)
+        layout.addWidget(self._pairs_area, 2)
+
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel, parent=self
+        )
+        buttons.accepted.connect(self._on_accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self._rebuild_pair_sections()
+        self.resize(660, 580)
+
+    @staticmethod
+    def _saved_value(saved: Optional[Dict[Any, Any]], a: str, b: str) -> float:
+        """Look a remembered judgement up in either orientation (default 1).
+
+        Stored keys follow the criteria/group order at the time they were
+        saved, and a rename can flip that order; reading the flipped pair back
+        as "equally important" would silently discard the user's answer.
+        """
+        for key, value in dict(saved or {}).items():
+            if not (isinstance(key, (tuple, list)) and len(key) == 2):
+                continue
+            v = _as_positive_float(value)
+            if v is None:
+                continue
+            k0, k1 = str(key[0]), str(key[1])
+            if k0 == a and k1 == b:
+                return v
+            if k0 == b and k1 == a:
+                return 1.0 / v
+        return 1.0
+
+    def _group_name_for(self, layer_id: str) -> str:
+        cmb = self._group_combos.get(str(layer_id))
+        name = ""
+        try:
+            name = str(cmb.currentText() or "").strip() if cmb is not None else ""
+        except Exception as _exc:
+            log_swallowed("ahp_suitability_dialog._HierarchyConfigDialog._group_name_for", _exc)
+        if name:
+            return name
+        # An empty box means "a group of its own" -- the same default
+        # AhpSuitabilityDialog._sanitize_hierarchy_config applies, so the
+        # dialog and the sanitizer never disagree about an unassigned row.
+        return str(self._labels.get(str(layer_id)) or layer_id or "기준")
+
+    def _current_groups(self) -> List[str]:
+        groups: List[str] = []
+        for layer_id, _label in self._criteria_rows:
+            name = self._group_name_for(layer_id)
+            if name and name not in groups:
+                groups.append(name)
+        return groups
+
+    def _members_of(self, group: str) -> List[Tuple[str, str]]:
+        return [(lid, lb) for lid, lb in self._criteria_rows if self._group_name_for(lid) == group]
+
+    def _pair_combo(self, value: Any) -> QtWidgets.QComboBox:
+        cmb = QtWidgets.QComboBox()
+        for label, val in _SCALE_OPTIONS:
+            cmb.addItem(label, float(val))
+        cmb.setCurrentIndex(_nearest_scale_index(value))
+        return cmb
+
+    def _remember_pair_values(self) -> None:
+        for key, cmb in dict(self._group_pair_combos).items():
+            v = _as_positive_float(cmb.currentData())
+            if v is not None:
+                self._saved_group_pairs[key] = v
+        for group, combos in dict(self._local_pair_combos).items():
+            saved = self._saved_local_pairs.setdefault(str(group), {})
+            for key, cmb in dict(combos).items():
+                v = _as_positive_float(cmb.currentData())
+                if v is not None:
+                    saved[key] = v
+
+    def _rebuild_pair_sections(self, _=None) -> None:
+        if not hasattr(self, "_pairs_area"):
+            # A combo signal can arrive while the dialog is still being built,
+            # before there is anywhere to put the comparison grid.
+            return
+        english = is_english_ui()
+        self._remember_pair_values()
+        self._group_pair_combos = {}
+        self._local_pair_combos = {}
+        self._groups = self._current_groups()
+
+        # Offer the names already in use as choices so a second criterion joins
+        # an existing group by picking it; retyping the name is how a typo
+        # silently creates a one-member group nobody intended.
+        for layer_id, _label in self._criteria_rows:
+            cmb = self._group_combos.get(layer_id)
+            if cmb is None:
+                continue
+            current = cmb.currentText()
+            try:
+                cmb.blockSignals(True)
+                cmb.clear()
+                cmb.addItems(list(self._groups))
+                cmb.setEditText(current)
+            finally:
+                cmb.blockSignals(False)
+
+        container = QtWidgets.QWidget()
+        vbox = QtWidgets.QVBoxLayout(container)
+
+        grp_top = QtWidgets.QGroupBox("Group vs group" if english else "그룹 간 비교")
+        form_top = QtWidgets.QFormLayout(grp_top)
+        if len(self._groups) < 2:
+            form_top.addRow(QtWidgets.QLabel(
+                "Only one group - nothing to compare at this level."
+                if english else "그룹이 1개뿐이라 이 단계에서 비교할 것이 없습니다."
+            ))
+        else:
+            for i, group_a in enumerate(self._groups):
+                for group_b in self._groups[i + 1:]:
+                    cmb = self._pair_combo(self._saved_value(self._saved_group_pairs, group_a, group_b))
+                    self._group_pair_combos[(group_a, group_b)] = cmb
+                    form_top.addRow(f"{group_a} vs {group_b}", cmb)
+        vbox.addWidget(grp_top)
+
+        # Within-group judgements are keyed by layer id, which survives a group
+        # being renamed; looking them up across every remembered group (instead
+        # of only the one with the same name) keeps a rename from quietly
+        # resetting the comparisons the user already made inside it.
+        remembered_local: Dict[Any, Any] = {}
+        for pairs in self._saved_local_pairs.values():
+            remembered_local.update(dict(pairs or {}))
+
+        for group in self._groups:
+            members = self._members_of(group)
+            if len(members) < 2:
+                continue
+            grp = QtWidgets.QGroupBox(f"{group} - within-group" if english else f"{group} - 그룹 내 비교")
+            form = QtWidgets.QFormLayout(grp)
+            combos: Dict[Tuple[str, str], QtWidgets.QComboBox] = {}
+            for i, (id_a, label_a) in enumerate(members):
+                for id_b, label_b in members[i + 1:]:
+                    cmb = self._pair_combo(self._saved_value(remembered_local, id_a, id_b))
+                    combos[(id_a, id_b)] = cmb
+                    form.addRow(f"{label_a or id_a} vs {label_b or id_b}", cmb)
+            self._local_pair_combos[group] = combos
+            vbox.addWidget(grp)
+
+        vbox.addStretch(1)
+        self._pairs_area.setWidget(container)
+
+    def _on_accept(self):
+        # Typing a group name does not regenerate the grid until the box loses
+        # focus, so rebuild once more here: accepting a grid that predates the
+        # last rename would submit comparisons for groups that no longer exist.
+        before = list(self._groups)
+        self._rebuild_pair_sections()
+        if list(self._groups) != before:
+            self.lblStatus.setText(
+                "The group list changed - check the comparisons below, then press OK again."
+                if is_english_ui() else
+                "그룹 구성이 바뀌었습니다. 아래 비교칸을 확인한 뒤 확인을 다시 누르세요."
+            )
+            return
+        self.accept()
+
+    def values(self) -> Dict[str, Any]:
+        """Raw hierarchy config: assignments plus both levels of judgements."""
+        assignments = {layer_id: self._group_name_for(layer_id) for layer_id, _label in self._criteria_rows}
+        group_pairs = {
+            key: float(cmb.currentData() or 1.0) for key, cmb in dict(self._group_pair_combos).items()
+        }
+        local_pairs = {
+            group: {key: float(cmb.currentData() or 1.0) for key, cmb in dict(combos).items()}
+            for group, combos in dict(self._local_pair_combos).items()
+        }
+        return {
+            "criterion_groups": assignments,
+            "group_pairs": group_pairs,
+            "local_pairs": local_pairs,
+        }
+
+
 class AhpSuitabilityDialog(QtWidgets.QDialog):
     def __init__(self, iface, parent=None):
         super().__init__(parent)
@@ -297,10 +607,65 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
         self._weight_input_mode = str(mode or "flat")
         self._weight_input_note = str(note or "")
         try:
-            if self._weight_input_note:
-                self.lblConsistency.setToolTip(self._weight_input_note)
+            self.lblConsistency.setToolTip(self._weight_input_note or _CR_TOOLTIP)
         except Exception as _exc:
             log_swallowed("tools/ahp_suitability_dialog.py:298 (_set_weight_input_mode)", _exc)
+        # A tooltip only reaches a user who happens to hover and the message
+        # bar clears itself after a few seconds, so the note -- which carries
+        # the Saaty-clamp caveat -- is also shown as plain text under the
+        # pairwise table for as long as the hierarchy weights are in force.
+        try:
+            if hasattr(self, "lblWeightModeNote"):
+                self.lblWeightModeNote.setText(self._weight_input_note)
+                self.lblWeightModeNote.setVisible(bool(self._weight_input_note))
+        except Exception as _exc:
+            log_swallowed("ahp_suitability_dialog._set_weight_input_mode", _exc)
+
+    def _invalidate_weight_input_mode(self) -> None:
+        """Go back to "flat" because the table no longer holds the synthesized ratios.
+
+        Resetting the table or changing the criteria list rebuilds every cell
+        from 1, so staying in "hierarchy" mode would keep labelling hand-made
+        flat weights -- clamp caveat included -- as if they came from a
+        hierarchy, and would tag the exported raster the same way.  The group
+        assignments themselves are kept, so reopening the hierarchy dialog does
+        not make the user redo the grouping.
+        """
+        self._set_weight_input_mode("flat", "")
+
+    def _on_open_hierarchy(self):
+        """Entry point for the hierarchical weighting (AHP_GUIDE.md, 6장)."""
+        english = is_english_ui()
+        rows = self._criterion_rows()
+        if len(rows) < 2:
+            push_message(
+                self.iface,
+                "Info" if english else "정보",
+                "Add at least 2 criteria first." if english else "기준(래스터)을 2개 이상 추가한 뒤에 사용하세요.",
+                level=1, duration=6,
+            )
+            restore_ui_focus(self)
+            return
+
+        dlg = _HierarchyConfigDialog(
+            criteria_rows=rows,
+            config=self._sanitize_hierarchy_config(self._hierarchy_config),
+            parent=self,
+        )
+        res = dlg.exec_() if hasattr(dlg, "exec_") else dlg.exec()
+        if res != QtWidgets.QDialog.Accepted:
+            restore_ui_focus(self)
+            return
+
+        if not self._apply_hierarchy_config(dlg.values()):
+            push_message(
+                self.iface,
+                "Error" if english else "오류",
+                "Could not apply the hierarchy configuration."
+                if english else "계층 구성을 적용하지 못했습니다.",
+                level=2, duration=6,
+            )
+        restore_ui_focus(self)
 
     def _setup_ui(self):
         self.setWindowTitle("AHP 입지적합도 (Suitability) - ArchToolkit")
@@ -437,13 +802,29 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
         self.lblConsistency = QtWidgets.QLabel("CR: -")
         self.lblConsistency.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
         try:
-            self.lblConsistency.setToolTip("일관성비율(CR). 일반적으로 CR ≤ 0.10 권장 (Saaty, 1980).")
+            self.lblConsistency.setToolTip(_CR_TOOLTIP)
         except Exception as _exc:
             log_swallowed("tools/ahp_suitability_dialog.py:437 (_setup_ui)", _exc)
+        self.btnHierarchy = QtWidgets.QPushButton("계층형 AHP 구성…")
+        self.btnHierarchy.setToolTip(
+            "기준을 상위그룹으로 묶어 그룹 간/그룹 내 비교만 하면 됩니다. "
+            "결과는 이 표에 비율로 채워집니다 (도움말의 ‘계층형 AHP’ 참고)."
+        )
+        self.btnHierarchy.clicked.connect(self._on_open_hierarchy)
         row_w.addWidget(self.btnResetPairwise)
+        row_w.addWidget(self.btnHierarchy)
         row_w.addStretch(1)
         row_w.addWidget(self.lblConsistency)
         vw.addLayout(row_w)
+
+        # Persistent home for the weight-input note. The hierarchy's Saaty-clamp
+        # caveat has to survive the message bar timing out, and a tooltip is only
+        # seen by a user who already suspects something, so it is shown here.
+        self.lblWeightModeNote = QtWidgets.QLabel("")
+        self.lblWeightModeNote.setWordWrap(True)
+        self.lblWeightModeNote.setStyleSheet("color:#bf360c;")
+        self.lblWeightModeNote.setVisible(False)
+        vw.addWidget(self.lblWeightModeNote)
 
         layout.addWidget(grp_w, 2)
 
@@ -525,7 +906,10 @@ CR은 0.000이지만 그건 일관적이어서가 아니라 <b>아무 판단도 
 </p>
 <p>
 CR이 높으면 가장 큰 값(9, 1/9)부터 의심하세요. 기준이 15개를 넘으면 CR이 "-"로 나오는데,
-Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 땐 계층형을 쓰세요.
+Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 땐 쌍대비교표 아래의
+<b>[계층형 AHP 구성…]</b> 버튼으로 기준을 상위그룹으로 묶으세요. 그룹 간·그룹 내로 나눠 비교하면
+칸 수가 줄고 CR도 그룹별로 따로 나옵니다. 계층 비율이 Saaty 척도(1/9-9)를 벗어나 보정되면
+표 아래에 경고가 남으며, 그때 표의 값은 근사치입니다.
 </p>
 
 <h4>주의/팁</h4>
@@ -645,12 +1029,22 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
         """
         data = dict(summary or {})
         pairs = data.get("global_pairwise_clamped_pairs")
-        if isinstance(pairs, (list, tuple)):
-            return (bool(pairs), int(len(pairs)))
+        if isinstance(pairs, (list, tuple)) and pairs:
+            return (True, int(len(pairs)))
         raw_count = data.get("global_pairwise_clamped_count")
-        if isinstance(raw_count, int) and not isinstance(raw_count, bool):
-            return (raw_count > 0, int(raw_count))
-        return (bool(data.get("global_pairwise_clamped")), None)
+        has_count = isinstance(raw_count, int) and not isinstance(raw_count, bool)
+        if has_count and int(raw_count) > 0:
+            return (True, int(raw_count))
+        # An empty pair list only proves "nothing clamped" while the other two
+        # keys agree with it.  A summary that lost its detail (a truncated
+        # record, a writer that only ever set the flag) still carries the
+        # flag, so let the flag win instead of letting the empty list
+        # short-circuit it -- concluding "not clamped" would drop the warning.
+        if bool(data.get("global_pairwise_clamped")):
+            return (True, None)
+        if isinstance(pairs, (list, tuple)) or has_count:
+            return (False, 0)
+        return (False, None)
 
     def _hierarchy_clamp_caveat(self, summary: Optional[Dict[str, Any]]) -> str:
         """One-line caveat for a flat seed that no longer reproduces the hierarchy.
@@ -710,7 +1104,7 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
         # built, so say so up front as well as in the note.
         caveat = self._hierarchy_clamp_caveat(summary)
         if caveat:
-            push_message(self.iface, "주의", caveat, level=1, duration=10)
+            push_message(self.iface, "Warning" if is_english_ui() else "주의", caveat, level=1, duration=10)
         return True
 
     def _serialized_hierarchy_config(self) -> Optional[Dict[str, Any]]:
@@ -791,6 +1185,32 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
             ],
             "global_pairwise_note": self._hierarchy_clamp_caveat(summary),
         }
+
+    def _hierarchy_metadata_params(self) -> Dict[str, Any]:
+        """Weight provenance to attach to the output raster's metadata.
+
+        The consistency ratio stored next to the result is recomputed from the
+        flat table, which is only an approximation of the hierarchy once a
+        ratio has been clamped.  Publishing the raster without saying so would
+        present that approximation's CR as the hierarchy's, so the clamp flag,
+        the count and the caveat travel with the layer instead of living only
+        in a dialog the reader no longer has open.
+        """
+        out: Dict[str, Any] = {"weight_input_mode": str(self._weight_input_mode or "flat")}
+        hierarchy = None
+        try:
+            hierarchy = self._serialized_hierarchy_config()
+        except Exception as _exc:
+            # Never let provenance bookkeeping cost the layer the rest of its
+            # metadata (criteria, weights, CR).
+            log_swallowed("ahp_suitability_dialog._hierarchy_metadata_params", _exc)
+        if not hierarchy:
+            return out
+        out["hierarchy"] = hierarchy
+        out["global_pairwise_clamped"] = bool(hierarchy.get("global_pairwise_clamped"))
+        out["global_pairwise_clamped_count"] = hierarchy.get("global_pairwise_clamped_count")
+        out["global_pairwise_note"] = str(hierarchy.get("global_pairwise_note") or "")
+        return out
 
     def _ensure_criterion_preference_defaults(self, crit: _Criterion) -> None:
         try:
@@ -904,6 +1324,7 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
 
         direction = str(self.cmbDirection.currentData() or "benefit")
         self._criteria.append(_Criterion(layer_id=lid, direction=direction))
+        self._invalidate_weight_input_mode()
         self._refresh_criteria_table()
         self._rebuild_pairwise_table()
 
@@ -917,6 +1338,7 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
                     del self._criteria[r]
         except Exception as _exc:
             log_swallowed("tools/ahp_suitability_dialog.py:834 (_on_remove_selected_criteria)", _exc)
+        self._invalidate_weight_input_mode()
         self._refresh_criteria_table()
         self._rebuild_pairwise_table()
 
@@ -1138,6 +1560,7 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
             log_swallowed("ahp_suitability_dialog._set_reciprocal_cell", _exc)
 
     def _on_reset_pairwise(self):
+        self._invalidate_weight_input_mode()
         self._rebuild_pairwise_table()
 
     def _build_pairwise_matrix(self) -> Optional["np.ndarray"]:
@@ -1627,6 +2050,7 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
                 "clip_to_aoi_extent": bool(self.chkClipToAoiExtent.isChecked()),
                 "align_to_first": bool(self.chkAlignToFirst.isChecked()),
                 "scale_0_100": bool(self.chkScale100.isChecked()),
+                **self._hierarchy_metadata_params(),
             }
             set_archtoolkit_layer_metadata(
                 layer,

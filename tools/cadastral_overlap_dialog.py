@@ -277,21 +277,30 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
         except Exception as _exc:
             log_swallowed("tools/cadastral_overlap_dialog.py:248 (_distance_area)", _exc)
         try:
-            ell = str(QgsProject.instance().ellipsoid() or "WGS84").strip() or "WGS84"
-            # An ellipsoid of "NONE" tells QGIS to measure planar areas in the
-            # source CRS units. On a geographic CRS that is SQUARE DEGREES, and
-            # measureArea() returns them without raising, so the planar fallback
-            # in _area_m2 never sees the problem. Substitute a real ellipsoid so
-            # an ellipsoidal measurement is genuinely performed; every other
-            # case keeps honouring whatever the project is configured with.
-            if ell.upper() == "NONE" and _is_geographic_crs(crs):
+            raw_ell = QgsProject.instance().ellipsoid()
+            ell = str(raw_ell if raw_ell is not None else "").strip()
+            # A blank or "NONE" ellipsoid tells QGIS to measure planar areas in
+            # the source CRS units. On a geographic CRS that is SQUARE DEGREES,
+            # and measureArea() returns them without raising, so the planar
+            # fallback in _area_m2 never sees the problem. Substitute a real
+            # ellipsoid so an ellipsoidal measurement is genuinely performed;
+            # every other case keeps honouring whatever the project is
+            # configured with.
+            if ((not ell) or ell.upper() == "NONE") and _is_geographic_crs(crs):
                 ell = "WGS84"
                 log_message(
-                    "CadastralOverlap: 프로젝트 타원체가 'NONE'이고 레이어가 지리좌표계여서 "
+                    "CadastralOverlap: 프로젝트 타원체가 비어 있거나 'NONE'이고 레이어가 지리좌표계여서 "
                     "면적 계산에 WGS84 타원체를 대신 사용합니다.",
                     level=Qgis.Warning,
                 )
-            da.setEllipsoid(ell)
+            # A blank ellipsoid on a PROJECTED CRS is deliberately left alone:
+            # skipping setEllipsoid() keeps QgsDistanceArea on its planar
+            # default, which is already the correct square-metre measurement
+            # there. Forcing WGS84 in would quietly swap a projected area for a
+            # geodesic one, which is outside what the geographic-CRS fix above
+            # is meant to change.
+            if ell:
+                da.setEllipsoid(ell)
         except Exception as _exc:
             log_swallowed("tools/cadastral_overlap_dialog.py:254 (_distance_area)", _exc)
         return da

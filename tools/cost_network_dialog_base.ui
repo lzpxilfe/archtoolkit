@@ -536,20 +536,23 @@
             </item>
             <item row="1" column="1">
              <widget class="QDoubleSpinBox" name="spinConollyRefSlopeDeg">
+              <property name="toolTip">
+               <string>경사 페널티가 본격적으로 커지기 시작하는 기준 경사(°). 값이 작을수록 약한 경사에도 페널티가 커집니다. (기본값: 5°)</string>
+              </property>
               <property name="decimals">
-               <number>0</number>
+               <number>2</number>
               </property>
               <property name="minimum">
-               <double>1.000000000000000</double>
+               <double>0.100000000000000</double>
               </property>
               <property name="maximum">
-               <double>80.000000000000000</double>
+               <double>30.000000000000000</double>
               </property>
               <property name="singleStep">
-               <double>1.000000000000000</double>
+               <double>0.100000000000000</double>
               </property>
               <property name="value">
-               <double>15.000000000000000</double>
+               <double>5.000000000000000</double>
               </property>
              </widget>
             </item>

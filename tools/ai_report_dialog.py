@@ -430,15 +430,19 @@ class AiAoiReportDialog(QtWidgets.QDialog):
         # mode-selection time, not only after the user has pressed "AI 요약 생성".
         # Built programmatically (like the rest of this grid) and guarded, so an
         # older Qt binding that fails here still leaves the dialog usable.
+        # The attribute is assigned only as the LAST statement of the try: if
+        # addWidget() were the call that raised, a self.lblGeminiHint bound earlier
+        # would survive parentless, and the hasattr-guarded setVisible(True) in
+        # _update_provider_ui would then pop it up as a stray top-level window.
         try:
-            self.lblGeminiHint = QtWidgets.QLabel(
-                "Gemini(API) 모드는 AOI 이름/면적/반경, 레이어 이름과 통계, "
-                "추가 유적의 이름과 AOI 중심 기준 거리/방위를 Google 서버로 전송합니다. "
-                "(거리+방위로 위치 역산이 가능하니 민감정보 여부를 먼저 확인하세요)"
+            lbl_gemini_hint = QtWidgets.QLabel(
+                "Gemini(API) 모드는 AOI 이름/면적/반경, 레이어 이름·통계·CRS·그룹 경로·래스터 파일명, "
+                "도구 실행 파라미터, 추가 유적의 거리/방위 등 컨텍스트 JSON 전체를 Google 서버로 전송합니다."
             )
-            self.lblGeminiHint.setWordWrap(True)
-            self.lblGeminiHint.setStyleSheet("color:#c62828;")
-            grid.addWidget(self.lblGeminiHint, 4, 0, 1, 3)
+            lbl_gemini_hint.setWordWrap(True)
+            lbl_gemini_hint.setStyleSheet("color:#c62828;")
+            grid.addWidget(lbl_gemini_hint, 4, 0, 1, 3)
+            self.lblGeminiHint = lbl_gemini_hint
         except Exception as _exc:
             log_swallowed("ai_report_dialog._setup_ui", _exc)
 
@@ -1034,14 +1038,18 @@ class AiAoiReportDialog(QtWidgets.QDialog):
 
             prompt = self._build_prompt(ctx)
             self._set_busy_message("Gemini 호출 중… (최대 약 45초)")
-            # The context JSON is not "layer names only": it carries the AOI name/area,
-            # the radius, per-layer statistics, and each reference site's distance AND
-            # compass bearing from the AOI centroid - which together reconstruct that
-            # site's position. Name that explicitly so the notice matches what is sent.
+            # The context JSON is not "layer names only": on top of the AOI name/area
+            # and the radius it carries per-layer statistics, CRS, layer-tree group
+            # path, provider, raster file basename and the ArchToolkit run parameters,
+            # plus each reference site's distance AND compass bearing from the AOI
+            # centroid - which together reconstruct that site's position. The notice
+            # therefore names the whole context JSON rather than a partial list, since
+            # any omission reads as a guarantee that the omitted field is not sent.
             push_message(
                 self.iface,
                 "AI 요약",
-                "Gemini 호출 중… AOI 이름/면적/반경, 레이어 이름과 통계, 추가 유적의 거리/방위가 외부로 전송됩니다.",
+                "Gemini 호출 중… AOI 이름/면적/반경, 레이어 이름·통계·CRS·그룹 경로·파일명, "
+                "도구 실행 파라미터, 추가 유적의 거리/방위 등 컨텍스트 JSON 전체가 외부로 전송됩니다.",
                 level=1,
                 duration=7,
             )
@@ -1129,6 +1137,11 @@ class AiAoiReportDialog(QtWidgets.QDialog):
             "상위 속성값, 수치 필드 min/mean/max), 그리고 추가 유적의 이름과 <b>AOI 중심 기준 거리·방위</b>까지 "
             "프롬프트에 담아 Google 서버로 보냅니다. 거리와 방위를 합치면 유적 위치를 역산할 수 있으므로, "
             "매장문화재 위치정보에 해당하는지 먼저 확인하세요.<br>"
+            "- 위 목록은 예시가 아니라 <b>전부가 아닙니다</b>: 실제로는 레이어별 CRS·레이어트리 그룹 경로·"
+            "데이터 공급자·지오메트리 타입, 래스터의 <b>파일 이름</b>, 그리고 <b>ArchToolkit 메타데이터</b>"
+            "(도구 ID/종류/단위/실행 ID와 관측자 높이·비용 모델·AHP 기준 레이어명·가중치 같은 "
+            "<b>도구 실행 파라미터</b>)를 포함한 <b>컨텍스트 JSON 전체</b>가 전송됩니다. "
+            "파일 이름이나 실행 파라미터에 유적명이 들어 있으면 그대로 함께 나갑니다.<br>"
             "- 도면/Style 결과는 해석에 방해가 될 수 있어 기본적으로 제외(체크)하는 것을 권장합니다."
         )
         try:

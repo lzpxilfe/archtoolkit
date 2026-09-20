@@ -40,11 +40,15 @@ class ConsumerMirrorTests(unittest.TestCase):
     """Our mirror must agree with the transcribed consumer implementation."""
 
     def test_mirror_matches_on_representative_names(self):
+        # These are *base names*, i.e. what the consumer sees after Path().stem.
+        # The shipped TRI layer contributes the key it exports as rather than its
+        # display name: that display name contains a dot ("et al."), which
+        # Path().stem would cut - see test_dotted_display_name_exports_cleanly.
         for value in (
             "slope",
             "경사도",
             "경사도_국토지리정보원_7등급",
-            "TRI Riley 1999 (험준기준:5)",
+            "TRI_Riley_et_al_1999_5_5",
             "curvature_profile",
             "",
             "___",
@@ -60,7 +64,7 @@ class ConsumerMirrorTests(unittest.TestCase):
         # The premise of this whole module. If this ever stops being true the
         # naming workaround can be simplified.
         self.assertEqual(_archmodelbench_safe_name("경사도"), "predictor")
-        self.assertEqual(_archmodelbench_safe_name("사면방향_8방위"), "8")
+        self.assertEqual(_archmodelbench_safe_name("사면방향_8방위 (평탄=0)"), "8_0")
 
 
 class RoundTripStabilityTests(unittest.TestCase):
@@ -82,7 +86,31 @@ class RoundTripStabilityTests(unittest.TestCase):
 
 class SanitizeKeyTests(unittest.TestCase):
     def test_collapses_punctuation_runs(self):
-        self.assertEqual(sanitize_key("TRI Riley 1999 (험준기준:5)"), "TRI_Riley_1999_5")
+        # The shipped TRI layer name: every run of punctuation/Hangul folds to a
+        # single "_" already, so this pins the key the exporter actually writes.
+        self.assertEqual(
+            sanitize_key("TRI (Riley et al. 1999 지수, 사용자 정의 5등급, 험준기준:5)"),
+            "TRI_Riley_et_al_1999_5_5",
+        )
+        # The case that genuinely needs the collapse pass: a literal "_" in the
+        # name next to stripped Hangul yields "TRI___5" before it is collapsed.
+        self.assertEqual(sanitize_key("TRI_험준기준_5"), "TRI_5")
+
+    def test_dotted_display_name_exports_cleanly(self):
+        # The shipped TRI name contains "et al.", and the consumer runs
+        # Path(value).stem *before* sanitising - fed that display name raw it
+        # would cut everything after the dot and yield "TRI_Riley_et_al". The
+        # export never hands over a display name, only the key, so this walks
+        # the path the exporter really takes and requires the consumer to leave
+        # the result alone. Same guard for the aspect layer's "(평탄=0)".
+        for name, expected in (
+            ("TRI (Riley et al. 1999 지수, 사용자 정의 5등급, 험준기준:5)", "TRI_Riley_et_al_1999_5_5"),
+            ("사면방향_8방위 (평탄=0)", "v_8_0"),
+            ("곡률-종단 profile (Z&T 1987, 부호규약: 음=볼록)", "profile_Z_T_1987"),
+        ):
+            key = sanitize_key(name)
+            self.assertEqual(key, expected, msg=name)
+            self.assertEqual(_archmodelbench_safe_name(f"{key}.tif"), key, msg=name)
 
     def test_returns_empty_when_nothing_ascii_survives(self):
         self.assertEqual(sanitize_key("경사도"), "")
@@ -96,7 +124,8 @@ class SanitizeKeyTests(unittest.TestCase):
         self.assertEqual(sanitize_key("7등급"), "v_7")
 
     def test_sanitized_output_is_always_round_trip_stable(self):
-        for value in ("TRI Riley 1999 (험준기준:5)", "가시권_단일점_3000m",
+        for value in ("TRI (Riley et al. 1999 지수, 사용자 정의 5등급, 험준기준:5)",
+                      "사면방향_8방위 (평탄=0)", "가시권_단일점_3000m",
                       "북향성 northness = cos(aspect)", "비용표면 (Tobler, 시간)"):
             key = sanitize_key(value)
             if key:
@@ -125,12 +154,13 @@ class AssignVariableKeysTests(unittest.TestCase):
     def test_the_failing_real_world_stack_becomes_readable(self):
         # The exact layers a Korean ArchToolkit session produces. Before this
         # module these exported as Korean filenames and arrived downstream as
-        # '7', '8', 'KIGAM', 'predictor', 'predictor_2'.
+        # '7', '8_0', 'KIGAM', 'predictor', 'predictor_2'.
         items = [
             {"kind": "slope", "name": "경사도_국토지리정보원_7등급", "tool_id": "terrain_analysis"},
-            {"kind": "aspect", "name": "사면방향_8방위", "tool_id": "terrain_analysis"},
-            {"kind": "tri", "name": "TRI Riley 1999 (험준기준:5)", "tool_id": "terrain_analysis"},
-            {"kind": "curvature_profile", "name": "곡률-종단 profile (Zevenbergen & Thorne 1987)",
+            {"kind": "aspect", "name": "사면방향_8방위 (평탄=0)", "tool_id": "terrain_analysis"},
+            {"kind": "tri", "name": "TRI (Riley et al. 1999 지수, 사용자 정의 5등급, 험준기준:5)",
+             "tool_id": "terrain_analysis"},
+            {"kind": "curvature_profile", "name": "곡률-종단 profile (Z&T 1987, 부호규약: 음=볼록)",
              "tool_id": "terrain_analysis"},
             {"kind": "trasp", "name": "TRASP 일사프록시 (Roberts & Cooper 1989)",
              "tool_id": "terrain_analysis"},

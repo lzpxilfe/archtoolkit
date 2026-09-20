@@ -7,8 +7,15 @@
 Viewshed Analysis Dialog for ArchToolkit
 Visibility analysis for archaeological applications: fortifications, temples, etc.
 
-Reference:
-- Wang, J., Robinson, G. J., & White, K. (1996). A Fast Solution to Local Viewshed 
+Reference (algorithm actually called):
+- Wang, J., Robinson, G. J., & White, K. (2000). Generating viewsheds without using
+  sightlines. PERS, 66(1), 87-90.
+  This is the reference-plane method GDAL implements in gdal:viewshed, which is the
+  algorithm this dialog invokes.
+
+Prior work by the same authors, NOT the algorithm called here (listed only because it
+is easy to confuse with the 2000 paper):
+- Wang, J., Robinson, G. J., & White, K. (1996). A Fast Solution to Local Viewshed
   Computation Using Grid-Based Digital Elevation Models. PERS, 62(10), 1157-1164.
 """
 import os
@@ -2012,12 +2019,13 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                 use_higuchi = self.chkHiguchi.isChecked()
                 is_reverse = self.radioReverseViewshed.isChecked()
 
-                # Resolve the zone breaks once so the raster, the legend, the
-                # rings and the layer metadata cannot drift apart.
-                higuchi_near, higuchi_mid = self._get_higuchi_thresholds()
-
                 raster_path = final_output
+                higuchi_near = higuchi_mid = None
                 if use_higuchi:
+                    # Resolve the zone breaks once, and only on the Higuchi path,
+                    # so the raster, the legend, the rings and the layer metadata
+                    # cannot drift apart.
+                    higuchi_near, higuchi_mid = self._get_higuchi_thresholds()
                     layer_name = f"가시권_히구치_{int(max_dist)}m"
                     higuchi_output = os.path.join(tempfile.gettempdir(), f'archt_vs_higuchi_{run_id}.tif')
                     self._create_higuchi_viewshed_raster(
@@ -4535,18 +4543,59 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         layer.setOpacity(0.7)
         layer.triggerRepaint()
     
-    def _setup_higuchi_threshold_widgets(self):
-        """Build the editable Higuchi zone breaks next to chkHiguchi.
+    def _insert_grid_rows_after(self, layout, anchor_widget, count):
+        """Free `count` grid rows directly below anchor_widget's row.
 
-        Created in code rather than in the .ui file so the existing grid rows do
-        not have to be renumbered. Every later read goes through
-        _get_higuchi_thresholds(), which falls back to the defaults if this
-        setup failed, so the dialog still works without these widgets.
+        QGridLayout has no insertRow(), so everything below the anchor is taken
+        out and re-added `count` rows lower. Returns the first freed row, or
+        None when the anchor is not in this layout so the caller can append.
+        """
+        if not hasattr(layout, "getItemPosition"):
+            return None
+        index = layout.indexOf(anchor_widget)
+        if index < 0:
+            return None
+        anchor_row = int(layout.getItemPosition(index)[0])
+
+        moved = []
+        for i in range(layout.count() - 1, -1, -1):
+            row, col, rowspan, colspan = layout.getItemPosition(i)
+            if int(row) <= anchor_row:
+                continue
+            moved.append((layout.takeAt(i), int(row), int(col), int(rowspan), int(colspan)))
+        for item, row, col, rowspan, colspan in moved:
+            widget = item.widget()
+            sub_layout = item.layout()
+            if widget is not None:
+                layout.addWidget(widget, row + count, col, rowspan, colspan)
+            elif sub_layout is not None:
+                layout.addLayout(sub_layout, row + count, col, rowspan, colspan)
+            else:
+                layout.addItem(item, row + count, col, rowspan, colspan)
+        return anchor_row + 1
+
+    def _setup_higuchi_threshold_widgets(self):
+        """Build the editable Higuchi zone breaks in the two rows below chkHiguchi.
+
+        Created in code rather than in the .ui file so the grid rows already
+        defined there do not have to be renumbered by hand. Every later read
+        goes through _get_higuchi_thresholds(), which falls back to the
+        defaults if this setup failed, so the dialog still works without these
+        widgets.
         """
         try:
             layout = getattr(self, "gridLayout_Style", None)
-            if layout is None:
+            if layout is None or not hasattr(self, "chkHiguchi"):
+                # Without the checkbox the Higuchi path cannot be switched on at
+                # all, so the breaks would be controls for an unreachable option.
                 return
+
+            # Claim the rows before building anything: if widget creation then
+            # fails, two empty grid rows collapse to nothing, whereas widgets
+            # created but never laid out would float over the dialog.
+            row = self._insert_grid_rows_after(layout, self.chkHiguchi, 2)
+            if row is None:
+                row = int(layout.rowCount())
 
             tip = (
                 "히구치 거리대 경계값\n"
@@ -4570,35 +4619,20 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             self.spinHiguchiMid.setSingleStep(500.0)
             self.spinHiguchiMid.setValue(self.HIGUCHI_MID_DEFAULT_M)
 
-            widgets = (self.lblHiguchiNear, self.spinHiguchiNear, self.lblHiguchiMid, self.spinHiguchiMid)
-            for _w in widgets:
+            for _w in (self.lblHiguchiNear, self.spinHiguchiNear, self.lblHiguchiMid, self.spinHiguchiMid):
                 _w.setToolTip(tip)
 
-            # Append after the existing rows instead of inserting, so the rows
-            # already defined in the .ui keep their numbering.
-            row = int(layout.rowCount())
+            # The breaks stay editable whether or not chkHiguchi is ticked. They
+            # are only ever read while it is, and tying their enabled state to
+            # the checkbox meant the first tick raised a modal telling the user
+            # to adjust 근경/중경 상한 while those spinboxes were still greyed
+            # out, and left no way to choose a mid break before that prompt.
             layout.addWidget(self.lblHiguchiNear, row, 0)
             layout.addWidget(self.spinHiguchiNear, row, 1)
             layout.addWidget(self.lblHiguchiMid, row + 1, 0)
             layout.addWidget(self.spinHiguchiMid, row + 1, 1)
-
-            checked = bool(self.chkHiguchi.isChecked()) if hasattr(self, "chkHiguchi") else False
-            for _w in widgets:
-                _w.setEnabled(checked)
-            if hasattr(self, "chkHiguchi"):
-                self.chkHiguchi.toggled.connect(self._on_higuchi_thresholds_enabled)
         except Exception as _exc:
             log_swallowed("viewshed_dialog._setup_higuchi_threshold_widgets", _exc)
-
-    def _on_higuchi_thresholds_enabled(self, checked):
-        """Grey out the zone breaks when Higuchi styling is off."""
-        try:
-            for _name in ("lblHiguchiNear", "spinHiguchiNear", "lblHiguchiMid", "spinHiguchiMid"):
-                _w = getattr(self, _name, None)
-                if _w is not None:
-                    _w.setEnabled(bool(checked))
-        except Exception as _exc:
-            log_swallowed("viewshed_dialog._on_higuchi_thresholds_enabled", _exc)
 
     def _get_higuchi_thresholds(self):
         """Return the (near, mid) Higuchi zone breaks in metres.
@@ -4625,12 +4659,38 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             mid = near + 1.0
         return (near, mid)
 
+    def _resolve_higuchi_thresholds(self, near_m=None, mid_m=None):
+        """Merge caller-supplied zone breaks with the dialog's configured pair.
+
+        Each argument is resolved on its own: a caller that passes only one of
+        the two keeps the value it passed instead of losing it to the widget
+        read. The near < mid ordering is then re-applied to the merged pair,
+        because mixing a caller value with a widget value can invert it even
+        when both sources were internally ordered.
+        """
+        if near_m is None or mid_m is None:
+            _near, _mid = self._get_higuchi_thresholds()
+            if near_m is None:
+                near_m = _near
+            if mid_m is None:
+                mid_m = _mid
+        near_m = float(near_m)
+        mid_m = float(mid_m)
+        if near_m > mid_m:
+            near_m, mid_m = mid_m, near_m
+        if near_m >= mid_m:
+            mid_m = near_m + 1.0
+        return (near_m, mid_m)
+
     @staticmethod
     def _format_higuchi_distance(value_m):
         """Format a zone break for UI text: 500.0 -> '500m', 2500.0 -> '2.5km'."""
         try:
             value_m = float(value_m)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError) as _exc:
+            # A non-numeric break would otherwise print as 'None' in the legend,
+            # the rings and the prompt with nothing in the log to explain it.
+            log_swallowed("viewshed_dialog._format_higuchi_distance", _exc)
             return str(value_m)
         if value_m >= 1000.0:
             return "{0:g}km".format(value_m / 1000.0)
@@ -4658,10 +4718,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         defines the zones by distance-to-height ratio (D/H), so these metric
         breaks are a practical convention, not values from Higuchi (1975).
         """
-        if near_m is None or mid_m is None:
-            near_m, mid_m = self._get_higuchi_thresholds()
-        near_m = float(near_m)
-        mid_m = float(mid_m)
+        near_m, mid_m = self._resolve_higuchi_thresholds(near_m, mid_m)
 
         # Observer point must be in DEM CRS to compute metric distance per pixel.
         observer_dem = self.transform_point(observer_point, observer_crs, dem_layer.crs())
@@ -4756,8 +4813,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         zones by distance-to-height ratio (D/H), so the legend has to report the
         thresholds actually used instead of a fixed 500 m / 2.5 km pair.
         """
-        if near_m is None or mid_m is None:
-            near_m, mid_m = self._get_higuchi_thresholds()
+        near_m, mid_m = self._resolve_higuchi_thresholds(near_m, mid_m)
         near_txt = self._format_higuchi_distance(near_m)
         mid_txt = self._format_higuchi_distance(mid_m)
 
@@ -4858,10 +4914,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         """Create buffer rings showing the configured Higuchi distance zones."""
         english = is_english_ui()
 
-        if near_m is None or mid_m is None:
-            near_m, mid_m = self._get_higuchi_thresholds()
-        near_m = float(near_m)
-        mid_m = float(mid_m)
+        near_m, mid_m = self._resolve_higuchi_thresholds(near_m, mid_m)
         
         # Use DEM CRS instead of hardcoded EPSG:5186
         layer = QgsVectorLayer("LineString?crs=" + dem_layer.crs().authid(), "히구치_거리대", "memory")

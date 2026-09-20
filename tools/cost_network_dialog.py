@@ -1164,7 +1164,8 @@ class CostNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                     "- 목적: 모든 유적을 '총 비용 합'이 최소가 되도록 연결\n"
                     "- 간선 수: N-1 (딱 필요한 만큼)\n"
                     "- 해석: 최소 골격(backbone) 네트워크\n"
-                    "Ref: Kruskal (1956); Prim (1957)"
+                    "Ref: Kruskal (1956) - 이 도구의 MST 구현 방식\n"
+                    "  (Prim(1957)은 관련 알고리즘이며 이 플러그인은 구현하지 않습니다)"
                 ),
             ),
             (
@@ -1263,6 +1264,16 @@ class CostNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
         self.btnRun.clicked.connect(self.run_analysis)
         self.btnClose.clicked.connect(self.reject)
 
+        # Title the slope-penalty group box here rather than in the .ui so the
+        # parameter box, the model combo entry and the model help all carry the
+        # same de-attributed name: the penalty is defined by this plugin, not
+        # published in Conolly & Lake (2006).
+        try:
+            if hasattr(self, "groupConollyLakeParams"):
+                self.groupConollyLakeParams.setTitle("상대경사 비용 (relative-slope cost)")
+        except Exception as _exc:
+            log_swallowed("cost_network_dialog.__init__", _exc)
+
         try:
             self._apply_help_texts()
         except Exception as _exc:
@@ -1310,6 +1321,8 @@ MST/k-NN/Hub 네트워크를 생성합니다.
       <li><b>에너지(kcal) 모드</b>에서는 <code>kcal_*</code> 열만 경사를 반영합니다.
       <code>time_*</code> 열은 <b>거리 / 고정속도</b>로 환산한 값이라 경사가 전혀 반영되지 않습니다
       (같은 길이면 급경사든 평지든 값이 같습니다). 이동시간 추정값으로 읽지 마세요.</li>
+      <li>같은 이유로 <b>Pandolf + ‘시간(분)’ 기준</b>은 비용 전체가 거리/고정속도가 되어
+      MST/k-NN이 직선거리 네트워크로 퇴화합니다. Pandolf는 ‘에너지(kcal)’ 기준으로 쓰세요.</li>
     </ul>
   </li>
   <li>(옵션) 노드 지표/중심성(SNA) 결과 레이어</li>
@@ -1651,14 +1664,17 @@ MST/k-NN/Hub 네트워크를 생성합니다.
             self.spinConollyBaseKmh,
             "기본 속도(km/h)\n- 평지(경사 0) 기준 속도입니다.\n- 값↑ → 전체 이동 시간이 감소합니다.",
         )
-        tt(
-            self.lblConollyRefSlope,
-            "기준 경사(°)\n- 비용 곡선의 기준점(민감도 기준)을 정합니다.\n- 값 변화에 따라 경사 페널티가 달라집니다.",
+        # This tooltip overrides the one stored in the .ui, so the "the reference
+        # slope IS the result" warning has to be repeated here or it never shows.
+        _conolly_ref_tip = (
+            "기준 경사(°)\n"
+            "- 비용 전체가 이 값에 반비례합니다. 기준을 절반으로 낮추면 모든 경사의 비용이 2배가 됩니다.\n"
+            "- 기준경사 이하의 경사에는 페널티를 1로 고정합니다(평지보다 빨라지지 않도록).\n"
+            "- 평지 대비 30° 경사 비용: 기준 5°(기본값)에서 약 6.6배, 기준 15°에서 약 2.2배.\n"
+            "- 결과를 보고할 때 사용한 기준경사(°)를 반드시 함께 밝히세요."
         )
-        tt(
-            self.spinConollyRefSlopeDeg,
-            "기준 경사(°)\n- 비용 곡선의 기준점(민감도 기준)을 정합니다.\n- 값 변화에 따라 경사 페널티가 달라집니다.",
-        )
+        tt(self.lblConollyRefSlope, _conolly_ref_tip)
+        tt(self.spinConollyRefSlopeDeg, _conolly_ref_tip)
 
         # Herzog wheeled (via Cuckovic)
         tt(
@@ -1785,7 +1801,11 @@ MST/k-NN/Hub 네트워크를 생성합니다.
             ("토블러 보행함수 (Tobler Hiking Function)", MODEL_TOBLER),
             ("나이스미스 규칙 (Naismith's Rule)", MODEL_NAISMITH),
             ("허조그 메타볼릭 (Herzog metabolic, via Čučković)", MODEL_HERZOG_METABOLIC),
-            ("코놀리&레이크 경사비용 (Conolly & Lake, 2006)", MODEL_CONOLLY_LAKE),
+            # Named for what the branch actually is: a plugin-defined relative-slope
+            # penalty informed by the Conolly & Lake (2006) discussion, not an equation
+            # published in that book. Kept identical to the cost-surface dialog, which
+            # drives the same cost_models.edge_cost branch - one model, one name.
+            ("상대경사 비용 (relative-slope cost, Conolly & Lake 2006 논의 기반)", MODEL_CONOLLY_LAKE),
             ("허조그 차량/수레 (Herzog wheeled, via Čučković)", MODEL_HERZOG_WHEELED),
             ("판돌프 운반 에너지 (Pandolf load carriage, 1977)", MODEL_PANDOLF),
         ]
@@ -1822,6 +1842,14 @@ MST/k-NN/Hub 네트워크를 생성합니다.
             # Energy output is meaningful only for Pandolf
             if model_key == MODEL_PANDOLF:
                 self.cmbCostMode.setEnabled(True)
+                # Pandolf's time cost is distance / CONSTANT speed (see
+                # cost_models.edge_cost), so leaving the combo on 시간(분) would
+                # silently solve the whole network on straight-line distance.
+                # Land on energy - the only mode this model resolves slope in.
+                # The user can still switch back, and run() warns if they do.
+                idx_energy = int(self.cmbCostMode.findData(COST_ENERGY))
+                if idx_energy >= 0 and self.cmbCostMode.currentData() != COST_ENERGY:
+                    self.cmbCostMode.setCurrentIndex(idx_energy)
             else:
                 self.cmbCostMode.setCurrentIndex(0)
                 self.cmbCostMode.setEnabled(False)
@@ -1850,10 +1878,20 @@ MST/k-NN/Hub 네트워크를 생성합니다.
                 "- 기본속도↑ → 전체 시간↓"
             )
         if model_key == MODEL_CONOLLY_LAKE:
+            # The reference slope sets the ENTIRE magnitude of this penalty
+            # (cost scales as tan(theta)/tan(ref)), so it is part of the result
+            # rather than a tuning knob - hence the calibration figures and the
+            # "report the reference slope" line, mirroring the cost-surface dialog.
             return (
-                "Conolly & Lake (2006)\n"
-                "- 경사에 따른 이동 비용을 보행 속도로 환산해 적용합니다.\n"
-                "- 기본속도↑ → 전체 시간↓"
+                "상대경사 비용 (relative-slope cost)\n"
+                "- 경사(절대값)를 기준경사로 나눈 값을 비용 배수로 쓰는 '플러그인 자체 정의' 페널티입니다.\n"
+                "- 출처 주의: Conolly & Lake(2006)가 논의한 '상대 경사 비용' 개념에 근거했을 뿐,\n"
+                "  그 책에 실린 수식이 아닙니다. 결과를 인용할 때 '코놀리-레이크 공식'이라고 부르지 마세요.\n"
+                "- 기본속도↑ → 전체 시간↓\n"
+                "- 기준경사(°): 비용 전체가 기준경사에 반비례합니다. 기준을 절반으로 낮추면 모든 경사의 비용이 2배가 됩니다.\n"
+                "- 보정(calibration) 참고: 평지 대비 30° 경사 비용은 기준경사 5°(기본값)에서 약 6.6배,\n"
+                "  기준경사 15°에서는 약 2.2배입니다(참고: 토블러는 약 7.5배).\n"
+                "- 결과를 보고할 때 사용한 기준경사(°)를 반드시 함께 밝히세요."
             )
         if model_key == MODEL_HERZOG_WHEELED:
             return (
@@ -1866,7 +1904,11 @@ MST/k-NN/Hub 네트워크를 생성합니다.
             return (
                 "Pandolf et al. (1977) Load Carriage\n"
                 "- 체중/짐무게/지형계수(마찰) + 경사로 에너지(J)를 추정합니다.\n"
-                "- 체중·짐무게·지형계수↑ → 에너지 소모↑"
+                "- 체중·짐무게·지형계수↑ → 에너지 소모↑\n"
+                "- 주의: 경사에 반응하는 값은 에너지뿐입니다. 비용 기준을 '시간(분)'으로 두면\n"
+                "  모든 간선 비용이 '거리 / 고정속도'(등방성)가 되어 MST/k-NN 간선이\n"
+                "  사실상 직선거리 네트워크로 퇴화합니다.\n"
+                "- 경사가 반영된 시간이 필요하면 토블러/나이스미스를 사용하세요."
             )
         return "모델을 선택하면 경사(오르막/내리막)에 따라 이동 비용을 계산합니다."
 
@@ -1970,6 +2012,8 @@ MST/k-NN/Hub 네트워크를 생성합니다.
           (대각 이동을 끄면 4방향·90° 단위가 되어 오차는 더 커집니다).</li>
           <li>에너지(kcal) 모드는 Pandolf 모델에서 의미가 있으며, 모델/파라미터 설정에 따라 값이 크게 달라질 수 있습니다.
           이 모드의 <code>time_*</code> 열은 ‘거리 / 고정속도’ 환산값이라 경사를 반영하지 않습니다.</li>
+          <li>Pandolf를 <b>‘시간(분)’ 기준</b>으로 돌리면 비용 자체가 ‘거리 / 고정속도’가 되어 경사가 전혀 반영되지 않습니다.
+          이 경우 간선/네트워크는 사실상 <b>직선거리 네트워크</b>이므로, Pandolf는 ‘에너지(kcal)’ 기준으로 쓰세요.</li>
           <li>큰 데이터(예: 200개+)는 후보 k/버퍼 조절이 중요하며, SNA의 느린 지표는 자동 생략될 수 있습니다.</li>
         </ul>
         """
@@ -1977,8 +2021,9 @@ MST/k-NN/Hub 네트워크를 생성합니다.
         refs = """
         <h3>참고(요약)</h3>
         <ul>
-          <li>MST: Kruskal(1956), Prim(1957)</li>
-          <li>보행/비용모델: Tobler(1993), Naismith(1892), Conolly &amp; Lake(2006), Pandolf et al.(1977)</li>
+          <li>MST: Kruskal(1956) - 이 도구의 구현 방식입니다. (Prim(1957)은 관련 알고리즘이며 이 플러그인은 구현하지 않습니다.)</li>
+          <li>보행/비용모델: Tobler(1993), Naismith(1892), Pandolf et al.(1977)</li>
+          <li>‘상대경사 비용’은 Conolly &amp; Lake(2006)의 <b>논의</b>에 근거한 <b>플러그인 자체 정의</b> 페널티이며, 그 책에 실린 수식이 아닙니다.</li>
           <li>SNA: Freeman(1979), Wasserman &amp; Faust(1994), Brandes(2001)</li>
         </ul>
         <p style='color:#444'>전체 참고문헌: <code>REFERENCES.md</code></p>
@@ -2298,7 +2343,25 @@ MST/k-NN/Hub 네트워크를 생성합니다.
         self._task = task
         QgsApplication.taskManager().addTask(task)
         push_message(self.iface, "최소비용 네트워크", "분석을 시작했습니다. (QGIS 작업 관리자 확인)", level=0, duration=6)
-        if cost_mode == COST_ENERGY:
+        # Pandolf is an energy model, so the warning has to be keyed on the
+        # MODEL: in time mode edge_cost() returns distance / CONSTANT speed, and
+        # that is the dangerous case - every edge, not just a spare column, loses
+        # its slope response, so the MST/k-NN edges degenerate to a Euclidean
+        # network. Energy mode is the weaker, columns-only caveat.
+        if model_key == MODEL_PANDOLF and cost_mode == COST_TIME:
+            push_message(
+                self.iface,
+                "판돌프 + 시간(분) 기준",
+                (
+                    "판돌프는 에너지 모델입니다. '시간(분)' 기준에서는 모든 간선 비용이 "
+                    "'거리 / 고정속도'(등방성)라 경사가 전혀 반영되지 않으며, MST/k-NN 간선이 "
+                    "사실상 직선거리 네트워크가 됩니다. 경사가 반영된 시간이 필요하면 토블러/나이스미스를, "
+                    "판돌프를 쓰려면 '에너지(kcal)' 기준을 선택하세요."
+                ),
+                level=1,
+                duration=10,
+            )
+        elif cost_mode == COST_ENERGY:
             # The energy solver never computes a travel time (see add_edge), so
             # warn before the user reads the time columns as modelled times.
             push_message(

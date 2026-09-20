@@ -173,6 +173,46 @@ def _compass8_ko(bearing_deg) -> str:
 _split_qgis_source_path = split_qgis_source_path
 
 
+def _is_geographic_crs(crs) -> bool:
+    """True when `crs` is measured in degrees (planar measures would be degrees)."""
+    try:
+        return bool(crs is not None and crs.isValid() and crs.isGeographic())
+    except Exception as _exc:
+        log_swallowed("ai_aoi_summary._is_geographic_crs", _exc)
+        return False
+
+
+def _will_use_ellipsoid(da: QgsDistanceArea) -> bool:
+    """True when `da` is actually configured to measure on an ellipsoid.
+
+    Guarded with hasattr/try because willUseEllipsoid() is not exposed by every
+    QGIS build. When we cannot tell, assume the measurement is sound: this check
+    exists to reject a bad number, never to withhold a correct one.
+    """
+    try:
+        if not hasattr(da, "willUseEllipsoid"):
+            return True
+        return bool(da.willUseEllipsoid())
+    except Exception as _exc:
+        log_swallowed("ai_aoi_summary._will_use_ellipsoid", _exc)
+        return True
+
+
+def _measures_in_degrees(da: QgsDistanceArea, crs) -> bool:
+    """True when this measurer would hand back degrees rather than metres.
+
+    measureArea()/measureLine() do not raise on a geographic CRS with no
+    ellipsoid in effect - they succeed and return SQUARE DEGREES / DEGREES. Every
+    caller in this module writes the result into a key named ``*_m2`` or ``*_m``,
+    and those values go into the report *and* into the prompt handed to the LLM,
+    so a degree-valued figure has to be withheld rather than presented as a
+    measurement.
+    """
+    if da is None:
+        return False
+    return _is_geographic_crs(crs) and not _will_use_ellipsoid(da)
+
+
 def _safe_distance_area(crs) -> QgsDistanceArea:
     da = QgsDistanceArea()
     try:
@@ -180,12 +220,86 @@ def _safe_distance_area(crs) -> QgsDistanceArea:
     except Exception as _exc:
         log_swallowed("tools/ai_aoi_summary.py:176 (_safe_distance_area)", _exc)
     try:
-        ellps = QgsProject.instance().ellipsoid()
+        ellps = str(QgsProject.instance().ellipsoid() or "").strip()
+        # QGIS returns the literal string "NONE" - not "" - when the project has
+        # no ellipsoid set, and "NONE" is truthy, so the previous `if ellps:`
+        # test applied it and willUseEllipsoid() stayed False. Substitute a real
+        # ellipsoid on a geographic CRS so an ellipsoidal measurement is genuinely
+        # performed; a projected CRS keeps honouring whatever the project is
+        # configured with. Same remedy as cadastral_overlap_dialog._distance_area
+        # and geochem_polygonize_dialog.
+        if _is_geographic_crs(crs) and ((not ellps) or ellps.upper() == "NONE"):
+            ellps = "WGS84"
+            log_message(
+                "AI 요약: 프로젝트 타원체가 설정되지 않아(NONE) 지리좌표계 레이어의 "
+                "면적/거리 계산에 WGS84 타원체를 대신 사용합니다.",
+                level=Qgis.Warning,
+            )
         if ellps:
             da.setEllipsoid(ellps)
     except Exception as _exc:
         log_swallowed("tools/ai_aoi_summary.py:182 (_safe_distance_area)", _exc)
+    # Warn once here rather than once per feature: if the substitution did not
+    # take (unknown ellipsoid name, older build), every measurement from this
+    # measurer is withheld by _measures_in_degrees() at the call sites.
+    if _measures_in_degrees(da, crs):
+        log_message(
+            "AI 요약: 타원체 기준 측정을 설정하지 못해 지리좌표계 레이어의 면적/거리를 "
+            "생략합니다(제곱도를 ㎡로 적지 않기 위함).",
+            level=Qgis.Warning,
+        )
     return da
+
+
+def _area_m2(da: QgsDistanceArea, geom, crs) -> Optional[float]:
+    """Ellipsoidal area in square metres, or None when it would not be metres."""
+    if geom is None:
+        return None
+    try:
+        if geom.isEmpty():
+            return None
+    except Exception as _exc:
+        log_swallowed("ai_aoi_summary._area_m2", _exc)
+        return None
+    if _measures_in_degrees(da, crs):
+        return None
+    try:
+        return float(da.measureArea(geom))
+    except Exception as _exc:
+        log_swallowed("ai_aoi_summary._area_m2", _exc)
+        return None
+
+
+def _length_m(da: QgsDistanceArea, geom, crs) -> Optional[float]:
+    """Ellipsoidal length in metres, or None when it would not be metres."""
+    if geom is None:
+        return None
+    try:
+        if geom.isEmpty():
+            return None
+    except Exception as _exc:
+        log_swallowed("ai_aoi_summary._length_m", _exc)
+        return None
+    if _measures_in_degrees(da, crs):
+        return None
+    try:
+        return float(da.measureLength(geom))
+    except Exception as _exc:
+        log_swallowed("ai_aoi_summary._length_m", _exc)
+        return None
+
+
+def _line_m(da: QgsDistanceArea, p1, p2, crs) -> Optional[float]:
+    """Ellipsoidal point-to-point distance in metres, or None when it would not be."""
+    if da is None or p1 is None or p2 is None:
+        return None
+    if _measures_in_degrees(da, crs):
+        return None
+    try:
+        return float(da.measureLine(p1, p2))
+    except Exception as _exc:
+        log_swallowed("ai_aoi_summary._line_m", _exc)
+        return None
 
 
 def _unary_union_geoms(layer: QgsVectorLayer, *, selected_only: bool) -> Tuple[Optional[QgsGeometry], int]:
@@ -355,7 +469,12 @@ def _vector_layer_stats_in_geom(
     if layer is None or geom is None or geom.isEmpty():
         return out
 
-    da = _safe_distance_area(layer.crs())
+    layer_crs = layer.crs()
+    da = _safe_distance_area(layer_crs)
+    # Withhold the *_m / *_m2 totals outright when they would be degrees: writing
+    # 0.0 into `total_length_m` reads as "no line features inside the AOI", which
+    # is a different wrong answer, and the figure is also sent to the LLM.
+    metric_totals = not _measures_in_degrees(da, layer_crs)
     da_origin = _safe_distance_area(origin_crs) if origin_point is not None and origin_crs is not None else None
     ct_to_origin = None
     if da_origin is not None:
@@ -421,12 +540,16 @@ def _vector_layer_stats_in_geom(
         n += 1
         if geom_type == QgsWkbTypes.LineGeometry:
             try:
-                total_len += float(da.measureLength(g.intersection(geom)))
+                _len = _length_m(da, g.intersection(geom), layer_crs)
+                if _len is not None:
+                    total_len += _len
             except Exception as _exc:
                 log_swallowed("ai_aoi_summary._vector_layer_stats_in_geom", _exc)
         elif geom_type == QgsWkbTypes.PolygonGeometry:
             try:
-                total_area += float(da.measureArea(g.intersection(geom)))
+                _area = _area_m2(da, g.intersection(geom), layer_crs)
+                if _area is not None:
+                    total_area += _area
             except Exception as _exc:
                 log_swallowed("ai_aoi_summary._vector_layer_stats_in_geom", _exc)
 
@@ -467,8 +590,8 @@ def _vector_layer_stats_in_geom(
                 pt_xy = QgsPointXY(pt)
                 if ct_to_origin is not None:
                     pt_xy = ct_to_origin.transform(pt_xy)
-                dist = float(da_origin.measureLine(origin_point, pt_xy))
-                if math.isfinite(dist):
+                dist = _line_m(da_origin, origin_point, pt_xy, origin_crs)
+                if dist is not None and math.isfinite(dist):
                     dist_acc["sum"] = float(dist_acc["sum"]) + dist
                     dist_acc["min"] = float(min(float(dist_acc["min"]), dist))
                     dist_acc["max"] = float(max(float(dist_acc["max"]), dist))
@@ -478,9 +601,9 @@ def _vector_layer_stats_in_geom(
 
     out["features"] = int(n)
     out["scanned"] = int(scanned)
-    if geom_type == QgsWkbTypes.LineGeometry:
+    if geom_type == QgsWkbTypes.LineGeometry and metric_totals:
         out["total_length_m"] = float(total_len)
-    if geom_type == QgsWkbTypes.PolygonGeometry:
+    if geom_type == QgsWkbTypes.PolygonGeometry and metric_totals:
         out["total_area_m2"] = float(total_area)
     if hist is not None:
         # keep top 20
@@ -775,8 +898,8 @@ def _reference_sites_summary(
             try:
                 rp = _extract_representative_point(g)
                 if rp is not None:
-                    d0 = float(da.measureLine(aoi_centroid_pt, rp))
-                    if math.isfinite(d0):
+                    d0 = _line_m(da, aoi_centroid_pt, rp, aoi_crs)
+                    if d0 is not None and math.isfinite(d0):
                         dist_to_centroid = d0
                     # Compass bearing AOI-centroid -> site (both in projected AOI CRS).
                     dx = float(rp.x()) - float(aoi_centroid_pt.x())
@@ -813,19 +936,19 @@ def _reference_sites_summary(
             gt = -1
         if gt == int(QgsWkbTypes.PolygonGeometry):
             try:
-                feature_area_m2 = float(da.measureArea(g))
+                feature_area_m2 = _area_m2(da, g, aoi_crs)
             except Exception:
                 feature_area_m2 = None
             try:
                 inter = g.intersection(aoi_geom)
                 if inter is not None and (not inter.isEmpty()):
-                    overlap_aoi_area_m2 = float(da.measureArea(inter))
+                    overlap_aoi_area_m2 = _area_m2(da, inter, aoi_crs)
             except Exception:
                 overlap_aoi_area_m2 = None
             try:
                 interb = g.intersection(buffer_geom)
                 if interb is not None and (not interb.isEmpty()):
-                    overlap_buffer_area_m2 = float(da.measureArea(interb))
+                    overlap_buffer_area_m2 = _area_m2(da, interb, aoi_crs)
             except Exception:
                 overlap_buffer_area_m2 = None
 
@@ -843,19 +966,19 @@ def _reference_sites_summary(
                 log_swallowed("ai_aoi_summary._reference_sites_summary", _exc)
         elif gt == int(QgsWkbTypes.LineGeometry):
             try:
-                feature_length_m = float(da.measureLength(g))
+                feature_length_m = _length_m(da, g, aoi_crs)
             except Exception:
                 feature_length_m = None
             try:
                 inter = g.intersection(aoi_geom)
                 if inter is not None and (not inter.isEmpty()):
-                    overlap_aoi_length_m = float(da.measureLength(inter))
+                    overlap_aoi_length_m = _length_m(da, inter, aoi_crs)
             except Exception:
                 overlap_aoi_length_m = None
             try:
                 interb = g.intersection(buffer_geom)
                 if interb is not None and (not interb.isEmpty()):
-                    overlap_buffer_length_m = float(da.measureLength(interb))
+                    overlap_buffer_length_m = _length_m(da, interb, aoi_crs)
             except Exception:
                 overlap_buffer_length_m = None
 
@@ -1172,11 +1295,11 @@ def build_aoi_context(
 
     da = _safe_distance_area(aoi_crs)
     try:
-        aoi_area = float(da.measureArea(aoi_geom))
+        aoi_area = _area_m2(da, aoi_geom, aoi_crs)
     except Exception:
         aoi_area = None
     try:
-        buf_area = float(da.measureArea(buf_geom))
+        buf_area = _area_m2(da, buf_geom, aoi_crs)
     except Exception:
         buf_area = None
 

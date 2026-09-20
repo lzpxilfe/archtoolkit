@@ -123,6 +123,11 @@ class CostTaskResult:
     corridor_raster_path: Optional[str] = None
     corridor_vector_path: Optional[str] = None
     corridor_percent: Optional[float] = None
+    # The run's approximation settings, carried out of the worker so every
+    # result layer can be stamped with its own caveat instead of relying on the
+    # reader having the help text open (see _tag_cost_surface_layer).
+    allow_diagonal: Optional[bool] = None
+    cost_mode: Optional[str] = None
 
 
 _inv_geotransform = inv_geotransform
@@ -282,7 +287,7 @@ def _rasterize_vector_mask(vector_source: str, *, win_gt, win_proj_wkt: str, col
     try:
         layer.ResetReading()
     except Exception as _exc:
-        log_swallowed("tools/cost_surface_dialog.py:284 (_rasterize_vector_mask)", _exc)
+        log_swallowed("tools/cost_surface_dialog.py:289 (_rasterize_vector_mask)", _exc)
     try:
         gdal.RasterizeLayer(out_ds, [1], layer, burn_values=[1], options=["ALL_TOUCHED=TRUE"])
     except Exception:
@@ -465,7 +470,7 @@ def _create_corridor_gpkg(corridor_raster_path, output_gpkg_path):
             try:
                 drv.DeleteDataSource(output_gpkg_path)
             except Exception as _exc:
-                log_swallowed("tools/cost_surface_dialog.py:467 (_create_corridor_gpkg)", _exc)
+                log_swallowed("tools/cost_surface_dialog.py:472 (_create_corridor_gpkg)", _exc)
 
         vds = drv.CreateDataSource(output_gpkg_path)
         if vds is None:
@@ -495,7 +500,7 @@ def _create_corridor_gpkg(corridor_raster_path, output_gpkg_path):
         try:
             vds.FlushCache()
         except Exception as _exc:
-            log_swallowed("tools/cost_surface_dialog.py:497 (_create_corridor_gpkg)", _exc)
+            log_swallowed("tools/cost_surface_dialog.py:502 (_create_corridor_gpkg)", _exc)
         vds = None
         ds = None
         return output_gpkg_path
@@ -534,7 +539,7 @@ def _create_fixed_contours_gpkg(
             try:
                 drv.DeleteDataSource(output_gpkg_path)
             except Exception as _exc:
-                log_swallowed("tools/cost_surface_dialog.py:536 (_create_fixed_contours_gpkg)", _exc)
+                log_swallowed("tools/cost_surface_dialog.py:541 (_create_fixed_contours_gpkg)", _exc)
 
         vds = drv.CreateDataSource(output_gpkg_path)
         if vds is None:
@@ -591,7 +596,7 @@ def _create_fixed_contours_gpkg(
         try:
             vds.FlushCache()
         except Exception as _exc:
-            log_swallowed("tools/cost_surface_dialog.py:593 (_create_fixed_contours_gpkg)", _exc)
+            log_swallowed("tools/cost_surface_dialog.py:598 (_create_fixed_contours_gpkg)", _exc)
         vds = None
         ds = None
         return output_gpkg_path
@@ -955,7 +960,7 @@ class CostSurfaceWorker(QgsTask):
         try:
             self._cancel_event.set()
         except Exception as _exc:
-            log_swallowed("tools/cost_surface_dialog.py:944 (cancel)", _exc)
+            log_swallowed("tools/cost_surface_dialog.py:962 (cancel)", _exc)
         try:
             return super().cancel()
         except Exception:
@@ -1182,7 +1187,7 @@ class CostSurfaceWorker(QgsTask):
             try:
                 friction[nodata_mask] = 1.0
             except Exception as _exc:
-                log_swallowed("tools/cost_surface_dialog.py:1171 (_run_impl)", _exc)
+                log_swallowed("tools/cost_surface_dialog.py:1189 (_run_impl)", _exc)
 
             try:
                 finite = np.isfinite(friction)
@@ -1572,6 +1577,8 @@ class CostSurfaceWorker(QgsTask):
             corridor_raster_path=corridor_raster_path,
             corridor_vector_path=corridor_vector_path,
             corridor_percent=(float(corridor_percent) if create_corridor else None),
+            allow_diagonal=bool(self.allow_diagonal),
+            cost_mode=path_cost_mode,
         )
 
 
@@ -1800,7 +1807,7 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
             if os.path.exists(icon_path):
                 self.setWindowIcon(QIcon(icon_path))
         except Exception as _exc:
-            log_swallowed("tools/cost_surface_dialog.py:1789 (__init__)", _exc)
+            log_swallowed("tools/cost_surface_dialog.py:1809 (__init__)", _exc)
 
         self._setup_help_button()
 
@@ -1844,7 +1851,7 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
             if hasattr(self, "cmbFrictionVector"):
                 self.cmbFrictionVector.setFilters(QgsMapLayerProxyModel.VectorLayer)
         except Exception as _exc:
-            log_swallowed("tools/cost_surface_dialog.py:1833 (__init__)", _exc)
+            log_swallowed("tools/cost_surface_dialog.py:1853 (__init__)", _exc)
         self._init_models()
         self.cmbModel.currentIndexChanged.connect(self._on_model_changed)
         self._on_model_changed()
@@ -1862,7 +1869,7 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
             if hasattr(self, "chkUseFrictionVector"):
                 self.chkUseFrictionVector.toggled.connect(self._on_friction_vector_toggled)
         except Exception as _exc:
-            log_swallowed("tools/cost_surface_dialog.py:1851 (__init__)", _exc)
+            log_swallowed("tools/cost_surface_dialog.py:1871 (__init__)", _exc)
 
         self.cmbDemLayer.layerChanged.connect(self._on_dem_changed)
         self._on_dem_changed()
@@ -1894,7 +1901,7 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
                 except Exception:
                     self.horizontalLayout_Buttons.addWidget(self.btnHelp)
         except Exception as _exc:
-            log_swallowed("tools/cost_surface_dialog.py:1883 (_setup_help_button)", _exc)
+            log_swallowed("tools/cost_surface_dialog.py:1903 (_setup_help_button)", _exc)
 
     def _on_help(self):
         html = """
@@ -1934,7 +1941,7 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
             plugin_dir = os.path.dirname(os.path.dirname(__file__))
             show_help_dialog(parent=self, title="Cost Surface / LCP 도움말", html=html, plugin_dir=plugin_dir)
         except Exception as _exc:
-            log_swallowed("tools/cost_surface_dialog.py:1914 (_on_help)", _exc)
+            log_swallowed("tools/cost_surface_dialog.py:1943 (_on_help)", _exc)
 
     def cleanup_for_unload(self):
         """Best-effort cleanup for plugin unload/reload (disconnect global signals, cancel tasks)."""
@@ -1957,12 +1964,12 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
             if bool(self.chkCreatePath.isChecked()):
                 return True
         except Exception as _exc:
-            log_swallowed("tools/cost_surface_dialog.py:1934 (_is_path_required)", _exc)
+            log_swallowed("tools/cost_surface_dialog.py:1966 (_is_path_required)", _exc)
         try:
             if hasattr(self, "chkCreateCorridor") and bool(self.chkCreateCorridor.isChecked()):
                 return True
         except Exception as _exc:
-            log_swallowed("tools/cost_surface_dialog.py:1939 (_is_path_required)", _exc)
+            log_swallowed("tools/cost_surface_dialog.py:1971 (_is_path_required)", _exc)
         return False
 
     def _update_point_help(self):
@@ -1972,7 +1979,7 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
             else:
                 self.lblPointHelp.setText("왼쪽 클릭 1번(시작), 우클릭/ESC: 종료")
         except Exception as _exc:
-            log_swallowed("tools/cost_surface_dialog.py:1949 (_update_point_help)", _exc)
+            log_swallowed("tools/cost_surface_dialog.py:1981 (_update_point_help)", _exc)
 
     def _on_create_path_toggled(self, checked):
         # When LCP output is disabled, drop any previously-selected end point to reduce confusion.
@@ -1983,7 +1990,7 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
                 self._update_labels()
             self._update_point_help()
         except Exception as _exc:
-            log_swallowed("tools/cost_surface_dialog.py:1960 (_on_create_path_toggled)", _exc)
+            log_swallowed("tools/cost_surface_dialog.py:1992 (_on_create_path_toggled)", _exc)
 
     def _on_create_corridor_toggled(self, checked):
         try:
@@ -2007,7 +2014,7 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
             if hasattr(self, "spinFrictionRasterScale"):
                 self.spinFrictionRasterScale.setEnabled(bool(checked))
         except Exception as _exc:
-            log_swallowed("tools/cost_surface_dialog.py:1984 (_on_friction_raster_toggled)", _exc)
+            log_swallowed("tools/cost_surface_dialog.py:2016 (_on_friction_raster_toggled)", _exc)
 
     def _on_friction_vector_toggled(self, checked):
         try:
@@ -2016,7 +2023,7 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
             if hasattr(self, "spinFrictionVectorMult"):
                 self.spinFrictionVectorMult.setEnabled(bool(checked))
         except Exception as _exc:
-            log_swallowed("tools/cost_surface_dialog.py:1993 (_on_friction_vector_toggled)", _exc)
+            log_swallowed("tools/cost_surface_dialog.py:2025 (_on_friction_vector_toggled)", _exc)
 
     def _on_model_changed(self):
         try:
@@ -2188,7 +2195,7 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
             if self.original_tool:
                 self.canvas.setMapTool(self.original_tool)
         except Exception as _exc:
-            log_swallowed("tools/cost_surface_dialog.py:2148 (finish_map_selection)", _exc)
+            log_swallowed("tools/cost_surface_dialog.py:2197 (finish_map_selection)", _exc)
         restore_ui_focus(self)
 
     def clear_points(self):
@@ -2563,7 +2570,7 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
             layer_name = f"누적 비용(분) (Cumulative Cost, min) - {(res.model_label or '').strip()}"
             cost_layer = QgsRasterLayer(res.cost_raster_path, layer_name)
             if cost_layer.isValid():
-                self._tag_cost_surface_layer(cost_layer, run_id, "cost_raster")
+                self._tag_cost_surface_layer(cost_layer, run_id, "cost_raster", res)
                 self._apply_cost_raster_style(cost_layer, res.cost_min, res.cost_max)
                 self._track_layer_output(cost_layer, res.cost_raster_path)
                 bottom_to_top.append(cost_layer)
@@ -2572,7 +2579,7 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
             layer_name = f"누적 에너지(kcal) (Cumulative Energy, kcal) - {(res.model_label or '').strip()}"
             energy_layer = QgsRasterLayer(res.energy_raster_path, layer_name)
             if energy_layer.isValid():
-                self._tag_cost_surface_layer(energy_layer, run_id, "energy_raster")
+                self._tag_cost_surface_layer(energy_layer, run_id, "energy_raster", res)
                 self._apply_energy_raster_style(
                     energy_layer, res.energy_min, res.energy_max
                 )
@@ -2589,7 +2596,7 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
                 layer_name = f"{layer_name} - {model_tag}"
             corridor_layer = QgsRasterLayer(res.corridor_raster_path, layer_name)
             if corridor_layer.isValid():
-                self._tag_cost_surface_layer(corridor_layer, run_id, "corridor_raster")
+                self._tag_cost_surface_layer(corridor_layer, run_id, "corridor_raster", res)
                 self._apply_corridor_raster_style(corridor_layer)
                 self._track_layer_output(corridor_layer, res.corridor_raster_path)
                 bottom_to_top.append(corridor_layer)
@@ -2608,7 +2615,7 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
                 "ogr",
             )
             if corridor_poly.isValid():
-                self._tag_cost_surface_layer(corridor_poly, run_id, "corridor_polygon")
+                self._tag_cost_surface_layer(corridor_poly, run_id, "corridor_polygon", res)
                 self._apply_corridor_polygon_style(corridor_poly)
                 self._track_layer_output(corridor_poly, res.corridor_vector_path)
                 bottom_to_top.append(corridor_poly)
@@ -2623,7 +2630,7 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
                 "ogr",
             )
             if iso_layer.isValid():
-                self._tag_cost_surface_layer(iso_layer, run_id, "isochrones")
+                self._tag_cost_surface_layer(iso_layer, run_id, "isochrones", res)
                 self._apply_isochrone_style(iso_layer)
                 self._track_layer_output(iso_layer, res.isochrones_vector_path)
                 bottom_to_top.append(iso_layer)
@@ -2638,7 +2645,7 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
                 "ogr",
             )
             if iso_layer.isValid():
-                self._tag_cost_surface_layer(iso_layer, run_id, "isoenergy")
+                self._tag_cost_surface_layer(iso_layer, run_id, "isoenergy", res)
                 self._apply_isoenergy_style(iso_layer)
                 self._track_layer_output(iso_layer, res.isoenergy_vector_path)
                 bottom_to_top.append(iso_layer)
@@ -2648,7 +2655,7 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
             pr = pt_layer.dataProvider()
             pr.addAttributes([QgsField("role", QVariant.String)])
             pt_layer.updateFields()
-            self._tag_cost_surface_layer(pt_layer, run_id, "start_end_points")
+            self._tag_cost_surface_layer(pt_layer, run_id, "start_end_points", res)
 
             f_start = QgsFeature(pt_layer.fields())
             f_start.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(*res.start_xy)))
@@ -2693,7 +2700,7 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
                 ]
             )
             path_layer.updateFields()
-            self._tag_cost_surface_layer(path_layer, run_id, "path_compare")
+            self._tag_cost_surface_layer(path_layer, run_id, "path_compare", res)
 
             feats = []
 
@@ -2777,7 +2784,7 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
                 path_layer.setCustomProperty("archtoolkit/dem_source", res.dem_source or "")
                 path_layer.setCustomProperty("archtoolkit/model_key", res.model_key or "")
             except Exception as _exc:
-                log_swallowed("tools/cost_surface_dialog.py:2722 (_add_result_layers)", _exc)
+                log_swallowed("tools/cost_surface_dialog.py:2786 (_add_result_layers)", _exc)
             self._profile_payloads[path_layer.id()] = {
                 "dem_source": res.dem_source,
                 "dem_authid": res.dem_authid,
@@ -2797,7 +2804,7 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
                 self._profile_selection_handlers[path_layer.id()] = handler
                 path_layer.selectionChanged.connect(handler)
             except Exception as _exc:
-                log_swallowed("tools/cost_surface_dialog.py:2738 (_add_result_layers)", _exc)
+                log_swallowed("tools/cost_surface_dialog.py:2806 (_add_result_layers)", _exc)
 
             bottom_to_top.append(path_layer)
 
@@ -2814,7 +2821,7 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
                         layer_name=f"LCP 마일스톤 (500m) - {model_tag}" if model_tag else "LCP 마일스톤 (500m)",
                     )
                     if milestone_layer is not None and milestone_layer.isValid():
-                        self._tag_cost_surface_layer(milestone_layer, run_id, "milestones")
+                        self._tag_cost_surface_layer(milestone_layer, run_id, "milestones", res)
                         bottom_to_top.append(milestone_layer)
             except Exception as e:
                 log_message(f"Milestone layer error: {e}", level=Qgis.Warning)
@@ -2823,27 +2830,49 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
             project.addMapLayer(lyr, False)
             run_group.insertLayer(0, lyr)
 
-    def _tag_cost_surface_layer(self, layer: QgsMapLayer, run_id: str, kind: str):
-        """Attach metadata to result layers for later cleanup (e.g., transient rubberbands)."""
+    def _tag_cost_surface_layer(self, layer: QgsMapLayer, run_id: str, kind: str, res: Optional[CostTaskResult] = None):
+        """Attach metadata to result layers for later cleanup (e.g., transient rubberbands).
+
+        `res` carries the run's approximation settings. They are stamped onto
+        every output because the accumulated-cost raster, the isochrones, the
+        isoenergy, the corridor and the LCP all come out of the same grid walk
+        (_neighbors) and are routinely exported, published and read as true
+        travel-time contours - long after the help text explaining the
+        45-degree quantisation is out of sight.
+        """
         if layer is None:
             return
         try:
             layer.setCustomProperty("archtoolkit/cost_surface/run_id", str(run_id))
             layer.setCustomProperty("archtoolkit/cost_surface/kind", str(kind))
         except Exception as _exc:
-            log_swallowed("tools/cost_surface_dialog.py:2773 (_tag_cost_surface_layer)", _exc)
+            log_swallowed("tools/cost_surface_dialog.py:2848 (_tag_cost_surface_layer)", _exc)
         try:
             units = ""
             if str(kind) == "cost_raster":
                 units = "min"
             elif str(kind) == "energy_raster":
                 units = "kcal"
+            approx_params = {}
+            if res is not None:
+                approx_params["model"] = str(getattr(res, "model_key", "") or "")
+                approx_params["cost_mode"] = str(getattr(res, "cost_mode", "") or "")
+                diagonal = getattr(res, "allow_diagonal", None)
+                # Left out rather than guessed when unknown: labelling a run
+                # 4-neighbour when it was not would be worse than silence.
+                if diagonal is not None:
+                    approx_params["connectivity"] = (
+                        "8-neighbour grid (45-degree quantised, cost overestimated by up to ~8%)"
+                        if diagonal
+                        else "4-neighbour grid (90-degree quantised, cost overestimated by up to ~41%)"
+                    )
             set_archtoolkit_layer_metadata(
                 layer,
                 tool_id="cost_surface",
                 run_id=str(run_id),
                 kind=str(kind or ""),
                 units=units,
+                params=(approx_params or None),
             )
         except Exception as _exc:
             log_swallowed("cost_surface_dialog._tag_cost_surface_layer", _exc)
@@ -2871,7 +2900,7 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
                     if layer and handler:
                         layer.selectionChanged.disconnect(handler)
                 except Exception as _exc:
-                    log_swallowed("tools/cost_surface_dialog.py:2813 (_cleanup_layer_outputs)", _exc)
+                    log_swallowed("tools/cost_surface_dialog.py:2902 (_cleanup_layer_outputs)", _exc)
                 try:
                     dlg = self._profile_dialogs.pop(lid, None)
                     if dlg:
@@ -2879,13 +2908,13 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
                         try:
                             dlg.deleteLater()
                         except Exception as _exc:
-                            log_swallowed("tools/cost_surface_dialog.py:2821 (_cleanup_layer_outputs)", _exc)
+                            log_swallowed("tools/cost_surface_dialog.py:2910 (_cleanup_layer_outputs)", _exc)
                 except Exception as _exc:
                     log_swallowed("cost_surface_dialog._cleanup_layer_outputs", _exc)
                 try:
                     self._profile_payloads.pop(lid, None)
                 except Exception as _exc:
-                    log_swallowed("tools/cost_surface_dialog.py:2827 (_cleanup_layer_outputs)", _exc)
+                    log_swallowed("tools/cost_surface_dialog.py:2916 (_cleanup_layer_outputs)", _exc)
         except Exception as _exc:
             log_swallowed("cost_surface_dialog._cleanup_layer_outputs", _exc)
 
@@ -3323,7 +3352,7 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
                     dlg.raise_()
                     dlg.activateWindow()
                 except Exception as _exc:
-                    log_swallowed("tools/cost_surface_dialog.py:3265 (open_cost_profile)", _exc)
+                    log_swallowed("tools/cost_surface_dialog.py:3354 (open_cost_profile)", _exc)
                 return
 
         dem_source = payload.get("dem_source")
@@ -3440,7 +3469,7 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
         try:
             dlg.setAttribute(Qt.WA_DeleteOnClose, True)
         except Exception as _exc:
-            log_swallowed("tools/cost_surface_dialog.py:3382 (open_cost_profile)", _exc)
+            log_swallowed("tools/cost_surface_dialog.py:3471 (open_cost_profile)", _exc)
         layout = QtWidgets.QVBoxLayout(dlg)
 
         summary_parts = []
@@ -3549,14 +3578,14 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
         try:
             dlg.destroyed.connect(lambda *_a, lid=layer_id: self._profile_dialogs.pop(lid, None))
         except Exception as _exc:
-            log_swallowed("tools/cost_surface_dialog.py:3491 (open_cost_profile)", _exc)
+            log_swallowed("tools/cost_surface_dialog.py:3580 (open_cost_profile)", _exc)
         try:
             dlg.destroyed.connect(lambda *_a: on_hover(None))
             dlg.destroyed.connect(
                 lambda *_a: (self.canvas.scene().removeItem(rb) if self.canvas and self.canvas.scene() else None)
             )
         except Exception as _exc:
-            log_swallowed("tools/cost_surface_dialog.py:3498 (open_cost_profile)", _exc)
+            log_swallowed("tools/cost_surface_dialog.py:3587 (open_cost_profile)", _exc)
         dlg.resize(820, 720 if model_key == MODEL_PANDOLF else 560)
         dlg.show()
 
@@ -3575,7 +3604,7 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
                 try:
                     self._task.cancel()
                 except Exception as _exc:
-                    log_swallowed("tools/cost_surface_dialog.py:3517 (_cleanup_for_close)", _exc)
+                    log_swallowed("tools/cost_surface_dialog.py:3606 (_cleanup_for_close)", _exc)
             self._task_running = False
             self._task = None
             self._reset_preview()
@@ -3585,9 +3614,9 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
                     try:
                         self.map_tool.snap_indicator.setMatch(QgsPointLocator.Match())
                     except Exception as _exc:
-                        log_swallowed("tools/cost_surface_dialog.py:3527 (_cleanup_for_close)", _exc)
+                        log_swallowed("tools/cost_surface_dialog.py:3616 (_cleanup_for_close)", _exc)
             except Exception as _exc:
-                log_swallowed("tools/cost_surface_dialog.py:3529 (_cleanup_for_close)", _exc)
+                log_swallowed("tools/cost_surface_dialog.py:3618 (_cleanup_for_close)", _exc)
 
             if self.original_tool:
                 self.canvas.setMapTool(self.original_tool)
@@ -3601,7 +3630,7 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
                 try:
                     self._task.cancel()
                 except Exception as _exc:
-                    log_swallowed("tools/cost_surface_dialog.py:3543 (_cleanup_for_unload)", _exc)
+                    log_swallowed("tools/cost_surface_dialog.py:3632 (_cleanup_for_unload)", _exc)
             self._task_running = False
             self._task = None
         except Exception as _exc:
@@ -3610,7 +3639,7 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
         try:
             self._reset_preview()
         except Exception as _exc:
-            log_swallowed("tools/cost_surface_dialog.py:3552 (_cleanup_for_unload)", _exc)
+            log_swallowed("tools/cost_surface_dialog.py:3641 (_cleanup_for_unload)", _exc)
 
         # Disconnect selection handlers for profile reopen to avoid stale callbacks after reload.
         try:
@@ -3633,9 +3662,9 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
                     try:
                         dlg.deleteLater()
                     except Exception as _exc:
-                        log_swallowed("tools/cost_surface_dialog.py:3575 (_cleanup_for_unload)", _exc)
+                        log_swallowed("tools/cost_surface_dialog.py:3664 (_cleanup_for_unload)", _exc)
                 except Exception as _exc:
-                    log_swallowed("tools/cost_surface_dialog.py:3577 (_cleanup_for_unload)", _exc)
+                    log_swallowed("tools/cost_surface_dialog.py:3666 (_cleanup_for_unload)", _exc)
             self._profile_dialogs.clear()
             self._profile_payloads.clear()
         except Exception as _exc:
@@ -3645,17 +3674,17 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
             if self.original_tool:
                 self.canvas.setMapTool(self.original_tool)
         except Exception as _exc:
-            log_swallowed("tools/cost_surface_dialog.py:3587 (_cleanup_for_unload)", _exc)
+            log_swallowed("tools/cost_surface_dialog.py:3676 (_cleanup_for_unload)", _exc)
 
         try:
             QgsProject.instance().layersWillBeRemoved.disconnect(self._on_project_layers_removed)
         except Exception as _exc:
-            log_swallowed("tools/cost_surface_dialog.py:3592 (_cleanup_for_unload)", _exc)
+            log_swallowed("tools/cost_surface_dialog.py:3681 (_cleanup_for_unload)", _exc)
 
         try:
             self._layer_temp_outputs.clear()
         except Exception as _exc:
-            log_swallowed("tools/cost_surface_dialog.py:3597 (_cleanup_for_unload)", _exc)
+            log_swallowed("tools/cost_surface_dialog.py:3686 (_cleanup_for_unload)", _exc)
 
 
 class CostPathPointTool(QgsMapToolEmitPoint):

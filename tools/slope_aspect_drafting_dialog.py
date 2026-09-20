@@ -280,6 +280,15 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
         success = False
         try:
             # Slope is required for both slope raster and aspect filtering.
+            # SCALE=1 is gdaldem's default and is only correct when the
+            # horizontal and the vertical units are both metres - the
+            # geographic-CRS guard above is what keeps that true.
+            # COMPUTE_EDGES stays at the toolbox default (False), so the 1-px
+            # border comes back as the -9999 NoData sentinel instead of a
+            # half-window guess. Both samplers below have to reject that value
+            # explicitly (slope <= -9000 / slope <= flat_thresh_deg) because
+            # -9999 is finite and isfinite() alone would let it through.
+            # Both choices are recorded in the layer metadata below.
             processing.run(
                 "gdal:slope",
                 {
@@ -324,6 +333,8 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
                             "step_cells": int(step_cells),
                             "label_size_pt": float(label_size_pt),
                             "slope_class_step": int(slope_class_step),
+                            "scale": 1,
+                            "compute_edges": False,
                         },
                     )
                 except Exception as _exc:
@@ -332,6 +343,18 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
                 run_group.insertLayer(0, out_grid)
 
             if want_aspect:
+                # ZERO_FLAT=True overrides the QGIS toolbox default (False):
+                # with the default gdaldem writes -9999 for flat cells, which is
+                # finite and would quantize to a bogus 81 deg (= E) arrow if the
+                # user left the flat threshold at 0. Writing flats as 0 keeps
+                # them harmless; they are dropped by the slope <= flat_thresh_deg
+                # test in _build_aspect_arrow_layer either way.
+                # COMPUTE_EDGES stays at the toolbox default (False) - the same
+                # as the gdal:slope call above - so the 1-px border is NoData in
+                # BOTH rasters and the arrow sampler drops it through that same
+                # slope test. Enabling it on only one of the two would ring the
+                # drawing with arrows whose direction is a half-window guess.
+                # Both choices are recorded in the layer metadata below.
                 processing.run(
                     "gdal:aspect",
                     {
@@ -365,6 +388,8 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
                             "step_cells": int(step_cells),
                             "flat_thresh_deg": float(flat_thresh),
                             "arrow_size_mm": float(arrow_size_mm),
+                            "zero_flat": True,
+                            "compute_edges": False,
                         },
                     )
                 except Exception as _exc:

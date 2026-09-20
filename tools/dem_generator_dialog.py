@@ -71,7 +71,12 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
         'Kriging (Lite, Ordinary)': {
             'algorithm': 'archtoolkit:kriging_lite',
             'method': None,
-            'desc': '포인트 기반 Ordinary Kriging(Lite). 자동 파라미터 + 예측 DEM + 분산(_variance.tif) 출력. 미터 단위 투영 CRS 권장 [Matheron, 1963; Cressie, 1993]'
+            # "자동 파라미터" overstated what Lite does: kriging_lite.py:8-11 fits no
+            # empirical variogram at all, so the variance band is a relative map and
+            # the description has to say so where the method is chosen.
+            'desc': ('포인트 기반 Ordinary Kriging(Lite). 휴리스틱 파라미터(경험 베리오그램 미적합) '
+                     '+ 예측 DEM + 상대 불확실성(_variance.tif) 출력. '
+                     '미터 단위 투영 CRS 권장 [Matheron, 1963; Cressie, 1993]')
         }
     }
     
@@ -227,7 +232,17 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
                 "<li><b>TIN</b>: 등고선(선) 데이터에 권장</li>"
                 "<li><b>IDW</b>: 포인트 데이터에 권장</li>"
                 "<li><b>Kriging (Lite)</b>: 포인트 + 값 필드(Z) 기반. 예측 DEM과 함께 "
-                "<code>_variance.tif</code>(불확실성)도 생성됩니다. (미터 단위 투영 CRS 권장)</li>"
+                "<code>_variance.tif</code>도 생성됩니다. (미터 단위 투영 CRS 권장)</li>"
+                "</ul>"
+                # README.md는 분산 래스터를 '보정된 예측분산이 아님'이라고 명시하는데,
+                # 정작 도구 안의 도움말은 그냥 '불확실성'이라고만 적고 있었다. 사용자가
+                # 실제로 읽는 곳에 한계를 적는다(수치는 kriging_lite.py:8-11 기준).
+                "<h3>Kriging (Lite)의 한계</h3>"
+                "<ul>"
+                "<li><code>Lite</code>는 <b>경험 베리오그램을 적합하지 않습니다</b>. 모델은 지수형으로 고정, "
+                "너깃은 표본분산의 5%, 레인지는 최근린 간격 중앙값의 3배이며, 이방성은 고려하지 않습니다.</li>"
+                "<li>따라서 <code>_variance.tif</code>는 보정된 예측분산이 아니라, 표본 밀도를 반영한 "
+                "<b>상대 불확실성 지도</b>로 읽어야 합니다. 값의 절대 크기보다 <b>상대적 분포</b>를 보세요.</li>"
                 "</ul>"
                 "<h3>팁</h3>"
                 "<ul>"
@@ -285,7 +300,13 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
             self.lblKrigingHint = QtWidgets.QLabel(
                 "<b>Kriging(Lite) 안내</b><br>"
                 "- 포인트 값(표고점 등) 기반 보간입니다. 등고선(선)에는 적합하지 않습니다.<br>"
-                "- 출력은 DEM과 함께 <code>_variance.tif</code>(불확실성)도 생성됩니다."
+                "- 출력은 DEM과 함께 <code>_variance.tif</code>도 생성됩니다.<br>"
+                # This banner sits right next to the method combo, so it is the
+                # last thing read before running. It has to carry the same
+                # caveat as README.md rather than just the word "불확실성".
+                "- <b>Lite</b>는 경험 베리오그램을 적합하지 않습니다(지수형 모델 고정, 너깃=표본분산의 5%, "
+                "레인지=최근린 간격 중앙값의 3배, 이방성 미고려).<br>"
+                "- 그러므로 <code>_variance.tif</code>는 보정된 예측분산이 아니라 <b>상대 불확실성 지도</b>입니다."
             )
             self.lblKrigingHint.setWordWrap(True)
             try:

@@ -52,7 +52,7 @@
 
 ## 경사도 / 사면방향 계산 (Slope / Aspect)
 
-**(A) gdaldem의 기본 3x3 커널(Horn 방식)** — `gdal:slope`, `gdal:aspect`를 ZEVENBERGEN 옵션 없이(기본=Horn) 호출:
+**(A) gdaldem의 기본 3x3 커널(Horn 방식)** — `gdal:slope`, `gdal:aspect`를 ZEVENBERGEN을 쓰지 않고(옵션 미지정 또는 `ZEVENBERGEN: False` — 둘 다 gdaldem 기본값인 Horn) 호출:
 > Horn, B.K.P. (1981). "Hill shading and the reflectance map." *Proceedings of the IEEE*, 69(1), pp. 14-47. DOI: 10.1109/PROC.1981.11918
 
 주(등급 구분): 경사 등급 표시(한국표준 / Tobler 1993 / Minetti 1995 / Llobera 2007 이름의 4종 프리셋, 각 5등급)는 **플러그인이 정한 표시 구분**입니다. 이름이 가리키는 문헌이 그 등급표를 그대로 출판한 것은 아니며, 각 연구의 논의를 참고해 만든 프리셋입니다.
@@ -112,7 +112,7 @@
 **(B) 무작위 지수(RI) 표의 확장(n>10)** — `RI_TABLE`의 n=11-15 값:
 > Alonso, J.A., & Lamata, M.T. (2006). "Consistency in the Analytic Hierarchy Process: a new approach." *International Journal of Uncertainty, Fuzziness and Knowledge-Based Systems*, 14(4), pp. 445-459. DOI: 10.1142/S0218488506004114
 
-주: 표에 없는 크기(n>15)의 행렬에서는 CR이 정의되지 않으므로, 플러그인은 0.0을 보고하지 않고 "정의 불가"로 처리합니다.
+주: 표에 없는 크기(n>15)의 행렬에서는 CR이 정의되지 않으므로, `ahp_core.py`는 0.0이 아니라 **NaN**을 반환하고, 대화상자는 이를 `CR=-`로 표시합니다. 0.0을 보고하면 일관적이라고 잘못 인증하는 셈이기 때문입니다(그런 경우에는 계층형으로 나누어 기준 수를 줄이십시오).
 
 ## 최소비용경로 / 비용-거리 (Least-cost path / Cost-distance)
 
@@ -185,7 +185,11 @@
 ## 히구치 거리대 (Higuchi view zones)
 
 **(C) 거리대 개념의 출처 (미터 기준값의 출처는 아님):**
-> Higuchi, T. (1975). *The Visual and Spatial Structure of Landscapes*.
+> 樋口忠彦 [Higuchi, T.] (1975). 『景観の構造 — ランドスケープとしての日本の空間』. 技報堂, 東京. (일본어 원저)
+>
+> 영역본: Higuchi, T. (1983). *The Visual and Spatial Structure of Landscapes*. Translated by Charles S. Terry. MIT Press, Cambridge, MA.
+
+주(서지): 영문 제목 *The Visual and Spatial Structure of Landscapes*는 **1983년 MIT Press 영역본**의 제목입니다. 1975년 판은 일본어 원저 『景観の構造』(技報堂)이므로, "Higuchi, T. (1975). The Visual and Spatial Structure of Landscapes. MIT Press." 라는 형태의 인용은 두 판본을 뒤섞은 것이며 그런 책은 존재하지 않습니다. 연도를 1975로 쓰려면 일본어 원저를, 영문 제목을 쓰려면 1983년 영역본을 인용해야 합니다.
 
 주(중요): Higuchi는 근경/중경/원경을 **관측 거리 ÷ 대상 높이의 비율(D/H)** 로 정의했습니다. 본 플러그인이 쓰는 **미터 단위 경계값(기본 500m / 2500m, 사용자 조정 가능)** 은 GIS 실무에서 널리 쓰이는 관례일 뿐 Higuchi(1975)가 제시한 수치가 아닙니다. 대상 유적(성벽·고분·산체 등)의 높이와 규모에 맞게 경계값을 조정해 사용하고, 실제 사용한 값은 결과 레이어 메타데이터(`higuchi_near_m`, `higuchi_mid_m`)에 기록됩니다.
 
@@ -201,13 +205,18 @@
 
 ## 지형 위치 지수 TPI (Topographic Position Index)
 
-**(A) 지수(index)의 원 출처** — `gdal:tpitopographicpositionindex`(중심 셀과 주변 셀 평균의 차) 호출:
+**(A) 지수(index)의 원 출처 — 반경 1셀(3x3)일 때만 이 알고리즘을 호출** — `gdal:tpitopographicpositionindex`(중심 셀과 주변 셀 평균의 차):
 > Wilson, M.F.J., O'Connell, B., Brown, C., Guinan, J.C., & Grehan, A.J. (2007). "Multiscale terrain analysis of multibeam bathymetry data for habitat mapping on the continental slope." *Marine Geodesy*, 30(1-2), pp. 3-35. DOI: 10.1080/01490410701295962
+
+주(중요): gdaldem TPI는 3x3 고정입니다. 따라서 **반경을 2셀 이상으로 지정하면 이 알고리즘을 호출하지 않으며**, 아래 (B)의 근사 계산으로 대체됩니다. 위 인용은 반경 1셀 경로에만 해당합니다.
+
+**(B) 반경 확장 TPI (다운샘플 근사)** — `tools/terrain_analysis_dialog.py`의 `_compute_tpi_raster`가 반경 2셀 이상에서 직접 구현:
+> DEM을 `(2r+1)`셀 블록 평균으로 축소해 이웃 평균을 근사하고, 원래 격자로 되돌린 뒤 `DEM - 이웃평균`으로 계산합니다. Weiss의 분류가 전제하는 **광역(broad-scale) TPI**를 3x3 고정 알고리즘으로는 낼 수 없기 때문입니다. 블록 평균 + 리샘플링이므로 **엄밀한 focal mean이 아니고** gdaldem TPI도 아니며, 레이어 이름에 "근사 반경"으로 표기됩니다. DEM이 블록 축소를 감당하지 못할 만큼 작으면 (A)의 3x3 경로로 되돌아가며, 이때는 실제 적용된 반경 1이 그대로 보고됩니다.
 
 **(B) 지형 위치 6등급 분류(Landform Classification)** — `run_slope_position_analysis`가 TPI와 경사 임계값을 조합해 직접 구현:
 > Weiss, A. (2001). "Topographic Position and Landforms Analysis." *Poster presentation, ESRI User Conference*, San Diego, CA.
 
-주: Weiss(2001)는 **분류(classification)** 의 출처이지 TPI **지수 자체**의 출처가 아닙니다. 지수의 출처는 위 Wilson 등(2007)입니다. 또한 gdaldem TPI는 3x3 고정이므로, Weiss의 분류가 전제하는 **광역(broad-scale) TPI**에 맞추기 위해 플러그인은 DEM을 축소(다운샘플)해 이웃 평균을 구한 뒤 `DEM - 이웃평균`으로 근사 반경 TPI를 계산합니다(레이어 이름에 "근사 반경"으로 표기).
+주: Weiss(2001)는 **분류(classification)** 의 출처이지 TPI **지수 자체**의 출처가 아닙니다. 지수의 출처는 위 Wilson 등(2007)입니다.
 
 ## 지형 거칠기 Roughness
 

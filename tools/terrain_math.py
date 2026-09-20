@@ -19,6 +19,18 @@ def zt_curvature(z, cell):
     taken with ``np.roll`` so callers must treat the one-cell border as invalid
     (it wraps around).  Where the surface is locally flat (slope ~ 0) both
     curvatures are 0 rather than a divide-by-zero NaN.
+
+    Sign convention (stated here because the caller cannot infer it from the
+    numbers, and cross-checking against GRASS/SAGA shows the opposite sign):
+    these values are the **negation** of the Zevenbergen & Thorne formula as
+    printed in the paper and in the ESRI documentation, which puts them in
+    agreement with ESRI's *descriptive* wording.
+
+    - profile (종단): 음(-) = 볼록 convex (침식 경향) / 양(+) = 오목 concave (퇴적 경향)
+    - plan (횡단):   음(-) = 수렴 convergent (물 모임) / 양(+) = 발산 divergent (능선)
+
+    Same wording as REFERENCES.md "부호 규약" and the layer names the dialog
+    writes ("부호규약: 음=볼록" / "부호규약: 음=수렴").
     """
     Z2 = np.roll(z, 1, 0)
     Z8 = np.roll(z, -1, 0)
