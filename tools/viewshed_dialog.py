@@ -4653,6 +4653,13 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             log_swallowed("viewshed_dialog._get_higuchi_thresholds", _exc)
             return (float(self.HIGUCHI_NEAR_DEFAULT_M), float(self.HIGUCHI_MID_DEFAULT_M))
 
+        return self._order_higuchi_pair(near, mid)
+
+    @staticmethod
+    def _order_higuchi_pair(near, mid):
+        """Enforce near < mid: swap an inverted pair, nudge an equal pair apart by 1 m."""
+        near = float(near)
+        mid = float(mid)
         if near > mid:
             near, mid = mid, near
         if near >= mid:
@@ -4674,13 +4681,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                 near_m = _near
             if mid_m is None:
                 mid_m = _mid
-        near_m = float(near_m)
-        mid_m = float(mid_m)
-        if near_m > mid_m:
-            near_m, mid_m = mid_m, near_m
-        if near_m >= mid_m:
-            mid_m = near_m + 1.0
-        return (near_m, mid_m)
+        return self._order_higuchi_pair(near_m, mid_m)
 
     @staticmethod
     def _format_higuchi_distance(value_m):

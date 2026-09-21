@@ -68,6 +68,18 @@ class InterpRgbToValueTests(unittest.TestCase):
         self.assertAlmostEqual(float(plain[0]), 6.0, places=4)
         self.assertAlmostEqual(float(snapped[0]), 10.0, places=4)
 
+    def test_snap_does_not_count_as_colour_mismatch(self):
+        # The grey pixel sits exactly ON the ramp (true residual 0). Snapping
+        # its t to 1.0 moves the projection ~100 RGB units away, and that
+        # distance must not be what the tolerance test sees, or on-ramp
+        # high-value pixels become NoData.
+        r, g, b = _bands([(153, 153, 153)])
+        out, residual = interp_rgb_to_value(
+            r=r, g=g, b=b, points=RAMP, snap_last_t=0.5, max_distance=5.0, return_residual=True
+        )
+        self.assertAlmostEqual(float(residual[0]), 0.0, places=3)
+        self.assertAlmostEqual(float(out[0]), 10.0, places=4)
+
     def test_shape_mismatch_raises(self):
         with self.assertRaises(ValueError):
             interp_rgb_to_value(

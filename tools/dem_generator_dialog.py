@@ -35,7 +35,7 @@ from .atomic_output import (
 )
 from .live_log_dialog import ensure_live_log_dialog
 from .help_dialog import show_help_dialog
-from .kriging_lite import ELEVATION_FIELD_CANDIDATES, GEOM_Z_SENTINEL
+from .kriging_lite import GEOM_Z_SENTINEL, auto_elevation_field
 
 # Load the UI file
 FORM_CLASS, _ = uic.loadUiType(os.path.join(
@@ -910,12 +910,9 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
             return -1
 
     def _resolve_z_field(self, fields) -> str:
-        """Elevation field NAME auto-detected in ``fields`` (same list as Kriging), or ""."""
+        """Elevation field NAME auto-detected in ``fields``: the same resolver Kriging uses, or ""."""
         try:
-            for name in ELEVATION_FIELD_CANDIDATES:
-                idx = int(fields.lookupField(name))
-                if idx >= 0:
-                    return str(fields[idx].name())
+            return str(auto_elevation_field(fields) or "")
         except Exception as _exc:
             log_swallowed("dem_generator_dialog._resolve_z_field", _exc)
         return ""
@@ -1105,6 +1102,27 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
                     level=1,
                     duration=8,
                 )
+            elif selected_codes and not dxf_layer_names:
+                # A DXF opened through the QGIS browser owns a "Layer" column
+                # too, but the table is not applied to it; say so instead of
+                # letting the ticked codes look active.
+                with_layer_field = []
+                for lyr in selected_layers:
+                    try:
+                        if lyr.fields().indexFromName("Layer") >= 0:
+                            with_layer_field.append(lyr.name())
+                    except Exception as _exc:
+                        log_swallowed("dem_generator_dialog.run_process", _exc)
+                if with_layer_field:
+                    push_message(
+                        self.iface,
+                        "안내",
+                        "레이어 코드 필터는 이 대화상자의 'DXF 불러오기'로 연 레이어에만 적용됩니다. "
+                        + ", ".join(with_layer_field[:3])
+                        + " 에는 코드 표가 적용되지 않아 모든 피처가 보간에 쓰입니다.",
+                        level=1,
+                        duration=9,
+                    )
 
         # Decide the elevation source BEFORE merging: native:mergevectorlayers
         # upgrades the output to Z as soon as ONE input has Z and pads the

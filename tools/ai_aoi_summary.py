@@ -86,7 +86,7 @@ _NUMERIC_FIELD_CANDIDATES = (
 # geochemistry table's boron column "B", a "rank" score or a "no" count are
 # data, not ids. Tool-specific junk columns live in _TOOL_ID_FIELD_RES instead.
 _ID_FIELD_RE = re.compile(
-    r"^(fid|gid|id|oid|objectid|osm_id|uid|uuid|idx|index|seq"
+    r"^(fid|gid|id|oid|objectid|osm_id|uid|uuid|idx|index|seq|pnu"
     r"|component|번호|일련번호|.*_id|.*_fid|.*_no|.*_idx)$",
     re.IGNORECASE,
 )

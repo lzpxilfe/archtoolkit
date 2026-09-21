@@ -69,6 +69,10 @@ def interp_rgb_to_value(
 
     out = np.full(rr.shape, np.nan, dtype=np.float32)
     min_dist = np.full(rr.shape, np.float32(np.inf), dtype=np.float32)
+    # Residual of the winning segment measured to the UNSNAPPED projection:
+    # snap_last_t moves the last segment's projection to its endpoint, which
+    # is the intended value rule but must not count as colour mismatch.
+    min_dist_raw = np.full(rr.shape, np.float32(np.inf), dtype=np.float32)
 
     pts = list(points)
     last_seg_idx = len(pts) - 2
@@ -99,7 +103,13 @@ def interp_rgb_to_value(
 
         t = ((rr - c1r) * vr + (gg - c1g) * vg + (bb - c1b) * vb) / v_len_sq
         np.clip(t, np.float32(0.0), np.float32(1.0), out=t)
+        dist_sq_raw = None
         if snap_last is not None and i == last_seg_idx:
+            # Distance to the true projection, kept for the residual only.
+            pr0 = c1r + t * vr
+            pg0 = c1g + t * vg
+            pb0 = c1b + t * vb
+            dist_sq_raw = (rr - pr0) ** 2 + (gg - pg0) ** 2 + (bb - pb0) ** 2
             # Important: apply snap BEFORE distance comparison (affects which segment wins).
             try:
                 t[t > np.float32(snap_last)] = np.float32(1.0)
@@ -109,6 +119,8 @@ def interp_rgb_to_value(
         pg = c1g + t * vg
         pb = c1b + t * vb
         dist_sq = (rr - pr) ** 2 + (gg - pg) ** 2 + (bb - pb) ** 2
+        if dist_sq_raw is None:
+            dist_sq_raw = dist_sq
 
         mask = dist_sq < min_dist
         if not np.any(mask):
@@ -118,8 +130,9 @@ def interp_rgb_to_value(
         delta = np.float32(v2 - v1)
         out[mask] = base + t[mask].astype(np.float32, copy=False) * delta
         min_dist[mask] = dist_sq[mask].astype(np.float32, copy=False)
+        min_dist_raw[mask] = dist_sq_raw[mask].astype(np.float32, copy=False)
 
-    residual = np.sqrt(min_dist)
+    residual = np.sqrt(min_dist_raw)
     if max_distance is not None:
         try:
             tol = float(max_distance)

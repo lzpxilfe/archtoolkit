@@ -74,6 +74,7 @@ class AlignResamplingSemanticsTests(unittest.TestCase):
         # The land-cover shape: Byte codes 1..7, no metadata.
         self.assertTrue(looks_like_class_codes("Byte", [1, 2, 3, 3, 7, 1, 6]))
         self.assertTrue(looks_like_class_codes("Int16", [10, 20, 30]))
+        self.assertTrue(looks_like_class_codes("Int32", [1, 5, 12, 12]))
         self.assertTrue(looks_like_class_codes("Byte", [4.0, 4.0]))
 
     def test_measurements_do_not_read_as_class_codes(self):

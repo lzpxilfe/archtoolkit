@@ -49,6 +49,7 @@ from .help_dialog import show_help_dialog
 from .i18n import is_english_ui
 from .utils import (
     log_swallowed,
+    log_message,
     get_archtoolkit_layer_metadata,
     log_exception,
     new_run_id,
@@ -1058,13 +1059,15 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
             how_many = f"{count} pair(s)" if count is not None else "some pairs"
             return (
                 f"Warning: {how_many} of the synthesized ratios fell outside the Saaty scale (1/9-9) "
-                "and were clamped, so the pairwise table is only an approximation; the hierarchical "
-                "global weights are the ones actually used."
+                "and were clamped, so the pairwise table is only an approximation. While hierarchy mode "
+                "is on, the run uses the hierarchical global weights; editing a table cell switches back "
+                "to the table's own values."
             )
         how_many = f"{count}쌍이" if count is not None else "일부가"
         return (
             f"주의: 계층 가중치 비율 중 {how_many} Saaty 척도(1/9-9)를 벗어나 보정되었습니다. "
-            "쌍대비교표는 근사값이며, 실제 사용되는 값은 계층 전역가중치(global_weights)입니다."
+            "쌍대비교표는 근사값이며, 계층 모드가 켜진 동안 실행은 계층 전역가중치(global_weights)를 씁니다. "
+            "표의 셀을 직접 수정하면 계층 모드가 해제되어 표의 값을 씁니다."
         )
 
     def _hierarchy_note(self, config: Optional[Dict[str, Any]] = None) -> str:
@@ -1106,6 +1109,59 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
         if caveat:
             push_message(self.iface, "Warning" if is_english_ui() else "주의", caveat, level=1, duration=10)
         return True
+
+    def _hierarchy_global_weight_vector(self) -> Optional[List[float]]:
+        """Global weights of the applied hierarchy, aligned to ``self._criteria``, or None.
+
+        None unless hierarchy mode is on and every criterion has a positive
+        global weight; the vector is normalised to sum 1. This is what the run
+        uses in hierarchy mode, so the clamped flat seed shown in the table
+        never silently replaces the weights the user built.
+        """
+        if not str(self._weight_input_mode or "").startswith("hierarchy"):
+            return None
+        try:
+            config = self._sanitize_hierarchy_config(self._hierarchy_config)
+            summary = dict((config or {}).get("computed") or {})
+            gw = dict(summary.get("global_weights") or {})
+            if not gw or not self._criteria:
+                return None
+            vec: List[float] = []
+            for crit in self._criteria:
+                w = gw.get(str(crit.layer_id or ""))
+                if w is None:
+                    return None
+                w = float(w)
+                if not math.isfinite(w) or w < 0.0:
+                    return None
+                vec.append(w)
+            total = float(sum(vec))
+            if total <= 0.0:
+                return None
+            return [v / total for v in vec]
+        except Exception as _exc:
+            log_swallowed("ahp_suitability_dialog._hierarchy_global_weight_vector", _exc)
+            return None
+
+    def _on_pairwise_hand_edited(self) -> None:
+        """A user edit to the flat table ends hierarchy mode: the table is now the source."""
+        if not str(self._weight_input_mode or "").startswith("hierarchy"):
+            return
+        self._invalidate_weight_input_mode()
+        try:
+            push_message(
+                self.iface,
+                "Info" if is_english_ui() else "안내",
+                (
+                    "Pairwise cell edited: hierarchy mode is off and the table's own values are used."
+                    if is_english_ui()
+                    else "쌍대비교 셀을 수정해 계층 가중치 모드를 해제했습니다. 이제 표의 값을 사용합니다."
+                ),
+                level=0,
+                duration=7,
+            )
+        except Exception as _exc:
+            log_swallowed("ahp_suitability_dialog._on_pairwise_hand_edited", _exc)
 
     def _serialized_hierarchy_config(self) -> Optional[Dict[str, Any]]:
         if not str(self._weight_input_mode or "").startswith("hierarchy"):
@@ -1196,7 +1252,10 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
         the count and the caveat travel with the layer instead of living only
         in a dialog the reader no longer has open.
         """
-        out: Dict[str, Any] = {"weight_input_mode": str(self._weight_input_mode or "flat")}
+        out: Dict[str, Any] = {
+            "weight_input_mode": str(self._weight_input_mode or "flat"),
+            "weights_source": str(getattr(self, "_last_weights_source", "") or "pairwise_matrix"),
+        }
         hierarchy = None
         try:
             hierarchy = self._serialized_hierarchy_config()
@@ -1497,6 +1556,7 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
                         self._pairwise[(int(row), int(col))] = float(v)
                         self._set_reciprocal_cell(int(row), int(col), float(v))
                         self._update_consistency_and_weights()
+                        self._on_pairwise_hand_edited()
 
                     cmb.currentIndexChanged.connect(_on_changed)
                     self.tblPairwise.setCellWidget(i, j, cmb)
@@ -2113,6 +2173,7 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
         # 1) Weights
         n = int(len(self._criteria))
         cr = None
+        self._last_weights_source = "pairwise_matrix"
         if n == 1:
             self._criteria[0].weight = 1.0
             cr = 0.0
@@ -2122,8 +2183,17 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
                 for c in self._criteria:
                     c.weight = 1.0 / float(n)
                 cr = None
+                self._last_weights_source = "equal"
             else:
                 w, _lam, cr0 = _ahp_weights_from_matrix(mat)
+                # In hierarchy mode the flat table is only a (possibly clamped)
+                # seed; the weights the user built are the hierarchy's global
+                # weights, so use those and say so in the metadata.
+                hier_w = self._hierarchy_global_weight_vector()
+                if hier_w is not None:
+                    w = hier_w
+                    self._last_weights_source = "hierarchy_global"
+                    log_message("AHP: hierarchy mode - using hierarchical global weights (pairwise table is the seed)")
                 for i, c in enumerate(self._criteria):
                     try:
                         c.weight = float(w[i])

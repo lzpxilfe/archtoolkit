@@ -94,6 +94,32 @@ def _as_float(value) -> Optional[float]:
         return None
 
 
+def auto_elevation_field(fields) -> Optional[str]:
+    """Elevation field name in a QgsFields, by NAME only, or None.
+
+    Exact spelling first over the whole candidate list, then one
+    case-insensitive pass (QgsFields.lookupField) returning the real
+    spelling. Shared by the Kriging path and the DEM dialog's TIN/IDW path so
+    "auto" resolves to the same column everywhere.
+    """
+    if fields is None:
+        return None
+    try:
+        for name in ELEVATION_FIELD_CANDIDATES:
+            idx = fields.indexFromName(name)
+            if idx >= 0:
+                return name
+        lookup = getattr(fields, "lookupField", None)
+        if lookup is not None:
+            for name in ELEVATION_FIELD_CANDIDATES:
+                idx = int(lookup(name))
+                if idx >= 0:
+                    return str(fields[idx].name())
+    except Exception as _exc:
+        log_swallowed("tools/kriging_lite.py (auto_elevation_field)", _exc)
+    return None
+
+
 def _auto_value_field(layer: QgsVectorLayer) -> Optional[str]:
     """Pick a likely elevation field by NAME only.
 
@@ -104,21 +130,8 @@ def _auto_value_field(layer: QgsVectorLayer) -> Optional[str]:
     """
     if layer is None:
         return None
-
     try:
-        fields = layer.fields()
-        for name in ELEVATION_FIELD_CANDIDATES:
-            idx = fields.indexFromName(name)
-            if idx >= 0:
-                return name
-        # Second pass, case-insensitive (QgsFields.lookupField), so "Height"
-        # or "elevation" is found and returned under its real spelling.
-        lookup = getattr(fields, "lookupField", None)
-        if lookup is not None:
-            for name in ELEVATION_FIELD_CANDIDATES:
-                idx = int(lookup(name))
-                if idx >= 0:
-                    return str(fields[idx].name())
+        return auto_elevation_field(layer.fields())
     except Exception as _exc:
         log_swallowed("tools/kriging_lite.py:89 (_auto_value_field)", _exc)
     return None
@@ -534,7 +547,9 @@ def ordinary_kriging_lite_to_geotiff(
             # nugget that fill_diagonal put on the matrix. With the continuous
             # value (partial_sill only) the solver treated every sample as
             # noisy and smoothed the surveyed values away (DEMGEN-02).
-            cvec = np.where(dist0 <= _EXACT_TOL, float(params.partial_sill + params.nugget), cvec)
+            # Tolerance scales with the cell size: an absolute 1e-9 is below
+            # float64 rounding at large map coordinates (Web Mercator x ~ 1e7).
+            cvec = np.where(dist0 <= max(_EXACT_TOL, 1e-6 * px), float(params.partial_sill + params.nugget), cvec)
 
             b = np.empty((len(key) + 1,), dtype=float)
             b[:-1] = cvec

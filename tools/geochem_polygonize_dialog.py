@@ -1008,9 +1008,6 @@ value/class 래스터와 폴리곤을 생성합니다.
                 level=1,
                 duration=9,
             )
-        if len(points) < 2:
-            push_message(self.iface, "오류", "CSV에는 value,r,g,b 형태의 포인트가 2개 이상 필요합니다.", level=2, duration=7)
-            return
 
         base_label = os.path.splitext(os.path.basename(path))[0]
         try:

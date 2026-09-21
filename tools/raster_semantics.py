@@ -83,7 +83,9 @@ def is_circular_meta(meta) -> bool:
 # absent: codes stored as float are already outside the convention, and a
 # float raster with few distinct values is far more often a rescaled
 # measurement than a class map.
-CLASS_CODE_TYPES = ("Byte", "Int8", "Int16", "UInt16")
+# Int32/UInt32 included: the plugin's own geology rasterizer writes lithology
+# codes as Int32, and a GeoTIFF opened in a fresh project has no metadata.
+CLASS_CODE_TYPES = ("Byte", "Int8", "Int16", "UInt16", "Int32", "UInt32")
 
 # Distinct values a sample may hold and still read as class codes. Land cover,
 # soil, lithology and suitability classes all sit well below this; a Byte

@@ -288,6 +288,16 @@ def _expected_nodata_values(layer: QgsRasterLayer, nodata):
     return tuple([nodata] * band_count)
 
 
+def _band_valid_count(provider, band: int) -> Optional[int]:
+    """Number of non-NoData cells in a band from full-resolution statistics, or None."""
+    try:
+        stats = provider.bandStatistics(int(band), QgsRasterBandStats.All, QgsRectangle(), 0)
+        return int(stats.elementCount)
+    except Exception as exc:
+        log_swallowed("align_export_dialog._band_valid_count", exc)
+        return None
+
+
 def _valid_fraction(block) -> Optional[float]:
     """Share of cells in a raster block that are not NoData, or None if unreadable.
 
@@ -1201,9 +1211,21 @@ class AlignExportDialog(QtWidgets.QDialog):
                 )
                 continue
             if fraction <= 0.0:
-                raise RuntimeError(
-                    f"정렬 결과에 유효 픽셀이 없습니다 (입력이 기준 격자와 겹치지 않는지 확인하세요): "
-                    f"{source_name} band {band}"
+                # A 64x64 nearest-decimated sample can step over a small valid
+                # patch on a large grid; confirm with full-band statistics
+                # before calling the predictor empty.
+                full_valid = _band_valid_count(provider, band)
+                if full_valid is None or full_valid <= 0:
+                    raise RuntimeError(
+                        f"정렬 결과에 유효 픽셀이 없습니다 (입력이 기준 격자와 겹치지 않는지 확인하세요): "
+                        f"{source_name} band {band}"
+                    )
+                total_px = float(layer.width()) * float(layer.height())
+                fraction = (float(full_valid) / total_px) if total_px > 0 else 0.0
+                log_message(
+                    f"정렬 결과 표본에는 유효 픽셀이 없었지만 전체 통계로 {full_valid:,}개를 확인했습니다: "
+                    f"{source_name} band {band}",
+                    level=Qgis.Warning,
                 )
             band_pct = 100.0 * fraction
             valid_pct = band_pct if valid_pct is None else min(valid_pct, band_pct)
