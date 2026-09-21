@@ -822,9 +822,17 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
                 continue
             try:
                 if float(grave_buffer_m) > 0:
-                    g = g.buffer(float(grave_buffer_m), 8)
+                    gb = g.buffer(float(grave_buffer_m), 8)
+                    # buffer() returns a NULL geometry on GEOS failure instead of
+                    # raising; appending it poisons the union below.
+                    if gb is not None and not gb.isNull() and not gb.isEmpty():
+                        g = gb
+                    else:
+                        log_message("무덤 회피: 버퍼 실패 피처는 원 지오메트리로 대체합니다.", level=Qgis.Warning)
             except Exception as _exc:
                 log_swallowed("trench_suggestion_dialog._build_grave_avoid_union", _exc)
+            if g is None or g.isNull() or g.isEmpty():
+                continue
             geoms.append(g)
 
         count = len(geoms)
@@ -839,6 +847,12 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
                     union = union.combine(g)
             except Exception:
                 union = None
+        # unaryUnion() reports a GEOS failure as a null geometry, not an
+        # exception, and intersects() against a null is always False - so the
+        # avoidance silently did nothing while the UI counted N graves avoided.
+        if union is None or union.isNull() or union.isEmpty():
+            log_message("무덤 회피: 회피 마스크(union) 생성 실패 — 이번 실행에는 회피가 적용되지 않습니다.", level=Qgis.Warning)
+            return None, 0
         return union, count
 
     def _dem_pixel_size(self, dem_layer: QgsRasterLayer) -> float:
@@ -887,8 +901,12 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
         pt: QgsPointXY,
         src_crs,
         radius_m: float,
-    ) -> Tuple[Optional[float], float]:
+    ) -> Tuple[Optional[float], float, Optional[float]]:
         """Slope-weighted circular mean of aspect over the trench footprint.
+
+        Also returns the MAXIMUM slope seen over the same rosette, so the
+        slope limit can be applied to the whole footprint rather than the
+        single centre cell a 500 m trench was previously judged by.
 
         A single-cell aspect sample is noisy; averaging aspect across the footprint
         (weighted by slope, so near-flat cells barely contribute) yields a stable
@@ -906,12 +924,15 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
         sum_e = 0.0
         sum_n = 0.0
         w_total = 0.0
+        slope_max_seen: Optional[float] = None
         cx = float(pt.x())
         cy = float(pt.y())
         for dx, dy in offsets:
             sp = QgsPointXY(cx + dx, cy + dy)
             asp = self._sample_raster_value(aspect_layer, sp, src_crs)
             slp = self._sample_raster_value(slope_layer, sp, src_crs)
+            if slp is not None and 0.0 <= float(slp) <= 90.0:
+                slope_max_seen = float(slp) if slope_max_seen is None else max(slope_max_seen, float(slp))
             if asp is None or slp is None:
                 continue
             if asp < 0.0 or asp > 360.0 or slp < 0.0 or slp > 90.0:
@@ -926,13 +947,13 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
             w_total += w
 
         if w_total <= 0.0:
-            return None, 0.0
+            return None, 0.0, slope_max_seen
         mag = math.hypot(sum_e, sum_n)
         coherence = mag / w_total if w_total > 0 else 0.0
         if mag <= 1e-9:
-            return None, float(coherence)
+            return None, float(coherence), slope_max_seen
         bearing = math.degrees(math.atan2(sum_e, sum_n)) % 360.0
-        return float(bearing), float(coherence)
+        return float(bearing), float(coherence), slope_max_seen
 
     def _clip_dem_to_aoi(
         self,
@@ -1302,13 +1323,18 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
 
                     # Stable orientation from footprint-averaged aspect, with a
                     # flat-terrain fallback to the AOI long axis.
-                    asp_bear, coherence = self._footprint_downslope_bearing(
+                    asp_bear, coherence, foot_slope_max = self._footprint_downslope_bearing(
                         aspect_layer=aspect_layer,
                         slope_layer=slope_layer,
                         pt=pt,
                         src_crs=aoi_layer.crs(),
                         radius_m=foot_radius,
                     )
+                    # The limit applies to the whole footprint, not just the centre
+                    # cell: a long trench can cross ground far steeper than its middle.
+                    if foot_slope_max is not None and foot_slope_max > slope_max:
+                        y += grid_step
+                        continue
                     is_flat = (asp_bear is None) or (coherence < 0.25) or (slope < flat_slope_thresh)
                     if is_flat:
                         bearing = float(default_bearing) % 180.0
@@ -1385,6 +1411,7 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
                             "mode": ("flat" if is_flat else orient_mode),
                             "inside_ratio": float(inside_ratio),
                             "slope_deg": float(slope),
+                            "slope_max_deg": foot_slope_max,
                             "ahp_val": ahp_val,
                             "ahp_score": float(ahp_score),
                             "ref_dist_m": ref_dist,
@@ -1484,6 +1511,7 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
                 QgsField("bearing_deg", QVariant.Double),
                 QgsField("inside_pct", QVariant.Double),
                 QgsField("slope_deg", QVariant.Double),
+                QgsField("slope_max_deg", QVariant.Double),
                 QgsField("ahp_val", QVariant.Double),
                 QgsField("ahp_score", QVariant.Double),
                 QgsField("ref_dist_m", QVariant.Double),
@@ -1504,6 +1532,7 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
                     float(d.get("bearing_deg") or 0.0),
                     float(d.get("inside_ratio") or 0.0) * 100.0,
                     float(d.get("slope_deg") or 0.0),
+                    _safe_float(d.get("slope_max_deg"), default=None),
                     _safe_float(d.get("ahp_val"), default=None),
                     float(d.get("ahp_score") or 0.0),
                     _safe_float(d.get("ref_dist_m"), default=None),
@@ -1561,6 +1590,11 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
                     "grave_buffer_m": grave_buffer_m,
                     "ref_radius_m": ref_radius_m,
                     "max_slope_deg": slope_max,
+                    "slope_test": "footprint_max_and_centre",
+                    # ahp_score is a min-max stretch over the AOI bounding box, not the
+                    # polygon and not the raster's own scale - recorded so a reader can
+                    # tell why the same raster scores differently in another AOI.
+                    "ahp_norm": {"method": "minmax", "extent": "aoi_bbox", "min": ahp_min, "max": ahp_max},
                     "weights_requested": {"ahp": w_ahp, "ref": w_ref, "slope": w_slope},
                     "weights_effective": {"ahp": we_ahp, "ref": we_ref, "slope": we_slope},
                     "ahp_used": bool(ahp_available),

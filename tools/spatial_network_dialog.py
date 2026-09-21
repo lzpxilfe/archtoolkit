@@ -1133,6 +1133,22 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
 
     def _ensure_metric(self, crs, title: str) -> bool:
         if is_metric_crs(crs):
+            # Web Mercator passes the metre check, but its scale factor is
+            # 1/cos(lat): every planar distance in this tool is ~26% long at
+            # 37.5N, and so is every distance threshold. Warn, do not block.
+            try:
+                authid = str(crs.authid() or "").upper()
+                desc = str(crs.description() or "").lower()
+                if authid in ("EPSG:3857", "EPSG:900913", "EPSG:3785") or "pseudo-mercator" in desc or "web mercator" in desc:
+                    push_message(
+                        self.iface, title,
+                        "Web Mercator(EPSG:3857)는 미터 단위지만 한국 위도에서 거리가 약 26% 과대합니다. "
+                        "거리·임계값이 중요하면 EPSG:5186 등 한국 투영좌표계로 재투영하세요.",
+                        level=1, duration=10,
+                    )
+                    log_message("CRS가 Web Mercator입니다: 거리와 임계값이 위도에 따라 과대(37.5N에서 약 1.26배).", level=Qgis.Warning)
+            except Exception as _exc:
+                log_swallowed("spatial_network_dialog._ensure_metric", _exc)
             return True
         push_message(
             self.iface,
@@ -1854,9 +1870,18 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
         else:
             step = max(pix, step)
 
-        # Network use-case: keep sampling reasonable.
+        # Network use-case: keep sampling reasonable - but say so when the
+        # ceiling coarsens a long sight line past the requested step.
         num_samples = int(total_dist / step) if step > 0 else 200
-        num_samples = max(80, min(num_samples, 2000))
+        num_samples = max(80, min(num_samples, 5000))
+        eff_step = (total_dist / num_samples) if num_samples > 0 else step
+        if eff_step > step * 1.05 and not getattr(self, "_los_step_warned", False):
+            self._los_step_warned = True
+            log_message(
+                f"가시선 샘플 간격: 요청 {step:.1f} m, 장거리 상한(5000점)으로 실제 {eff_step:.1f} m 적용 "
+                f"(총거리 {total_dist:.0f} m). 이보다 긴 쌍은 모두 이 상한의 영향을 받습니다.",
+                level=Qgis.Warning,
+            )
 
         if provider is None:
             provider = dem_layer.dataProvider()
@@ -1871,6 +1896,12 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
             tgt_elev = float(tgt_elev0) + float(tgt_height)
         except Exception:
             return None
+        # A Float32 DEM carrying NaN but declaring no NoData makes sample()
+        # return (nan, True). NaN compares False to everything, so a NaN
+        # endpoint made every pair "visible" and a NaN hole read as clear
+        # ground. Treat both as a sample failure, like viewshed_dialog does.
+        if not (math.isfinite(obs_elev) and math.isfinite(tgt_elev)):
+            return None
 
         for i in range(1, num_samples):
             frac = i / num_samples
@@ -1882,6 +1913,8 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
             try:
                 z = float(elev)
             except Exception:
+                return None
+            if not math.isfinite(z):
                 return None
 
             sight = obs_elev + frac * (tgt_elev - obs_elev)
@@ -1905,6 +1938,8 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
         compute_betweenness: bool = False,
         vis_edge_rule: str = VIS_RULE_MUTUAL,
     ):
+        # once-per-run notice for the LOS sample ceiling (see _los_visible)
+        self._los_step_warned = False
         n = len(nodes)
         if n < 2:
             return

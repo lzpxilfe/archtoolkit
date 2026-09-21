@@ -78,6 +78,7 @@ from .help_dialog import show_help_dialog
 from .i18n import get_output_group_name
 from .geochem_legend import (
     LegendPoint,
+    RGB_MATCH_TOLERANCE as _RGB_MATCH_TOLERANCE,
     interp_rgb_to_value as _interp_rgb_to_value,
     mask_black_lines as _mask_black_lines,
     points_to_breaks as _points_to_breaks,
@@ -1492,14 +1493,42 @@ value/class 래스터와 폴리곤을 생성합니다.
             log_message("GeoChem: RGB -> value mapping…", level=Qgis.Info)
             if do_snap_max:
                 log_message(f"GeoChem: high-end snap enabled (last segment t>{snap_t:g} -> max)", level=Qgis.Info)
-            out = _interp_rgb_to_value(
+            out, residual = _interp_rgb_to_value(
                 r=r,
                 g=g,
                 b=b,
                 points=preset.points,
                 snap_last_t=snap_t if do_snap_max else None,
+                max_distance=_RGB_MATCH_TOLERANCE,
+                return_residual=True,
             )
             nodata_val = np.float32(-9999.0)
+            # Off-legend colours (black lines, label text, anything not on the
+            # ramp) used to be forced onto the nearest segment - and the dark
+            # corner of RGB space is nearest the maximum of most presets. They
+            # are NoData now; with inpainting on they get filled like the
+            # linework mask, otherwise they stay NoData. The count is reported
+            # so a map full of rejected pixels does not pass silently.
+            try:
+                rejected = ~np.isfinite(out)
+                n_rej = int(np.count_nonzero(rejected))
+                if n_rej:
+                    out = out.astype(np.float32, copy=False)
+                    out[rejected] = nodata_val
+                    pct_rej = n_rej / max(1, int(out.size)) * 100.0
+                    log_message(
+                        f"GeoChem: {n_rej:,}/{int(out.size):,} 픽셀({pct_rej:.2f}%)이 범례 색에서 RGB 거리 "
+                        f"{_RGB_MATCH_TOLERANCE:g} 이상 떨어져 NoData 처리 (검정 선·문자·범례 밖 색)",
+                        level=Qgis.Warning if pct_rej >= 5.0 else Qgis.Info,
+                    )
+                    if pct_rej >= 5.0:
+                        push_message(
+                            self.iface, "GeoChem",
+                            f"범례와 맞지 않는 색 {pct_rej:.1f}%를 NoData 처리했습니다. 범례 프리셋이 이 WMS와 맞는지 확인하세요.",
+                            level=1, duration=9,
+                        )
+            except Exception as _exc:
+                log_swallowed("geochem_polygonize_dialog.run (legend tolerance)", _exc)
 
             # Transparent pixels (if alpha band exists) -> NoData
             transparent = None
@@ -2350,6 +2379,27 @@ value/class 래스터와 폴리곤을 생성합니다.
             px_area = 0.0
         if not math.isfinite(px_area) or px_area < 0:
             px_area = 0.0
+        # px_area and every c*_area below are in the RASTER CRS units squared.
+        # A WMS is often served in EPSG:4326, in which case these are square
+        # degrees and must not be read as an area. Name the unit in a field and
+        # warn once rather than let a square-degree number sit in an area column.
+        try:
+            rcrs = raster_crs
+            if rcrs is not None and rcrs.isValid() and rcrs.isGeographic():
+                px_area_unit = "deg2"
+                log_message(
+                    "GeoChem zonal: 래스터 CRS가 위경도라 px_area/c*_area는 제곱도(deg²)입니다. 면적으로 읽지 마세요.",
+                    level=Qgis.Warning,
+                )
+            elif rcrs is not None and rcrs.isValid():
+                # Projected: label with the CRS authid so the unit is traceable
+                # (a Korean belt is metres; a feet-based CRS is not).
+                px_area_unit = f"{rcrs.authid() or 'projected'} units^2"
+            else:
+                px_area_unit = "unknown"
+        except Exception as _exc:
+            log_swallowed("geochem_polygonize_dialog._make_zonal_stats_layer (area unit)", _exc)
+            px_area_unit = "unknown"
 
         # Output layer (same CRS as zone layer)
         crs = zone_layer.crs()
@@ -2388,6 +2438,7 @@ value/class 래스터와 폴리곤을 생성합니다.
             QgsField("val_min", QVariant.Double),
             QgsField("val_max", QVariant.Double),
             QgsField("px_area", QVariant.Double),
+            QgsField("area_unit", QVariant.String),
         ]
 
         n_classes = max(0, int(len(breaks) - 1))
@@ -2581,6 +2632,7 @@ value/class 래스터와 폴리곤을 생성합니다.
                 out_ft["val_min"] = float(v_min) if v_min is not None else None
                 out_ft["val_max"] = float(v_max) if v_max is not None else None
                 out_ft["px_area"] = float(px_area) if px_area > 0 else None
+                out_ft["area_unit"] = px_area_unit
 
                 if cls_counts is not None:
                     for cid in range(1, n_classes + 1):

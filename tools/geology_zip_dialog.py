@@ -423,6 +423,18 @@ class KigamZipProcessor:
                 if not layer.isValid():
                     log_message(f"KIGAM 레이어 로드 실패: {shp_path}", level=Qgis.Warning)
                     continue
+                # A sheet whose .prj was lost (re-packed ZIP, decode failure)
+                # loads fine and rasterizes fine - to a GeoTIFF with no CRS,
+                # reported as success. Say so at load time, where the fix is
+                # one click in layer properties.
+                try:
+                    if not layer.crs().isValid():
+                        log_message(f"KIGAM: {fname} 좌표계 없음(.prj 누락/인식 불가). 래스터 변환 전 CRS를 지정하세요.", level=Qgis.Warning)
+                        push_message(self.iface, "지질도 좌표계",
+                                     f"{fname}: 좌표계를 읽지 못했습니다. 레이어 속성에서 CRS를 지정한 뒤 래스터로 변환하세요.",
+                                     level=1, duration=10)
+                except Exception as _exc:
+                    log_swallowed("geology_zip_dialog.process_zip (crs check)", _exc)
 
                 QgsProject.instance().addMapLayer(layer, False)
                 loaded_layers.append(layer)
@@ -1007,10 +1019,86 @@ class GeologyZipDialog(QtWidgets.QDialog):
         except Exception:
             return False
 
+    def _build_shared_code_mapping(
+        self,
+        layers: List[QgsVectorLayer],
+        field_name: str,
+    ) -> Tuple[Dict[str, int], Dict[str, str], Dict[str, List[str]], List[Tuple[str, List[str]]]]:
+        """One code mapping for every selected sheet, in a content-derived order.
+
+        String codes (Qa, Jbgr, ...) used to be numbered in feature-encounter
+        order with the counter restarting per output, so the same lithology
+        got a different integer in each sheet and each run, and ticking one
+        more sheet renumbered every class. Codes are now assigned over the
+        sorted union of values across ALL selected layers, so a lithology
+        keeps its integer across sheets and re-runs of the same selection.
+
+        Numeric index codes (LITHOIDX/AGEIDX) are kept as they are, but every
+        label seen for a code is collected so a code that means different
+        things in different sheets is detected instead of the first sheet's
+        name silently winning. Returns (mapping, labels, labels_all, conflicts).
+        """
+        mapping: Dict[str, int] = {}
+        labels: Dict[str, str] = {}
+        labels_all: Dict[str, List[str]] = {}
+        conflicts: List[Tuple[str, List[str]]] = []
+        if not layers:
+            return mapping, labels, labels_all, conflicts
+        numeric = self._is_numeric_field(layers[0], field_name)
+        label_field = self._suggest_label_field(layers[0], field_name) if numeric else None
+        keys: set = set()
+        for lyr in layers:
+            if lyr.fields().indexOf(field_name) < 0:
+                continue
+            lf = label_field if (label_field and lyr.fields().indexOf(label_field) >= 0) else None
+            for f in lyr.getFeatures():
+                try:
+                    val = f[field_name]
+                except Exception as _exc:
+                    log_swallowed("geology_zip_dialog._build_shared_code_mapping", _exc)
+                    val = None
+                if val is None or str(val).strip() == "":
+                    continue
+                if numeric:
+                    try:
+                        code = str(int(float(val)))
+                    except Exception as _exc:
+                        log_swallowed("geology_zip_dialog._build_shared_code_mapping", _exc)
+                        code = None
+                    if code is None:
+                        continue
+                    keys.add(code)
+                    if lf:
+                        try:
+                            lbl = f[lf]
+                            if lbl is not None and str(lbl).strip():
+                                seen = labels_all.setdefault(code, [])
+                                if str(lbl).strip() not in seen:
+                                    seen.append(str(lbl).strip())
+                        except Exception as _exc:
+                            log_swallowed("geology_zip_dialog._build_shared_code_mapping", _exc)
+                else:
+                    keys.add(str(val))
+        if numeric:
+            for code in sorted(keys, key=lambda c: int(c)):
+                mapping[code] = int(code)
+                seen = labels_all.get(code) or []
+                if seen:
+                    labels[code] = seen[0]
+                if len(seen) > 1:
+                    conflicts.append((code, list(seen)))
+        else:
+            for i, key in enumerate(sorted(keys), start=1):
+                mapping[key] = i
+                labels[key] = key
+        return mapping, labels, labels_all, conflicts
+
     def _build_numeric_merge_layer(
         self,
         layers: List[QgsVectorLayer],
         field_name: str,
+        mapping: Optional[Dict[str, int]] = None,
+        labels: Optional[Dict[str, str]] = None,
     ) -> Tuple[Optional[QgsVectorLayer], Dict[str, int], Dict[str, str], Dict[int, int]]:
         if not layers:
             return None, {}, {}, {}
@@ -1052,10 +1140,13 @@ class GeologyZipDialog(QtWidgets.QDialog):
         pr.addAttributes([QgsField("ATK_VAL", QVariant.Int)])
         out_layer.updateFields()
 
-        mapping: Dict[str, int] = {}
-        labels: Dict[str, str] = {}
+        # A caller may pass the run-wide mapping from _build_shared_code_mapping
+        # so every output of the run shares one code table; unseen keys are
+        # appended after it rather than restarting at 1.
+        mapping = dict(mapping) if mapping else {}
+        labels = dict(labels) if labels else {}
         counts: Dict[int, int] = {}
-        next_id = 1
+        next_id = (max(int(v) for v in mapping.values()) + 1) if mapping else 1
         numeric = self._is_numeric_field(layers[0], field_name)
         label_field = self._suggest_label_field(layers[0], field_name) if numeric else None
 
@@ -1146,6 +1237,7 @@ class GeologyZipDialog(QtWidgets.QDialog):
         *,
         labels: Optional[Dict[str, str]] = None,
         counts: Optional[Dict[int, int]] = None,
+        labels_all: Optional[Dict[str, List[str]]] = None,
     ) -> Optional[str]:
         if not mapping and not labels and not counts:
             return None
@@ -1154,16 +1246,22 @@ class GeologyZipDialog(QtWidgets.QDialog):
             csv_path = base + "_mapping.csv"
             labels = labels or {}
             counts = counts or {}
+            labels_all = labels_all or {}
             with open(csv_path, "w", encoding="utf-8", newline="") as f:
                 w = csv.writer(f)
-                w.writerow(["code", "int_value", "label", "feature_count"])
+                # labels_all lists every name seen for a code across the selected
+                # sheets, "|"-joined; more than one name means the code is not
+                # the same lithology everywhere and the raster must be read with
+                # its source sheet in mind.
+                w.writerow(["code", "int_value", "label", "feature_count", "labels_all"])
                 rows = []
                 for code, v in (mapping or {}).items():
                     vv = int(v)
-                    rows.append((vv, str(code), str(labels.get(str(code), "") or ""), int(counts.get(vv, 0))))
+                    rows.append((vv, str(code), str(labels.get(str(code), "") or ""), int(counts.get(vv, 0)),
+                                 "|".join(labels_all.get(str(code), []) or [])))
                 rows.sort(key=lambda x: (x[0], x[1]))
-                for vv, code, label, cnt in rows:
-                    w.writerow([code, vv, label, cnt])
+                for vv, code, label, cnt, lall in rows:
+                    w.writerow([code, vv, label, cnt, lall])
             if os.path.exists(csv_path) and os.path.getsize(csv_path) > 0:
                 return csv_path
             return None
@@ -1228,6 +1326,12 @@ class GeologyZipDialog(QtWidgets.QDialog):
             except Exception:
                 units = None
 
+            if crs is None or not crs.isValid():
+                # A CRS-less input rasterizes without complaint into a GeoTIFF
+                # that carries no projection and reports success. Refuse it.
+                raise RuntimeError(
+                    f"{layer.name()}: 좌표계가 없어 래스터를 만들 수 없습니다. 레이어 속성에서 CRS를 지정한 뒤 다시 실행하세요."
+                )
             if crs is not None and crs.isValid() and (crs.isGeographic() or units == QgsUnitTypes.DistanceDegrees):
                 lat0 = 0.0
                 try:
@@ -1279,7 +1383,11 @@ class GeologyZipDialog(QtWidgets.QDialog):
             "WIDTH": float(cell_w),
             "HEIGHT": float(cell_h),
             "EXTENT": rect if rect is not None else layer.extent(),
-            "NODATA": float(nodata),
+            # NODATA only DECLARES the value on the band. Without INIT the grid
+            # starts at 0, so every cell no polygon centre covered was a real
+            # class 0 - absent from the mapping CSV and never masked.
+            "NODATA": float(int(round(float(nodata)))),
+            "INIT": float(int(round(float(nodata)))),
             # Categorical rasters should stay integer-coded for MaxEnt/ML workflows.
             "DATA_TYPE": 4,  # Int32
             "OUTPUT": out_path,
@@ -1382,12 +1490,20 @@ class GeologyZipDialog(QtWidgets.QDialog):
                     return
                 out_path = _ensure_output_extension(out_path, fmt)
 
-                merged_layer, mapping, labels, counts = self._build_numeric_merge_layer(layers, field)
+                shared_map, shared_labels, labels_all, conflicts = self._build_shared_code_mapping(layers, field)
+                if conflicts:
+                    txt = "; ".join(f"{c}: {' / '.join(ls)}" for c, ls in conflicts[:6])
+                    log_message(f"KIGAM: 같은 코드가 도엽마다 다른 암상명을 가집니다 — {txt}", level=Qgis.Warning)
+                    push_message(self.iface, "지질도 코드 충돌",
+                                 f"코드 {len(conflicts)}개가 도엽별로 다른 이름을 가집니다. mapping.csv의 labels_all 열을 확인하세요.",
+                                 level=1, duration=10)
+                merged_layer, mapping, labels, counts = self._build_numeric_merge_layer(
+                    layers, field, mapping=shared_map, labels=shared_labels)
                 if merged_layer is None or not merged_layer.isValid():
                     raise RuntimeError("병합 레이어 생성에 실패했습니다.")
 
                 raster_path = self._rasterize_layer(merged_layer, "ATK_VAL", out_path, pixel, nodata)
-                csv_path = self._write_mapping_csv(mapping, raster_path, labels=labels, counts=counts)
+                csv_path = self._write_mapping_csv(mapping, raster_path, labels=labels, counts=counts, labels_all=labels_all)
 
                 try:
                     r_name = os.path.splitext(os.path.basename(raster_path))[0].strip() or f"Geology_{run_id}"
@@ -1435,6 +1551,8 @@ class GeologyZipDialog(QtWidgets.QDialog):
                 restore_ui_focus(self)
                 return
 
+            shared_by_field: Dict[str, Tuple[Dict[str, int], Dict[str, str], Dict[str, List[str]], list]] = {}
+
             for lyr in layers:
                 field = self.cmbField.currentText().strip()
                 if field == "(자동 선택)" or lyr.fields().indexOf(field) < 0:
@@ -1450,13 +1568,20 @@ class GeologyZipDialog(QtWidgets.QDialog):
                     log_message(f"{lyr.name()}: 필드 없음, 건너뜀", level=Qgis.Warning)
                     continue
 
-                merged_layer, mapping, labels, counts = self._build_numeric_merge_layer([lyr], field)
+                # Per-layer outputs still share one code table per field, so a
+                # lithology carries the same integer in every sheet's raster.
+                if field not in shared_by_field:
+                    same_field = [l0 for l0 in layers if l0.fields().indexOf(field) >= 0]
+                    shared_by_field[field] = self._build_shared_code_mapping(same_field, field)
+                shared_map, shared_labels, labels_all, _conf = shared_by_field[field]
+                merged_layer, mapping, labels, counts = self._build_numeric_merge_layer(
+                    [lyr], field, mapping=shared_map, labels=shared_labels)
                 if merged_layer is None or not merged_layer.isValid():
                     continue
 
                 out_path = os.path.join(out_dir, f"{_safe_name(lyr.name())}.{fmt}")
                 raster_path = self._rasterize_layer(merged_layer, "ATK_VAL", out_path, pixel, nodata)
-                csv_path = self._write_mapping_csv(mapping, raster_path, labels=labels, counts=counts)
+                csv_path = self._write_mapping_csv(mapping, raster_path, labels=labels, counts=counts, labels_all=labels_all)
 
                 rlayer = QgsRasterLayer(raster_path, f"{lyr.name()}_raster")
                 if rlayer and rlayer.isValid():
@@ -1513,7 +1638,7 @@ class GeologyZipDialog(QtWidgets.QDialog):
         )
         if layers:
             try:
-                frame_layer = next((l for l in layers if "frame" in l.name().lower()), None)
+                frame_layer = next((lyr for lyr in layers if "frame" in lyr.name().lower()), None)
                 target = frame_layer or layers[0]
                 if target and target.isValid():
                     canvas = self.iface.mapCanvas()

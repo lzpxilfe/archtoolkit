@@ -28,6 +28,17 @@ def points_to_breaks(points: Sequence[LegendPoint]) -> List[float]:
     return vals
 
 
+RGB_MATCH_TOLERANCE = 48.0
+"""Euclidean RGB distance beyond which a pixel is not a legend colour.
+
+Without a tolerance every pixel is forced onto the nearest segment, and the
+dark corner of RGB space is nearest the maroon end of most presets - so black
+linework, its anti-alias halo and label text came back as top-percentile
+anomalies. 48 is generous (about 19% of one channel): it rejects neutral
+darks and off-legend colours while keeping JPEG-noisy ramp colours.
+"""
+
+
 def interp_rgb_to_value(
     *,
     r: np.ndarray,
@@ -35,8 +46,16 @@ def interp_rgb_to_value(
     b: np.ndarray,
     points: Sequence[LegendPoint],
     snap_last_t: Optional[float] = None,
-) -> np.ndarray:
-    """Vectorized mapping: RGB -> scalar value by projecting to the nearest legend polyline segment in RGB space."""
+    max_distance: Optional[float] = None,
+    return_residual: bool = False,
+):
+    """Vectorized mapping: RGB -> scalar value by projecting to the nearest legend polyline segment in RGB space.
+
+    ``max_distance``: pixels whose nearest-segment RGB distance exceeds it are
+    returned as NaN instead of being forced onto the ramp. ``return_residual``
+    also returns that per-pixel distance so the caller can report or write it.
+    Both default off, so existing callers see the old behaviour.
+    """
     if r.shape != g.shape or r.shape != b.shape:
         raise ValueError("RGB bands must have the same shape")
     if len(points) < 2:
@@ -98,12 +117,32 @@ def interp_rgb_to_value(
         out[mask] = base + t[mask].astype(np.float32, copy=False) * delta
         min_dist[mask] = dist_sq[mask].astype(np.float32, copy=False)
 
+    residual = np.sqrt(min_dist)
+    if max_distance is not None:
+        try:
+            tol = float(max_distance)
+            if tol >= 0.0:
+                out[residual > np.float32(tol)] = np.nan
+        except Exception as _exc:
+            log_swallowed("tools/geochem_legend.py (interp_rgb_to_value tolerance)", _exc)
+    if return_residual:
+        return out, residual
     return out
 
 
 def mask_black_lines(r: np.ndarray, g: np.ndarray, b: np.ndarray) -> np.ndarray:
-    """Detect neutral dark 'linework' (not intense red/brown) and return mask."""
+    """Detect neutral dark 'linework' (not intense red/brown) and return mask.
+
+    Two tests, OR-ed: the original strict one, plus a low-saturation dark test
+    that also catches the anti-alias halo around a black line (e.g. 85,80,78),
+    which the strict per-channel <75 bound missed. The saturation term keeps
+    dark but coloured ramp pixels (10,60,10; the maroon legend maximum) out.
+    """
     rr = r.astype(np.int16, copy=False)
     gg = g.astype(np.int16, copy=False)
     bb = b.astype(np.int16, copy=False)
-    return (rr < 75) & (gg < 75) & (bb < 75) & (np.abs(rr - gg) < 15) & (np.abs(gg - bb) < 15)
+    strict = (rr < 75) & (gg < 75) & (bb < 75) & (np.abs(rr - gg) < 15) & (np.abs(gg - bb) < 15)
+    mx = np.maximum(np.maximum(rr, gg), bb)
+    mn = np.minimum(np.minimum(rr, gg), bb)
+    halo = (mx < 90) & ((mx - mn) < 30)
+    return strict | halo
