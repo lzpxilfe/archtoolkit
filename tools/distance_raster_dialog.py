@@ -429,7 +429,10 @@ class DistanceRasterDialog(QtWidgets.QDialog):
                 "NODATA": 0,
                 "DATA_TYPE": 0,      # Byte: this is a presence mask, not a measurement
                 "INIT": 0,
-                "ALL_TOUCH": burn_rule == "all_touched",
+                # QGIS declares an ALL_TOUCH constant for gdal:rasterize but never
+                # registers it as a parameter (3.34 and 3.40 alike), so passing it
+                # is silently ignored. The flag has to travel as a raw extra option.
+                "EXTRA": "-at" if burn_rule == "all_touched" else "",
                 "OUTPUT": burned,
             })
             if not os.path.exists(burned):
