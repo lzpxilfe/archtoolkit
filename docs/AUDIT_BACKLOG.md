@@ -302,7 +302,7 @@
 
 | ID | 심각도 | 내용 | 위치 | 상태 | 비고 |
 | --- | --- | --- | --- | --- | --- |
-| DIST-01 | blocker | Polygons narrower than a cell are silently dropped by the default pixel-centre burn rule, inflating every distance | `tools/distance_raster_dialog.py` | 적용 | 선·면은 ALL_TOUCH, burn_rule 메타데이터 |
+| DIST-01 | blocker | Polygons narrower than a cell are silently dropped by the default pixel-centre burn rule, inflating every distance | `tools/distance_raster_dialog.py` | 적용 | 선·면은 -at로 굽기(EXTRA 경유: QGIS가 ALL_TOUCH 파라미터를 등록하지 않아 무시됨을 회귀 비교로 확인), burn_rule 메타데이터 |
 | DIST-02 | blocker | Nothing checks that the burn produced any target cell, so an all-NoData distance raster is reported as a finished predictor | `tools/distance_raster_dialog.py` | 적용 | 대상 셀 0 / 전부 NoData이면 거부 |
 | DIST-03 | blocker | A non-square reference grid makes every distance wrong: gdal_proximity scales both axes by the X pixel size | `tools/distance_raster_dialog.py` | 적용 | 비정사각 픽셀 거부 |
 
