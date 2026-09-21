@@ -46,6 +46,7 @@ from .live_log_dialog import ensure_live_log_dialog
 from .utils import log_swallowed, log_message, push_message, restore_ui_focus
 from .utils import set_archtoolkit_layer_metadata
 from .help_dialog import show_help_dialog
+from . import dialog_memory
 from .i18n import is_english_ui
 
 
@@ -134,6 +135,8 @@ def _unary_union(geoms: List[QgsGeometry]) -> Optional[QgsGeometry]:
 class CadastralOverlapDialog(QtWidgets.QDialog):
     def __init__(self, iface, parent=None):
         super().__init__(parent)
+        # Remember the last-used inputs between sessions (tools/dialog_memory.py).
+        dialog_memory.attach(self, "cadastral_overlap")
         self.iface = iface
         self._setup_ui()
 
@@ -251,7 +254,7 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
 """
         try:
             plugin_dir = os.path.dirname(os.path.dirname(__file__))
-            show_help_dialog(parent=self, title="Cadastral Overlap 도움말", html=html, plugin_dir=plugin_dir)
+            show_help_dialog(parent=self, title="Cadastral Overlap 도움말", html=html, plugin_dir=plugin_dir, tool_id="cadastral_overlap")
         except Exception as _exc:
             log_swallowed("tools/cadastral_overlap_dialog.py:226 (_on_help)", _exc)
 

@@ -76,6 +76,7 @@ from .aoi_extent import resolve_aoi_extent
 from .atomic_output import cleanup_staging_dir, create_staging_dir, publish_staging_dir
 from .gdal_outcome import GdalOutcomeTracker
 from .help_dialog import show_help_dialog
+from . import dialog_memory
 from .live_log_dialog import ensure_live_log_dialog
 from .predictor_naming import assign_variable_keys
 from .raster_grid_contract import (
@@ -482,6 +483,8 @@ class AlignExportDialog(QtWidgets.QDialog):
 
     def __init__(self, iface, parent=None):
         super().__init__(parent)
+        # Remember the last-used inputs between sessions (tools/dialog_memory.py).
+        dialog_memory.attach(self, "align_export")
         self.iface = iface
         self._setup_ui()
         self._populate_layers()
@@ -1383,6 +1386,6 @@ class AlignExportDialog(QtWidgets.QDialog):
         )
         try:
             plugin_dir = os.path.dirname(os.path.dirname(__file__))
-            show_help_dialog(parent=self, title="정렬/내보내기 도움말", html=html, plugin_dir=plugin_dir)
+            show_help_dialog(parent=self, title="정렬/내보내기 도움말", html=html, plugin_dir=plugin_dir, tool_id="align_export")
         except Exception as _exc:
             log_swallowed("tools/align_export_dialog.py:1057 (_on_help)", _exc)

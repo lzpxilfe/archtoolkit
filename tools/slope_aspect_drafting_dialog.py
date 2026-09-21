@@ -68,6 +68,7 @@ import processing
 from .utils import log_swallowed, cleanup_files, push_message, restore_ui_focus, set_archtoolkit_layer_metadata
 from .live_log_dialog import ensure_live_log_dialog
 from .help_dialog import show_help_dialog
+from . import dialog_memory
 
 
 FORM_CLASS, _ = uic.loadUiType(
@@ -78,6 +79,8 @@ FORM_CLASS, _ = uic.loadUiType(
 class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
     def __init__(self, iface, parent=None):
         super().__init__(parent)
+        # Remember the last-used inputs between sessions (tools/dialog_memory.py).
+        dialog_memory.attach(self, "slope_aspect_drafting")
         self.setupUi(self)
         self.iface = iface
 
@@ -127,7 +130,7 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
                 "<li>AOI 범위를 너무 크게 잡으면 출력이 무거워질 수 있습니다.</li>"
                 "</ul>"
             )
-            show_help_dialog(parent=self, title="도면화(경사/사면방향) 도움말", html=html, plugin_dir=plugin_dir)
+            show_help_dialog(parent=self, title="도면화(경사/사면방향) 도움말", html=html, plugin_dir=plugin_dir, tool_id="slope_aspect_drafting")
         except Exception:
             try:
                 QtWidgets.QMessageBox.information(self, "도움말", "README.md를 참고하세요.")

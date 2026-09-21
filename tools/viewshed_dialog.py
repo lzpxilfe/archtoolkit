@@ -56,6 +56,7 @@ from .utils import (
 )
 from .live_log_dialog import ensure_live_log_dialog
 from .help_dialog import show_help_dialog
+from . import dialog_memory
 from .i18n import is_english_ui
 from .utils import split_qgis_source_path
 from .raster_io import inv_geotransform
@@ -77,6 +78,8 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
 
     def __init__(self, iface, parent=None):
         super(ViewshedDialog, self).__init__(parent)
+        # Remember the last-used inputs between sessions (tools/dialog_memory.py).
+        dialog_memory.attach(self, "viewshed")
         self.setupUi(self)
         self.iface = iface
         self.canvas = iface.mapCanvas()
@@ -373,7 +376,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
 """
         try:
             plugin_dir = os.path.dirname(os.path.dirname(__file__))
-            show_help_dialog(parent=self, title="Viewshed/LOS 도움말", html=html, plugin_dir=plugin_dir)
+            show_help_dialog(parent=self, title="Viewshed/LOS 도움말", html=html, plugin_dir=plugin_dir, tool_id="viewshed")
         except Exception as _exc:
             log_swallowed("tools/viewshed_dialog.py:353 (_on_help)", _exc)
     

@@ -46,6 +46,7 @@ from qgis.gui import QgsMapLayerComboBox
 
 from .live_log_dialog import ensure_live_log_dialog
 from .help_dialog import show_help_dialog
+from . import dialog_memory
 from .i18n import is_english_ui
 from .utils import (
     log_swallowed,
@@ -591,6 +592,8 @@ class _HierarchyConfigDialog(QtWidgets.QDialog):
 class AhpSuitabilityDialog(QtWidgets.QDialog):
     def __init__(self, iface, parent=None):
         super().__init__(parent)
+        # Remember the last-used inputs between sessions (tools/dialog_memory.py).
+        dialog_memory.attach(self, "ahp")
         self.iface = iface
         self._aoi_failure = None   # AOI requested and NOT applied
         self._aoi_warning = None   # AOI applied, some polygons skipped
@@ -931,7 +934,7 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
 """
         try:
             plugin_dir = os.path.dirname(os.path.dirname(__file__))
-            show_help_dialog(parent=self, title="AHP 적합도 도움말", html=html, plugin_dir=plugin_dir)
+            show_help_dialog(parent=self, title="AHP 적합도 도움말", html=html, plugin_dir=plugin_dir, tool_id="ahp")
         except Exception as _exc:
             log_swallowed("tools/ahp_suitability_dialog.py:546 (_on_help)", _exc)
 

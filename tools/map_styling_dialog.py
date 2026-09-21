@@ -48,6 +48,7 @@ from .utils import (
     set_archtoolkit_layer_metadata,
 )
 from .help_dialog import show_help_dialog
+from . import dialog_memory
 
 FORM_CLASS, _ = uic.loadUiType(os.path.join(
     os.path.dirname(__file__), 'map_styling_dialog_base.ui'))
@@ -91,6 +92,8 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
     
     def __init__(self, iface, parent=None):
         super(MapStylingDialog, self).__init__(parent)
+        # Remember the last-used inputs between sessions (tools/dialog_memory.py).
+        dialog_memory.attach(self, "map_styling")
         self.setupUi(self)
         self.iface = iface
         self._style_run_id = None
@@ -148,7 +151,7 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
                 "<li>QML/프리셋 내보내기로 프로젝트 재사용성을 높일 수 있습니다.</li>"
                 "</ul>"
             )
-            show_help_dialog(parent=self, title="Map Styling 도움말", html=html, plugin_dir=plugin_dir)
+            show_help_dialog(parent=self, title="Map Styling 도움말", html=html, plugin_dir=plugin_dir, tool_id="map_styling")
         except Exception:
             try:
                 QtWidgets.QMessageBox.information(self, "도움말", "README.md를 참고하세요.")

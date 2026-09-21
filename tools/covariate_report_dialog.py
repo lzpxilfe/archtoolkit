@@ -55,6 +55,7 @@ from qgis.core import (
 )
 
 from .help_dialog import show_help_dialog
+from . import dialog_memory
 from .aoi_extent import resolve_aoi_extent
 from .utils import (
     log_swallowed,
@@ -128,6 +129,8 @@ class CovariateReportDialog(QtWidgets.QDialog):
 
     def __init__(self, iface, parent=None):
         super().__init__(parent)
+        # Remember the last-used inputs between sessions (tools/dialog_memory.py).
+        dialog_memory.attach(self, "covariate_report")
         self.iface = iface
         self._setup_ui()
         self._populate_layers()
@@ -477,6 +480,6 @@ class CovariateReportDialog(QtWidgets.QDialog):
         )
         try:
             plugin_dir = os.path.dirname(os.path.dirname(__file__))
-            show_help_dialog(parent=self, title="상관/VIF 리포트 도움말", html=html, plugin_dir=plugin_dir)
+            show_help_dialog(parent=self, title="상관/VIF 리포트 도움말", html=html, plugin_dir=plugin_dir, tool_id="covariate_report")
         except Exception as _exc:
             log_swallowed("tools/covariate_report_dialog.py:477 (_on_help)", _exc)

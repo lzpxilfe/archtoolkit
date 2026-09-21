@@ -35,6 +35,7 @@ from .atomic_output import (
 )
 from .live_log_dialog import ensure_live_log_dialog
 from .help_dialog import show_help_dialog
+from . import dialog_memory
 from .kriging_lite import GEOM_Z_SENTINEL, auto_elevation_field
 
 # Load the UI file
@@ -170,6 +171,8 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
     
     def __init__(self, iface, parent=None):
         super(DemGeneratorDialog, self).__init__(parent)
+        # Remember the last-used inputs between sessions (tools/dialog_memory.py).
+        dialog_memory.attach(self, "dem_generator")
         self.setupUi(self)
         self.iface = iface
         self.loaded_dxf_layers = []
@@ -252,7 +255,7 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
                 "<li>출처/레퍼런스는 <code>REFERENCES.md</code>를 참고하세요.</li>"
                 "</ul>"
             )
-            show_help_dialog(parent=self, title="DEM 생성 도움말", html=html, plugin_dir=plugin_dir)
+            show_help_dialog(parent=self, title="DEM 생성 도움말", html=html, plugin_dir=plugin_dir, tool_id="dem_generator")
         except Exception:
             try:
                 QtWidgets.QMessageBox.information(self, "도움말", "README.md를 참고하세요.")

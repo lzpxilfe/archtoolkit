@@ -139,8 +139,19 @@ class ArchToolkitHelpDialog(QtWidgets.QDialog):
         self.browser.setTextCursor(cursor)
 
 
-def show_help_dialog(*, parent, title: str, html: str, plugin_dir: Optional[str] = None) -> None:
+def show_help_dialog(*, parent, title: str, html: str, plugin_dir: Optional[str] = None, tool_id: Optional[str] = None) -> None:
     # plugin_dir is currently unused (kept for compatibility with callers).
+    # tool_id appends the tool's "학술 근거와 권장 절차" block (tools/scholar_notes.py)
+    # so every help window ends with who published the method and how they
+    # meant it to be used.
+    if tool_id:
+        try:
+            from .scholar_notes import html_for
+            extra = html_for(tool_id)
+            if extra:
+                html = f"{html}\n<hr/>\n{extra}"
+        except Exception as _exc:
+            log_swallowed("help_dialog.show_help_dialog (scholar_notes)", _exc)
     dlg = ArchToolkitHelpDialog(title=title, html=html, plugin_dir=plugin_dir, parent=parent)
     try:
         dlg.exec_()

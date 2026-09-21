@@ -46,6 +46,7 @@ from .utils import (
 )
 from .live_log_dialog import ensure_live_log_dialog
 from .help_dialog import show_help_dialog
+from . import dialog_memory
 
 PROFILE_LAYER_NAME = "Terrain Profile Lines"
 PROFILE_GROUP_NAME = "ArchToolkit - Terrain Profile"
@@ -635,6 +636,8 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
      
     def __init__(self, iface, parent=None):
         super(TerrainProfileDialog, self).__init__(parent)
+        # Remember the last-used inputs between sessions (tools/dialog_memory.py).
+        dialog_memory.attach(self, "terrain_profile")
         self.setupUi(self)
         self.iface = iface
         self.canvas = iface.mapCanvas()
@@ -962,7 +965,7 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
                 " (예: 5m DEM, 1,000m 단면 → 샘플 200개 내외)</li>"
                 "</ul>"
             )
-            show_help_dialog(parent=self, title="지형 단면 도움말", html=html, plugin_dir=plugin_dir)
+            show_help_dialog(parent=self, title="지형 단면 도움말", html=html, plugin_dir=plugin_dir, tool_id="terrain_profile")
         except Exception:
             try:
                 QMessageBox.information(self, "도움말", "README.md를 참고하세요.")

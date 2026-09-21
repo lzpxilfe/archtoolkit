@@ -77,6 +77,7 @@ from .utils import (
 from . import cost_budget
 from .live_log_dialog import ensure_live_log_dialog
 from .help_dialog import show_help_dialog
+from . import dialog_memory
 from .i18n import get_output_group_name
 from .network_metrics import (
     betweenness_centrality_weighted as _sna_betweenness_centrality_weighted,
@@ -1103,6 +1104,8 @@ class CostNetworkWorker(QgsTask):
 class CostNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
     def __init__(self, iface, parent=None):
         super().__init__(parent)
+        # Remember the last-used inputs between sessions (tools/dialog_memory.py).
+        dialog_memory.attach(self, "cost_network")
         self.setupUi(self)
         self.iface = iface
 
@@ -1337,7 +1340,7 @@ MST/k-NN/Hub 네트워크를 생성합니다.
 """
         try:
             plugin_dir = os.path.dirname(os.path.dirname(__file__))
-            show_help_dialog(parent=self, title="Least-cost Network 도움말", html=html, plugin_dir=plugin_dir)
+            show_help_dialog(parent=self, title="Least-cost Network 도움말", html=html, plugin_dir=plugin_dir, tool_id="cost_network")
         except Exception as _exc:
             log_swallowed("tools/cost_network_dialog.py:1301 (_on_help)", _exc)
 

@@ -60,6 +60,7 @@ from qgis.gui import QgsMapLayerComboBox
 import processing
 
 from .help_dialog import show_help_dialog
+from . import dialog_memory
 from .live_log_dialog import ensure_live_log_dialog
 from .predictor_naming import distance_variable_key, sanitize_key
 from .utils import (
@@ -82,6 +83,8 @@ class DistanceRasterDialog(QtWidgets.QDialog):
 
     def __init__(self, iface, parent=None):
         super().__init__(parent)
+        # Remember the last-used inputs between sessions (tools/dialog_memory.py).
+        dialog_memory.attach(self, "distance_raster")
         self.iface = iface
         self._setup_ui()
 
@@ -680,6 +683,6 @@ class DistanceRasterDialog(QtWidgets.QDialog):
         try:
             plugin_dir = os.path.dirname(os.path.dirname(__file__))
             show_help_dialog(parent=self, title="거리 래스터 도움말", html=html,
-                             plugin_dir=plugin_dir)
+                             plugin_dir=plugin_dir, tool_id="distance_raster")
         except Exception as _exc:
             log_swallowed("tools/distance_raster_dialog.py:520 (_on_help)", _exc)

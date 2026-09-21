@@ -50,6 +50,7 @@ from .terrain_math import tri_radius, zt_curvature
 from . import cost_budget
 from .live_log_dialog import ensure_live_log_dialog
 from .help_dialog import show_help_dialog
+from . import dialog_memory
 
 # This tool uses QGIS built-in GDAL processing algorithms. The curvature
 # analysis additionally uses NumPy + GDAL (both ship with QGIS - no extra
@@ -153,6 +154,8 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
     
     def __init__(self, iface, parent=None):
         super(TerrainAnalysisDialog, self).__init__(parent)
+        # Remember the last-used inputs between sessions (tools/dialog_memory.py).
+        dialog_memory.attach(self, "terrain_analysis")
         self.setupUi(self)
         self.iface = iface
         
@@ -230,7 +233,7 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                 "<li>학술 출처는 <code>REFERENCES.md</code>를 참고하세요.</li>"
                 "</ul>"
             )
-            show_help_dialog(parent=self, title="지형 분석 도움말", html=html, plugin_dir=plugin_dir)
+            show_help_dialog(parent=self, title="지형 분석 도움말", html=html, plugin_dir=plugin_dir, tool_id="terrain_analysis")
         except Exception:
             try:
                 QtWidgets.QMessageBox.information(self, "도움말", "README.md를 참고하세요.")

@@ -41,6 +41,7 @@ from qgis.gui import QgsMapLayerComboBox
 import processing
 
 from .help_dialog import show_help_dialog
+from . import dialog_memory
 from .live_log_dialog import ensure_live_log_dialog
 from .utils import (
     is_null_value,
@@ -394,6 +395,8 @@ def _rect_geom_from_center(center: QgsPointXY, *, length_m: float, width_m: floa
 class TrenchSuggestionDialog(QtWidgets.QDialog):
     def __init__(self, iface, parent=None):
         super().__init__(parent)
+        # Remember the last-used inputs between sessions (tools/dialog_memory.py).
+        dialog_memory.attach(self, "trench_suggestion")
         self.iface = iface
         self._grave_codes_cache: Optional[Set[str]] = None
         self._setup_ui()
@@ -640,7 +643,7 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
         )
         try:
             plugin_dir = os.path.dirname(os.path.dirname(__file__))
-            show_help_dialog(parent=self, title="트렌치 후보 제안 도움말", html=html, plugin_dir=plugin_dir)
+            show_help_dialog(parent=self, title="트렌치 후보 제안 도움말", html=html, plugin_dir=plugin_dir, tool_id="trench_suggestion")
         except Exception:
             QtWidgets.QMessageBox.information(self, "도움말", "README를 참고하세요.")
 

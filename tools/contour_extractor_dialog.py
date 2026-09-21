@@ -26,6 +26,7 @@ import processing
 from .utils import log_swallowed, push_message, set_archtoolkit_layer_metadata
 from .live_log_dialog import ensure_live_log_dialog
 from .help_dialog import show_help_dialog
+from . import dialog_memory
 
 # Load the UI file
 FORM_CLASS, _ = uic.loadUiType(os.path.join(
@@ -43,6 +44,8 @@ class ContourExtractorDialog(QtWidgets.QDialog, FORM_CLASS):
     
     def __init__(self, iface, parent=None):
         super(ContourExtractorDialog, self).__init__(parent)
+        # Remember the last-used inputs between sessions (tools/dialog_memory.py).
+        dialog_memory.attach(self, "contour_extractor")
         self.setupUi(self)
         self.iface = iface
         
@@ -101,7 +104,7 @@ class ContourExtractorDialog(QtWidgets.QDialog, FORM_CLASS):
                 "<li>출처/레퍼런스는 <code>REFERENCES.md</code>를 참고하세요.</li>"
                 "</ul>"
             )
-            show_help_dialog(parent=self, title="등고선 추출 도움말", html=html, plugin_dir=plugin_dir)
+            show_help_dialog(parent=self, title="등고선 추출 도움말", html=html, plugin_dir=plugin_dir, tool_id="contour_extractor")
         except Exception:
             try:
                 QtWidgets.QMessageBox.information(self, "도움말", "README.md를 참고하세요.")

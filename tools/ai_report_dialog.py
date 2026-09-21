@@ -25,6 +25,8 @@ from . import ai_aoi_summary
 from . import ai_gemini
 from . import ai_local_summarizer
 from .live_log_dialog import ensure_live_log_dialog
+from .help_dialog import show_help_dialog
+from . import dialog_memory
 from .utils import log_swallowed, log_message, push_message, restore_ui_focus
 
 
@@ -147,6 +149,8 @@ class _LayerMultiSelectDialog(QtWidgets.QDialog):
 class AiAoiReportDialog(QtWidgets.QDialog):
     def __init__(self, iface, parent=None):
         super().__init__(parent)
+        # Remember the last-used inputs between sessions (tools/dialog_memory.py).
+        dialog_memory.attach(self, "ai_report")
         self.iface = iface
         self._selected_layer_ids: List[str] = []
         self._last_ctx: Optional[dict] = None
@@ -1236,9 +1240,10 @@ class AiAoiReportDialog(QtWidgets.QDialog):
             "- 도면/Style 결과는 해석에 방해가 될 수 있어 기본적으로 제외(체크)하는 것을 권장합니다."
         )
         try:
-            QtWidgets.QMessageBox.information(self, "AI 조사요약 도움말", html)
-        except Exception:
-            # Fallback plain text
+            plugin_dir = os.path.dirname(os.path.dirname(__file__))
+            show_help_dialog(parent=self, title="AI 조사요약 도움말", html=html, plugin_dir=plugin_dir, tool_id="ai_report")
+        except Exception as _exc:
+            log_swallowed("ai_report_dialog._on_help", _exc)
             QtWidgets.QMessageBox.information(self, "AI 조사요약 도움말", "README의 AI 조사요약 섹션을 참고하세요.")
 
     def _on_export(self):

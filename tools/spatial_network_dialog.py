@@ -62,6 +62,7 @@ from .utils import (
 )
 from .live_log_dialog import ensure_live_log_dialog
 from .help_dialog import show_help_dialog
+from . import dialog_memory
 from .i18n import is_english_ui
 from .network_metrics import (
     betweenness_centrality_unweighted,
@@ -108,6 +109,8 @@ class _Node:
 class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
     def __init__(self, iface, parent=None):
         super().__init__(parent)
+        # Remember the last-used inputs between sessions (tools/dialog_memory.py).
+        dialog_memory.attach(self, "spatial_network")
         self.setupUi(self)
         self.iface = iface
         self.canvas = iface.mapCanvas()
@@ -245,7 +248,7 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
 """
         try:
             plugin_dir = os.path.dirname(os.path.dirname(__file__))
-            show_help_dialog(parent=self, title="Spatial / Visibility Network 도움말", html=html, plugin_dir=plugin_dir)
+            show_help_dialog(parent=self, title="Spatial / Visibility Network 도움말", html=html, plugin_dir=plugin_dir, tool_id="spatial_network")
         except Exception as _exc:
             log_swallowed("tools/spatial_network_dialog.py:239 (_on_help)", _exc)
 

@@ -76,6 +76,7 @@ from .atomic_output import (
 )
 from .live_log_dialog import ensure_live_log_dialog
 from .help_dialog import show_help_dialog
+from . import dialog_memory
 from .i18n import get_output_group_name
 from .geochem_legend import (
     LegendCsvError,
@@ -493,6 +494,8 @@ _LEGEND_SAMPLE_PROBLEMS: Dict[str, str] = {
 class GeoChemPolygonizeDialog(QtWidgets.QDialog):
     def __init__(self, iface, parent=None):
         super().__init__(parent)
+        # Remember the last-used inputs between sessions (tools/dialog_memory.py).
+        dialog_memory.attach(self, "geochem")
         self.iface = iface
         self.setWindowTitle("지구화학도 래스터 수치화 (GeoChem WMS → Raster) - ArchToolkit")
 
@@ -957,7 +960,7 @@ value/class 래스터와 폴리곤을 생성합니다.
 """
         try:
             plugin_dir = os.path.dirname(os.path.dirname(__file__))
-            show_help_dialog(parent=self, title="GeoChem 도움말", html=html, plugin_dir=plugin_dir)
+            show_help_dialog(parent=self, title="GeoChem 도움말", html=html, plugin_dir=plugin_dir, tool_id="geochem")
         except Exception as _exc:
             log_swallowed("tools/geochem_polygonize_dialog.py:921 (_on_help)", _exc)
 

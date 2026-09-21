@@ -15,9 +15,12 @@ that fails to restore still opens with its defaults.
 """
 from __future__ import annotations
 
+import os
+import re
 from typing import Iterable
 
 from qgis.PyQt import QtWidgets
+from qgis.PyQt.QtCore import QTimer
 from qgis.core import QgsProject, QgsSettings
 
 from .swallow_log import log_swallowed
@@ -28,6 +31,12 @@ except Exception:  # pragma: no cover - headless import paths
     QgsMapLayerComboBox = None  # type: ignore
 
 _PREFIX = "ArchToolkit/dialogs"
+# Set by test harnesses so remembered values never leak into a scripted run.
+_DISABLE_ENV = "ARCHTOOLKIT_NO_DIALOG_MEMORY"
+# Line edits that hold paths or secrets are never remembered: an output path
+# restored blindly overwrites the previous result, and a key must not sit in
+# plain settings under a generic name.
+_SENSITIVE_LINEEDIT_RE = re.compile(r"(out|path|file|dir|folder|key|token|secret|api|password)", re.IGNORECASE)
 
 
 def _widgets(dialog: QtWidgets.QWidget, skip: Iterable[str]) -> list:
@@ -36,6 +45,8 @@ def _widgets(dialog: QtWidgets.QWidget, skip: Iterable[str]) -> list:
     for w in dialog.findChildren(QtWidgets.QWidget):
         name = str(w.objectName() or "")
         if not name or name.startswith("qt_") or name in skip_set:
+            continue
+        if isinstance(w, QtWidgets.QLineEdit) and _SENSITIVE_LINEEDIT_RE.search(name):
             continue
         out.append((name, w))
     return out
@@ -142,6 +153,28 @@ def restore(dialog: QtWidgets.QWidget, key: str, *, skip: Iterable[str] = ()) ->
     return n
 
 
+def attach(dialog: QtWidgets.QDialog, key: str, *, skip: Iterable[str] = ()) -> None:
+    """Restore once the dialog is up, and save when it closes.
+
+    Called right after ``super().__init__`` in a dialog constructor: the
+    restore is deferred with a zero-delay timer so it runs after the whole
+    constructor has built and populated its widgets, and the save hangs on
+    QDialog.finished so accept, reject and the window close button all
+    persist what the user last entered. A no-op when the environment sets
+    ARCHTOOLKIT_NO_DIALOG_MEMORY (scripted runs).
+    """
+    if os.environ.get(_DISABLE_ENV):
+        return
+    try:
+        QTimer.singleShot(0, lambda: restore(dialog, key, skip=skip))
+    except Exception as exc:
+        log_swallowed("dialog_memory.attach", exc)
+    try:
+        dialog.finished.connect(lambda _result: save(dialog, key, skip=skip))
+    except Exception as exc:
+        log_swallowed("dialog_memory.attach", exc)
+
+
 def forget(key: str) -> None:
     """Drop everything remembered for one dialog key."""
     try:
@@ -150,4 +183,4 @@ def forget(key: str) -> None:
         log_swallowed("dialog_memory.forget", exc)
 
 
-__all__ = ["save", "restore", "forget"]
+__all__ = ["attach", "save", "restore", "forget"]
