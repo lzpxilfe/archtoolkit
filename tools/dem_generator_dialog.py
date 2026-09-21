@@ -56,7 +56,7 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
         'TIN - Linear (선형)': {
             'algorithm': 'qgis:tininterpolation',
             'method': 0,
-            'desc': '삼각망 기반 선형 보간. 등고선 데이터에 적합 [Delaunay, 1934]'
+            'desc': '들로네 삼각망(Delaunay 1934) 위의 선형 보간. 등고선 데이터에 적합'
         },
         'TIN - Clough-Tocher (곡면)': {
             'algorithm': 'qgis:tininterpolation',

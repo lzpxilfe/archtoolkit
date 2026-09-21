@@ -99,7 +99,7 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
             ]
         },
         'llobera': {
-            'name': 'Llobera 2007',
+            'name': '인지구분(플러그인)',
             'classes': [
                 {'max': 2, 'label': '1등급 | 0~2° | 평탄', 'color': '#d3d3d3'},
                 {'max': 6, 'label': '2등급 | 2~6° | 인지', 'color': '#add8e6'},

@@ -18,7 +18,9 @@
 ## TIN 선형 보간 (Triangulated Irregular Network)
 
 **(A) 들로네 삼각분할** — `qgis:tininterpolation` (method=0, 선형) 호출:
-> Delaunay, B. (1934). "Sur la sphère vide". *Otdelenie Matematicheskikh i Estestvennykh Nauk*, 7, pp. 793–800.
+> Delaunay, B. (1934). "Sur la sphère vide. À la mémoire de Georges Voronoï". *Известия Академии наук СССР, VII серия, Отделение математических и естественных наук* (Bulletin de l'Académie des Sciences de l'URSS, VII série, Classe des sciences mathématiques et naturelles), 1934, no. 6, pp. 793–800.
+
+주(서지): 널리 퍼진 축약형 "Bull. Acad. Sci. URSS **7**: 793-800"의 `7`은 **권 번호가 아니라 시리즈 번호(VII série)** 입니다. 이 학술지는 권 번호를 쓰지 않고 연도 + 호(выпуск)로 색인됩니다. 원본 스캔은 러시아과학원 Math-Net.Ru에서 확인할 수 있습니다.
 
 **(C) GIS 적용 맥락:**
 > Fowler, R.J., & Little, J.J. (1979). "Automatic extraction of irregular network digital terrain models". *Computer Graphics (SIGGRAPH '79)*, 13(2), pp. 199–207.
@@ -70,7 +72,9 @@
 > Tobler, W. (1993). "Three Presentations on Geographical Analysis and Modeling: Non-Isotropic Geographic Modeling, Speculations on the Geometry of Geography, Global Spatial Analysis." *NCGIA Technical Report 93-1*.
 
 **(B) Naismith의 규칙 (시간 기반 보행 모델)** — `naismith_time_s`:
-> Naismith, W. W. (1892). "Excursions." *Scottish Mountaineering Club Journal*.
+> Naismith, W. W. (1892). "Cruach Ardran, Stobinian, and Ben More". In: "Excursions" [department: "Notes and Queries"], *Scottish Mountaineering Club Journal*, 2(3), pp. 135-136. (규칙 본문은 p. 136)
+
+주(서지): "Excursions"는 논문 제목이 아니라 여러 짧은 기고를 묶은 **고정 칼럼명**입니다. 나이스미스 규칙은 그 칼럼 안의 위 기고문 말미에 한 문장으로 제시됩니다.
 
 **(B) Pandolf의 운반 에너지(Load carriage) 모델** — `edge_cost`의 `MODEL_PANDOLF` 분기:
 > Pandolf, K.B., Givoni, B., & Goldman, R.F. (1977). "Predicting energy expenditure with loads while standing or walking very slowly." *Journal of Applied Physiology*, 43(4), pp. 577–581. DOI: 10.1152/jappl.1977.43.4.577
@@ -128,7 +132,7 @@
 > Kruskal, J.B. (1956). "On the shortest spanning subtree of a graph and the traveling salesman problem." *Proceedings of the American Mathematical Society*, 7(1), pp. 48–50.
 
 **(C) 관련 MST 알고리즘 (플러그인은 구현하지 않음):**
-> Prim, R.C. (1957). "Shortest connection network and some generalizations." *Bell System Technical Journal*, 36(6), pp. 1389–1401.
+> Prim, R.C. (1957). "Shortest Connection Networks and Some Generalizations." *Bell System Technical Journal*, 36(6), pp. 1389–1401. DOI: 10.1002/j.1538-7305.1957.tb01515.x
 
 ## 사회 네트워크 분석 (SNA: Social Network Analysis)
 
@@ -216,7 +220,7 @@
 **(B) 지형 위치 6등급 분류(Landform Classification)** — `run_slope_position_analysis`가 TPI와 경사 임계값을 조합해 직접 구현:
 > Weiss, A. (2001). "Topographic Position and Landforms Analysis." *Poster presentation, ESRI User Conference*, San Diego, CA.
 
-주: Weiss(2001)는 **분류(classification)** 의 출처이지 TPI **지수 자체**의 출처가 아닙니다. 지수의 출처는 위 Wilson 등(2007)입니다.
+주(정정): 이전 판의 이 문단은 "Weiss(2001)는 분류의 출처일 뿐 TPI 지수의 출처가 아니며, 지수의 출처는 Wilson 등(2007)"이라고 적었습니다. **이는 틀렸습니다.** Weiss(2001) 포스터 자체가 TPI 산식을 직접 정의하고 있어, 해당 주장은 원 출처가 스스로 반박합니다. Weiss(2001)는 **지수와 분류 양쪽의 출처**입니다. Wilson 등(2007)은 TPI를 수심 자료에 적용한 해양판 파생지표(BPI)를 제시한 것이지 TPI의 기원을 주장하지 않습니다. 이 오귀속은 Roughness의 출처를 바로잡는 과정에서 본 문서가 새로 만들어낸 것으로, 여기서 철회합니다.
 
 ## 지형 거칠기 Roughness
 

@@ -130,7 +130,7 @@
          <bool>true</bool>
         </property>
         <property name="toolTip">
-         <string>&lt;html&gt;&lt;b&gt;한국 표준 경사도 분류&lt;/b&gt;&lt;hr/&gt;국토지리정보원 기준에 따른 5단계 분류입니다.&lt;br/&gt;&lt;br/&gt;• 완경사지: 0~15° (주거지 최적)&lt;br/&gt;• 경사지: 15~20° (계단식 경작)&lt;br/&gt;• 급경사지: 20~25° (산지 산림)&lt;br/&gt;• 험준지: 25~30° (접근 곤란)&lt;br/&gt;• 절험지: 30°+ (절벽/암벽)&lt;br/&gt;&lt;br/&gt;&lt;b&gt;고고학 활용:&lt;/b&gt; 유적 입지 적합성 평가&lt;/html&gt;</string>
+         <string>&lt;html&gt;&lt;b&gt;한국 표준 경사도 분류&lt;/b&gt;&lt;hr/&gt;&lt;b&gt;산림청&lt;/b&gt; 예규 「공·사유림 경영계획 작성 및 운영요령」 [별표] 산림경영계획서 기재요령 &apos;1. 산림현황 ⑧ 경사도&apos;의 5단계 구분입니다(완/경/급/험/절). 국토지리정보원 기준이 아닙니다.&lt;br/&gt;&lt;br/&gt;• 완경사지: 0~15° (주거지 최적)&lt;br/&gt;• 경사지: 15~20° (계단식 경작)&lt;br/&gt;• 급경사지: 20~25° (산지 산림)&lt;br/&gt;• 험준지: 25~30° (접근 곤란)&lt;br/&gt;• 절험지: 30°+ (절벽/암벽)&lt;br/&gt;&lt;br/&gt;&lt;b&gt;고고학 활용:&lt;/b&gt; 유적 입지 적합성 평가&lt;/html&gt;</string>
         </property>
        </widget>
       </item>
@@ -157,10 +157,10 @@
       <item row="1" column="1">
        <widget class="QRadioButton" name="radioLlobera">
         <property name="text">
-         <string>Llobera(2007) - 인지지형</string>
+         <string>인지 경사 구분 (플러그인 자체 표)</string>
         </property>
         <property name="toolTip">
-         <string>&lt;html&gt;&lt;b&gt;Llobera 인지적 지형 인식&lt;/b&gt;&lt;hr/&gt;&lt;i&gt;Llobera, M. (2007). Reconstructing visual landscapes. World Archaeology 39(1):51-69.&lt;/i&gt;&lt;br/&gt;&lt;br/&gt;인간이 지형 경사를 어떻게 인지하는지 분석합니다.&lt;br/&gt;&lt;br/&gt;&lt;b&gt;고고학 활용:&lt;/b&gt;&lt;br/&gt;• 경관 인지 분석&lt;br/&gt;• 시각적 경계/장벽 파악&lt;/html&gt;</string>
+         <string>&lt;html&gt;&lt;b&gt;인지 경사 구분 (플러그인 자체 표)&lt;/b&gt;&lt;hr/&gt;&lt;b&gt;주의:&lt;/b&gt; 아래 0-2 / 2-6 / 6-12 / 12-20 / 20°+ 구간은 &lt;b&gt;이 플러그인이 정한 표시 구분&lt;/b&gt;이며 Llobera가 발표한 분류가 아닙니다. Llobera, M. (2007) &quot;Reconstructing visual landscapes&quot;(World Archaeology 39(1):51-69)는 &lt;b&gt;가시성(visibility)&lt;/b&gt;에 관한 논문으로, 경사 등급표를 제시하지 않습니다. 경관 인지라는 착상의 배경으로만 참고하십시오.&lt;br/&gt;&lt;br/&gt;&lt;b&gt;고고학 활용:&lt;/b&gt;&lt;br/&gt;• 경관 인지 분석&lt;br/&gt;• 시각적 경계/장벽 파악&lt;/html&gt;</string>
         </property>
        </widget>
       </item>

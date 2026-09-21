@@ -136,7 +136,7 @@
       <item row="0" column="1">
        <widget class="QComboBox" name="cmbScale">
         <property name="toolTip">
-         <string>국토지리정보원 내규에 따른 축척별 권장 해상도를 자동 입력합니다.</string>
+         <string>축척별 권장 해상도를 자동 입력합니다. 값은 등고선 간격에서 유도한 실무 관례이며, 특정 기관이 고시한 표가 아닙니다.</string>
         </property>
        </widget>
       </item>
@@ -184,7 +184,7 @@
       <item row="3" column="0" colspan="2">
        <widget class="QLabel" name="lblInterpDesc">
         <property name="text">
-         <string>TIN (Triangulated Irregular Network): 불규칙 삼각망 보간법 [Delaunay, 1934]</string>
+         <string>TIN (Triangulated Irregular Network): 들로네 삼각망(Delaunay 1934) 기반 보간. TIN을 지형모델로 쓰는 방식 자체는 Fowler &amp; Little (1979)</string>
         </property>
         <property name="styleSheet">
          <string>background-color: #fff3e0; padding: 8px; border-radius: 3px; font-style: italic;</string>
