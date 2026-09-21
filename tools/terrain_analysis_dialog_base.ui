@@ -137,20 +137,20 @@
       <item row="0" column="1">
        <widget class="QRadioButton" name="radioTobler">
         <property name="text">
-         <string>Tobler(1993) - 보행속도</string>
+         <string>보행속도 기반 구분 (Tobler 1993 함수 참고)</string>
         </property>
         <property name="toolTip">
-         <string>&lt;html&gt;&lt;b&gt;Tobler 보행속도 함수 (Hiking Function)&lt;/b&gt;&lt;hr/&gt;&lt;i&gt;Tobler, W. (1993). Three Presentations on Geographical Analysis and Modeling: Non-Isotropic Geographic Modeling.&lt;/i&gt;&lt;br/&gt;&lt;br/&gt;경사에 따른 보행 속도 변화를 모델링합니다:&lt;br/&gt;&lt;br/&gt;• 평지 (0°): 시속 ~5km (기본 보행)&lt;br/&gt;• 완경사 (5°): 시속 ~4km&lt;br/&gt;• 경사 (15°): 시속 ~2km&lt;br/&gt;• 급경사 (25°+): 시속 &lt;1km&lt;br/&gt;&lt;br/&gt;&lt;b&gt;고고학 활용:&lt;/b&gt;&lt;br/&gt;• 고대 도로 경로 추정&lt;br/&gt;• 이동 비용 분석 (Cost-Distance)&lt;br/&gt;• 교역로, 순찰로 복원&lt;/html&gt;</string>
+         <string>&lt;html&gt;&lt;b&gt;보행속도 기반 경사 구분&lt;/b&gt;&lt;hr/&gt;&lt;b&gt;주의:&lt;/b&gt; 아래 0-6 / 6-12 / 12-18 / 18-25 / 25°+ &lt;b&gt;구간값은 이 플러그인이 정한 표시 구분&lt;/b&gt;입니다. Tobler(1993)가 발표한 것은 보행속도 함수 &lt;i&gt;W = 6·exp(-3.5·|tan θ + 0.05|)&lt;/i&gt; 이며 경사 등급표가 아닙니다. 아래 속도 수치는 그 함수로 계산한 값입니다.&lt;hr/&gt;&lt;i&gt;Tobler, W. (1993). Three Presentations on Geographical Analysis and Modeling: Non-Isotropic Geographic Modeling.&lt;/i&gt;&lt;br/&gt;&lt;br/&gt;경사에 따른 보행 속도 변화를 모델링합니다:&lt;br/&gt;&lt;br/&gt;• 평지 (0°): 시속 ~5km (기본 보행)&lt;br/&gt;• 완경사 (5°): 시속 ~4km&lt;br/&gt;• 경사 (15°): 시속 ~2km&lt;br/&gt;• 급경사 (25°+): 시속 &lt;1km&lt;br/&gt;&lt;br/&gt;&lt;b&gt;고고학 활용:&lt;/b&gt;&lt;br/&gt;• 고대 도로 경로 추정&lt;br/&gt;• 이동 비용 분석 (Cost-Distance)&lt;br/&gt;• 교역로, 순찰로 복원&lt;/html&gt;</string>
         </property>
        </widget>
       </item>
       <item row="1" column="0">
         <widget class="QRadioButton" name="radioMinetti">
          <property name="text">
-          <string>Minetti(1995) - 에너지효율</string>
+          <string>에너지 기반 구분 (Minetti 1995 연구 참고)</string>
          </property>
          <property name="toolTip">
-          <string>&lt;html&gt;&lt;b&gt;Minetti 에너지 소비 함수&lt;/b&gt;&lt;hr/&gt;&lt;i&gt;Minetti, A. E. (1995). Optimum gradient of mountain paths. Journal of Applied Physiology 79(5):1698-1703. DOI:10.1152/jappl.1995.79.5.1698.&lt;/i&gt;&lt;br/&gt;&lt;br/&gt;경사에 따른 에너지 소비량(J/kg/m) 변화를 분석합니다.&lt;br/&gt;&lt;br/&gt;&lt;b&gt;고고학 활용:&lt;/b&gt;&lt;br/&gt;• 운반 경로 최적화 분석&lt;br/&gt;• 고대 노동력 추정&lt;/html&gt;</string>
+          <string>&lt;html&gt;&lt;b&gt;에너지 기반 경사 구분&lt;/b&gt;&lt;hr/&gt;&lt;b&gt;주의:&lt;/b&gt; 아래 0-3 / 3-9 / 9-15 / 15-25 / 25°+ &lt;b&gt;구간값은 이 플러그인이 정한 표시 구분&lt;/b&gt;이며 Minetti(1995)가 발표한 분류표가 아닙니다. 해당 논문은 최적 경사(약 ±10-15%)에 관한 연구입니다.&lt;hr/&gt;&lt;i&gt;Minetti, A. E. (1995). Optimum gradient of mountain paths. Journal of Applied Physiology 79(5):1698-1703. DOI:10.1152/jappl.1995.79.5.1698.&lt;/i&gt;&lt;br/&gt;&lt;br/&gt;경사에 따른 에너지 소비량(J/kg/m) 변화를 분석합니다.&lt;br/&gt;&lt;br/&gt;&lt;b&gt;고고학 활용:&lt;/b&gt;&lt;br/&gt;• 운반 경로 최적화 분석&lt;br/&gt;• 고대 노동력 추정&lt;/html&gt;</string>
          </property>
         </widget>
       </item>

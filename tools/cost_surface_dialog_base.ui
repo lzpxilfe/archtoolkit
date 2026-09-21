@@ -369,7 +369,7 @@
           <item>
            <widget class="QGroupBox" name="groupConollyLakeParams">
             <property name="title">
-             <string>Conolly &amp; Lake relative slope (2006)</string>
+             <string>상대경사 비용 (플러그인 정의; Conolly &amp; Lake 2006 논의 참고)</string>
             </property>
             <layout class="QGridLayout" name="gridLayout_ConollyLake">
              <item row="0" column="0">

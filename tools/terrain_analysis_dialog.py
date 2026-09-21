@@ -79,7 +79,7 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
             ]
         },
         'tobler': {
-            'name': 'Tobler 1993',
+            'name': '보행속도구분(플러그인)',
             'classes': [
                 {'max': 6, 'label': '1등급 | 0~6° | 일반 보행', 'color': '#1a5f1a'},
                 {'max': 12, 'label': '2등급 | 6~12° | 속도 감소', 'color': '#7ec87e'},
@@ -89,7 +89,7 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
             ]
         },
         'minetti': {
-            'name': 'Minetti 1995',
+            'name': '에너지구분(플러그인)',
             'classes': [
                 {'max': 3, 'label': '1등급 | 0~3° | 일상', 'color': '#20b2aa'},
                 {'max': 9, 'label': '2등급 | 3~9° | 노동', 'color': '#ffff00'},
