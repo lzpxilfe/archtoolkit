@@ -167,14 +167,18 @@
 
 > Amati, V., Shafie, T., & Brandes, U. (2018). "Reconstructing Archaeological Networks with Structural Holes." *Journal of Archaeological Method and Theory*, 25, pp. 226–253. DOI: 10.1007/s10816-017-9335-1
 
-## 가시성 네트워크 (Visibility / Intervisibility Network, VGA)
+## 가시성 네트워크 (Visibility / Intervisibility Network)
 
-**(C) 고고학적 해석 맥락 (구현은 가시권 분석과 네트워크 지표의 조합):**
+**(B) 구현 — 유적 간 상호가시성(LOS) 검사** (`tools/spatial_network_dialog.py`): 두 유적을 잇는 시선을 DEM 위에서 등간격으로 샘플링해 지형이 시선을 가리는지 판정합니다. 각 샘플 지형고도에는 지구 곡률·대기 굴절 보정 `cc · d² / (2R)` (R = 6,371,000 m, cc = 1 − 굴절계수, 기본 굴절계수 0.13 → cc = 0.87)을 적용하며, 이는 `gdal_viewshed`가 쓰는 보정과 같은 식입니다. DEM NoData를 만난 쌍은 "샘플 실패"로 기록되고 노드 레이어의 `fail_deg`에 집계됩니다(가시성 없음으로 취급하지 않음). 폴리곤 입력의 `vis_ratio_ab`는 A의 경계 샘플 중 B의 대표점이 보이는 비율입니다.
+
+**(C) 고고학적 해석 맥락 (구현은 위 LOS 검사와 네트워크 지표의 조합):**
 > Van Dyke, R.M., Bocinsky, R.K., Windes, T.C., & Robinson, T.J. (2016). "Great houses, shrines, and high places: intervisibility in the Chacoan world." *American Antiquity*, 81(2), pp. 205–230.
 
 > Gillings, M., & Wheatley, D. (2001). "Seeing is not believing: unresolved issues in archaeological visibility analysis." In: *On the Good Use of Geographical Information Systems in Archaeological Landscape Studies* (COST Action G2).
 
 > Turner, A., Doxa, M., O'Sullivan, D., & Penn, A. (2001). "From isovists to visibility graphs: a methodology for the analysis of architectural space." *Environment and Planning B: Planning and Design*, 28(1), pp. 103–121. DOI: 10.1068/b2684
+
+주: Turner 등(2001)의 VGA(visibility graph analysis)는 **격자 셀 간** 가시성 그래프를 다루는 방법론이며, 이 도구가 계산하는 **유적(점/폴리곤) 간** 상호가시성 네트워크와는 다른 방법입니다. 시각 그래프라는 착상의 배경으로만 참고하십시오.
 
 ## 가시권 분석 (Viewshed / LOS)
 
@@ -257,6 +261,16 @@
 > Phillips, S.J., & Dudík, M. (2008). "Modeling of species distributions with Maxent: new extensions and a comprehensive evaluation." *Ecography*, 31(2), pp. 161–175.
 
 > Elith, J., Phillips, S.J., Hastie, T., Dudík, M., Chee, Y.E., & Yates, C.J. (2011). "A statistical explanation of MaxEnt for ecologists." *Diversity and Distributions*, 17(1), pp. 43–57.
+
+## 지구화학도 범례 프리셋 (GeoChem)
+
+**(C) 자료 출처 (알고리즘 아님):**
+> 한국지질자원연구원(KIGAM). 지구화학도 WMS 렌더링 이미지 (원자료 수치가 아니라 색상으로 표현된 지도).
+
+주: `tools/geochem_polygonize_dialog.py`의 프리셋 7종(Fe2O3, Pb, Cu, Zn, Sr, Ba, CaO)은 문헌이 아니라 서비스 범례를 판독해 입력한 표입니다.
+Fe2O3는 사용자가 제공한 범례 포인트(색-값)이고, 나머지 6종은 백분위 구간값만 범례에서 읽었으며 색상 팔레트는 Fe2O3와 같다고 **가정**했습니다.
+값 역추정은 범례 폴리라인 최근접 투영(선형 보간)이며, 색 거리가 `RGB_MATCH_TOLERANCE`를 넘는 픽셀은 NoData로 제외됩니다.
+범례가 백분위 구간표이므로 최상위 구간 색은 구간 상한값으로 기록되고, 그 사이 값은 구간 경계 사이의 선형 보간값입니다.
 
 ## 지질도 데이터 (KIGAM 1:50,000)
 

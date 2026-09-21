@@ -49,8 +49,11 @@ from qgis.core import (
     Qgis,
     QgsCoordinateReferenceSystem,
     QgsProject,
+    QgsRasterBandStats,
     QgsRasterLayer,
+    QgsRectangle,
     QgsVectorLayer,
+    QgsWkbTypes,
 )
 from qgis.gui import QgsMapLayerComboBox
 
@@ -197,13 +200,18 @@ class DistanceRasterDialog(QtWidgets.QDialog):
             return
         try:
             crs = layer.crs()
-            px = abs(float(layer.rasterUnitsPerPixelX()))
+            px_x = abs(float(layer.rasterUnitsPerPixelX()))
+            px_y = abs(float(layer.rasterUnitsPerPixelY()))
             text = (f"{crs.authid() or crs.description()} · {layer.width()}x{layer.height()} 셀 "
-                    f"· 픽셀 {px:g}")
+                    f"· 픽셀 {px_x:g}")
+            if not self._is_square_pixel(px_x, px_y):
+                text += (f" x {px_y:g}  [주의] 비정사각 픽셀 — 거리 계산 불가, "
+                         "정사각 픽셀로 리샘플링하세요")
             if crs.isValid() and crs.isGeographic():
                 text += "  [주의] 지리좌표계(도) — 투영 CRS를 쓰세요"
             self.lblGridInfo.setText(text)
-        except Exception:
+        except Exception as _exc:
+            log_swallowed("distance_raster_dialog._on_ref_changed", _exc)
             self.lblGridInfo.setText("")
 
     def _on_variable_changed(self, text):
@@ -285,11 +293,33 @@ class DistanceRasterDialog(QtWidgets.QDialog):
         try:
             px_x = abs(float(ref.rasterUnitsPerPixelX()))
             px_y = abs(float(ref.rasterUnitsPerPixelY()))
-        except Exception:
+        except Exception as _exc:
+            log_swallowed("distance_raster_dialog._on_run", _exc)
             px_x = px_y = 0.0
         if px_x <= 0 or px_y <= 0:
             push_message(self.iface, "오류", "기준 래스터 픽셀 크기를 확인할 수 없습니다.",
                          level=2, duration=6)
+            return
+        # gdal_proximity measures sqrt(dx^2 + dy^2) in pixel-index space and
+        # multiplies by the X pixel size alone (alg/gdalproximity.cpp), so on a
+        # 10 m x 20 m grid every north-south distance comes out at half its
+        # true value while the layer still says metres. GDAL's own "Pixels not
+        # square" note is a CPLError warning that never reaches the message
+        # bar, so the refusal has to happen here - the same rule align/export
+        # applies to its reference grid.
+        if not self._is_square_pixel(px_x, px_y):
+            log_message(
+                f"거리 래스터: 비정사각 픽셀 기준 래스터 거부 ({ref.name()}: "
+                f"{px_x:g} x {px_y:g}).",
+                level=Qgis.Warning,
+            )
+            push_message(
+                self.iface, "오류",
+                f"비정사각 픽셀 기준 래스터({px_x:g} x {px_y:g})는 거리 계산에서 지원하지 않습니다. "
+                "GDAL proximity가 두 축 모두에 X 픽셀 크기를 적용해 남북 방향 거리가 틀어집니다. "
+                "기준 래스터를 정사각 픽셀로 리샘플링한 뒤 다시 실행하세요.",
+                level=2, duration=12,
+            )
             return
 
         run_id = new_run_id("dist")
@@ -382,6 +412,13 @@ class DistanceRasterDialog(QtWidgets.QDialog):
                           f" [{ref_crs.authid()}]")
             burned = os.path.join(tempfile.gettempdir(), f"archt_dist_burn_{run_id}.tif")
             temp_files.append(burned)
+            # GDAL's default burns a polygon only where a pixel CENTRE falls
+            # inside it, so a 5 m channel polygon on a 30 m grid burns almost
+            # nothing and every "distance to water" then points at the nearest
+            # wide reach instead. A presence mask feeding a distance transform
+            # wants every touched cell (-at); points are unaffected by -at and
+            # always land in the cell that contains them.
+            burn_rule = self._burn_rule(source)
             processing.run("gdal:rasterize", {
                 "INPUT": prepared,
                 "BURN": 1,
@@ -392,10 +429,45 @@ class DistanceRasterDialog(QtWidgets.QDialog):
                 "NODATA": 0,
                 "DATA_TYPE": 0,      # Byte: this is a presence mask, not a measurement
                 "INIT": 0,
+                "ALL_TOUCH": burn_rule == "all_touched",
                 "OUTPUT": burned,
             })
             if not os.path.exists(burned):
                 raise RuntimeError("대상 레이어를 격자에 굽지 못했습니다.")
+
+            # A mask with no target cell makes gdal:proximity write NoData into
+            # every cell and still return a valid file, so "file exists" is not
+            # enough: count what actually burned before spending the proximity
+            # pass on it.
+            target_cells = None
+            burned_summary = self._band_summary(burned)
+            if burned_summary is not None:
+                _valid, value_sum, max_value = burned_summary
+                target_cells = int(round(value_sum))
+                if target_cells <= 0 and max_value >= 1:
+                    # Contradictory statistics; something burned, count unknown.
+                    target_cells = None
+                elif target_cells <= 0:
+                    log_message(
+                        f"거리 래스터: 대상 레이어 '{source.name()}'가 기준 격자 어느 셀에도 "
+                        f"구워지지 않아 중단합니다 ({key}, 기준 {ref.name()}).",
+                        level=Qgis.Warning,
+                    )
+                    push_message(
+                        self.iface, "오류",
+                        f"대상 레이어 '{source.name()}'의 피처가 기준 격자({px_x:g} m 셀)의 어느 셀에도 "
+                        "구워지지 않았습니다. 거리 래스터를 만들지 않았습니다. "
+                        "기준 래스터 범위와 대상 레이어의 지오메트리를 확인하세요.",
+                        level=2, duration=12,
+                    )
+                    return
+                log_message(
+                    f"거리 래스터: 대상 셀 {target_cells}개 ({burn_rule}, {key}).")
+            else:
+                log_message(
+                    f"거리 래스터: 구운 셀 수를 확인하지 못했습니다 ({key}). 계속 진행합니다.",
+                    level=Qgis.Warning,
+                )
 
             # 3. Distance from every cell to the nearest burned cell.
             progress.setValue(2)
@@ -420,6 +492,35 @@ class DistanceRasterDialog(QtWidgets.QDialog):
             if not os.path.exists(output):
                 raise RuntimeError("거리 래스터가 생성되지 않았습니다.")
 
+            # Same rule on the way out: a layer that is 100% NoData would be
+            # added, stamped with units="m" and reported as done, and then
+            # silently drop every training point from a predictor stack.
+            output_summary = self._band_summary(output)
+            if output_summary is not None:
+                valid_cells, _sum, max_value = output_summary
+                if valid_cells <= 0 and not (max_value >= 0):
+                    temp_files.append(output)
+                    hint = ""
+                    if max_distance > 0:
+                        hint = (f" 최대 거리({max_distance:g} m)를 늘리거나 제한을 없애세요.")
+                    log_message(
+                        f"거리 래스터: 결과가 전부 NoData여서 레이어를 추가하지 않습니다 "
+                        f"({key}, 기준 {ref.name()}).",
+                        level=Qgis.Warning,
+                    )
+                    push_message(
+                        self.iface, "오류",
+                        f"거리 래스터 '{key}'에 유효한 셀이 없습니다(전부 NoData). "
+                        f"레이어를 추가하지 않았습니다.{hint}",
+                        level=2, duration=12,
+                    )
+                    return
+            else:
+                log_message(
+                    f"거리 래스터: 결과의 유효 셀 수를 확인하지 못했습니다 ({key}).",
+                    level=Qgis.Warning,
+                )
+
             progress.setValue(3)
             layer = QgsRasterLayer(output, f"{key} (거리, m)")
             if not layer.isValid():
@@ -437,6 +538,9 @@ class DistanceRasterDialog(QtWidgets.QDialog):
                     "max_distance_m": max_distance or None,
                     "reference_raster": ref.name(),
                     "reference_crs": ref_crs.authid(),
+                    "pixel_size_m": px_x,
+                    "burn_rule": burn_rule,
+                    "target_cells": target_cells,
                 },
             )
             self._add_to_group(layer, run_id)
@@ -461,6 +565,57 @@ class DistanceRasterDialog(QtWidgets.QDialog):
             # raster itself is referenced by the new layer and must survive.
             cleanup_files(temp_files)
             restore_ui_focus(self)
+
+    @staticmethod
+    def _is_square_pixel(px_x, px_y, rel_tol=1e-6):
+        """True when the two pixel sizes agree within a relative tolerance."""
+        try:
+            px_x, px_y = abs(float(px_x)), abs(float(px_y))
+        except Exception as _exc:
+            log_swallowed("distance_raster_dialog._is_square_pixel", _exc)
+            return False
+        if px_x <= 0 or px_y <= 0:
+            return False
+        return abs(px_x - px_y) <= rel_tol * max(px_x, px_y)
+
+    @staticmethod
+    def _burn_rule(layer) -> str:
+        """'cell_centre' for point sources, 'all_touched' for lines and polygons.
+
+        Recorded in the layer metadata so a reader of the predictor can tell
+        how the target was put on the grid. When the geometry type cannot be
+        read the line/polygon rule is used: GDAL ignores -at for points, so
+        the wider rule is never wrong, only the label would be.
+        """
+        try:
+            if layer.geometryType() == QgsWkbTypes.PointGeometry:
+                return "cell_centre"
+        except Exception as _exc:
+            log_swallowed("distance_raster_dialog._burn_rule", _exc)
+        return "all_touched"
+
+    @staticmethod
+    def _band_summary(path):
+        """(valid_cells, value_sum, max_value) of band 1, or None when unknown.
+
+        Full scan (sampleSize 0): a sampled pass could miss the handful of
+        cells a small site layer burns, and refusing on a sampling artefact
+        would be worse than the silence this replaces. For the 0/1 mask the
+        sum is the burned-cell count whether or not the NoData flag took;
+        for the distance raster elementCount is the number of non-NoData
+        cells. None means the statistics could not be read, and the caller
+        proceeds with a logged warning rather than aborting a working run.
+        """
+        try:
+            probe = QgsRasterLayer(str(path), "archt_dist_stats_probe", "gdal")
+            if not probe.isValid():
+                return None
+            stats = probe.dataProvider().bandStatistics(
+                1, QgsRasterBandStats.All, QgsRectangle(), 0)
+            return (int(stats.elementCount), float(stats.sum), float(stats.maximumValue))
+        except Exception as _exc:
+            log_swallowed("distance_raster_dialog._band_summary", _exc)
+        return None
 
     @staticmethod
     def _layer_extent(obj):
@@ -493,7 +648,9 @@ class DistanceRasterDialog(QtWidgets.QDialog):
             "<h4>사용</h4>"
             "<ol>"
             "<li><b>대상 레이어</b>: 거리를 잴 대상(하천선, 유적점, 도로선 등). "
-            "점·선·면 모두 됩니다.</li>"
+            "점은 점이 놓인 셀에, 선·면은 <b>닿는 모든 셀</b>에 굽습니다(all-touched). "
+            "기준 셀보다 훨씬 가는 하천·도로 폴리곤도 셀 단위로만 표현되므로 "
+            "거리의 해상도는 기준 픽셀 크기를 넘지 못합니다.</li>"
             "<li><b>기준 래스터</b>: 출력 격자를 정합니다. 다른 예측변수와 같은 래스터를 "
             "고르면 정렬 작업 없이 바로 같은 스택에 들어갑니다.</li>"
             "<li><b>변수 이름</b>: 영문으로 짧게 (water, road, site). "
@@ -508,6 +665,10 @@ class DistanceRasterDialog(QtWidgets.QDialog):
             "<li>기준 래스터가 <b>투영 CRS</b>여야 거리 단위가 미터가 됩니다. "
             "지리좌표계(도)는 거부합니다.</li>"
             "<li>대상 레이어 CRS가 다르면 자동으로 변환한 뒤 계산합니다.</li>"
+            "<li>기준 래스터 픽셀은 <b>정사각</b>이어야 합니다. 비정사각 픽셀은 GDAL이 "
+            "X 픽셀 크기로만 거리를 환산해 남북 거리가 틀어지므로 거부합니다.</li>"
+            "<li>대상이 격자 어느 셀에도 구워지지 않거나 결과가 전부 NoData이면 "
+            "레이어를 추가하지 않고 오류를 표시합니다.</li>"
             "<li><b>최대 거리</b>를 두면 그보다 먼 셀은 NoData가 되고, 모델 학습에서 "
             "그 셀들이 빠집니다. 보통은 제한 없이 두세요.</li>"
             "</ul>"

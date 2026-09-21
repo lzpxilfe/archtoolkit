@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """Whether an ArchToolkit raster holds class codes or measurements.
 
-One rule, two consequences, both silent when it is wrong:
+One rule (plus a circular-direction rule and a no-metadata heuristic, both
+below), two consequences, both silent when it is wrong:
 
 * align/export resamples a categorical raster with nearest neighbour. Bilinear
   on nominal codes blends lithology 5 and lithology 12 into 8.5 - a value that
@@ -53,6 +54,71 @@ def is_categorical_meta(meta) -> bool:
     if any(hint in tool_id for hint in CATEGORICAL_TOOL_HINTS):
         return True
     return any(hint in kind for hint in CATEGORICAL_KIND_HINTS)
+
+
+# Kinds that hold a direction in degrees. A direction is circular: 355 and 5
+# are ten degrees apart, and their linear average (180) points the opposite
+# way, so bilinear resampling manufactures directions no source cell had.
+# Only nearest neighbour leaves them alone. terrain_analysis writes flat cells
+# as 0 (due north), which makes every flat/slope boundary such a case.
+# "northness", "eastness" and "trasp" are deliberately absent: those are the
+# linearised forms terrain_analysis emits precisely so they can be averaged.
+CIRCULAR_KIND_HINTS = ("aspect", "bearing", "azimuth")
+
+
+def is_circular_meta(meta) -> bool:
+    """True when the layer metadata describes a raster of directions (degrees).
+
+    Checked after :func:`is_categorical_meta` by callers: a raster that is
+    both (an 8-sector aspect *class* raster) is categorical first, and both
+    answers lead to nearest-neighbour resampling anyway.
+    """
+    if not hasattr(meta, "get"):
+        return False
+    kind = str(meta.get("kind") or "").lower()
+    return any(hint in kind for hint in CIRCULAR_KIND_HINTS)
+
+
+# Band types a raster of class codes is normally stored in. Float types are
+# absent: codes stored as float are already outside the convention, and a
+# float raster with few distinct values is far more often a rescaled
+# measurement than a class map.
+CLASS_CODE_TYPES = ("Byte", "Int8", "Int16", "UInt16")
+
+# Distinct values a sample may hold and still read as class codes. Land cover,
+# soil, lithology and suitability classes all sit well below this; a Byte
+# measurement (hillshade, scaled index) blows through it in any real sample.
+CLASS_CODE_MAX_DISTINCT = 32
+
+
+def looks_like_class_codes(type_name, values) -> bool:
+    """Heuristic for a raster that carries no ArchToolkit metadata.
+
+    Absence of metadata is not evidence of continuity, but nothing in the
+    file says which it is either. This is the cheapest signal that can be
+    read from the pixels: an integer band type AND at most
+    :data:`CLASS_CODE_MAX_DISTINCT` distinct, integral values in ``values``
+    (a decimated sample of the valid cells). True means "resample with
+    nearest neighbour and say why"; False keeps the caller's default.
+
+    A false positive costs little (nearest on a measurement drops the
+    interpolation smoothing); a false negative is the bilinear-on-codes
+    corruption this exists to avoid. The threshold is therefore generous.
+    """
+    if str(type_name or "") not in CLASS_CODE_TYPES:
+        return False
+    distinct = set()
+    for value in values:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return False
+        if not math.isfinite(number) or number != math.floor(number):
+            return False
+        distinct.add(number)
+        if len(distinct) > CLASS_CODE_MAX_DISTINCT:
+            return False
+    return bool(distinct)
 
 
 # Inclusive value ranges of the GDAL band types a categorical raster is written
@@ -116,7 +182,12 @@ __all__ = [
     "CATEGORICAL_KIND_HINTS",
     "CATEGORICAL_TOOL_HINTS",
     "CATEGORICAL_UNITS",
+    "CIRCULAR_KIND_HINTS",
+    "CLASS_CODE_MAX_DISTINCT",
+    "CLASS_CODE_TYPES",
     "INTEGER_TYPE_RANGES",
     "choose_nodata_sentinel",
     "is_categorical_meta",
+    "is_circular_meta",
+    "looks_like_class_codes",
 ]

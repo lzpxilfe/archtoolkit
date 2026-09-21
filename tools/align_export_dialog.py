@@ -30,8 +30,15 @@ Design
 - QGIS built-ins only (gdal:warpreproject + QGIS layer API), per DEVELOPMENT.md.
 - Reference grid is taken from a chosen raster layer (its CRS / extent / pixel
   size), with optional AOI clip and pixel-size override.
-- Categorical outputs (by ArchToolkit metadata kind) resample with nearest
-  neighbour; continuous outputs use bilinear.
+- Categorical outputs (by ArchToolkit metadata kind/units/tool_id) resample
+  with nearest neighbour; so do circular outputs (aspect and other directions
+  in degrees, whose linear average points the wrong way). Continuous outputs
+  use bilinear. A raster with no ArchToolkit metadata is of unknown meaning:
+  it defaults to bilinear and is marked "unknown" in the manifest, unless a
+  pixel sample reads as integer class codes, in which case it gets nearest.
+- The common grid is CRS + extent + pixel size. NoData is decided per raster
+  (continuous: -9999; categorical: the source's own value or a sentinel) and
+  recorded in the manifest's ``nodata`` column.
 - Runs each GDAL warp through QGIS' task manager so the progress dialog stays
   responsive and cancellation reaches the active subprocess.
 """
@@ -51,6 +58,7 @@ from qgis.PyQt.QtGui import QIcon
 from qgis.core import (
     Qgis,
     QgsApplication,
+    QgsCoordinateTransform,
     QgsProcessingAlgRunnerTask,
     QgsProcessingContext,
     QgsProcessingFeedback,
@@ -78,7 +86,13 @@ from .raster_grid_contract import (
     canonical_gdal_target_grid,
     validate_grid,
 )
-from .raster_semantics import choose_nodata_sentinel
+from .raster_semantics import (
+    CLASS_CODE_MAX_DISTINCT,
+    CLASS_CODE_TYPES,
+    choose_nodata_sentinel,
+    is_circular_meta,
+    looks_like_class_codes,
+)
 from .utils import (
     log_swallowed,
     get_archtoolkit_layer_metadata,
@@ -274,6 +288,70 @@ def _expected_nodata_values(layer: QgsRasterLayer, nodata):
     return tuple([nodata] * band_count)
 
 
+def _valid_fraction(block) -> Optional[float]:
+    """Share of cells in a raster block that are not NoData, or None if unreadable.
+
+    The block is the decimated sample the validator already reads, so this
+    costs nothing extra. A block with no NoData declared counts as fully
+    valid - there is nothing to mask in that case.
+    """
+    try:
+        rows, cols = int(block.height()), int(block.width())
+        total = rows * cols
+        if total <= 0:
+            return None
+        valid = 0
+        for row in range(rows):
+            for col in range(cols):
+                if not block.isNoData(row, col):
+                    valid += 1
+        return valid / float(total)
+    except Exception as exc:
+        log_swallowed("align_export_dialog._valid_fraction", exc)
+        return None
+
+
+def _sample_looks_like_class_codes(layer: QgsRasterLayer) -> bool:
+    """Pixel-sample heuristic for a raster that carries no ArchToolkit metadata.
+
+    Decision rule lives in :func:`tools.raster_semantics.looks_like_class_codes`
+    (unit-tested); this only feeds it the band type and a decimated sample of
+    the valid cells. Anything unreadable resolves to False, i.e. the
+    continuous default, so a failure here can only leave behaviour unchanged.
+    """
+    try:
+        provider = layer.dataProvider()
+        if provider is None or int(layer.bandCount()) != 1:
+            return False
+        type_name = _band_type_name(provider, 1)
+        if type_name not in CLASS_CODE_TYPES:
+            return False
+        block = provider.block(
+            1, layer.extent(), min(64, int(layer.width())), min(64, int(layer.height())))
+        if block is None or not block.isValid():
+            return False
+        values = (
+            block.value(row, col)
+            for row in range(int(block.height()))
+            for col in range(int(block.width()))
+            if not block.isNoData(row, col)
+        )
+        return looks_like_class_codes(type_name, values)
+    except Exception as exc:
+        log_swallowed("align_export_dialog._sample_looks_like_class_codes", exc)
+        return False
+
+
+def _crs_label(crs) -> str:
+    try:
+        if crs is None or not crs.isValid():
+            return ""
+        return str(crs.authid() or crs.description() or "")
+    except Exception as exc:
+        log_swallowed("align_export_dialog._crs_label", exc)
+        return ""
+
+
 def _ensure_supported_reference_grid(layer: QgsRasterLayer, px: float, *, pixel_override: bool) -> None:
     provider = layer.dataProvider()
     if provider is None:
@@ -334,6 +412,50 @@ class _Item:
     tool_id: str = ""
     nodata: Optional[float] = None
     nodata_reason: str = ""
+    # Direction in degrees (aspect): nearest only, see raster_semantics.
+    circular: bool = False
+    # False for a raster this plugin did not produce. Its meaning is unknown,
+    # which the manifest must say instead of asserting "continuous".
+    has_metadata: bool = True
+    # Set by the pixel-sample heuristic for a no-metadata raster.
+    nearest_by_sample: bool = False
+    source_crs: str = ""
+    valid_pct: Optional[float] = None
+
+    @property
+    def nearest(self) -> bool:
+        return bool(self.categorical or self.circular or self.nearest_by_sample)
+
+    @property
+    def categorical_label(self) -> str:
+        """Manifest ``categorical`` column: yes / no / unknown / unknown(nearest)."""
+        if self.categorical:
+            return "yes"
+        if not self.has_metadata:
+            return "unknown(nearest)" if self.nearest_by_sample else "unknown"
+        return "no"
+
+    @property
+    def resampling_label(self) -> str:
+        """Manifest ``resampling`` column; the reason is appended when it is not the default one."""
+        if self.categorical:
+            return "nearest"
+        if self.circular:
+            return "nearest(circular)"
+        if self.nearest_by_sample:
+            return "nearest(heuristic)"
+        return "bilinear"
+
+    @property
+    def semantics_note(self) -> str:
+        """Short Korean tag for the log line that maps variable name to layer."""
+        if self.categorical:
+            return "  [범주형: 최근접]"
+        if self.circular:
+            return "  [방향(원형): 최근접]"
+        if not self.has_metadata:
+            return "  [메타데이터 없음: 연속형으로 처리]"
+        return ""
 
 
 @dataclass(frozen=True)
@@ -370,8 +492,9 @@ class AlignExportDialog(QtWidgets.QDialog):
         layout = QtWidgets.QVBoxLayout(self)
         header = QtWidgets.QLabel(
             "<b>분석 결과 정렬/내보내기</b><br>"
-            "이미 만든 분석 결과 래스터들을 <b>하나의 기준 격자</b>(CRS·범위·픽셀크기·NoData)로 맞춰 "
-            "정렬하고, 예측모델용 스택+manifest로 내보냅니다.<br>"
+            "이미 만든 분석 결과 래스터들을 <b>하나의 기준 격자</b>(CRS·범위·픽셀크기)로 맞춰 "
+            "정렬하고, 예측모델용 스택+manifest로 내보냅니다. "
+            "NoData는 래스터별로 정해지며 manifest의 <code>nodata</code> 열에 기록됩니다.<br>"
             "<span style='color:#455a64;'>이 도구는 변수를 새로 만들지 않습니다 — 당신의 분석 결과를 모델 입력으로 정리합니다.</span>"
         )
         header.setWordWrap(True)
@@ -493,6 +616,12 @@ class AlignExportDialog(QtWidgets.QDialog):
                 label += "  (도면용 사본 — 예측변수 아님)"
             elif is_categorical_raster_meta(meta):
                 label += "  (범주형)"
+            elif is_circular_meta(meta):
+                label += "  (방향, 최근접)"
+            elif not is_arch:
+                # Not produced by this plugin, so nothing says whether it is a
+                # measurement or class codes. Say so where the user checks it.
+                label += "  (메타데이터 없음: 연속형으로 처리)"
             item = QtWidgets.QListWidgetItem(label)
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
             item.setCheckState(Qt.Checked if auto_check else Qt.Unchecked)
@@ -542,7 +671,12 @@ class AlignExportDialog(QtWidgets.QDialog):
             # into meaningless fractional values). Shared helper keeps this in
             # lockstep with the covariate report's exclusion rule.
             categorical = is_categorical_raster_meta(meta)
-            out.append(_Item(lid, lyr.name(), "", kind, units, categorical, tool_id))
+            # Aspect and other directions in degrees are circular: bilinear
+            # averages 355 and 5 to 180. Nearest only, like categorical.
+            circular = (not categorical) and is_circular_meta(meta)
+            has_metadata = bool(tool_id or kind)
+            out.append(_Item(lid, lyr.name(), "", kind, units, categorical, tool_id,
+                             circular=circular, has_metadata=has_metadata))
 
         # The exported base name becomes the model's variable name downstream,
         # and consumers reduce it to ASCII - which deletes Hangul rather than
@@ -563,6 +697,19 @@ class AlignExportDialog(QtWidgets.QDialog):
         items = self._selected_items()
         if not items:
             push_message(self.iface, "오류", "정렬할 래스터를 하나 이상 선택하세요.", level=2, duration=6)
+            return
+        # Belt and braces for assign_variable_keys' case-folded uniqueness:
+        # keys are filenames, and on Windows/macOS slope.tif and Slope.tif are
+        # the same file, which gdalwarp -overwrite would silently replace.
+        folded = [item.key.casefold() for item in items]
+        if len(set(folded)) != len(folded):
+            clashes = sorted({item.key for item in items if folded.count(item.key.casefold()) > 1})
+            push_message(
+                self.iface, "오류",
+                "변수명이 대소문자만 다른 래스터가 있어 같은 파일로 덮어쓰게 됩니다: "
+                + ", ".join(clashes) + " (레이어 이름을 바꾸거나 하나를 해제하세요)",
+                level=2, duration=12,
+            )
             return
 
         export_dir = str(self.txtExport.text() or "").strip()
@@ -641,9 +788,24 @@ class AlignExportDialog(QtWidgets.QDialog):
         # rather than leaving them to infer it from the manifest afterwards.
         for item in items:
             log_message(
-                f"변수명 '{item.key}' ← {item.name}"
-                + ("  [범주형]" if item.categorical else ""),
+                f"변수명 '{item.key}' ← {item.name}" + item.semantics_note,
                 level=Qgis.Info,
+            )
+
+        # A source that does not overlap the target grid still warps "successfully"
+        # into a file that is entirely NoData. Say so before the run starts; the
+        # output validation below refuses such a file when it happens anyway.
+        outside = self._sources_outside_target(items, ref_crs, target_grid)
+        if outside:
+            names = ", ".join(outside)
+            log_message(
+                f"기준 격자와 겹치지 않는 입력 래스터: {names} (정렬 결과가 전부 NoData가 됩니다)",
+                level=Qgis.Warning,
+            )
+            push_message(
+                self.iface, "주의",
+                f"기준 격자와 겹치지 않는 입력 래스터가 있습니다: {names}",
+                level=1, duration=12,
             )
 
         try:
@@ -679,6 +841,41 @@ class AlignExportDialog(QtWidgets.QDialog):
                 src = split_qgis_source_path(src_layer.source())
                 if not src:
                     raise RuntimeError(f"입력 경로를 확인할 수 없습니다: {item.name}")
+                if not item.has_metadata:
+                    # No metadata means no semantic claim can be made. Default
+                    # to the continuous path but say so, and switch to nearest
+                    # only when the pixels themselves read as class codes.
+                    item.nearest_by_sample = _sample_looks_like_class_codes(src_layer)
+                    if item.nearest_by_sample:
+                        log_message(
+                            f"메타데이터 없는 래스터가 정수형이고 표본의 서로 다른 값이 "
+                            f"{CLASS_CODE_MAX_DISTINCT}개 이하라 클래스 코드로 보고 최근접으로 "
+                            f"재배열합니다 (manifest categorical=unknown(nearest)): {item.name}",
+                            level=Qgis.Warning,
+                        )
+                    else:
+                        log_message(
+                            f"메타데이터 없는 래스터를 연속형으로 처리합니다 (이중선형, manifest "
+                            f"categorical=unknown). 실제로 범주형이면 결과가 잘못됩니다: {item.name}",
+                            level=Qgis.Warning,
+                        )
+                src_crs = src_layer.crs()
+                item.source_crs = _crs_label(src_crs)
+                try:
+                    # A CRS assigned in Layer Properties lives only in the
+                    # project. The warp is told to use it; record the case
+                    # where that differs from what the file says.
+                    provider = src_layer.dataProvider()
+                    file_crs = provider.crs() if provider is not None else None
+                    if file_crs is not None and file_crs.isValid() and src_crs.isValid() and file_crs != src_crs:
+                        log_message(
+                            f"레이어 CRS가 파일 CRS와 다릅니다 ({item.name}): 레이어 "
+                            f"{_crs_label(src_crs)} / 파일 {_crs_label(file_crs)}. "
+                            "레이어에 지정된 CRS를 원본 CRS로 사용합니다.",
+                            level=Qgis.Warning,
+                        )
+                except Exception as exc:
+                    log_swallowed("align_export_dialog._on_run", exc)
                 if item.categorical:
                     item.nodata, item.nodata_reason = _categorical_output_nodata(src_layer)
                     if item.nodata is None:
@@ -705,22 +902,30 @@ class AlignExportDialog(QtWidgets.QDialog):
                     px,
                     extent_str,
                     ref_crs,
-                    nearest=item.categorical,
+                    nearest=item.nearest,
                     nodata=item.nodata,
                     progress=progress,
+                    # Only a true categorical raster keeps its band type. A
+                    # circular or heuristic-nearest raster still carries the
+                    # continuous -9999 NoData, which needs Float32.
+                    force_float32=not item.categorical,
+                    source_crs=src_crs,
                 )
                 QtWidgets.QApplication.processEvents()
                 if progress.wasCanceled():
                     raise _Cancelled()
                 if not os.path.isfile(out_path):
                     raise RuntimeError(f"정렬 출력이 생성되지 않았습니다: {item.name}")
-                self._validate_warp_output(out_path, item.name, expected)
+                item.valid_pct = self._validate_warp_output(out_path, item.name, expected)
                 outputs.append({
                     "key": item.key, "path": out_path, "source": item.name,
                     "kind": item.kind, "units": item.units,
                     "categorical": bool(item.categorical),
+                    "categorical_label": item.categorical_label,
                     "nodata": item.nodata,
-                    "resampling": "nearest" if item.categorical else "bilinear",
+                    "resampling": item.resampling_label,
+                    "source_crs": item.source_crs,
+                    "valid_pct": item.valid_pct,
                 })
                 progress.setValue(idx + 1)
             if len(outputs) != len(items):
@@ -781,6 +986,12 @@ class AlignExportDialog(QtWidgets.QDialog):
                 f"{target_grid.extent.ymin},{target_grid.extent.ymax}"
             ),
             "continuous_nodata": CONTINUOUS_NODATA,
+            "note": (
+                "continuous_nodata applies only to manifest rows whose categorical "
+                "column is 'no' (or 'unknown'/'unknown(nearest)'). NoData is per "
+                "raster, not part of the common grid: categorical rows carry their "
+                "own value, or none, in the manifest's nodata column."
+            ),
             "run_id": run_id,
         }
         try:
@@ -824,9 +1035,12 @@ class AlignExportDialog(QtWidgets.QDialog):
         log_message(f"Align & export done: {len(outputs)} rasters (run {run_id})", level=log_level)
         restore_ui_focus(self)
 
-    def _warp(self, src, out, px, extent_str, ref_crs, *, nearest: bool, nodata, progress):
+    def _warp(self, src, out, px, extent_str, ref_crs, *, nearest: bool, nodata, progress,
+              force_float32: Optional[bool] = None, source_crs=None):
         if progress.wasCanceled():
             raise _Cancelled()
+        if force_float32 is None:
+            force_float32 = not nearest
         # Categorical layers keep their input type (often Byte) so the class
         # codes stay integral, and carry an explicit NoData chosen by
         # _categorical_output_nodata — either the source's own value or a
@@ -834,15 +1048,20 @@ class AlignExportDialog(QtWidgets.QDialog):
         # Float32 so the -9999 NoData is always representable — with DATA_TYPE=0
         # a continuous Byte product (e.g. 0-255 hillshade) would have -9999
         # clamped, turning valid value 0 into NoData.
+        # SOURCE_CRS is the layer's effective CRS, which may be one the user
+        # assigned in Layer Properties and which never reaches the file. With
+        # None, gdalwarp reads the file's own tag and that override is lost.
+        # The algorithm emits -s_srs only for a valid CRS, so None stays a
+        # no-op for callers that have nothing better.
         params = {
             "INPUT": src,
-            "SOURCE_CRS": None,
+            "SOURCE_CRS": source_crs,
             "TARGET_CRS": ref_crs,
             "RESAMPLING": 0 if nearest else 1,  # 0=nearest, 1=bilinear
             "NODATA": nodata,
             "TARGET_RESOLUTION": px,
             "OPTIONS": "",
-            "DATA_TYPE": 0 if nearest else 6,  # categorical: keep type / continuous: Float32
+            "DATA_TYPE": 6 if force_float32 else 0,  # 0: keep type / 6: Float32
             "TARGET_EXTENT": extent_str,
             "TARGET_EXTENT_CRS": ref_crs,
             "MULTITHREADING": False,
@@ -906,7 +1125,15 @@ class AlignExportDialog(QtWidgets.QDialog):
             raise RuntimeError(f"GDAL 출력 경로가 요청과 다릅니다: {result_path}")
         return out
 
-    def _validate_warp_output(self, path, source_name, expected):
+    def _validate_warp_output(self, path, source_name, expected) -> Optional[float]:
+        """Check the output against ``expected``; return its sampled valid-pixel percentage.
+
+        The percentage comes from the decimated block read for the pixel
+        check, so it is an estimate. None means it could not be read. Zero
+        raises: gdalwarp with an explicit extent produces a complete grid even
+        when the source lies entirely outside it, and that file passes every
+        container check while holding no data at all.
+        """
         layer = QgsRasterLayer(path, "ArchToolkit alignment validation")
         if not layer.isValid():
             raise RuntimeError(f"정렬 결과를 열 수 없습니다: {source_name}")
@@ -944,6 +1171,7 @@ class AlignExportDialog(QtWidgets.QDialog):
 
         if len(expected.nodata_values) != actual_band_count:
             raise RuntimeError(f"정렬 결과 NoData 계약이 band 수와 맞지 않습니다: {source_name}")
+        valid_pct: Optional[float] = None
         for band in range(1, actual_band_count + 1):
             expected_nodata = expected.nodata_values[band - 1]
             try:
@@ -965,6 +1193,55 @@ class AlignExportDialog(QtWidgets.QDialog):
             block = provider.block(band, layer.extent(), sample_width, sample_height)
             if block is None or not block.isValid():
                 raise RuntimeError(f"정렬 결과 픽셀을 읽을 수 없습니다: {source_name} band {band}")
+            fraction = _valid_fraction(block)
+            if fraction is None:
+                log_message(
+                    f"정렬 결과의 유효 픽셀 비율을 읽지 못했습니다: {source_name} band {band}",
+                    level=Qgis.Warning,
+                )
+                continue
+            if fraction <= 0.0:
+                raise RuntimeError(
+                    f"정렬 결과에 유효 픽셀이 없습니다 (입력이 기준 격자와 겹치지 않는지 확인하세요): "
+                    f"{source_name} band {band}"
+                )
+            band_pct = 100.0 * fraction
+            valid_pct = band_pct if valid_pct is None else min(valid_pct, band_pct)
+        if valid_pct is not None and valid_pct < 100.0:
+            log_message(
+                f"정렬 결과 유효 픽셀(표본) {valid_pct:.1f}%: {source_name}",
+                level=Qgis.Warning if valid_pct < 50.0 else Qgis.Info,
+            )
+        return valid_pct
+
+    def _sources_outside_target(self, items, ref_crs, target_grid) -> List[str]:
+        """Names of the inputs whose extent, in the reference CRS, misses the target grid."""
+        outside: List[str] = []
+        try:
+            target = QgsRectangle(
+                target_grid.extent.xmin, target_grid.extent.ymin,
+                target_grid.extent.xmax, target_grid.extent.ymax,
+            )
+        except Exception as exc:
+            log_swallowed("align_export_dialog._sources_outside_target", exc)
+            return outside
+        project = QgsProject.instance()
+        for item in items:
+            try:
+                layer = project.mapLayer(item.layer_id)
+                if layer is None:
+                    continue
+                extent = layer.extent()
+                src_crs = layer.crs()
+                if src_crs.isValid() and ref_crs.isValid() and src_crs != ref_crs:
+                    extent = QgsCoordinateTransform(src_crs, ref_crs, project).transformBoundingBox(extent)
+                if extent.isEmpty() or not extent.intersects(target):
+                    outside.append(item.name)
+            except Exception as exc:
+                # A failed transform is not proof of non-overlap; the output
+                # validation still refuses an all-NoData result.
+                log_swallowed("align_export_dialog._sources_outside_target", exc)
+        return outside
 
     def _write_manifest(self, export_dir, outputs, grid=None):
         # Reference grid → its own JSON sidecar so the CSV's first row is the
@@ -977,14 +1254,22 @@ class AlignExportDialog(QtWidgets.QDialog):
         path = os.path.join(export_dir, "aligned_stack_manifest.csv")
         with open(path, "w", newline="", encoding="utf-8-sig") as f:
             w = csv.writer(f)
+            # categorical: yes / no / unknown / unknown(nearest). "unknown" is a
+            # raster this plugin did not produce; nothing says what it holds.
+            # nodata is per raster (not a grid property). source_crs is the
+            # CRS the warp read the input in. valid_pct is the sampled share
+            # of non-NoData cells, so a partly covered predictor is visible.
             w.writerow(["variable", "file", "source_layer", "kind", "units",
-                        "categorical", "nodata", "resampling"])
+                        "categorical", "nodata", "resampling", "source_crs", "valid_pct"])
             for o in outputs:
+                valid_pct = o.get("valid_pct")
                 w.writerow([o["key"], os.path.basename(o["path"]), o["source"],
                             o["kind"], o["units"],
-                            "yes" if o.get("categorical") else "no",
+                            o.get("categorical_label") or ("yes" if o.get("categorical") else "no"),
                             "" if o.get("nodata") is None else o["nodata"],
-                            o["resampling"]])
+                            o["resampling"],
+                            o.get("source_crs", ""),
+                            "" if valid_pct is None else round(float(valid_pct), 1)])
 
         # Which rasters are categorical is the one thing file conventions
         # cannot carry, and a modelling tool that wants it as a typed list
@@ -1009,7 +1294,9 @@ class AlignExportDialog(QtWidgets.QDialog):
                 lyr, tool_id="align_export", run_id=run_id,
                 kind=o["kind"] or "aligned", units=o["units"],
                 params={"variable": o["key"], "source_layer": o["source"],
-                        "resampling": o["resampling"]},
+                        "resampling": o["resampling"],
+                        "categorical": o.get("categorical_label", ""),
+                        "source_crs": o.get("source_crs", "")},
             )
             layers.append(lyr)
 
@@ -1036,7 +1323,7 @@ class AlignExportDialog(QtWidgets.QDialog):
     def _on_help(self):
         html = (
             "<h3>분석 결과 정렬/내보내기</h3>"
-            "<p>이미 실행한 분석 결과 래스터들을 <b>하나의 기준 격자</b>(CRS·범위·픽셀크기·NoData)로 맞춰 "
+            "<p>이미 실행한 분석 결과 래스터들을 <b>하나의 기준 격자</b>(CRS·범위·픽셀크기)로 맞춰 "
             "정렬하고, 예측모델용 스택으로 내보냅니다. 이 도구는 <b>변수를 새로 만들지 않습니다</b> — "
             "당신의 분석을 모델 입력으로 정리하는 하위 유틸리티입니다.</p>"
             "<h4>사용</h4>"
@@ -1046,9 +1333,30 @@ class AlignExportDialog(QtWidgets.QDialog):
             "<li><b>내보내기 폴더</b>를 지정합니다. 결과는 실행별 "
             "<code>aligned_stack_&lt;run_id&gt;</code> 폴더에 GeoTIFF와 manifest로 함께 게시됩니다.</li>"
             "</ol>"
+            "<h4>NoData</h4>"
+            "<p>NoData는 기준 격자의 일부가 <b>아니라 래스터별</b>로 정해집니다. 연속형은 -9999, "
+            "범주형은 원본의 값 또는 코드 범위 밖의 값을 쓰며, 안전한 값이 없으면 NoData 없이 내보내고 "
+            "로그에 사유를 남깁니다. 실제 값은 manifest의 <code>nodata</code> 열을 보세요.</p>"
             "<h4>리샘플</h4>"
-            "<p>범주형 결과(지질/등급 등, 메타데이터 <code>kind</code> 기준)는 최근접(nearest), "
-            "연속형은 이중선형(bilinear)으로 재배열합니다.</p>"
+            "<p>래스터의 의미에 따라 세 갈래로 나뉘며 manifest의 <code>categorical</code>·"
+            "<code>resampling</code> 열에 기록됩니다.</p>"
+            "<ul>"
+            "<li><b>범주형</b>(지질/등급/마스크 등, 메타데이터 <code>kind</code>·<code>units</code>·"
+            "<code>tool_id</code> 기준): 최근접(nearest). 이중선형은 클래스 코드를 섞어 존재하지 않는 값을 만듭니다.</li>"
+            "<li><b>방향(원형) 값</b>(사면방향 등 도 단위 방위): 최근접. 355도와 5도의 평균 180도는 정반대 방향이므로 "
+            "이중선형을 쓸 수 없습니다. 평균할 수 있는 형태가 필요하면 지형 분석의 북향성/동향성/TRASP를 쓰세요.</li>"
+            "<li><b>연속형</b>(경사·고도·거리 등): 이중선형(bilinear).</li>"
+            "</ul>"
+            "<p><b>ArchToolkit 메타데이터가 없는 래스터</b>(직접 불러온 파일 등)는 의미를 알 수 없으므로 "
+            "연속형으로 처리(이중선형)하고 <code>categorical</code> 열에 <code>unknown</code>으로 기록합니다. "
+            f"다만 정수형(Byte/Int16 등)이고 표본에서 서로 다른 값이 {CLASS_CODE_MAX_DISTINCT}개 이하이면 "
+            "클래스 코드로 보고 최근접으로 재배열하며 <code>unknown(nearest)</code>로 기록합니다. "
+            "그런 래스터가 실제로 범주형인지 여부는 "
+            "직접 확인하세요. 잘못 처리되면 결과가 조용히 틀립니다.</p>"
+            "<h4>검증</h4>"
+            "<p>결과마다 CRS·격자·band 수·NoData를 확인하고, 표본의 유효 픽셀 비율을 <code>valid_pct</code> 열에 "
+            "기록합니다. 유효 픽셀이 하나도 없으면(입력이 기준 격자와 겹치지 않을 때) 실행을 중단합니다. "
+            "입력의 CRS는 <code>source_crs</code> 열에 기록되며, 레이어 속성에서 지정한 CRS가 파일의 CRS보다 우선합니다.</p>"
             "<p style='color:#455a64'>QGIS 기본 구성(GDAL)만 사용합니다.</p>"
         )
         try:

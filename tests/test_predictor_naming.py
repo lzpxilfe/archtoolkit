@@ -234,6 +234,31 @@ class AssignVariableKeysTests(unittest.TestCase):
         # And the exported filenames must still survive the consumer as a set.
         self.assertEqual(len(set(_archmodelbench_unique_names([f"{k}.tif" for k in keys]))), 4)
 
+    def test_keys_differing_only_by_case_are_made_distinct(self):
+        # Keys become filenames, and NTFS / default APFS are case-insensitive:
+        # slope.tif and Slope.tif are one file there, and gdalwarp -overwrite
+        # replaces the first predictor with the second without a word. The
+        # natural pairing is an ArchToolkit product next to the user's own
+        # layer of the same name.
+        for items in (
+            [{"kind": "slope", "name": "경사도", "tool_id": "terrain_analysis"},
+             {"kind": "", "name": "Slope"}],
+            [{"kind": "dem", "name": "DEM_생성", "tool_id": "dem_generate"},
+             {"kind": "", "name": "DEM"}],
+            [{"kind": "", "name": "TRI"}, {"kind": "tri", "name": "x"},
+             {"kind": "", "name": "Tri"}],
+        ):
+            keys = assign_variable_keys(items)
+            folded = [k.casefold() for k in keys]
+            self.assertEqual(len(set(folded)), len(items), msg=f"case collision in {keys}")
+            for key in keys:
+                self.assertTrue(is_round_trip_stable(key), msg=key)
+        # The first occurrence keeps its case; only the later one is suffixed.
+        self.assertEqual(
+            assign_variable_keys([{"kind": "slope", "name": "a"}, {"kind": "", "name": "Slope"}]),
+            ["slope", "Slope_2"],
+        )
+
     def test_fallback_and_derived_keys_never_collide(self):
         items = [{"kind": "layer_01", "name": "x"}, {"kind": "", "name": "경사도"}]
         keys = assign_variable_keys(items)

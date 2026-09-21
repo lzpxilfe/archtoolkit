@@ -60,7 +60,7 @@ ArchToolkit은 한국의 고고학·문화유산 조사/연구에서 자주 반�
 | --- | --- |
 | `지형 분석 (Terrain Analysis)` | 경사, 사면방향, TRI(Riley et al. 1999 지수), TPI, Roughness(Wilson et al. 2007 지수), Slope Position, 곡률(Zevenbergen & Thorne 1987, 부호규약: 음(-)=볼록/수렴), 사면파생(북향성/동향성/TRASP, Roberts & Cooper 1989) 계산과 분류/스타일·해석 요약 (표시 등급 구간은 플러그인 자체 관례) |
 | `거리 래스터 (Distance to Features)` | 하천·기존 유적·도로 등 대상 레이어까지의 직선거리를 기준 격자에 맞춰 계산 (예측모델에서 가장 널리 쓰이는 변수 계열, `gdal:proximity` 기반) |
-| `분석 결과 정렬/내보내기 (Align & Export Stack)` | 이미 만든 분석 결과 래스터들을 하나의 기준 격자(CRS·범위·픽셀크기·NoData)로 정렬해 실행별 원자적 스택+manifest로 내보내기 (범주형=최근접, 연속형=이중선형, 취소·실패 시 부분 결과 미게시) |
+| `분석 결과 정렬/내보내기 (Align & Export Stack)` | 이미 만든 분석 결과 래스터들을 하나의 기준 격자(CRS·범위·픽셀크기)로 정렬해 실행별 원자적 스택+manifest로 내보내기 (범주형·방향=최근접, 연속형=이중선형, NoData는 래스터별로 manifest `nodata` 열에 기록, 취소·실패 시 부분 결과 미게시) |
 | `변수 상관/VIF 리포트 (Correlation & VIF)` | 변수(래스터) 스택의 상관행렬과 VIF(분산팽창계수)를 계산해 예측모델 투입 전 다중공선성 점검, 상관/VIF 리포트·CSV 저장 |
 | `AHP 입지적합도 (AHP Suitability)` | 여러 환경 래스터를 AHP 쌍대비교 가중치로 통합해 적합도 래스터 생성 ([사용설명서](docs/AHP_GUIDE.md)) |
 | `지구화학도 래스터 수치화 (GeoChem WMS → Raster)` | WMS RGB를 범례 기반으로 역추정해 value/class 래스터와 폴리곤 결과 생성 |

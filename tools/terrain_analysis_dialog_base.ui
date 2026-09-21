@@ -140,7 +140,7 @@
          <string>보행속도 기반 구분 (Tobler 1993 함수 참고)</string>
         </property>
         <property name="toolTip">
-         <string>&lt;html&gt;&lt;b&gt;보행속도 기반 경사 구분&lt;/b&gt;&lt;hr/&gt;&lt;b&gt;주의:&lt;/b&gt; 아래 0-6 / 6-12 / 12-18 / 18-25 / 25°+ &lt;b&gt;구간값은 이 플러그인이 정한 표시 구분&lt;/b&gt;입니다. Tobler(1993)가 발표한 것은 보행속도 함수 &lt;i&gt;W = 6·exp(-3.5·|tan θ + 0.05|)&lt;/i&gt; 이며 경사 등급표가 아닙니다. 아래 속도 수치는 그 함수로 계산한 값입니다.&lt;hr/&gt;&lt;i&gt;Tobler, W. (1993). Three Presentations on Geographical Analysis and Modeling: Non-Isotropic Geographic Modeling.&lt;/i&gt;&lt;br/&gt;&lt;br/&gt;경사에 따른 보행 속도 변화를 모델링합니다:&lt;br/&gt;&lt;br/&gt;• 평지 (0°): 시속 ~5km (기본 보행)&lt;br/&gt;• 완경사 (5°): 시속 ~4km&lt;br/&gt;• 경사 (15°): 시속 ~2km&lt;br/&gt;• 급경사 (25°+): 시속 &lt;1km&lt;br/&gt;&lt;br/&gt;&lt;b&gt;고고학 활용:&lt;/b&gt;&lt;br/&gt;• 고대 도로 경로 추정&lt;br/&gt;• 이동 비용 분석 (Cost-Distance)&lt;br/&gt;• 교역로, 순찰로 복원&lt;/html&gt;</string>
+         <string>&lt;html&gt;&lt;b&gt;보행속도 기반 경사 구분&lt;/b&gt;&lt;hr/&gt;&lt;b&gt;주의:&lt;/b&gt; 구간값(0-6 / 6-12 / 12-18 / 18-25 / 25°+)은 &lt;b&gt;플러그인이 정한 표시 구분&lt;/b&gt;이며, Tobler(1993)가 발표한 것은 보행속도 함수 &lt;i&gt;W = 6·exp(-3.5·|tan θ + 0.05|)&lt;/i&gt;입니다(아래 속도는 그 함수의 계산값).&lt;hr/&gt;&lt;i&gt;Tobler, W. (1993). Three Presentations on Geographical Analysis and Modeling: Non-Isotropic Geographic Modeling.&lt;/i&gt;&lt;br/&gt;&lt;br/&gt;경사에 따른 보행 속도 변화를 모델링합니다:&lt;br/&gt;&lt;br/&gt;• 평지 (0°): 시속 ~5km (기본 보행)&lt;br/&gt;• 완경사 (5°): 시속 ~4km&lt;br/&gt;• 경사 (15°): 시속 ~2km&lt;br/&gt;• 급경사 (25°+): 시속 &lt;1km&lt;br/&gt;&lt;br/&gt;&lt;b&gt;고고학 활용:&lt;/b&gt;&lt;br/&gt;• 고대 도로 경로 추정&lt;br/&gt;• 이동 비용 분석 (Cost-Distance)&lt;br/&gt;• 교역로, 순찰로 복원&lt;/html&gt;</string>
         </property>
        </widget>
       </item>
@@ -150,7 +150,7 @@
           <string>에너지 기반 구분 (Minetti 1995 연구 참고)</string>
          </property>
          <property name="toolTip">
-          <string>&lt;html&gt;&lt;b&gt;에너지 기반 경사 구분&lt;/b&gt;&lt;hr/&gt;&lt;b&gt;주의:&lt;/b&gt; 아래 0-3 / 3-9 / 9-15 / 15-25 / 25°+ &lt;b&gt;구간값은 이 플러그인이 정한 표시 구분&lt;/b&gt;이며 Minetti(1995)가 발표한 분류표가 아닙니다. 해당 논문은 최적 경사(약 ±10-15%)에 관한 연구입니다.&lt;hr/&gt;&lt;i&gt;Minetti, A. E. (1995). Optimum gradient of mountain paths. Journal of Applied Physiology 79(5):1698-1703. DOI:10.1152/jappl.1995.79.5.1698.&lt;/i&gt;&lt;br/&gt;&lt;br/&gt;경사에 따른 에너지 소비량(J/kg/m) 변화를 분석합니다.&lt;br/&gt;&lt;br/&gt;&lt;b&gt;고고학 활용:&lt;/b&gt;&lt;br/&gt;• 운반 경로 최적화 분석&lt;br/&gt;• 고대 노동력 추정&lt;/html&gt;</string>
+          <string>&lt;html&gt;&lt;b&gt;에너지 기반 경사 구분&lt;/b&gt;&lt;hr/&gt;&lt;b&gt;주의:&lt;/b&gt; 구간값(0-3 / 3-9 / 9-15 / 15-25 / 25°+)은 &lt;b&gt;플러그인이 정한 표시 구분&lt;/b&gt;이며 Minetti(1995, 최적 경사 연구)의 분류표가 아닙니다.&lt;hr/&gt;&lt;i&gt;Minetti, A. E. (1995). Optimum gradient of mountain paths. Journal of Applied Physiology 79(5):1698-1703. DOI:10.1152/jappl.1995.79.5.1698.&lt;/i&gt;&lt;br/&gt;&lt;br/&gt;경사에 따른 에너지 소비량(J/kg/m) 변화를 분석합니다.&lt;br/&gt;&lt;br/&gt;&lt;b&gt;고고학 활용:&lt;/b&gt;&lt;br/&gt;• 운반 경로 최적화 분석&lt;br/&gt;• 고대 노동력 추정&lt;/html&gt;</string>
          </property>
         </widget>
       </item>
@@ -160,7 +160,7 @@
          <string>인지 경사 구분 (플러그인 자체 표)</string>
         </property>
         <property name="toolTip">
-         <string>&lt;html&gt;&lt;b&gt;인지 경사 구분 (플러그인 자체 표)&lt;/b&gt;&lt;hr/&gt;&lt;b&gt;주의:&lt;/b&gt; 아래 0-2 / 2-6 / 6-12 / 12-20 / 20°+ 구간은 &lt;b&gt;이 플러그인이 정한 표시 구분&lt;/b&gt;이며 Llobera가 발표한 분류가 아닙니다. Llobera, M. (2007) &quot;Reconstructing visual landscapes&quot;(World Archaeology 39(1):51-69)는 &lt;b&gt;가시성(visibility)&lt;/b&gt;에 관한 논문으로, 경사 등급표를 제시하지 않습니다. 경관 인지라는 착상의 배경으로만 참고하십시오.&lt;br/&gt;&lt;br/&gt;&lt;b&gt;고고학 활용:&lt;/b&gt;&lt;br/&gt;• 경관 인지 분석&lt;br/&gt;• 시각적 경계/장벽 파악&lt;/html&gt;</string>
+         <string>&lt;html&gt;&lt;b&gt;인지 경사 구분 (플러그인 자체 표)&lt;/b&gt;&lt;hr/&gt;&lt;b&gt;주의:&lt;/b&gt; 구간값(0-2 / 2-6 / 6-12 / 12-20 / 20°+)은 &lt;b&gt;플러그인이 정한 표시 구분&lt;/b&gt;입니다. Llobera(2007, World Archaeology 39(1):51-69)는 가시성 논문으로 경사 등급표를 제시하지 않으며, 착상의 배경으로만 참고하십시오.&lt;br/&gt;&lt;br/&gt;&lt;b&gt;고고학 활용:&lt;/b&gt;&lt;br/&gt;• 경관 인지 분석&lt;br/&gt;• 시각적 경계/장벽 파악&lt;/html&gt;</string>
         </property>
        </widget>
       </item>
@@ -405,7 +405,7 @@
             <number>20</number>
            </property>
            <property name="toolTip">
-            <string>&lt;html&gt;&lt;b&gt;TRI 험준 기준 임계값&lt;/b&gt;&lt;hr/&gt;이 값 이상을 '험준 지형'으로 분류합니다. 표시 5등급은 이 값에 비례해 나뉘는 &lt;b&gt;플러그인 자체 구분&lt;/b&gt;이며, Riley 등(1999)이 발표한 분류(절대 미터값 기준 7등급, 0-80 ~ 959-4367)가 아닙니다.&lt;br/&gt;&lt;br/&gt;&lt;b&gt;권장값:&lt;/b&gt;&lt;br/&gt;• 20 (기본값): 플러그인 기본 표시 기준&lt;br/&gt;• 10: 더 민감하게 험준 지형 탐지&lt;br/&gt;• 30: 극도로 험준한 지형만 탐지&lt;/html&gt;</string>
+            <string>&lt;html&gt;&lt;b&gt;TRI 험준 기준 임계값&lt;/b&gt;&lt;hr/&gt;이 값 이상을 '험준 지형'으로 분류합니다. 표시 5등급은 이 값에 비례해 나뉘는 &lt;b&gt;플러그인 자체 구분&lt;/b&gt;이며, Riley 등(1999)의 분류(절대 미터값 7등급, 0-80 m에서 959-4367 m까지)가 아닙니다.&lt;br/&gt;&lt;br/&gt;&lt;b&gt;권장값:&lt;/b&gt;&lt;br/&gt;• 20 (기본값): 플러그인 기본 표시 기준&lt;br/&gt;• 10: 더 민감하게 험준 지형 탐지&lt;br/&gt;• 30: 극도로 험준한 지형만 탐지&lt;/html&gt;</string>
            </property>
           </widget>
          </item>

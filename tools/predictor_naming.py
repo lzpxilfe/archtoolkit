@@ -136,6 +136,11 @@ def assign_variable_keys(items):
     from the order the user sees in the dialog, makes the mapping reproducible
     and lets the manifest record it.
     """
+    # ``taken`` holds case-folded keys. A key becomes a filename, and on NTFS
+    # and default APFS/HFS+ - the two desktops QGIS mostly runs on - slope.tif
+    # and Slope.tif are one file; the warp runs with -overwrite, so the second
+    # raster would silently replace the first. The returned key keeps its
+    # original case so the manifest still shows what the user named.
     taken: set = set()
     keys = []
     for index, item in enumerate(items or []):
@@ -155,17 +160,17 @@ def assign_variable_keys(items):
         # one predictor silently lost.
         key = base
         suffix = 2
-        while key in taken:
+        while key.casefold() in taken:
             key = f"{base}_{suffix}"
             suffix += 1
         # The suffix cannot break the contract (it is ASCII), but assert it
         # rather than trust it: everything downstream depends on this holding.
         if not is_round_trip_stable(key):  # pragma: no cover - defensive
             key = f"{FALLBACK_STEM}_{index + 1:02d}"
-            while key in taken:
+            while key.casefold() in taken:
                 index += 1
                 key = f"{FALLBACK_STEM}_{index + 1:02d}"
-        taken.add(key)
+        taken.add(key.casefold())
         keys.append(key)
     return keys
 

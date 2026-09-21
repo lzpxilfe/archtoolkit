@@ -13,6 +13,15 @@ import tempfile
 import time
 import unittest
 
+# QGIS-free: the resampling decisions align/export makes live in
+# tools.raster_semantics precisely so they can be pinned without PyQGIS.
+from tools.raster_semantics import (
+    CLASS_CODE_MAX_DISTINCT,
+    is_categorical_meta,
+    is_circular_meta,
+    looks_like_class_codes,
+)
+
 
 QGIS_AVAILABLE = False
 QGIS_IMPORT_ERROR = None
@@ -20,7 +29,7 @@ try:
     from osgeo import gdal, osr
     from qgis.PyQt import QtWidgets
     from qgis.PyQt.QtCore import QObject, QTimer
-    from qgis.core import QgsApplication, QgsRasterLayer
+    from qgis.core import QgsApplication, QgsCoordinateReferenceSystem, QgsRasterLayer
 
     from processing.core.Processing import Processing
     from tools.align_export_dialog import (
@@ -34,6 +43,54 @@ try:
     QGIS_AVAILABLE = True
 except ImportError as exc:  # pragma: no cover - exercised by dependency-free CI
     QGIS_IMPORT_ERROR = exc
+
+
+class AlignResamplingSemanticsTests(unittest.TestCase):
+    """The three-way nearest/bilinear decision, runnable without QGIS."""
+
+    def test_aspect_is_circular_and_never_categorical(self):
+        # terrain_analysis tags its aspect raster exactly like this. It is not
+        # categorical (degrees are a measurement) but it must not be averaged:
+        # 355 and 5 are both north, their mean 180 is south.
+        aspect = {"tool_id": "terrain_analysis", "kind": "aspect", "units": "deg"}
+        self.assertFalse(is_categorical_meta(aspect))
+        self.assertTrue(is_circular_meta(aspect))
+
+    def test_direction_kinds_are_circular(self):
+        for kind in ("aspect", "Aspect_8dir", "bearing", "azimuth", "flow_bearing"):
+            self.assertTrue(is_circular_meta({"kind": kind}), msg=kind)
+
+    def test_linearised_aspect_derivatives_stay_continuous(self):
+        # northness/eastness/TRASP exist so aspect CAN be averaged; they must
+        # keep the bilinear path.
+        for kind in ("northness", "eastness", "trasp", "slope", "dem", "tri", "distance_water"):
+            self.assertFalse(is_circular_meta({"kind": kind, "units": "index"}), msg=kind)
+
+    def test_missing_or_malformed_metadata_is_not_circular(self):
+        for meta in (None, {}, {"kind": None}, {"tool_id": "terrain_analysis"}, "aspect", 5):
+            self.assertFalse(is_circular_meta(meta), msg=repr(meta))
+
+    def test_integer_raster_with_few_distinct_values_reads_as_class_codes(self):
+        # The land-cover shape: Byte codes 1..7, no metadata.
+        self.assertTrue(looks_like_class_codes("Byte", [1, 2, 3, 3, 7, 1, 6]))
+        self.assertTrue(looks_like_class_codes("Int16", [10, 20, 30]))
+        self.assertTrue(looks_like_class_codes("Byte", [4.0, 4.0]))
+
+    def test_measurements_do_not_read_as_class_codes(self):
+        # Float bands never; integer bands with many values (a Byte hillshade,
+        # a scaled index) or fractional values never.
+        self.assertFalse(looks_like_class_codes("Float32", [1, 2, 3]))
+        self.assertFalse(looks_like_class_codes("Float64", [1, 2]))
+        self.assertFalse(looks_like_class_codes("Byte", range(CLASS_CODE_MAX_DISTINCT + 1)))
+        self.assertTrue(looks_like_class_codes("Byte", range(CLASS_CODE_MAX_DISTINCT)))
+        self.assertFalse(looks_like_class_codes("Byte", [1, 2.5, 3]))
+        self.assertFalse(looks_like_class_codes("Int16", [1, float("nan")]))
+
+    def test_empty_or_unreadable_sample_keeps_the_default(self):
+        self.assertFalse(looks_like_class_codes("Byte", []))
+        self.assertFalse(looks_like_class_codes("", [1, 2]))
+        self.assertFalse(looks_like_class_codes(None, [1, 2]))
+        self.assertFalse(looks_like_class_codes("Byte", ["x", 1]))
 
 
 @unittest.skipUnless(QGIS_AVAILABLE, f"PyQGIS/GDAL unavailable: {QGIS_IMPORT_ERROR}")
@@ -71,7 +128,9 @@ class AlignExportQgisIntegrationTests(unittest.TestCase):
         spatial_ref.ImportFromEPSG(32652)
         return spatial_ref
 
-    def _create_raster(self, path, width, height, *, tiled=False, nodata=None):
+    def _create_raster(self, path, width, height, *, tiled=False, nodata=None,
+                       fill=1, valid_rows=None):
+        """A Float32 raster filled with ``fill``; ``valid_rows`` top rows get 1."""
         options = ["TILED=YES"] if tiled else []
         dataset = gdal.GetDriverByName("GTiff").Create(
             path,
@@ -87,7 +146,11 @@ class AlignExportQgisIntegrationTests(unittest.TestCase):
         band = dataset.GetRasterBand(1)
         if nodata is not None:
             band.SetNoDataValue(nodata)
-        band.Fill(1)
+        band.Fill(fill)
+        if valid_rows:
+            array = band.ReadAsArray()
+            array[:valid_rows, :] = 1
+            band.WriteArray(array)
         dataset = None
 
     def _contract(self, grid, *, nodata=-9999.0):
@@ -243,6 +306,81 @@ class AlignExportQgisIntegrationTests(unittest.TestCase):
                 "origin source",
                 self._contract(shifted_grid),
             )
+
+    # -- coverage -------------------------------------------------------------
+    #
+    # gdalwarp with an explicit -te/-tr writes the complete target grid even
+    # when the source lies entirely outside it. Such a file has the right CRS,
+    # grid, band count and NoData and holds no data at all.
+
+    @staticmethod
+    def _unit_grid():
+        return RasterGrid(
+            width=10, height=10, extent=Extent(0.0, 10.0, 0.0, 10.0),
+            resolution_x=1.0, resolution_y=1.0,
+        )
+
+    def test_output_with_no_valid_pixels_is_rejected(self):
+        output = self._path("all_nodata_output.tif")
+        self._create_raster(output, 10, 10, nodata=-9999.0, fill=-9999.0)
+        with self.assertRaisesRegex(RuntimeError, "유효 픽셀"):
+            AlignExportDialog._validate_warp_output(
+                QObject(), output, "non-overlapping source", self._contract(self._unit_grid()))
+
+    def test_validation_reports_the_sampled_valid_pixel_share(self):
+        half = self._path("half_valid_output.tif")
+        self._create_raster(half, 10, 10, nodata=-9999.0, fill=-9999.0, valid_rows=5)
+        pct = AlignExportDialog._validate_warp_output(
+            QObject(), half, "half covered", self._contract(self._unit_grid()))
+        self.assertIsNotNone(pct)
+        self.assertAlmostEqual(pct, 50.0, delta=1.0)
+
+        full = self._path("full_valid_output.tif")
+        self._create_raster(full, 10, 10, nodata=-9999.0)
+        pct = AlignExportDialog._validate_warp_output(
+            QObject(), full, "fully covered", self._contract(self._unit_grid()))
+        self.assertAlmostEqual(pct, 100.0, delta=0.01)
+
+    # -- circular / source CRS ------------------------------------------------
+
+    def test_nearest_with_float32_keeps_directions_and_continuous_nodata(self):
+        # The aspect path: nearest like a class raster (no invented
+        # directions) but Float32 with -9999, unlike a class raster which
+        # keeps its band type and its own NoData.
+        source = self._create_class_raster(
+            self._path("aspect_like_source.tif"), nodata=None,
+            codes=(0, 90, 180, 270), gdal_type=gdal.GDT_Int16)
+        output = self._path("aspect_like_out.tif")
+        progress = QtWidgets.QProgressDialog("", "", 0, 1)
+        self.addCleanup(progress.close)
+        AlignExportDialog._warp(
+            QObject(), source, output, 2.0, "0,10,0,10", "EPSG:32652",
+            nearest=True, nodata=-9999.0, progress=progress, force_float32=True,
+        )
+        band = gdal.Open(output).GetRasterBand(1)
+        self.assertEqual(band.DataType, gdal.GDT_Float32)
+        self.assertAlmostEqual(float(band.GetNoDataValue()), -9999.0, places=6)
+        values = set(band.ReadAsArray().ravel().tolist()) - {-9999.0}
+        self.assertTrue(values <= {0.0, 90.0, 180.0, 270.0},
+                        msg=f"resampling invented directions: {sorted(values)}")
+
+    def test_warp_accepts_the_layers_effective_source_crs(self):
+        # A CRS assigned in Layer Properties never reaches the file; the warp
+        # is handed it as SOURCE_CRS so gdalwarp does not fall back to the
+        # file's own tag. Here both agree, so the output must simply be valid.
+        source = self._path("source_crs_source.tif")
+        output = self._path("source_crs_out.tif")
+        self._create_raster(source, 20, 20)
+        progress = QtWidgets.QProgressDialog("", "", 0, 1)
+        self.addCleanup(progress.close)
+        AlignExportDialog._warp(
+            QObject(), source, output, 1.0, "0,10,0,10", "EPSG:32652",
+            nearest=False, nodata=-9999.0, progress=progress,
+            source_crs=QgsCoordinateReferenceSystem("EPSG:32652"),
+        )
+        pct = AlignExportDialog._validate_warp_output(
+            QObject(), output, "source crs", self._contract(self._unit_grid()))
+        self.assertAlmostEqual(pct, 100.0, delta=0.01)
 
     # -- categorical NoData -------------------------------------------------
     #
