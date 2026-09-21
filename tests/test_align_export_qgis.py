@@ -111,10 +111,11 @@ class AlignExportQgisIntegrationTests(unittest.TestCase):
         if QgsApplication.processingRegistry().algorithmById("gdal:warpreproject") is None:
             raise unittest.SkipTest("QGIS GDAL provider is unavailable")
 
-    @classmethod
-    def tearDownClass(cls):
-        if cls._owns_app:
-            cls.app.exitQgis()
+    # No tearDownClass: a QgsApplication cannot be re-created in the same
+    # process once exitQgis() has run, and QgsApplication.instance() keeps
+    # returning the dead object, so any QGIS-gated test discovered later
+    # (e.g. test_dialog_memory_qgis) crashed on it. The one application
+    # lives for the whole test process, as QGIS's own test suites do.
 
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp(prefix="archtoolkit_align_qgis_test_")

@@ -20,7 +20,10 @@ class DialogMemoryRoundTripTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-        cls.app = QgsApplication.instance() or QgsApplication([], False)
+        cls.app = QgsApplication.instance()
+        if cls.app is None:
+            cls.app = QgsApplication([], False)
+            cls.app.initQgis()
 
     def _build(self):
         d = QtWidgets.QDialog()
