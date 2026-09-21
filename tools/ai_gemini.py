@@ -18,7 +18,7 @@ from qgis.PyQt import QtWidgets
 from qgis.PyQt.QtCore import QEventLoop, QSettings, QTimer, QUrl
 from qgis.PyQt.QtNetwork import QNetworkRequest
 
-from .utils import log_swallowed, push_message
+from .utils import log_message, log_swallowed, push_message
 
 
 _SETTINGS_PREFIX = "ArchToolkit/ai/gemini"
@@ -28,6 +28,36 @@ _SETTINGS_PREFIX = "ArchToolkit/ai/gemini"
 # primary model id is unavailable in the caller's API project/region.
 DEFAULT_MODEL = "gemini-2.5-flash"
 FALLBACK_MODELS = ("gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.5-flash-lite")
+
+# finishReason of the most recent generate_text() call. The API returns the
+# partial text together with "MAX_TOKENS" (or "SAFETY"/"RECITATION"/"OTHER")
+# when it stopped early; the (text, error) return value cannot carry that
+# without breaking callers, so the caller reads it here right after the call
+# (the plugin drives this from the GUI thread, one request at a time).
+_LAST_FINISH_REASON: Optional[str] = None
+_LAST_FINISH_WARNING: Optional[str] = None
+
+
+def last_finish_reason() -> Optional[str]:
+    """finishReason reported by the most recent generate_text() call (None if unknown)."""
+    return _LAST_FINISH_REASON
+
+
+def last_finish_warning() -> Optional[str]:
+    """Korean one-line warning when the last response did not finish with STOP, else None."""
+    return _LAST_FINISH_WARNING
+
+
+def finish_reason_warning(finish_reason: Optional[str]) -> Optional[str]:
+    """User-facing warning for a non-STOP finishReason; None when the response
+    finished normally (STOP) or the reason is unknown/absent.
+    """
+    fr = str(finish_reason or "").strip()
+    if not fr or fr.upper() == "STOP":
+        return None
+    if fr.upper() == "MAX_TOKENS":
+        return f"※ 응답이 토큰 한도로 잘렸습니다 (finishReason={fr}) - 아래 내용은 불완전합니다."
+    return f"※ 응답이 정상 종료되지 않았습니다 (finishReason={fr}) - 아래 내용은 불완전할 수 있습니다."
 
 
 def _settings_get(key: str, default=None):
@@ -261,7 +291,15 @@ def generate_text(
     max_output_tokens: int = 1024,
     timeout_ms: int = 45000,
 ) -> Tuple[Optional[str], Optional[str]]:
-    """Call Gemini generateContent and return (text, error_message)."""
+    """Call Gemini generateContent and return (text, error_message).
+
+    A response the API cut off (finishReason != STOP, typically MAX_TOKENS)
+    still returns its partial text with error=None; the reason is exposed via
+    last_finish_reason()/last_finish_warning() so the caller can label it.
+    """
+    global _LAST_FINISH_REASON, _LAST_FINISH_WARNING
+    _LAST_FINISH_REASON = None
+    _LAST_FINISH_WARNING = None
     api_key = str(api_key or "").strip()
     if not api_key:
         return None, "API key is missing"
@@ -374,6 +412,18 @@ def generate_text(
             return None, f"No candidates in response: {raw[:500]}"
         content = candidates[0].get("content") or {}
         parts = content.get("parts") or []
+        try:
+            fr = str(candidates[0].get("finishReason") or "").strip()
+        except Exception as _exc:
+            log_swallowed("ai_gemini.generate_text", _exc)
+            fr = ""
+        _LAST_FINISH_REASON = fr or None
+        _LAST_FINISH_WARNING = finish_reason_warning(fr)
+        if _LAST_FINISH_WARNING:
+            try:
+                log_message(f"Gemini finishReason={fr} (model={model}): 응답이 완전하지 않습니다.", level=1)
+            except Exception as _exc:
+                log_swallowed("ai_gemini.generate_text", _exc)
         texts = []
         for p in parts:
             t = p.get("text")
@@ -381,6 +431,8 @@ def generate_text(
                 texts.append(t.strip())
         if texts:
             return "\n".join(texts).strip(), None
+        if fr and fr.upper() != "STOP":
+            return None, f"No text parts in response (finishReason={fr}): {raw[:500]}"
         return None, f"No text parts in response: {raw[:500]}"
     except Exception as e:
         return None, f"Failed to parse response: {e}"

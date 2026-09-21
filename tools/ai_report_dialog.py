@@ -718,11 +718,65 @@ class AiAoiReportDialog(QtWidgets.QDialog):
         ai_gemini.set_configured_model(model)
         push_message(self.iface, "완료", f"모델을 저장했습니다: {model}", level=0, duration=4)
 
+    def _prompt_caveats(self, ctx: dict) -> str:
+        """Lines telling the model which figures in the JSON are partial or
+        sampled, so a capped count or a sample extreme is not written up as a
+        total. Empty when nothing was capped."""
+        lines: List[str] = []
+        try:
+            layers = [lyr for lyr in (ctx.get("layers") or []) if isinstance(lyr, dict)]
+            if bool(ctx.get("layers_truncated")):
+                opts = ctx.get("options") or {}
+                lines.append(
+                    f"- 주의: 레이어 한도({opts.get('max_layers')}개)에 도달해 후보 {ctx.get('layers_candidates')}개 중 "
+                    f"{len(layers)}개만 JSON에 포함되었습니다. 포함되지 않은 레이어에 대해 단정하지 마세요."
+                )
+            trunc = []
+            sampled = []
+            for lyr in layers:
+                st = lyr.get("stats") or {}
+                if not isinstance(st, dict):
+                    continue
+                nm = str(lyr.get("name") or "")
+                if bool(st.get("truncated")):
+                    trunc.append(f"{nm}(스캔 한도 {st.get('scan_cap')}개)")
+                if bool(st.get("sampled")):
+                    sampled.append(f"{nm}(표본 step {st.get('sample_step')})")
+            if trunc:
+                lines.append(
+                    "- 주의: 다음 레이어는 피처 스캔 한도에 도달해 `features`/`total_length_m`/`total_area_m2`/"
+                    "`numeric_fields`가 부분값입니다(`stats.truncated=true`): "
+                    + ", ".join(trunc[:20])
+                    + ". 총계로 단정하지 마세요."
+                )
+            if sampled:
+                lines.append(
+                    "- 주의: 다음 래스터는 표본 추출되어(`stats.sampled=true`) `count`는 표본 수, "
+                    "`min`/`max`는 표본 극값입니다: " + ", ".join(sampled[:20])
+                )
+            ref = ctx.get("reference_sites") or {}
+            if isinstance(ref, dict) and bool(ref.get("scan_truncated")):
+                lines.append(
+                    f"- 주의: `reference_sites`는 스캔 한도({ref.get('scan_cap')}개)에 도달했습니다. `counts`와 "
+                    "가장 가까운 유적은 스캔된 범위 내의 값이며, 더 가까운 유적이 있을 수 있습니다."
+                )
+            if isinstance(ref, dict) and bool(ref.get("truncated")):
+                lines.append(
+                    "- 참고: `reference_sites.items`는 가장 가까운 유적부터 표시 한도까지만 포함하며, "
+                    "`counts`는 스캔된 전체 유적 기준입니다."
+                )
+        except Exception as _exc:
+            log_swallowed("ai_report_dialog._prompt_caveats", _exc)
+        if not lines:
+            return ""
+        return "\n".join(lines) + "\n"
+
     def _build_prompt(self, ctx: dict) -> str:
         ctx_json = json.dumps(ctx, ensure_ascii=False, indent=2)
         radius_m = ctx.get("radius_m")
         aoi = ctx.get("aoi", {}) or {}
         aoi_name = aoi.get("layer_name", "")
+        caveats = self._prompt_caveats(ctx)
 
         return (
             "당신은 한국의 고고학/문화유산 연구자를 돕는 GIS 분석 보조자입니다.\n"
@@ -734,6 +788,7 @@ class AiAoiReportDialog(QtWidgets.QDialog):
             "- 동일 `run_id`는 같은 도구 실행(run)에서 나온 결과이므로 묶어서 설명해도 됩니다.\n"
             "- JSON에 `reference_sites`가 있으면, AOI와 특정 유적 간 관계(내부/버퍼 내/거리/중첩)를 별도 소제목으로 설명하세요.\n"
             "- 대형 폴리곤/선형 유적은 `inside/outside` 면적·길이 필드를 사용해 AOI 내부/외부를 분리해서 설명하세요.\n"
+            f"{caveats}"
             "\n"
             "요청:\n"
             "1) 한국어로, 보고서/업무 메모 형태로 정리해 주세요.\n"
@@ -975,6 +1030,18 @@ class AiAoiReportDialog(QtWidgets.QDialog):
                     log_swallowed("ai_report_dialog._get_or_build_ctx", _exc)
 
         if ctx:
+            try:
+                note = str(((ctx.get("options") or {}).get("selection_note")) or "").strip()
+                if note:
+                    push_message(
+                        self.iface,
+                        "AI 요약",
+                        f"AOI {note} - AOI 면적/버퍼/통계는 레이어 전체 기준입니다.",
+                        level=1,
+                        duration=8,
+                    )
+            except Exception as _exc:
+                log_swallowed("ai_report_dialog._get_or_build_ctx", _exc)
             self._last_ctx = ctx
             self._last_ctx_key = key
         return ctx, None
@@ -1096,6 +1163,30 @@ class AiAoiReportDialog(QtWidgets.QDialog):
                         push_message(self.iface, "AI 요약", "로컬 요약으로 대체 완료", level=1, duration=6)
                 except Exception as _exc:
                     log_swallowed("ai_report_dialog._on_generate", _exc)
+                return
+
+            # A response the API cut off (finishReason MAX_TOKENS/SAFETY/...) still
+            # arrives as text; label it as partial at the top of the output box
+            # (which is what report.md is written from) instead of announcing "완료".
+            finish_warning = None
+            finish_reason = None
+            try:
+                finish_warning = ai_gemini.last_finish_warning()
+                finish_reason = ai_gemini.last_finish_reason()
+            except Exception as _exc:
+                log_swallowed("ai_report_dialog._on_generate", _exc)
+            if finish_warning:
+                text = f"{finish_warning}\n\n{text or ''}"
+                self.txtOutput.setPlainText(text)
+                self._last_report_text = str(text)
+                log_message(f"Gemini 응답 불완전(finishReason={finish_reason}): 출력에 경고를 표시했습니다.", level=1)
+                push_message(
+                    self.iface,
+                    "AI 요약",
+                    f"완료(불완전): 응답이 잘렸습니다 (finishReason={finish_reason}). 출력 상단의 경고를 확인하세요.",
+                    level=1,
+                    duration=10,
+                )
                 return
 
             self.txtOutput.setPlainText(text or "")

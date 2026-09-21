@@ -42,6 +42,28 @@ def _first_nonempty(items: List[str]) -> Optional[str]:
     return None
 
 
+def _is_visibility_raster(layer: Dict[str, Any]) -> bool:
+    """True only when the layer's ArchToolkit metadata says it is a viewshed
+    visibility product - not the asymmetry/imbalance coding, LOS helpers or
+    observer points, whose 0/1 cells do not mean "visible".
+    """
+    try:
+        meta = layer.get("archtoolkit") or {}
+        if not isinstance(meta, dict):
+            return False
+        tool_id = str(meta.get("tool_id") or "").strip().lower()
+        kind = str(meta.get("kind") or "").strip().lower()
+        units = str(meta.get("units") or "").strip().lower()
+        if tool_id != "viewshed":
+            return False
+        if any(k in kind for k in ("imbalance", "asym", "los_", "observer", "aoi_stats", "ring")):
+            return False
+        return bool(kind) or units == "mask"
+    except Exception as _exc:
+        log_swallowed("ai_local_summarizer._is_visibility_raster", _exc)
+        return False
+
+
 def _layer_stats_lines(layer: Dict[str, Any]) -> List[str]:
     t = str(layer.get("type") or "")
     stats = layer.get("stats")
@@ -54,6 +76,12 @@ def _layer_stats_lines(layer: Dict[str, Any]) -> List[str]:
         n = stats.get("features")
         scanned = stats.get("scanned")
         lines.append(f"- 피처: { _fmt_int(n) } (스캔 { _fmt_int(scanned) })")
+        if bool(stats.get("truncated")):
+            cap_txt = _fmt_int(stats.get("scan_cap"))
+            total_txt = ""
+            if stats.get("layer_feature_count") is not None:
+                total_txt = f", 레이어 전체 {_fmt_int(stats.get('layer_feature_count'))}개"
+            lines.append(f"- (스캔 한도 {cap_txt}개 도달 - 아래 합계는 부분값{total_txt})")
 
         if "total_length_m" in stats:
             lines.append(f"- 총 길이: { _fmt_float(stats.get('total_length_m'), digits=1) } m")
@@ -95,11 +123,19 @@ def _layer_stats_lines(layer: Dict[str, Any]) -> List[str]:
             show_fields = [f for f in preferred if f in num]
             if not show_fields:
                 show_fields = list(num.keys())
-            for f in show_fields[:8]:
+            shown = show_fields[:8]
+            for f in shown:
                 d = num.get(f) or {}
                 lines.append(
                     f"- {f}: mean={_fmt_float(d.get('mean'), digits=2)} (min={_fmt_float(d.get('min'), digits=2)}, max={_fmt_float(d.get('max'), digits=2)}, n={_fmt_int(d.get('n'))})"
                 )
+            try:
+                omitted = max(0, len(num) - len(shown)) + int(stats.get("numeric_fields_truncated") or 0)
+            except Exception as _exc:
+                log_swallowed("ai_local_summarizer._layer_stats_lines", _exc)
+                omitted = 0
+            if omitted > 0:
+                lines.append(f"- 외 {_fmt_int(omitted)}개 수치 필드 생략(표시 한도/필드 수 cap)")
 
         dist = stats.get("dist_to_aoi_centroid_m")
         if isinstance(dist, dict) and dist.get("n"):
@@ -108,12 +144,29 @@ def _layer_stats_lines(layer: Dict[str, Any]) -> List[str]:
             )
 
     elif t == "raster":
-        lines.append(f"- 픽셀(표본) 수: {_fmt_int(stats.get('count'))}")
-        lines.append(
-            f"- min/mean/max: { _fmt_float(stats.get('min'), digits=3) } / { _fmt_float(stats.get('mean'), digits=3) } / { _fmt_float(stats.get('max'), digits=3) }"
-        )
-        if "gt_0_5_pct" in stats:
-            lines.append(f"- (힌트) 마스크/가시(>0.5) 비율: { _fmt_float(stats.get('gt_0_5_pct'), digits=1) } %")
+        sampled_txt = ""
+        if bool(stats.get("sampled")):
+            try:
+                ratio = float(stats.get("sample_step") or 1.0) ** 2
+            except Exception as _exc:
+                log_swallowed("ai_local_summarizer._layer_stats_lines", _exc)
+                ratio = 1.0
+            sampled_txt = f" (표본 1/{ratio:.1f})"
+            lines.append(
+                f"- 창 픽셀 수: {_fmt_int(stats.get('window_px'))} "
+                f"(메모리 보호를 위해 약 1/{ratio:.1f}로 표본 추출 - count는 표본 수, min/max는 표본 극값)"
+            )
+        lines.append(f"- 픽셀(표본) 수: {_fmt_int(stats.get('count'))}{sampled_txt}")
+        mn = _fmt_float(stats.get('min'), digits=3)
+        me = _fmt_float(stats.get('mean'), digits=3)
+        mx = _fmt_float(stats.get('max'), digits=3)
+        lines.append(f"- min/mean/max{sampled_txt}: {mn} / {me} / {mx}")
+        if "high_value_pct" in stats or "gt_0_5_pct" in stats:
+            pct = stats.get("high_value_pct", stats.get("gt_0_5_pct"))
+            thr = stats.get("high_value_threshold")
+            thr_txt = f"(>{_fmt_float(thr, digits=3)})" if thr is not None else "(>0.5)"
+            label = "가시 비율" if _is_visibility_raster(layer) else "상위값 셀 비율"
+            lines.append(f"- (힌트) {label}{thr_txt}: { _fmt_float(pct, digits=1) } %")
     else:
         lines.append("- 통계: (지원되지 않는 레이어 타입)")
 
@@ -138,7 +191,19 @@ def _reference_sites_lines(ctx: Dict[str, Any]) -> List[str]:
 
     out: List[str] = []
     out.append(f"- 레이어: `{layer_name or '(이름 없음)'}`")
-    out.append(f"- 유적 수: {_fmt_int(feature_count)} (스캔 {_fmt_int(scanned)})")
+    classified = ref.get("classified_count")
+    if classified is not None:
+        out.append(
+            f"- 유적 수: {_fmt_int(classified)} "
+            f"(관계 분류 {_fmt_int(classified)}개, 상세 표시 {_fmt_int(feature_count)}개, 스캔 {_fmt_int(scanned)})"
+        )
+    else:
+        out.append(f"- 유적 수: {_fmt_int(feature_count)} (스캔 {_fmt_int(scanned)})")
+    if bool(ref.get("scan_truncated")):
+        out.append(
+            f"- (스캔 한도 {_fmt_int(ref.get('scan_cap'))}개 도달 - 분류 집계와 '가장 가까운 유적'은 "
+            "스캔된 범위 내의 값이며 더 가까운 유적이 있을 수 있음)"
+        )
     if name_field:
         out.append(f"- 이름 필드: `{name_field}`")
     out.append(
@@ -209,7 +274,7 @@ def _reference_sites_lines(ctx: Dict[str, Any]) -> List[str]:
         out.append(f"  - {name}: {rel_ko}{comp_txt}, AOI경계거리={dist}m, AOI중심거리={dc}m{suffix}")
 
     if bool(ref.get("truncated")):
-        out.append("- (표시 개수 제한으로 일부 유적은 생략됨)")
+        out.append("- (표시 개수 제한으로 일부 유적은 생략됨 - 위 분류 집계는 스캔된 전체 유적 기준)")
     return out
 
 
@@ -273,13 +338,23 @@ def _narrative_lines(ctx: Dict[str, Any]) -> List[str]:
         counts = ref.get("counts") or {}
         items = [d for d in (ref.get("items") or []) if isinstance(d, dict)]
         feature_count = int(ref.get("feature_count") or 0)
+        # `counts` are tallied over every classified site, not only the displayed items.
+        try:
+            classified = int(ref.get("classified_count")) if ref.get("classified_count") is not None else feature_count
+        except Exception as _exc:
+            log_swallowed("ai_local_summarizer._narrative_lines", _exc)
+            classified = feature_count
+        scan_truncated = bool(ref.get("scan_truncated"))
+        scan_cap_txt = _fmt_int(ref.get("scan_cap"))
         inside = int(counts.get("inside_or_overlap_aoi") or 0)
         buf_only = int(counts.get("inside_buffer_only") or 0)
 
         s2 = (
-            f"주변 유적 레이어에서 관계가 계산된 유적은 총 {_fmt_int(feature_count)}개로, "
+            f"주변 유적 레이어에서 관계가 계산된 유적은 총 {_fmt_int(classified)}개로, "
             f"이 중 AOI 내부/중첩 {_fmt_int(inside)}개, 버퍼 내부(외곽) {_fmt_int(buf_only)}개입니다."
         )
+        if scan_truncated:
+            s2 += f" (스캔 한도 {scan_cap_txt}개 도달: 스캔된 범위 내 집계)"
         lines.append(s2)
 
         # Nearest site: name, distance, direction.
@@ -295,7 +370,10 @@ def _narrative_lines(ctx: Dict[str, Any]) -> List[str]:
             dphrase = _distance_phrase(nearest.get("distance_to_aoi_m"))
             comp = str(nearest.get("compass_from_aoi") or "").strip()
             rel = _RELATION_KO.get(str(nearest.get("relation") or ""), "")
-            bits = [f"가장 가까운 유적은 `{nm}`"]
+            if scan_truncated:
+                bits = [f"스캔된 범위({scan_cap_txt}개) 내에서 가장 가까운 유적은 `{nm}`"]
+            else:
+                bits = [f"가장 가까운 유적은 `{nm}`"]
             if comp:
                 bits.append(f"AOI 중심 기준 {comp}쪽")
             if dphrase == "AOI에 접함":
@@ -305,6 +383,8 @@ def _narrative_lines(ctx: Dict[str, Any]) -> List[str]:
             if rel:
                 bits.append(f"관계: {rel}")
             lines.append(", ".join(bits) + "에 위치합니다.")
+            if scan_truncated:
+                lines.append("(스캔 한도로 일부 유적이 검토되지 않아 더 가까운 유적이 있을 수 있습니다.)")
 
             # Direction distribution among buffered sites.
             dir_tally: Dict[str, int] = {}
@@ -347,8 +427,11 @@ def generate_report(ctx: Dict[str, Any]) -> str:
             "프로젝트 전체 요약" if arch_only is False else None,
         ]
     )
+    selection_note = str(options.get("selection_note") or "").strip()
     sel_note = _first_nonempty(
         [
+            # Empty-selection fallback: the context says what actually happened.
+            selection_note or None,
             "선택 피처만 사용" if selected_only else None,
             "레이어 전체 피처 사용" if selected_only is False else None,
         ]
@@ -382,7 +465,13 @@ def generate_report(ctx: Dict[str, Any]) -> str:
     out.append(f"- 반경: {_fmt_float(radius_m, digits=0)} m")
     out.append(f"- 버퍼 면적(반경 내): {_fmt_float(buf_area, digits=1)} ㎡")
     out.append(f"- 요약 레이어 수: {_fmt_int(len(layers))} {header_notes}".rstrip())
-    if isinstance(options.get("max_layers"), (int, float)) and len(layers) >= int(options.get("max_layers") or 0):
+    if "layers_truncated" in ctx:
+        if bool(ctx.get("layers_truncated")):
+            out.append(
+                f"- 참고: 레이어 한도({_fmt_int(options.get('max_layers'))}개)에 도달해 후보 "
+                f"{_fmt_int(ctx.get('layers_candidates'))}개 중 {_fmt_int(len(layers))}개만 요약했습니다."
+            )
+    elif isinstance(options.get("max_layers"), (int, float)) and len(layers) >= int(options.get("max_layers") or 0):
         out.append("- 참고: 레이어 수가 많아 일부만 요약되었을 수 있습니다.")
     out.append("")
 
@@ -458,12 +547,14 @@ def generate_report(ctx: Dict[str, Any]) -> str:
             if str(lyr.get("type") or "") != "raster":
                 continue
             stats = lyr.get("stats") or {}
-            if "gt_0_5_pct" in stats:
-                ras_vis.append((float(stats.get("gt_0_5_pct") or 0.0), str(lyr.get("name") or "")))
+            pct = stats.get("high_value_pct", stats.get("gt_0_5_pct"))
+            if pct is not None:
+                ras_vis.append((float(pct or 0.0), str(lyr.get("name") or ""), _is_visibility_raster(lyr)))
         ras_vis.sort(reverse=True)
         if ras_vis:
+            label = "가시 비율" if ras_vis[0][2] else "상위값(이진 마스크) 셀 비율"
             observations.append(
-                f"- (힌트) 0.5 초과 비율이 높은 래스터: `{ras_vis[0][1]}` ({_fmt_float(ras_vis[0][0], digits=1)}%)"
+                f"- (힌트) {label}이 높은 래스터: `{ras_vis[0][1]}` ({_fmt_float(ras_vis[0][0], digits=1)}%)"
             )
     except Exception as _exc:
         log_swallowed("tools/ai_local_summarizer.py:467 (generate_report)", _exc)
@@ -479,6 +570,7 @@ def generate_report(ctx: Dict[str, Any]) -> str:
     out.append("- 이 보고서는 **외부 AI를 호출하지 않는 로컬 요약**입니다(문장 품질/해석은 제한적).")
     out.append("- 통계는 AOI 버퍼와의 교차/표본 기반이며, 레이어 품질(좌표계/해상도/NoData)에 따라 달라질 수 있습니다.")
     out.append("- 레이어가 많거나(레이어 cap), 피처가 매우 많으면(스캔 cap) 일부만 반영되었을 수 있습니다.")
+    out.append("- 스캔 한도/표본 추출에 걸린 레이어는 위 레이어별 항목과 추가 유적 관계 항목에 별도 표시했습니다.")
     out.append("")
 
     # 6) Next steps

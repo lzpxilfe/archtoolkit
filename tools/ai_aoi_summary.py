@@ -9,6 +9,7 @@ Design goals
 
 from __future__ import annotations
 
+import heapq
 import math
 import os
 import re
@@ -37,6 +38,7 @@ from qgis.core import (
     QgsProject,
     QgsRasterLayer,
     QgsRectangle,
+    QgsUnitTypes,
     QgsVectorLayer,
     QgsWkbTypes,
 )
@@ -78,14 +80,26 @@ _NUMERIC_FIELD_CANDIDATES = (
 )
 
 # Field names that are numeric but carry no analytical meaning: ids/keys,
-# sequence counters, the 19-digit Korean cadastral PNU, per-feature RGB colour
-# columns (terrain profile), and graph component indices — their mean/min/max
-# would read as pseudo-analytics in the report and the Gemini prompt.
+# sequence counters and graph component indices - their mean/min/max would read
+# as pseudo-analytics in the report and the Gemini prompt. This generic rule is
+# applied to EVERY layer, so it must not swallow legitimate short columns: a
+# geochemistry table's boron column "B", a "rank" score or a "no" count are
+# data, not ids. Tool-specific junk columns live in _TOOL_ID_FIELD_RES instead.
 _ID_FIELD_RE = re.compile(
-    r"^(fid|gid|id|oid|objectid|osm_id|uid|uuid|no|idx|index|seq|rank|pnu|r|g|b"
+    r"^(fid|gid|id|oid|objectid|osm_id|uid|uuid|idx|index|seq"
     r"|component|번호|일련번호|.*_id|.*_fid|.*_no|.*_idx)$",
     re.IGNORECASE,
 )
+
+# Per-tool exclusions keyed by the layer's archtoolkit tool_id: terrain profile
+# writes per-feature RGB colour columns and a row counter, cadastral overlap
+# carries the 19-digit Korean PNU, trench suggestion a rank/row counter. They
+# are skipped only when the layer metadata says it came from that tool.
+_TOOL_ID_FIELD_RES = {
+    "terrain_profile": re.compile(r"^(r|g|b|no)$", re.IGNORECASE),
+    "cadastral_overlap": re.compile(r"^(pnu)$", re.IGNORECASE),
+    "trench_suggestion": re.compile(r"^(rank|no)$", re.IGNORECASE),
+}
 
 # Hints that a string field is a category worth histogramming (EN + KO).
 _CATEGORICAL_HINTS = (
@@ -102,16 +116,20 @@ _NUMERIC_QVARIANTS = (
 )
 
 
-def _classify_fields(layer, *, max_numeric: int = 12):
+def _classify_fields(layer, *, max_numeric: int = 12, tool_id: str = ""):
     """Auto-select fields by their actual type instead of a name whitelist.
 
-    Returns (numeric_field_names, categorical_field_name). Numeric fields are
-    real numeric columns (excluding id/key-like names); the categorical field is
-    the best string column for a value histogram (Korean category fields
-    included), preferring name hints and legacy tool outputs.
+    Returns (numeric_field_names, categorical_field_name, numeric_dropped).
+    Numeric fields are real numeric columns (excluding id/key-like names, plus
+    the tool-specific junk columns for the ArchToolkit `tool_id` given); the
+    categorical field is the best string column for a value histogram (Korean
+    category fields included), preferring name hints and legacy tool outputs.
+    `numeric_dropped` is how many numeric columns the `max_numeric` cap cut, so
+    the report can say "외 N개 생략" instead of implying the column was absent.
     """
     numeric: List[str] = []
     categorical: Optional[str] = None
+    tool_re = _TOOL_ID_FIELD_RES.get(str(tool_id or "").strip().lower())
     try:
         fields = list(layer.fields())
     except Exception:
@@ -133,6 +151,8 @@ def _classify_fields(layer, *, max_numeric: int = 12):
         if ftype in _NUMERIC_QVARIANTS:
             if _ID_FIELD_RE.match(name):
                 continue
+            if tool_re is not None and tool_re.match(name):
+                continue
             numeric.append(name)
         elif ftype == QVariant.String:
             string_candidates.append(name)
@@ -141,6 +161,7 @@ def _classify_fields(layer, *, max_numeric: int = 12):
     known = [c for c in _NUMERIC_FIELD_CANDIDATES if c in numeric]
     rest = [c for c in numeric if c not in known]
     numeric_ordered = (known + rest)[: int(max_numeric)]
+    numeric_dropped = max(0, len(numeric) - len(numeric_ordered))
 
     # Categorical: legacy tool fields first, then a hinted string field.
     for legacy in ("class_id", "Layer", "element"):
@@ -154,7 +175,7 @@ def _classify_fields(layer, *, max_numeric: int = 12):
                 categorical = name
                 break
 
-    return numeric_ordered, categorical
+    return numeric_ordered, categorical, numeric_dropped
 
 
 _COMPASS_8_KO = ("북", "북동", "동", "남동", "남", "남서", "서", "북서")
@@ -251,6 +272,32 @@ def _safe_distance_area(crs) -> QgsDistanceArea:
     return da
 
 
+def _to_m2(da: QgsDistanceArea, area: float) -> float:
+    """Convert a measureArea() result to square metres.
+
+    QgsDistanceArea reports in its own areaUnits(): square metres when an
+    ellipsoid is in effect, otherwise the source CRS units squared. Routing every
+    value through convertAreaMeasurement() is what makes a ``*_m2`` key mean
+    square metres on a feet- or kilometre-based projection as well (same as
+    cadastral_overlap_dialog._area_m2). On failure the raw figure is kept, which
+    is the pre-conversion behaviour and exact for a metre CRS.
+    """
+    try:
+        return float(da.convertAreaMeasurement(float(area), QgsUnitTypes.AreaSquareMeters))
+    except Exception as _exc:
+        log_swallowed("ai_aoi_summary._to_m2", _exc)
+        return float(area)
+
+
+def _to_m(da: QgsDistanceArea, length: float) -> float:
+    """Convert a measureLength()/measureLine() result to metres (see _to_m2)."""
+    try:
+        return float(da.convertLengthMeasurement(float(length), QgsUnitTypes.DistanceMeters))
+    except Exception as _exc:
+        log_swallowed("ai_aoi_summary._to_m", _exc)
+        return float(length)
+
+
 def _area_m2(da: QgsDistanceArea, geom, crs) -> Optional[float]:
     """Ellipsoidal area in square metres, or None when it would not be metres."""
     if geom is None:
@@ -264,7 +311,7 @@ def _area_m2(da: QgsDistanceArea, geom, crs) -> Optional[float]:
     if _measures_in_degrees(da, crs):
         return None
     try:
-        return float(da.measureArea(geom))
+        return _to_m2(da, float(da.measureArea(geom)))
     except Exception as _exc:
         log_swallowed("ai_aoi_summary._area_m2", _exc)
         return None
@@ -283,7 +330,7 @@ def _length_m(da: QgsDistanceArea, geom, crs) -> Optional[float]:
     if _measures_in_degrees(da, crs):
         return None
     try:
-        return float(da.measureLength(geom))
+        return _to_m(da, float(da.measureLength(geom)))
     except Exception as _exc:
         log_swallowed("ai_aoi_summary._length_m", _exc)
         return None
@@ -296,7 +343,7 @@ def _line_m(da: QgsDistanceArea, p1, p2, crs) -> Optional[float]:
     if _measures_in_degrees(da, crs):
         return None
     try:
-        return float(da.measureLine(p1, p2))
+        return _to_m(da, float(da.measureLine(p1, p2)))
     except Exception as _exc:
         log_swallowed("ai_aoi_summary._line_m", _exc)
         return None
@@ -464,6 +511,7 @@ def _vector_layer_stats_in_geom(
     max_features_scan: int = 20000,
     origin_point: Optional[QgsPointXY] = None,
     origin_crs=None,
+    tool_id: str = "",
 ) -> Dict[str, Any]:
     out: Dict[str, Any] = {"features": 0}
     if layer is None or geom is None or geom.isEmpty():
@@ -495,7 +543,7 @@ def _vector_layer_stats_in_geom(
 
     # Auto-select fields by actual type (numeric stats + one categorical column),
     # including Korean category fields - not just a fixed English name whitelist.
-    num_fields, hist_field = _classify_fields(layer)
+    num_fields, hist_field, num_dropped = _classify_fields(layer, tool_id=tool_id)
     hist = {} if hist_field else None
 
     num_acc: Dict[str, Dict[str, Any]] = {}
@@ -511,10 +559,15 @@ def _vector_layer_stats_in_geom(
     if geom_type == QgsWkbTypes.PointGeometry and da_origin is not None and origin_point is not None:
         dist_acc = {"sum": 0.0, "min": float("inf"), "max": float("-inf"), "n": 0}
 
+    scan_cap = int(max_features_scan)
+    truncated = False
     for feat in layer.getFeatures(req):
-        scanned += 1
-        if scanned > int(max_features_scan):
+        # Test the cap BEFORE counting so `scanned` reports the number actually
+        # examined (it used to read cap+1 when the cap fired).
+        if scanned >= scan_cap:
+            truncated = True
             break
+        scanned += 1
         _skip_391 = False
         try:
             g = feat.geometry()
@@ -601,6 +654,29 @@ def _vector_layer_stats_in_geom(
 
     out["features"] = int(n)
     out["scanned"] = int(scanned)
+    out["scan_cap"] = int(scan_cap)
+    # Written explicitly (not only when true) so a reader of context.json/CSV
+    # can tell "complete" from "flag never written".
+    out["truncated"] = bool(truncated)
+    out["numeric_fields_truncated"] = int(num_dropped)
+    if truncated:
+        # Everything below is a partial figure over the first `scan_cap`
+        # features in provider order. Name the cap and, when the provider can
+        # answer cheaply, the layer's full feature count as the denominator.
+        try:
+            fc = int(layer.featureCount())
+            if fc >= 0:
+                out["layer_feature_count"] = fc
+        except Exception as _exc:
+            log_swallowed("ai_aoi_summary._vector_layer_stats_in_geom", _exc)
+        try:
+            log_message(
+                f"AI 요약: 레이어 '{layer.name()}' 피처 스캔 한도({scan_cap:,}개)에 도달했습니다. "
+                "피처 수/총 길이/총 면적/필드 통계는 부분값입니다.",
+                level=Qgis.Warning,
+            )
+        except Exception as _exc:
+            log_swallowed("ai_aoi_summary._vector_layer_stats_in_geom", _exc)
     if geom_type == QgsWkbTypes.LineGeometry and metric_totals:
         out["total_length_m"] = float(total_len)
     if geom_type == QgsWkbTypes.PolygonGeometry and metric_totals:
@@ -800,7 +876,8 @@ def _reference_sites_summary(
     da = _safe_distance_area(aoi_crs)
 
     scanned = 0
-    kept = 0
+    classified = 0
+    scan_truncated = False
     counts = {
         "inside_or_overlap_aoi": 0,
         "inside_buffer_only": 0,
@@ -809,12 +886,22 @@ def _reference_sites_summary(
         "crosses_aoi_boundary": 0,
         "crosses_buffer_boundary": 0,
     }
-    items: List[Dict[str, Any]] = []
+
+    # Two passes. Pass 1 walks every feature up to max_scan and computes only
+    # the cheap discriminators (relation class, distance to AOI/buffer) and
+    # tallies `counts` over ALL of them; it keeps the nearest max_items in a
+    # bounded max-heap keyed on distance so memory stays O(max_items). Pass 2
+    # computes the expensive per-item fields (bearing, area/length splits) for
+    # those nearest items only. Previously the loop stopped at max_items in
+    # provider (FID) order and sorted afterwards, so the "nearest site" and the
+    # classification counts came from an arbitrary subset of the sites in range.
+    heap: List[Tuple[float, int, Dict[str, Any]]] = []
 
     for ft in features:
-        scanned += 1
-        if scanned > max_scan:
+        if scanned >= max_scan:
+            scan_truncated = True
             break
+        scanned += 1
 
         _skip_672 = False
         try:
@@ -877,6 +964,7 @@ def _reference_sites_summary(
         else:
             relation = "outside_buffer"
             counts["outside_buffer"] += 1
+        classified += 1
 
         try:
             dist_to_aoi = 0.0 if intersects_aoi else float(g.distance(aoi_geom))
@@ -890,6 +978,60 @@ def _reference_sites_summary(
                 dist_to_buffer = None
         except Exception:
             dist_to_buffer = None
+
+        rec: Dict[str, Any] = {
+            "ft": ft,
+            "g": g,
+            "relation": relation,
+            "intersects_aoi": intersects_aoi,
+            "within_aoi": within_aoi,
+            "intersects_buf": intersects_buf,
+            "within_buf": within_buf,
+            "crosses_aoi_boundary": crosses_aoi_boundary,
+            "crosses_buffer_boundary": crosses_buffer_boundary,
+            "dist_to_aoi": dist_to_aoi,
+            "dist_to_buffer": dist_to_buffer,
+        }
+        # Negated distance -> max-heap; the unique sequence number breaks ties
+        # so the dict is never compared. heappushpop evicts the farthest.
+        sort_key = float(dist_to_aoi) if dist_to_aoi is not None else float("inf")
+        entry = (-sort_key, -classified, rec)
+        if len(heap) < max_items:
+            heapq.heappush(heap, entry)
+        else:
+            heapq.heappushpop(heap, entry)
+
+    if scan_truncated:
+        try:
+            log_message(
+                f"AI 요약: 추가 유적 레이어 '{layer.name()}' 스캔 한도({max_scan:,}개)에 도달했습니다. "
+                "분류 집계와 '가장 가까운 유적'은 스캔된 범위 내의 값입니다.",
+                level=Qgis.Warning,
+            )
+        except Exception as _exc:
+            log_swallowed("ai_aoi_summary._reference_sites_summary", _exc)
+
+    nearest = [entry[2] for entry in heap]
+    for rec in nearest:
+        rec["name"] = _feature_ref_name(rec["ft"], name_field=name_field)
+    try:
+        nearest.sort(
+            key=lambda r: (
+                float(r["dist_to_aoi"]) if r.get("dist_to_aoi") is not None else float("inf"),
+                str(r.get("name") or ""),
+            )
+        )
+    except Exception as _exc:
+        log_swallowed("ai_aoi_summary._reference_sites_summary", _exc)
+
+    items: List[Dict[str, Any]] = []
+    for rec in nearest:
+        ft = rec["ft"]
+        g = rec["g"]
+        intersects_aoi = bool(rec["intersects_aoi"])
+        within_aoi = bool(rec["within_aoi"])
+        intersects_buf = bool(rec["intersects_buf"])
+        within_buf = bool(rec["within_buf"])
 
         dist_to_centroid = None
         bearing_from_aoi_deg = None
@@ -997,14 +1139,14 @@ def _reference_sites_summary(
 
         item = {
             "fid": int(ft.id()) if hasattr(ft, "id") else None,
-            "name": _feature_ref_name(ft, name_field=name_field),
-            "relation": relation,
-            "crosses_aoi_boundary": crosses_aoi_boundary,
-            "crosses_buffer_boundary": crosses_buffer_boundary,
+            "name": str(rec.get("name") or ""),
+            "relation": str(rec["relation"]),
+            "crosses_aoi_boundary": bool(rec["crosses_aoi_boundary"]),
+            "crosses_buffer_boundary": bool(rec["crosses_buffer_boundary"]),
             "inside_or_overlap_aoi": bool(intersects_aoi or within_aoi),
             "inside_or_overlap_buffer": bool(intersects_buf or within_buf),
-            "distance_to_aoi_m": dist_to_aoi,
-            "distance_to_buffer_m": dist_to_buffer,
+            "distance_to_aoi_m": rec["dist_to_aoi"],
+            "distance_to_buffer_m": rec["dist_to_buffer"],
             "distance_to_aoi_centroid_m": dist_to_centroid,
             "bearing_from_aoi_deg": bearing_from_aoi_deg,
             "compass_from_aoi": compass_from_aoi,
@@ -1051,19 +1193,8 @@ def _reference_sites_summary(
             item["outside_buffer_length_pct"] = outside_buffer_length_pct
 
         items.append(item)
-        kept += 1
-        if kept >= max_items:
-            break
 
-    try:
-        items.sort(
-            key=lambda d: (
-                float(d.get("distance_to_aoi_m")) if d.get("distance_to_aoi_m") is not None else float("inf"),
-                str(d.get("name") or ""),
-            )
-        )
-    except Exception as _exc:
-        log_swallowed("ai_aoi_summary._reference_sites_summary", _exc)
+    kept = len(items)
 
     return {
         "layer_id": str(layer.id() or ""),
@@ -1072,11 +1203,19 @@ def _reference_sites_summary(
         "selected_feature_count": int(selected_count),
         "name_field": str(name_field or ""),
         "feature_count": int(kept),
+        # Sites the relation classes/counts were tallied over (all scanned in
+        # range), as opposed to feature_count = items detailed below.
+        "classified_count": int(classified),
         "scanned": int(scanned),
+        "scan_cap": int(max_scan),
+        # scan_truncated: the scan itself stopped at scan_cap, so counts and the
+        # nearest site are relative to the scanned subset. truncated: only the
+        # item list is cut (counts remain complete over everything scanned).
+        "scan_truncated": bool(scan_truncated),
         "counts": counts,
         "items": items,
         "max_features": int(max_items),
-        "truncated": bool(kept >= max_items),
+        "truncated": bool(classified > kept),
     }
 
 
@@ -1150,7 +1289,8 @@ def _raster_stats_in_geom(
             if scale > 1.0:
                 bw = max(1, int(math.floor(float(w) / scale)))
                 bh = max(1, int(math.floor(float(h) / scale)))
-    except Exception:
+    except Exception as _exc:
+        log_swallowed("ai_aoi_summary._raster_stats_in_geom", _exc)
         bw, bh = int(w), int(h)
 
     try:
@@ -1216,6 +1356,24 @@ def _raster_stats_in_geom(
 
     ds = None
 
+    # Record whether the read was decimated (GDAL nearest-neighbour via the
+    # smaller buffer): every (step x step) block then contributes one sample,
+    # so `count` is a sample count and min/max are sample extrema, biased inward.
+    window_px = int(w) * int(h)
+    try:
+        read_px = int(arr.shape[0]) * int(arr.shape[1]) if arr.ndim >= 2 else int(arr.size)
+    except Exception as _exc:
+        log_swallowed("ai_aoi_summary._raster_stats_in_geom", _exc)
+        read_px = int(bw) * int(bh)
+    sampled = bool(read_px > 0 and read_px < window_px)
+    sample_step = 1.0
+    if sampled:
+        try:
+            sample_step = float(round(math.sqrt(float(window_px) / float(read_px)), 3))
+        except Exception as _exc:
+            log_swallowed("ai_aoi_summary._raster_stats_in_geom", _exc)
+            sample_step = 1.0
+
     valid = mask & np.isfinite(arr)
     if nodata is not None:
         try:
@@ -1233,8 +1391,14 @@ def _raster_stats_in_geom(
             "min": float(np.nanmin(vals)),
             "max": float(np.nanmax(vals)),
             "mean": float(np.nanmean(vals)),
+            "sampled": bool(sampled),
+            "sample_step": float(sample_step),
+            "window_px": int(window_px),
         }
-        # Binary-ish mask hint (e.g., viewshed/corridor): only compute when data looks 0/Max-ish.
+        # Binary mask hint (e.g. viewshed/corridor): only when the sample holds
+        # EXACTLY two distinct valid values. The old ">= 98 % of cells are 0 or
+        # max" gate also admitted three-class rasters (the viewshed asymmetry
+        # coding 0/1/2) and zero-padded continuous rasters.
         try:
             sample = vals
             if int(sample.size) > 200_000:
@@ -1243,17 +1407,61 @@ def _raster_stats_in_geom(
             vmin = float(out.get("min"))
             vmax = float(out.get("max"))
             if math.isfinite(vmin) and math.isfinite(vmax) and vmax > 0 and vmin >= -1e-6 and sample.size > 0:
-                near0 = float(np.count_nonzero(np.isclose(sample, 0.0, atol=1e-6)))
-                nearMax = float(np.count_nonzero(np.isclose(sample, vmax, atol=1e-6)))
-                frac = (near0 + nearMax) / float(sample.size)
-                if frac >= 0.98:
-                    vis = float(np.count_nonzero(vals > 0.5)) / float(vals.size) * 100.0
-                    out["gt_0_5_pct"] = float(vis)
+                uniq = np.unique(sample)
+                if int(uniq.size) == 2:
+                    lo = float(uniq[0])
+                    hi = float(uniq[1])
+                    # Threshold relative to the detected values (their midpoint,
+                    # i.e. vmax/2 for a 0/high mask) rather than an absolute 0.5:
+                    # a weighted viewshed coded {0, 0.35} used to report 0 %.
+                    thr = (lo + hi) / 2.0
+                    pct = float(np.count_nonzero(vals > thr)) / float(vals.size) * 100.0
+                    out["high_value_pct"] = float(pct)
+                    out["high_value"] = float(hi)
+                    out["low_value"] = float(lo)
+                    out["high_value_threshold"] = float(thr)
+                    # Legacy key kept for readers of older context.json/CSV (same
+                    # number; the keys above describe what it now measures).
+                    out["gt_0_5_pct"] = float(pct)
         except Exception as _exc:
             log_swallowed("ai_aoi_summary._raster_stats_in_geom", _exc)
         return out
     except Exception:
         return None
+
+
+def _project_layers_in_tree_order() -> List[QgsMapLayer]:
+    """Project layers in layer-tree (panel) order, then any not in the tree.
+
+    mapLayers() iterates in layer-id key order, which is alphabetical by
+    generated id and unrelated to the panel, so which layers survived the
+    max_layers cap was arbitrary. Tree order is what the user sees.
+    """
+    ordered: List[QgsMapLayer] = []
+    seen = set()
+    try:
+        root = QgsProject.instance().layerTreeRoot()
+        for node in root.findLayers():
+            try:
+                lyr = node.layer()
+            except Exception as _exc:
+                log_swallowed("ai_aoi_summary._project_layers_in_tree_order", _exc)
+                lyr = None
+            if lyr is None or lyr.id() in seen:
+                continue
+            ordered.append(lyr)
+            seen.add(lyr.id())
+    except Exception as _exc:
+        log_swallowed("ai_aoi_summary._project_layers_in_tree_order", _exc)
+    try:
+        for lyr in QgsProject.instance().mapLayers().values():
+            if lyr is None or lyr.id() in seen:
+                continue
+            ordered.append(lyr)
+            seen.add(lyr.id())
+    except Exception as _exc:
+        log_swallowed("ai_aoi_summary._project_layers_in_tree_order", _exc)
+    return ordered
 
 
 def build_aoi_context(
@@ -1277,6 +1485,30 @@ def build_aoi_context(
     aoi_crs = aoi_layer.crs()
     if not is_metric_crs(aoi_crs):
         return None, "AOI CRS 단위가 미터가 아닙니다. (투영 CRS 사용 권장)"
+
+    # "Selected features only" with an empty selection falls back to the whole
+    # layer (as _unary_union_geoms always did) - but the fallback is now recorded
+    # so the report header cannot claim "선택 피처만 사용" for a run that used
+    # every feature, and the log says so at warning level.
+    selected_only_requested = bool(selected_only)
+    selection_note: Optional[str] = None
+    if selected_only:
+        try:
+            sel_n = int(aoi_layer.selectedFeatureCount())
+        except Exception as _exc:
+            log_swallowed("ai_aoi_summary.build_aoi_context", _exc)
+            sel_n = 0
+        if sel_n <= 0:
+            selected_only = False
+            selection_note = "선택 피처 없음: 전체 피처 사용"
+            try:
+                log_message(
+                    "AI 요약: '선택된 피처만 사용'이 켜져 있으나 AOI 레이어에 선택된 피처가 없어 "
+                    "전체 피처를 사용합니다. AOI 면적/버퍼/모든 통계가 레이어 전체 기준입니다.",
+                    level=Qgis.Warning,
+                )
+            except Exception as _exc:
+                log_swallowed("ai_aoi_summary.build_aoi_context", _exc)
 
     aoi_geom, feat_n = _unary_union_geoms(aoi_layer, selected_only=selected_only)
     if aoi_geom is None or aoi_geom.isEmpty():
@@ -1329,8 +1561,25 @@ def build_aoi_context(
             seen.add(lyr.id())
         layers = ordered
     else:
-        layers = list(QgsProject.instance().mapLayers().values())
+        layers = _project_layers_in_tree_order()
     summaries: List[Dict[str, Any]] = []
+
+    # In the explicit 'layers' scope the user picked every layer by hand, so
+    # the cap honours the full selection (raised to its size and logged) rather
+    # than silently cutting an arbitrary tail of it.
+    effective_max_layers = int(max_layers)
+    if layer_ids and len(layers) > effective_max_layers:
+        effective_max_layers = int(len(layers))
+        try:
+            log_message(
+                f"AI 요약: 대상 레이어 {len(layers)}개가 레이어 한도({int(max_layers)}개)를 넘어 한도를 "
+                f"{effective_max_layers}개로 올렸습니다.",
+                level=Qgis.Info,
+            )
+        except Exception as _exc:
+            log_swallowed("ai_aoi_summary.build_aoi_context", _exc)
+    layers_candidates = 0
+    layers_truncated = False
 
     for lyr in layers:
         if lyr is None or lyr.id() == aoi_layer.id():
@@ -1376,6 +1625,13 @@ def build_aoi_context(
         except Exception as _exc:
             log_swallowed("ai_aoi_summary.build_aoi_context", _exc)
 
+        # Past the cap: keep counting candidates (so the context can say how
+        # many were skipped) but do not compute their stats.
+        layers_candidates += 1
+        if len(summaries) >= effective_max_layers:
+            layers_truncated = True
+            continue
+
         item: Dict[str, Any] = {
             "id": lyr.id(),
             "name": lyr.name(),
@@ -1403,6 +1659,7 @@ def build_aoi_context(
                     g_layer,
                     origin_point=aoi_centroid_pt,
                     origin_crs=aoi_crs,
+                    tool_id=str((meta or {}).get("tool_id") or ""),
                 )
             except Exception:
                 item["stats"] = {"features": 0}
@@ -1423,8 +1680,16 @@ def build_aoi_context(
                 item["stats"] = None
 
         summaries.append(item)
-        if len(summaries) >= int(max_layers):
-            break
+
+    if layers_truncated:
+        try:
+            log_message(
+                f"AI 요약: 레이어 한도({effective_max_layers}개)에 도달해 후보 {layers_candidates}개 중 "
+                f"{len(summaries)}개만 요약했습니다.",
+                level=Qgis.Warning,
+            )
+        except Exception as _exc:
+            log_swallowed("ai_aoi_summary.build_aoi_context", _exc)
 
     reference_sites = None
     if reference_layer is not None and isinstance(reference_layer, QgsVectorLayer):
@@ -1452,8 +1717,13 @@ def build_aoi_context(
         "radius_m": float(r),
         "buffer_area_m2": buf_area,
         "layers": summaries,
+        "layers_truncated": bool(layers_truncated),
+        "layers_candidates": int(layers_candidates),
         "options": {
+            # Effective mode (False when the empty-selection fallback was taken).
             "selected_only": bool(selected_only),
+            "selected_only_requested": bool(selected_only_requested),
+            "selection_note": selection_note,
             "archtoolkit_only": bool(only_archtoolkit_layers),
             "exclude_styling_layers": bool(exclude_styling_layers),
             "layer_scope": "layers" if layer_ids else "group" if group_prefix else "auto",
@@ -1463,7 +1733,8 @@ def build_aoi_context(
             "reference_selected_only": bool(reference_selected_only),
             "reference_name_field": str(reference_name_field or ""),
             "reference_max_features": int(reference_max_features),
-            "max_layers": int(max_layers),
+            "max_layers": int(effective_max_layers),
+            "max_layers_requested": int(max_layers),
         },
     }
     if reference_sites is not None:
@@ -1547,6 +1818,10 @@ def export_aoi_context_csv(
             # Common vector stats
             "features",
             "scanned",
+            "scan_cap",
+            "truncated",
+            "layer_feature_count",
+            "numeric_fields_truncated",
             "total_length_m",
             "total_area_m2",
             "top_field",
@@ -1560,7 +1835,15 @@ def export_aoi_context_csv(
             "raster_min",
             "raster_mean",
             "raster_max",
+            "raster_sampled",
+            "raster_sample_step",
+            "raster_window_px",
             "gt_0_5_pct",
+            "high_value_pct",
+            "high_value_threshold",
+            # Context-level layer cap (repeated per row so the file is self-describing)
+            "layers_truncated",
+            "layers_candidates",
             # Raw JSON
             "stats_json",
         ]
@@ -1607,6 +1890,10 @@ def export_aoi_context_csv(
                     # vector stats
                     "features": _as_text(stats.get("features")),
                     "scanned": _as_text(stats.get("scanned")),
+                    "scan_cap": _as_text(stats.get("scan_cap")),
+                    "truncated": _as_text(stats.get("truncated")),
+                    "layer_feature_count": _as_text(stats.get("layer_feature_count")),
+                    "numeric_fields_truncated": _as_text(stats.get("numeric_fields_truncated")),
                     "total_length_m": _as_text(stats.get("total_length_m")),
                     "total_area_m2": _as_text(stats.get("total_area_m2")),
                     "top_field": _as_text(stats.get("top_field")),
@@ -1620,7 +1907,15 @@ def export_aoi_context_csv(
                     "raster_min": _as_text(stats.get("min")),
                     "raster_mean": _as_text(stats.get("mean")),
                     "raster_max": _as_text(stats.get("max")),
+                    "raster_sampled": _as_text(stats.get("sampled")),
+                    "raster_sample_step": _as_text(stats.get("sample_step")),
+                    "raster_window_px": _as_text(stats.get("window_px")),
                     "gt_0_5_pct": _as_text(stats.get("gt_0_5_pct")),
+                    "high_value_pct": _as_text(stats.get("high_value_pct")),
+                    "high_value_threshold": _as_text(stats.get("high_value_threshold")),
+                    # context-level
+                    "layers_truncated": _as_text(ctx.get("layers_truncated")),
+                    "layers_candidates": _as_text(ctx.get("layers_candidates")),
                     # raw
                     "stats_json": _as_text(lyr.get("stats")),
                 }
