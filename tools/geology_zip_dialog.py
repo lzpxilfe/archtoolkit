@@ -235,13 +235,80 @@ def _meters_to_degrees(pixel_m: float, lat_deg: float) -> Tuple[float, float]:
         return 0.0, 0.0
     return (m / m_per_deg_lon), (m / m_per_deg_lat)
 
+
+# Reasons a feature (or a whole layer) never reaches the burn, in report
+# order. Keys starting with "layer_" count layers, the rest count features.
+DROP_REASON_LABELS = {
+    "empty_geometry": "빈 지오메트리",
+    "transform_failed": "좌표 변환 실패",
+    "null_value": "값 없음(NULL/공백)",
+    "non_numeric": "숫자 아님",
+    "add_failed": "피처 추가 실패",
+    "feature_error": "처리 오류",
+    "layer_geometry_mismatch": "지오메트리 타입 불일치",
+    "layer_field_missing": "필드 없음",
+    "layer_transform_failed": "좌표계 변환 불가",
+}
+
+
+def _format_drops(drops: Optional[Dict[str, int]]) -> str:
+    """Human-readable summary of non-zero drop counters, "" when nothing was
+    dropped, e.g. '제외된 피처 10개(값 없음(NULL/공백) 8, 숫자 아님 2)'."""
+    if not drops:
+        return ""
+    feat = []
+    lyr = []
+    n_feat = 0
+    n_lyr = 0
+    for key, label in DROP_REASON_LABELS.items():
+        try:
+            n = int(drops.get(key, 0) or 0)
+        except Exception as _exc:
+            log_swallowed("geology_zip_dialog._format_drops", _exc)
+            n = 0
+        if n <= 0:
+            continue
+        if key.startswith("layer_"):
+            lyr.append(f"{label} {n}")
+            n_lyr += n
+        else:
+            feat.append(f"{label} {n}")
+            n_feat += n
+    parts = []
+    if n_feat:
+        parts.append(f"제외된 피처 {n_feat}개({', '.join(feat)})")
+    if n_lyr:
+        parts.append(f"제외된 레이어 {n_lyr}개({', '.join(lyr)})")
+    return ", ".join(parts)
+
+
+def _code_key(val) -> str:
+    """Text key for a code value. Integral numbers become '12' rather than
+    '12.0' so a sheet that stores LITHOIDX as Double and one that stores it as
+    text share a key when the field has to be treated as text."""
+    if isinstance(val, bool):
+        return str(val)
+    if isinstance(val, int):
+        return str(val)
+    if isinstance(val, float) and val.is_integer():
+        return str(int(val))
+    return str(val)
+
+
 class KigamZipProcessor:
     # Guard rails against malformed/malicious ZIPs (zip bombs).
     MAX_ZIP_ENTRIES = 5000
     MAX_TOTAL_UNCOMPRESSED = 2 * 1024 ** 3  # 2 GiB
     MAX_COMPRESSION_RATIO = 200.0
 
-    def __init__(self):
+    @staticmethod
+    def default_extract_root() -> str:
+        """The managed extraction folder under the QGIS profile, or "" when the
+        profile path is unknown (a temp folder is used in that case).
+
+        Side-effect free so the help text can name the folder without
+        constructing a processor (whose __init__ runs the cleanup reaper).
+        """
         root_name = GEOLOGY_EXTRACT_ROOT_NAME or "ArchToolkit_KIGAM_Extract"
         base = ""
         try:
@@ -251,12 +318,23 @@ class KigamZipProcessor:
         except Exception:
             base = ""
         if base:
+            return os.path.join(base, "ArchToolkit", root_name)
+        return ""
+
+    def __init__(self):
+        root_name = GEOLOGY_EXTRACT_ROOT_NAME or "ArchToolkit_KIGAM_Extract"
+        base = self.default_extract_root()
+        if base:
             # User-profile directory: private to this user (unlike the shared
             # system temp dir) and survives reboots, so layer sources in saved
             # projects keep working.
-            self.extract_root = os.path.join(base, "ArchToolkit", root_name)
+            self.extract_root = base
         else:
             self.extract_root = tempfile.mkdtemp(prefix=f"{root_name}_")
+        # Folder the most recent process_zip() extracted into; the dialog
+        # names it in the load message so the user knows the shapefiles live
+        # in a managed folder with a retention window (GEO-13).
+        self.last_extract_dir = ""
         try:
             os.makedirs(self.extract_root, exist_ok=True)
         except Exception as _exc:
@@ -396,6 +474,12 @@ class KigamZipProcessor:
         except Exception as e:
             log_message(f"KIGAM ZIP 추출 실패: {e}", level=Qgis.Warning)
             return []
+        self.last_extract_dir = extract_dir
+        log_message(
+            f"KIGAM 추출 폴더: {extract_dir} (레이어를 {max(1, int(GEOLOGY_EXTRACT_CLEANUP_DAYS))}일 동안 "
+            "불러오지 않은 도엽 폴더는 다음 ZIP 로드 시 자동 삭제됩니다)",
+            level=Qgis.Info,
+        )
 
         # Locate 'sym' folder (optional)
         sym_path = None
@@ -713,6 +797,11 @@ class GeologyZipDialog(QtWidgets.QDialog):
         self.spinPixel.setSingleStep(1.0)
         self.spinPixel.setValue(10.0)
         self.spinPixel.setSuffix(" m")
+        self.spinPixel.setToolTip(
+            "출력 래스터의 셀 크기(미터). 셀 중심이 폴리곤 안에 들어가는 셀에만 코드가 기록되므로, "
+            "폭이 한 셀보다 좁은 지질 단위(얇은 암맥 등)는 이 픽셀 크기에서는 래스터에 기록되지 않습니다. "
+            "매핑 CSV의 cell_count 열이 0인 코드가 그런 경우이며, 픽셀 크기를 줄이면 포함됩니다."
+        )
         form_rst.addRow("해상도(픽셀 크기):", self.spinPixel)
 
         self.spinNoData = QtWidgets.QDoubleSpinBox()
@@ -971,7 +1060,15 @@ class GeologyZipDialog(QtWidgets.QDialog):
         for p in priority:
             if p in common:
                 return p
-        return sorted(common)[0]
+        # Last resort: the alphabetically first common field. It may be an
+        # area or id column, so say which field is being burned instead of
+        # tagging an arbitrary attribute as a lithology class silently (GEO-09).
+        fallback = sorted(common)[0]
+        text = (f"우선 필드(LITHOIDX/AGEIDX 등)가 공통으로 없어 공통 필드 중 이름순 첫 번째 '{fallback}'를 "
+                "값 필드로 사용합니다. 지질 코드가 아닐 수 있으니 확인하거나 필드를 직접 선택하세요.")
+        log_message(f"KIGAM rasterize: {text}", level=Qgis.Warning)
+        push_message(self.iface, "값 필드 자동 선택", text, level=1, duration=10)
+        return fallback
 
     def _suggest_label_field(self, layer: QgsVectorLayer, field_name: str) -> Optional[str]:
         try:
@@ -1019,10 +1116,58 @@ class GeologyZipDialog(QtWidgets.QDialog):
         except Exception:
             return False
 
+    def _field_numeric_across(
+        self,
+        layers: List[QgsVectorLayer],
+        field_name: str,
+    ) -> Tuple[bool, List[str], List[str], List[str]]:
+        """Decide numeric-vs-text for a field over EVERY selected layer that has it.
+
+        Deciding from layers[0] alone made a sheet that stores LITHOIDX as
+        text fail int(float('Kgr')) on every feature and contribute nothing
+        to the raster. The field is numeric only when it is numeric in all
+        layers; on a disagreement the caller warns and the field is treated
+        as text, which keeps every sheet (GEO-07). Returns
+        (numeric, numeric_layer_names, text_layer_names, double_layer_names).
+        """
+        num_names: List[str] = []
+        text_names: List[str] = []
+        double_names: List[str] = []
+        for lyr in layers or []:
+            try:
+                if lyr.fields().indexOf(field_name) < 0:
+                    continue
+                name = str(lyr.name() or "")
+                if self._is_numeric_field(lyr, field_name):
+                    num_names.append(name)
+                    if lyr.fields().field(field_name).type() == QVariant.Double:
+                        double_names.append(name)
+                else:
+                    text_names.append(name)
+            except Exception as _exc:
+                log_swallowed("geology_zip_dialog._field_numeric_across", _exc)
+        numeric = bool(num_names) and not text_names
+        return numeric, num_names, text_names, double_names
+
+    def _warn_field_types(self, field_name: str, num_names: List[str], text_names: List[str], double_names: List[str]) -> None:
+        """Say in the message bar when the value field is typed differently
+        per layer (then burned as text) or is a Double (then truncated)."""
+        if num_names and text_names:
+            text = (f"'{field_name}' 자료형이 레이어마다 다릅니다(숫자: {', '.join(num_names)} / 문자: {', '.join(text_names)}). "
+                    "모든 레이어를 문자 코드로 매핑합니다(정수 코드는 mapping.csv 참고).")
+            log_message(f"KIGAM rasterize: {text}", level=Qgis.Warning)
+            push_message(self.iface, "값 필드 자료형 불일치", text, level=1, duration=12)
+        elif double_names:
+            text = (f"'{field_name}'는 실수(Double) 필드입니다({', '.join(double_names)}). "
+                    "소수점 이하를 잘라낸 정수를 클래스 코드로 기록합니다. 실측값(면적 등)이라면 지질 클래스 래스터로 쓰지 마세요.")
+            log_message(f"KIGAM rasterize: {text}", level=Qgis.Warning)
+            push_message(self.iface, "실수 필드 정수 변환", text, level=1, duration=12)
+
     def _build_shared_code_mapping(
         self,
         layers: List[QgsVectorLayer],
         field_name: str,
+        numeric: Optional[bool] = None,
     ) -> Tuple[Dict[str, int], Dict[str, str], Dict[str, List[str]], List[Tuple[str, List[str]]]]:
         """One code mapping for every selected sheet, in a content-derived order.
 
@@ -1044,7 +1189,8 @@ class GeologyZipDialog(QtWidgets.QDialog):
         conflicts: List[Tuple[str, List[str]]] = []
         if not layers:
             return mapping, labels, labels_all, conflicts
-        numeric = self._is_numeric_field(layers[0], field_name)
+        if numeric is None:
+            numeric = self._field_numeric_across(layers, field_name)[0]
         label_field = self._suggest_label_field(layers[0], field_name) if numeric else None
         keys: set = set()
         for lyr in layers:
@@ -1078,7 +1224,7 @@ class GeologyZipDialog(QtWidgets.QDialog):
                         except Exception as _exc:
                             log_swallowed("geology_zip_dialog._build_shared_code_mapping", _exc)
                 else:
-                    keys.add(str(val))
+                    keys.add(_code_key(val))
         if numeric:
             for code in sorted(keys, key=lambda c: int(c)):
                 mapping[code] = int(code)
@@ -1099,9 +1245,13 @@ class GeologyZipDialog(QtWidgets.QDialog):
         field_name: str,
         mapping: Optional[Dict[str, int]] = None,
         labels: Optional[Dict[str, str]] = None,
-    ) -> Tuple[Optional[QgsVectorLayer], Dict[str, int], Dict[str, str], Dict[int, int]]:
+        numeric: Optional[bool] = None,
+    ) -> Tuple[Optional[QgsVectorLayer], Dict[str, int], Dict[str, str], Dict[int, int], Dict[str, int]]:
+        """Returns (layer, mapping, labels, counts, drops). ``drops`` counts,
+        per DROP_REASON_LABELS key, every feature or layer that did not reach
+        the burn, so callers can report it instead of claiming success."""
         if not layers:
-            return None, {}, {}, {}
+            return None, {}, {}, {}, {}
 
         target_crs = layers[0].crs()
         try:
@@ -1128,7 +1278,7 @@ class GeologyZipDialog(QtWidgets.QDialog):
 
         if out_layer is None or not out_layer.isValid():
             log_message(f"병합 레이어 생성 실패(메모리 레이어 초기화 실패): geom={geom_str}, crs={authid}", level=Qgis.Warning)
-            return None, {}, {}, {}
+            return None, {}, {}, {}, {}
 
         try:
             if target_crs is not None and target_crs.isValid():
@@ -1146,13 +1296,29 @@ class GeologyZipDialog(QtWidgets.QDialog):
         mapping = dict(mapping) if mapping else {}
         labels = dict(labels) if labels else {}
         counts: Dict[int, int] = {}
+        # Every feature that does not reach the burn is counted by reason so
+        # the completion message can say how much of the sheet is missing
+        # instead of reporting an unqualified success (GEO-07).
+        drops: Dict[str, int] = {k: 0 for k in DROP_REASON_LABELS}
         next_id = (max(int(v) for v in mapping.values()) + 1) if mapping else 1
-        numeric = self._is_numeric_field(layers[0], field_name)
+        if numeric is None:
+            numeric, num_names, text_names, _dbl = self._field_numeric_across(layers, field_name)
+            if num_names and text_names:
+                log_message(
+                    f"KIGAM: '{field_name}' 자료형이 레이어마다 다릅니다(숫자: {', '.join(num_names)} / 문자: {', '.join(text_names)}). "
+                    "문자 코드로 처리합니다.",
+                    level=Qgis.Warning,
+                )
         label_field = self._suggest_label_field(layers[0], field_name) if numeric else None
 
         for lyr in layers:
             if lyr.geometryType() != layers[0].geometryType():
                 log_message(f"지오메트리 타입 불일치: {lyr.name()} (skip)", level=Qgis.Warning)
+                drops["layer_geometry_mismatch"] += 1
+                continue
+            if lyr.fields().indexOf(field_name) < 0:
+                log_message(f"필드 '{field_name}' 없음으로 레이어 제외: {lyr.name()}", level=Qgis.Warning)
+                drops["layer_field_missing"] += 1
                 continue
             transform = None
             if lyr.crs() != target_crs:
@@ -1166,6 +1332,7 @@ class GeologyZipDialog(QtWidgets.QDialog):
                     log_swallowed("tools/geology_zip_dialog.py:1054 (_build_numeric_merge_layer)", _exc)
                     _skip_1052 = True
                 if _skip_1052:
+                    drops["layer_transform_failed"] += 1
                     continue
 
             for f in lyr.getFeatures():
@@ -1173,13 +1340,16 @@ class GeologyZipDialog(QtWidgets.QDialog):
                 try:
                     geom = f.geometry()
                     if geom is None or geom.isEmpty():
+                        drops["empty_geometry"] += 1
                         continue
                     if transform is not None:
                         # transform() returns a status code, not an exception.
                         if geom.transform(transform) != 0:
+                            drops["transform_failed"] += 1
                             continue
                     val = f[field_name]
                     if val is None or str(val).strip() == "":
+                        drops["null_value"] += 1
                         continue
                     if numeric:
                         _skip_1073 = False
@@ -1190,6 +1360,7 @@ class GeologyZipDialog(QtWidgets.QDialog):
                             log_swallowed("tools/geology_zip_dialog.py:1075 (_build_numeric_merge_layer)", _exc)
                             _skip_1073 = True
                         if _skip_1073:
+                            drops["non_numeric"] += 1
                             continue
                         code = str(out_int)
                         mapping[code] = out_int
@@ -1202,7 +1373,7 @@ class GeologyZipDialog(QtWidgets.QDialog):
                                 log_swallowed("tools/geology_zip_dialog.py:1085 (_build_numeric_merge_layer)", _exc)
                         out_val = float(out_int)
                     else:
-                        key = str(val)
+                        key = _code_key(val)
                         if key not in mapping:
                             mapping[key] = next_id
                             next_id += 1
@@ -1210,25 +1381,31 @@ class GeologyZipDialog(QtWidgets.QDialog):
                             labels[key] = key
                         out_val = float(mapping[key])
 
+                    nf = QgsFeature(out_layer.fields())
+                    nf.setGeometry(geom)
+                    nf.setAttributes([out_val])
+                    # PyQGIS returns (ok, features); older builds a bare bool.
+                    res = pr.addFeatures([nf])
+                    ok = bool(res[0]) if isinstance(res, (tuple, list)) else bool(res)
+                    if not ok:
+                        drops["add_failed"] += 1
+                        continue
+
                     try:
                         out_i = int(out_val)
                         counts[out_i] = counts.get(out_i, 0) + 1
                     except Exception as _exc:
                         log_swallowed("geology_zip_dialog._build_numeric_merge_layer", _exc)
-
-                    nf = QgsFeature(out_layer.fields())
-                    nf.setGeometry(geom)
-                    nf.setAttributes([out_val])
-                    pr.addFeatures([nf])
                 except Exception as _exc:
                     log_swallowed("geology_zip_dialog._build_numeric_merge_layer", _exc)
                     log_swallowed("tools/geology_zip_dialog.py:1107 (_build_numeric_merge_layer)", _exc)
+                    drops["feature_error"] += 1
                     _skip_1061 = True
                 if _skip_1061:
                     continue
 
         out_layer.updateExtents()
-        return out_layer, mapping, labels, counts
+        return out_layer, mapping, labels, counts, drops
 
     def _write_mapping_csv(
         self,
@@ -1238,35 +1415,141 @@ class GeologyZipDialog(QtWidgets.QDialog):
         labels: Optional[Dict[str, str]] = None,
         counts: Optional[Dict[int, int]] = None,
         labels_all: Optional[Dict[str, List[str]]] = None,
+        cell_counts: Optional[Dict[int, int]] = None,
     ) -> Optional[str]:
-        if not mapping and not labels and not counts:
-            return None
+        csv_path = ""
         try:
-            base = os.path.splitext(out_path)[0]
-            csv_path = base + "_mapping.csv"
+            csv_path = os.path.splitext(str(out_path or ""))[0] + "_mapping.csv"
+        except Exception as _exc:
+            log_swallowed("geology_zip_dialog._write_mapping_csv", _exc)
+        if not mapping and not labels and not counts:
+            # Nothing to write: every feature was dropped before the burn
+            # (see the drop counters in the completion message).
+            log_message(f"코드 매핑 CSV를 만들 코드가 없습니다(피처가 모두 제외되었을 수 있음): {csv_path}", level=Qgis.Warning)
+            return None
+        err = ""
+        try:
             labels = labels or {}
             counts = counts or {}
             labels_all = labels_all or {}
-            with open(csv_path, "w", encoding="utf-8", newline="") as f:
+            # utf-8-sig: Excel on Korean Windows reads BOM-less UTF-8 as cp949
+            # and garbles every lithology name; the plugin's other user-facing
+            # CSVs already write the BOM (GEO-11).
+            with open(csv_path, "w", encoding="utf-8-sig", newline="") as f:
                 w = csv.writer(f)
                 # labels_all lists every name seen for a code across the selected
                 # sheets, "|"-joined; more than one name means the code is not
                 # the same lithology everywhere and the raster must be read with
                 # its source sheet in mind.
-                w.writerow(["code", "int_value", "label", "feature_count", "labels_all"])
+                # cell_count is the number of cells carrying the code in the
+                # WRITTEN raster (cell-centre burn). 0 with feature_count > 0
+                # means the unit is narrower than one cell at this pixel size
+                # and is absent from the raster; blank means the raster could
+                # not be read back to count.
+                w.writerow(["code", "int_value", "label", "feature_count", "cell_count", "labels_all"])
                 rows = []
                 for code, v in (mapping or {}).items():
                     vv = int(v)
+                    cc = "" if cell_counts is None else int(cell_counts.get(vv, 0))
                     rows.append((vv, str(code), str(labels.get(str(code), "") or ""), int(counts.get(vv, 0)),
-                                 "|".join(labels_all.get(str(code), []) or [])))
+                                 cc, "|".join(labels_all.get(str(code), []) or [])))
                 rows.sort(key=lambda x: (x[0], x[1]))
-                for vv, code, label, cnt, lall in rows:
-                    w.writerow([code, vv, label, cnt, lall])
+                for vv, code, label, cnt, cc, lall in rows:
+                    w.writerow([code, vv, label, cnt, cc, lall])
             if os.path.exists(csv_path) and os.path.getsize(csv_path) > 0:
                 return csv_path
+            err = "파일이 생성되지 않았거나 비어 있습니다"
+        except Exception as _exc:
+            log_swallowed("geology_zip_dialog._write_mapping_csv", _exc)
+            err = str(_exc) or _exc.__class__.__name__
+        # The CSV is the only legend for the raster's integers: a failure to
+        # write it must be as visible as the raster's success (GEO-06).
+        text = f"코드 매핑 CSV를 쓰지 못했습니다: {csv_path or '(경로 없음)'} ({err})."
+        if mapping:
+            text += (f" 래스터의 정수 코드 {len(mapping)}개를 해석할 범례 파일이 없습니다. "
+                     "이 래스터만으로는 코드가 어떤 지질 단위인지 알 수 없으니 쓰기 가능한 폴더로 다시 실행하세요.")
+        log_message(f"KIGAM rasterize: {text}", level=Qgis.Warning)
+        push_message(self.iface, "코드 매핑 CSV 실패", text, level=1, duration=15)
+        return None
+
+    def _raster_cell_counts(self, raster_path: str, nodata: float) -> Optional[Dict[int, int]]:
+        """Distinct integer values actually present in the written raster and
+        their cell counts, read back in row blocks so a whole sheet at a fine
+        pixel size is never loaded at once. None when GDAL/numpy are missing
+        or the file cannot be read; the CSV then leaves cell_count blank
+        rather than claiming a count (GEO-10)."""
+        try:
+            from osgeo import gdal
+            import numpy as np
+        except Exception as _exc:
+            log_swallowed("geology_zip_dialog._raster_cell_counts", _exc)
             return None
-        except Exception:
+        ds = None
+        try:
+            ds = gdal.Open(str(raster_path))
+            if ds is None:
+                return None
+            band = ds.GetRasterBand(1)
+            xs, ys = int(ds.RasterXSize), int(ds.RasterYSize)
+            if xs <= 0 or ys <= 0:
+                return None
+            nd = band.GetNoDataValue()
+            nd = float(nodata) if nd is None else float(nd)
+            # About 4M cells (16 MB of Int32) per block.
+            rows_per_block = max(1, 4000000 // max(1, xs))
+            totals: Dict[int, int] = {}
+            y = 0
+            while y < ys:
+                h = min(rows_per_block, ys - y)
+                arr = band.ReadAsArray(0, y, xs, h)
+                if arr is None:
+                    return None
+                vals, cnts = np.unique(np.asarray(arr), return_counts=True)
+                for v, c in zip(vals.tolist(), cnts.tolist()):
+                    fv = float(v)
+                    if math.isnan(fv) or fv == nd:
+                        continue
+                    iv = int(round(fv))
+                    totals[iv] = totals.get(iv, 0) + int(c)
+                y += h
+            return totals
+        except Exception as _exc:
+            log_swallowed("geology_zip_dialog._raster_cell_counts", _exc)
             return None
+        finally:
+            ds = None
+
+    def _report_unburned_codes(
+        self,
+        mapping: Dict[str, int],
+        labels: Dict[str, str],
+        cell_counts: Optional[Dict[int, int]],
+        raster_path: str,
+    ) -> List[str]:
+        """Name the codes that have features but no cell in the written raster
+        (units narrower than one cell at this pixel size). Returns them."""
+        if cell_counts is None:
+            log_message(f"래스터 값을 읽지 못해 mapping.csv의 cell_count 열을 비워 둡니다: {raster_path}", level=Qgis.Warning)
+            return []
+        missing: List[str] = []
+        for code, v in (mapping or {}).items():
+            present = True  # unknown counts are never reported as missing
+            try:
+                present = int(cell_counts.get(int(v), 0)) > 0
+            except Exception as _exc:
+                log_swallowed("geology_zip_dialog._report_unburned_codes", _exc)
+            if present:
+                continue
+            lbl = str((labels or {}).get(str(code), "") or "")
+            missing.append(f"{code}={v}" + (f"({lbl})" if lbl and lbl != str(code) else ""))
+        if not missing:
+            return []
+        shown = ", ".join(missing[:10]) + (f" 외 {len(missing) - 10}개" if len(missing) > 10 else "")
+        text = (f"코드 {len(missing)}개는 폴리곤 폭이 한 셀보다 좁아 이 픽셀 크기의 래스터에 기록되지 않았습니다"
+                f"(cell_count=0): {shown}. 픽셀 크기를 줄이면 포함됩니다.")
+        log_message(f"KIGAM rasterize: {text} [{raster_path}]", level=Qgis.Warning)
+        push_message(self.iface, "래스터에 없는 코드", text, level=1, duration=12)
+        return missing
 
     def _rasterize_layer(
         self,
@@ -1281,6 +1564,20 @@ class GeologyZipDialog(QtWidgets.QDialog):
         # Rasterize to GTiff first, then translate to .asc (the format MaxEnt
         # actually consumes).
         if str(out_path or "").lower().endswith(".asc"):
+            # A geographic CRS gives unequal lon/lat cell sizes, which the
+            # AAIGrid driver writes as dx/dy instead of cellsize - a header
+            # ArcGIS and MaxEnt do not read. The export is kept (QGIS reads
+            # it) but the user is told in the message bar (GEO-08).
+            try:
+                crs0 = layer.crs()
+                if crs0 is not None and crs0.isValid() and crs0.isGeographic():
+                    text = (f"{layer.name()}: 지리좌표계({crs0.authid() or '?'}) 레이어를 ASCII Grid로 내보냅니다. "
+                            "헤더의 셀 크기가 경도/위도(도) 단위(dx/dy)로 기록되어 ArcGIS·MaxEnt는 이 파일을 읽지 못하거나 "
+                            "잘못 배치할 수 있습니다. 투영 CRS(미터, 예: EPSG:5179)로 변환한 뒤 내보내는 것을 권장합니다.")
+                    log_message(f"KIGAM rasterize: {text}", level=Qgis.Warning)
+                    push_message(self.iface, "ASCII Grid 좌표계 주의", text, level=1, duration=15)
+            except Exception as _exc:
+                log_swallowed("geology_zip_dialog._rasterize_layer", _exc)
             tmp_tif = os.path.join(
                 tempfile.gettempdir(), f"atk_kigam_asc_{new_run_id('kigam')}.tif"
             )
@@ -1345,6 +1642,14 @@ class GeologyZipDialog(QtWidgets.QDialog):
                         f"KIGAM rasterize: geographic CRS detected ({authid or 'unknown'}). "
                         f"pixel {cell_w}m -> {deg_w:.8f}°(lon) {deg_h:.8f}°(lat) at lat={lat0:.4f}",
                         level=Qgis.Warning,
+                    )
+                    # Say it where the user looks, not only in the log (GEO-08).
+                    push_message(
+                        self.iface, "픽셀 크기 변환",
+                        f"{layer.name()}: 지리좌표계({authid or '?'})라서 픽셀 {cell_w:g} m를 위도 {lat0:.2f}° 기준 "
+                        f"{deg_w:.8f}°(경도) x {deg_h:.8f}°(위도)로 바꿔 래스터를 만듭니다. "
+                        "정확한 미터 격자가 필요하면 투영 CRS로 변환한 뒤 실행하세요.",
+                        level=1, duration=12,
                     )
                     cell_w, cell_h = float(deg_w), float(deg_h)
         except Exception as _exc:
@@ -1469,11 +1774,30 @@ class GeologyZipDialog(QtWidgets.QDialog):
             restore_ui_focus(self)
             return
 
-        field = self._choose_common_field(layers) if self.radMerge.isChecked() else None
-        if self.radMerge.isChecked() and not field:
-            push_message(self.iface, "오류", "공통 필드를 찾을 수 없습니다. 필드를 직접 선택하세요.", level=2)
-            restore_ui_focus(self)
-            return
+        chosen = self.cmbField.currentText().strip()
+        explicit = bool(chosen) and chosen != "(자동 선택)"
+
+        field = None
+        if self.radMerge.isChecked():
+            if explicit:
+                # The user named a field: a layer that lacks it is left out
+                # with a visible warning instead of the choice being replaced
+                # by an auto-picked attribute without a word (GEO-09).
+                lacking = [l0.name() for l0 in layers if l0.fields().indexOf(chosen) < 0]
+                if lacking:
+                    layers = [l0 for l0 in layers if l0.fields().indexOf(chosen) >= 0]
+                    text = f"선택한 필드 '{chosen}'가 없는 레이어를 제외했습니다: {', '.join(lacking)}"
+                    log_message(f"KIGAM rasterize: {text}", level=Qgis.Warning)
+                    push_message(self.iface, "필드 없는 레이어 제외", text, level=1, duration=10)
+                if not layers:
+                    push_message(self.iface, "오류", f"선택한 레이어 중 필드 '{chosen}'를 가진 레이어가 없습니다.", level=2)
+                    restore_ui_focus(self)
+                    return
+            field = self._choose_common_field(layers)
+            if not field:
+                push_message(self.iface, "오류", "공통 필드를 찾을 수 없습니다. 필드를 직접 선택하세요.", level=2)
+                restore_ui_focus(self)
+                return
 
         fmt = self.cmbFormat.currentData() or "tif"
         pixel = float(self.spinPixel.value())
@@ -1490,20 +1814,30 @@ class GeologyZipDialog(QtWidgets.QDialog):
                     return
                 out_path = _ensure_output_extension(out_path, fmt)
 
-                shared_map, shared_labels, labels_all, conflicts = self._build_shared_code_mapping(layers, field)
+                numeric, num_names, text_names, double_names = self._field_numeric_across(layers, field)
+                self._warn_field_types(field, num_names, text_names, double_names)
+                shared_map, shared_labels, labels_all, conflicts = self._build_shared_code_mapping(layers, field, numeric=numeric)
                 if conflicts:
                     txt = "; ".join(f"{c}: {' / '.join(ls)}" for c, ls in conflicts[:6])
                     log_message(f"KIGAM: 같은 코드가 도엽마다 다른 암상명을 가집니다 — {txt}", level=Qgis.Warning)
                     push_message(self.iface, "지질도 코드 충돌",
                                  f"코드 {len(conflicts)}개가 도엽별로 다른 이름을 가집니다. mapping.csv의 labels_all 열을 확인하세요.",
                                  level=1, duration=10)
-                merged_layer, mapping, labels, counts = self._build_numeric_merge_layer(
-                    layers, field, mapping=shared_map, labels=shared_labels)
+                merged_layer, mapping, labels, counts, drops = self._build_numeric_merge_layer(
+                    layers, field, mapping=shared_map, labels=shared_labels, numeric=numeric)
                 if merged_layer is None or not merged_layer.isValid():
                     raise RuntimeError("병합 레이어 생성에 실패했습니다.")
+                drop_text = _format_drops(drops)
+                if drop_text:
+                    log_message(f"KIGAM rasterize: {drop_text}", level=Qgis.Warning)
+                if int(merged_layer.featureCount() or 0) <= 0:
+                    raise RuntimeError("래스터에 기록할 피처가 없습니다." + (f" {drop_text}" if drop_text else ""))
 
                 raster_path = self._rasterize_layer(merged_layer, "ATK_VAL", out_path, pixel, nodata)
-                csv_path = self._write_mapping_csv(mapping, raster_path, labels=labels, counts=counts, labels_all=labels_all)
+                cell_counts = self._raster_cell_counts(raster_path, nodata)
+                unburned = self._report_unburned_codes(mapping, labels, cell_counts, raster_path)
+                csv_path = self._write_mapping_csv(mapping, raster_path, labels=labels, counts=counts,
+                                                   labels_all=labels_all, cell_counts=cell_counts)
 
                 try:
                     r_name = os.path.splitext(os.path.basename(raster_path))[0].strip() or f"Geology_{run_id}"
@@ -1537,11 +1871,27 @@ class GeologyZipDialog(QtWidgets.QDialog):
                         # also becomes the exported variable name.
                         kind="geology_class",
                         units="class",
-                        params={"field": field, "pixel": pixel},
+                        params={
+                            "field": field,
+                            "pixel": pixel,
+                            "field_numeric": bool(numeric),
+                            "double_truncated": bool(double_names),
+                            "dropped": {k: int(v) for k, v in drops.items() if v},
+                            "unburned_codes": len(unburned),
+                            "mapping_csv": csv_path or "",
+                        },
                     )
                 if csv_path:
                     log_message(f"코드 매핑 저장: {csv_path}", level=Qgis.Info)
-                push_message(self.iface, "완료", f"래스터 생성: {raster_path}", level=0, duration=7)
+                done = f"래스터 생성: {raster_path} (필드: {field})"
+                if drop_text:
+                    done += f" / {drop_text}"
+                if unburned:
+                    done += f" / 래스터에 없는 코드 {len(unburned)}개"
+                if mapping and not csv_path:
+                    done += " / 코드 매핑 CSV 없음"
+                level = 1 if (drop_text or unburned or (mapping and not csv_path)) else 0
+                push_message(self.iface, "완료", done, level=level, duration=10 if level else 7)
                 return
 
             # Per-layer mode
@@ -1551,11 +1901,25 @@ class GeologyZipDialog(QtWidgets.QDialog):
                 restore_ui_focus(self)
                 return
 
-            shared_by_field: Dict[str, Tuple[Dict[str, int], Dict[str, str], Dict[str, List[str]], list]] = {}
+            # field -> ((mapping, labels, labels_all, conflicts), numeric, double_truncated)
+            shared_by_field: Dict[str, tuple] = {}
+            total_drops: Dict[str, int] = {}
+            outputs: List[str] = []
+            skipped: List[str] = []
 
             for lyr in layers:
-                field = self.cmbField.currentText().strip()
-                if field == "(자동 선택)" or lyr.fields().indexOf(field) < 0:
+                if explicit:
+                    # The user named a field: a layer that lacks it is skipped
+                    # with a visible warning, never silently re-pointed at
+                    # another attribute (GEO-09).
+                    if lyr.fields().indexOf(chosen) < 0:
+                        text = f"{lyr.name()}: 선택한 필드 '{chosen}'가 없어 건너뜁니다."
+                        log_message(f"KIGAM rasterize: {text}", level=Qgis.Warning)
+                        push_message(self.iface, "레이어 건너뜀", text, level=1, duration=8)
+                        skipped.append(str(lyr.name() or ""))
+                        continue
+                    field = chosen
+                else:
                     # Choose best field for this layer
                     field = None
                     for p in ["LITHOIDX", "AGEIDX", "LITHONAME", "TYPE", "ASGN_CODE", "SIGN", "CODE"]:
@@ -1564,26 +1928,75 @@ class GeologyZipDialog(QtWidgets.QDialog):
                             break
                     if field is None:
                         field = lyr.fields()[0].name() if lyr.fields() else None
+                        if field:
+                            text = (f"{lyr.name()}: 우선 필드(LITHOIDX/AGEIDX 등)가 없어 첫 번째 속성 '{field}'를 "
+                                    "값 필드로 사용합니다. 지질 코드가 아닐 수 있으니 확인하세요.")
+                            log_message(f"KIGAM rasterize: {text}", level=Qgis.Warning)
+                            push_message(self.iface, "값 필드 자동 선택", text, level=1, duration=10)
                 if not field:
                     log_message(f"{lyr.name()}: 필드 없음, 건너뜀", level=Qgis.Warning)
+                    skipped.append(str(lyr.name() or ""))
                     continue
 
                 # Per-layer outputs still share one code table per field, so a
                 # lithology carries the same integer in every sheet's raster.
+                # The numeric/text decision is made once over every layer that
+                # has the field so a sheet storing it as text does not get a
+                # different code table from a sheet storing it as integer.
                 if field not in shared_by_field:
                     same_field = [l0 for l0 in layers if l0.fields().indexOf(field) >= 0]
-                    shared_by_field[field] = self._build_shared_code_mapping(same_field, field)
-                shared_map, shared_labels, labels_all, _conf = shared_by_field[field]
-                merged_layer, mapping, labels, counts = self._build_numeric_merge_layer(
-                    [lyr], field, mapping=shared_map, labels=shared_labels)
+                    numeric, num_names, text_names, double_names = self._field_numeric_across(same_field, field)
+                    self._warn_field_types(field, num_names, text_names, double_names)
+                    shared_by_field[field] = (
+                        self._build_shared_code_mapping(same_field, field, numeric=numeric),
+                        bool(numeric),
+                        bool(double_names),
+                    )
+                (shared_map, shared_labels, labels_all, _conf), numeric, double_trunc = shared_by_field[field]
+                merged_layer, mapping, labels, counts, drops = self._build_numeric_merge_layer(
+                    [lyr], field, mapping=shared_map, labels=shared_labels, numeric=numeric)
+                for k, v in (drops or {}).items():
+                    total_drops[k] = total_drops.get(k, 0) + int(v or 0)
+                drop_text = _format_drops(drops)
+                if drop_text:
+                    log_message(f"KIGAM rasterize: {lyr.name()} - {drop_text}", level=Qgis.Warning)
                 if merged_layer is None or not merged_layer.isValid():
+                    skipped.append(str(lyr.name() or ""))
+                    continue
+                if int(merged_layer.featureCount() or 0) <= 0:
+                    text = f"{lyr.name()}: 래스터에 기록할 피처가 없어 건너뜁니다." + (f" {drop_text}" if drop_text else "")
+                    log_message(f"KIGAM rasterize: {text}", level=Qgis.Warning)
+                    push_message(self.iface, "레이어 건너뜀", text, level=1, duration=10)
+                    skipped.append(str(lyr.name() or ""))
                     continue
 
-                out_path = os.path.join(out_dir, f"{_safe_name(lyr.name())}.{fmt}")
+                # Layer names repeat across sheets (both ZIPs hold a 'Litho'),
+                # so the file is named sheet + layer and never overwrites an
+                # existing file (GEO-03).
+                region = self._kigam_region_for_layer(lyr)
+                base_name = _safe_name(f"{region}_{lyr.name()}" if region else lyr.name())
+                out_path = os.path.join(out_dir, f"{base_name}.{fmt}")
+                n = 1
+                while os.path.exists(out_path):
+                    n += 1
+                    out_path = os.path.join(out_dir, f"{base_name}_{n}.{fmt}")
+                if n > 1:
+                    log_message(
+                        f"KIGAM rasterize: {base_name}.{fmt}가 이미 있어 {os.path.basename(out_path)}로 저장합니다.",
+                        level=Qgis.Warning,
+                    )
                 raster_path = self._rasterize_layer(merged_layer, "ATK_VAL", out_path, pixel, nodata)
-                csv_path = self._write_mapping_csv(mapping, raster_path, labels=labels, counts=counts, labels_all=labels_all)
+                cell_counts = self._raster_cell_counts(raster_path, nodata)
+                unburned = self._report_unburned_codes(mapping, labels, cell_counts, raster_path)
+                csv_path = self._write_mapping_csv(mapping, raster_path, labels=labels, counts=counts,
+                                                   labels_all=labels_all, cell_counts=cell_counts)
 
-                rlayer = QgsRasterLayer(raster_path, f"{lyr.name()}_raster")
+                try:
+                    r_base = os.path.splitext(os.path.basename(raster_path))[0].strip() or base_name
+                except Exception as _exc:
+                    log_swallowed("geology_zip_dialog._run_rasterize", _exc)
+                    r_base = base_name
+                rlayer = QgsRasterLayer(raster_path, f"{r_base}_raster ({field})")
                 if rlayer and rlayer.isValid():
                     QgsProject.instance().addMapLayer(rlayer, False)
                     try:
@@ -1604,12 +2017,36 @@ class GeologyZipDialog(QtWidgets.QDialog):
                         # also becomes the exported variable name.
                         kind="geology_class",
                         units="class",
-                        params={"field": field, "pixel": pixel},
+                        params={
+                            "field": field,
+                            "pixel": pixel,
+                            "region": region,
+                            "source_layer": str(lyr.name() or ""),
+                            "field_numeric": bool(numeric),
+                            "double_truncated": bool(double_trunc),
+                            "dropped": {k: int(v) for k, v in (drops or {}).items() if v},
+                            "unburned_codes": len(unburned),
+                            "mapping_csv": csv_path or "",
+                        },
                     )
                 if csv_path:
                     log_message(f"코드 매핑 저장: {csv_path}", level=Qgis.Info)
+                outputs.append(f"{os.path.basename(raster_path)} [{field}]" + ("" if csv_path or not mapping else " (매핑 CSV 없음)"))
 
-            push_message(self.iface, "완료", "레이어별 래스터 변환이 완료되었습니다.", level=0, duration=7)
+            n_out = len(outputs)
+            done = f"레이어별 래스터 {n_out}개 생성"
+            if outputs:
+                done += ": " + ", ".join(outputs[:6]) + (f" 외 {n_out - 6}개" if n_out > 6 else "")
+            if skipped:
+                done += f" / 건너뜀 {len(skipped)}개({', '.join(skipped[:6])}" + (f" 외 {len(skipped) - 6}개" if len(skipped) > 6 else "") + ")"
+            total_text = _format_drops(total_drops)
+            if total_text:
+                done += f" / {total_text}"
+            if n_out == 0:
+                push_message(self.iface, "오류", done + " - 생성된 래스터가 없습니다. 로그를 확인하세요.", level=2, duration=10)
+                return
+            level = 1 if (skipped or total_text) else 0
+            push_message(self.iface, "완료", done, level=level, duration=10 if level else 7)
         except Exception as e:
             log_message(f"래스터 변환 실패: {e}", level=Qgis.Warning)
             push_message(self.iface, "오류", f"래스터 변환 실패: {e}", level=2)
@@ -1646,14 +2083,34 @@ class GeologyZipDialog(QtWidgets.QDialog):
                     canvas.refresh()
             except Exception as _exc:
                 log_swallowed("geology_zip_dialog._load_zip", _exc)
-            push_message(self.iface, "완료", f"ZIP에서 {len(layers)}개 레이어를 로드했습니다.", level=0, duration=7)
+            # Say where the shapefiles went and how long they are kept: the
+            # loaded layers look like ordinary file layers, but they live in a
+            # managed folder that the next ZIP load reaps after the retention
+            # window if nothing touched it (GEO-13).
+            done = f"ZIP에서 {len(layers)}개 레이어를 로드했습니다."
+            try:
+                extract_dir = str(getattr(processor, "last_extract_dir", "") or "")
+                days = max(1, int(GEOLOGY_EXTRACT_CLEANUP_DAYS))
+                if extract_dir:
+                    done += (f" SHP는 {extract_dir}에 풀렸습니다. 이 폴더는 {days}일 동안 다시 불러오지 않으면 "
+                             "다음 ZIP 로드 때 자동 삭제되며(현재 열린 프로젝트가 쓰는 폴더만 보호), "
+                             "그러면 이 도엽을 참조하는 저장된 프로젝트의 레이어가 깨집니다. 오래 쓸 도엽은 다른 폴더로 복사해 두세요.")
+            except Exception as _exc:
+                log_swallowed("geology_zip_dialog._load_zip", _exc)
+            push_message(self.iface, "완료", done, level=0, duration=15)
         else:
             push_message(self.iface, "경고", "로드된 레이어가 없습니다. 로그를 확인하세요.", level=1)
 
         self.refresh_layer_list()
 
     def _on_help(self):
-        html = """
+        try:
+            extract_root = KigamZipProcessor.default_extract_root() or "(QGIS 프로필 폴더를 찾지 못하면 임시 폴더)"
+        except Exception as _exc:
+            log_swallowed("geology_zip_dialog._on_help", _exc)
+            extract_root = "(QGIS 프로필)/ArchToolkit/" + (GEOLOGY_EXTRACT_ROOT_NAME or "ArchToolkit_KIGAM_Extract")
+        cleanup_days = max(1, int(GEOLOGY_EXTRACT_CLEANUP_DAYS))
+        html = f"""
 <h3>지질도 ZIP 불러오기 / MaxEnt 래스터 변환</h3>
 <p>
 KIGAM 1:50,000 지질도 ZIP(도엽)을 바로 로드하고, 지질 코드 기반으로 래스터를 생성합니다.
@@ -1665,6 +2122,10 @@ KIGAM 1:50,000 지질도 ZIP(도엽)을 바로 로드하고, 지질 코드 기�
   <li>KIGAM에서 받은 ZIP을 선택하면 SHP를 자동 로드하고, sym 폴더가 있으면 심볼을 적용합니다.</li>
   <li>LITHOIDX/LITHONAME 레이어는 라벨을 자동 적용할 수 있습니다.</li>
   <li>레이어는 <code>ArchToolkit - Geology</code> 그룹 아래 <code>KIGAM_도엽명</code>으로 정리되고, 라인/포인트가 폴리곤(Litho) 위로 올라오도록 순서를 맞춥니다.</li>
+  <li><b>추출 폴더와 보관 기간</b>: SHP는 <code>{extract_root}</code> 아래 도엽별 폴더에 풀립니다.
+      이 폴더는 <b>{cleanup_days}일</b> 동안 그 도엽을 다시 불러오지 않으면 다음 ZIP 로드 때 자동 삭제됩니다
+      (현재 열려 있는 프로젝트가 쓰는 폴더만 보호되며, 닫혀 있는 다른 프로젝트가 참조하는 폴더는 보호되지 않습니다).
+      삭제되면 그 도엽을 참조하는 저장된 프로젝트의 레이어가 깨지므로, 오래 쓸 도엽은 다른 폴더로 복사해 두세요.</li>
 </ul>
 
 <h4>벡터 → 래스터</h4>
@@ -1674,8 +2135,15 @@ KIGAM 1:50,000 지질도 ZIP(도엽)을 바로 로드하고, 지질 코드 기�
   <li>값 필드는 보통 <code>LITHOIDX</code>/<code>AGEIDX</code>를 사용합니다.</li>
   <li>문자 코드(예: Qa, Jbgr)일 경우 자동으로 정수 코드로 매핑하며, <code>*_mapping.csv</code>를 함께 저장합니다.</li>
   <li>숫자 코드(예: <code>LITHOIDX</code>)를 선택해도 가능한 경우 <code>LITHONAME</code>/<code>AGENAME</code>을 함께 매핑 CSV에 기록합니다.</li>
-  <li>단일 래스터(병합) 또는 레이어별 출력 중 선택할 수 있습니다.</li>
-  <li>실행 후에는 <b>출력 파일이 실제로 생성되었는지</b> 확인하고, 문제가 있으면 로그에 원인을 남깁니다.</li>
+  <li>단일 래스터(병합) 또는 레이어별 출력 중 선택할 수 있습니다. 레이어별 출력의 파일 이름은
+      <code>도엽_레이어</code>(예: <code>GF13_청주_Litho.tif</code>)이며, 같은 이름의 파일이 있으면 덮어쓰지 않고
+      <code>_2</code>, <code>_3</code>을 붙입니다.</li>
+  <li>래스터는 <b>셀 중심이 폴리곤 안에 들어가는 셀</b>에만 코드를 기록합니다. 폭이 한 셀보다 좁은 지질 단위(얇은 암맥 등)는
+      그 픽셀 크기에서는 래스터에 기록되지 않으며, 매핑 CSV의 <code>cell_count</code> 열이 0인 코드가 그런 경우입니다.
+      픽셀 크기를 줄이면 포함됩니다.</li>
+  <li>값이 비어 있거나(NULL) 숫자 필드에 숫자가 아닌 값이 든 피처, 좌표 변환에 실패한 피처는 래스터에서 빠지며, 완료 메시지와 로그에 제외된 피처 수가 이유별로 표시됩니다.</li>
+  <li>ASCII Grid(.asc)는 지리좌표계(도) 레이어에서는 셀 크기가 도 단위(dx/dy)로 기록되어 ArcGIS·MaxEnt가 읽지 못할 수 있습니다. 투영 CRS(미터)로 변환한 뒤 내보내세요.</li>
+  <li>실행 후에는 <b>출력 파일이 실제로 생성되었는지</b> 확인하고, 문제가 있으면 로그에 원인을 남깁니다. 매핑 CSV를 쓰지 못하면 메시지 표시줄에 경고가 뜹니다(CSV 없이는 래스터의 정수 코드를 해석할 수 없습니다).</li>
 </ul>
 
 <h4>예측모델링 팁</h4>
