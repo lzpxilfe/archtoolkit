@@ -26,9 +26,11 @@ from qgis.core import (
     QgsMarkerSymbol,
     QgsPointXY,
     QgsProject,
+    QgsProviderRegistry,
     QgsRaster,
     QgsRasterBandStats,
     QgsRasterLayer,
+    QgsRectangle,
     QgsSingleSymbolRenderer,
     QgsSpatialIndex,
     QgsVectorLayer,
@@ -71,19 +73,76 @@ _GRAVE_KW_KO = (
     "능묘",
     "가족묘",
     "공동묘",
+    # Burial-type names that Korean excavation/survey data uses as feature and
+    # legend labels (a dolmen row reads "OO리 지석묘군", never "무덤").
+    # 패총 (shell midden) is deliberately NOT here.
+    "지석묘",
+    "고인돌",
+    "석실묘",
+    "석곽묘",
+    "석실분",
+    "석곽분",
+    "토광묘",
+    "옹관묘",
+    "목관묘",
+    "목곽묘",
+    "분구묘",
+    "주구묘",
+    "봉토분",
+    "적석총",
 )
 _GRAVE_KW_EN = (
     "tomb",
     "grave",
     "burial",
     "cemetery",
+    "tumulus",
+    "barrow",
+    "dolmen",
+    "cist",
+)
+# English plurals the `s?` suffix in the matcher does not produce.
+_GRAVE_KW_EN_IRREGULAR = (
+    "cemeteries",
+    "tumuli",
 )
 # Korean compounds that contain a grave term as a substring but are NOT graves.
+# They are removed from the text before any Korean rule runs.
 _GRAVE_KO_FALSE = (
     "고분자",  # polymer / macromolecule
+    # Guards for the 총/릉 suffix rules below.
+    "총계",  # total (count)
+    "총합",  # sum
+    "총량",  # total amount
+    "총면적",  # total area
+    "패총",  # shell midden - a site, not a grave
+    "권총",  # pistol
+    "소총",  # rifle
+    "엽총",  # shotgun
+    "기관총",  # machine gun
+    "구릉",  # hill
+    "강릉",  # Gangneung (city)
+    "능선",  # ridge
+    "릉선",  # ridge (variant spelling)
+)
+# Suffix rules: a Hangul syllable followed by 총 (mounded tomb: 천마총, 고총,
+# 황남대총) or 릉 (royal tomb: 선릉, 정릉) at the END of a word. Requiring a
+# Hangul syllable before and none after keeps 선릉역 (station), 구릉지 (hilly
+# land) and a bare "총 3건" (total 3) from firing.
+_GRAVE_SUFFIX_RES = (
+    re.compile(r"(?<=[가-힣])총(?![가-힣])"),
+    re.compile(r"(?<=[가-힣])릉(?![가-힣])"),
 )
 
-_CODE_RE = re.compile(r"\b([A-Z][0-9]{7,8})\b")
+# Legend codes such as A0010000 / B00100011. Lookarounds instead of `\b`: Python
+# treats Hangul syllables as word characters, so `\b` never fired between 묘지
+# and A0010000 when a legend cell glued the code to its label.
+_CODE_RE = re.compile(r"(?<![A-Za-z0-9])([A-Z][0-9]{7,8})(?![A-Za-z0-9])")
+
+# hidden/ legend workbook extensions. Modern NGII legend files ship as .xlsx.
+_LEGEND_WORKBOOK_EXTS = (".xls", ".xlsx", ".xlsm")
+# Legacy QgsDataProvider.subLayers() field separator.
+_SUBLAYER_SEP = "!!::!!"
 
 
 def _text_has_grave_keyword(text: str) -> bool:
@@ -102,14 +161,118 @@ def _text_has_grave_keyword(text: str) -> bool:
     for kw in _GRAVE_KW_KO:
         if kw in scrubbed:
             return True
+    for rx in _GRAVE_SUFFIX_RES:
+        if rx.search(scrubbed):
+            return True
     low = s.lower()
     for kw in _GRAVE_KW_EN:
-        # `s?` covers plurals ("tombs", "graves"); "cemeteries" needs its own stem.
+        # `s?` covers plurals ("tombs", "graves"); irregular plurals have their own stems.
         if re.search(r"\b" + re.escape(kw) + r"s?\b", low):
             return True
-    if re.search(r"\bcemeteries\b", low):
-        return True
+    for kw in _GRAVE_KW_EN_IRREGULAR:
+        if re.search(r"\b" + re.escape(kw) + r"\b", low):
+            return True
     return False
+
+
+def _grave_search_terms() -> List[str]:
+    """Every term the grave matcher looks for, in matcher order.
+
+    Reported when avoidance matched nothing, so the user can tell a genuine
+    absence of graves from a vocabulary gap.
+    """
+    terms: List[str] = list(_GRAVE_KW_KO)
+    terms.extend(["~총", "~릉"])
+    terms.extend(_GRAVE_KW_EN)
+    terms.extend(_GRAVE_KW_EN_IRREGULAR)
+    return terms
+
+
+_GRAVE_SEARCH_TERM_COUNT = len(_grave_search_terms())
+
+
+def _is_legend_workbook_name(name: str) -> bool:
+    return str(name or "").lower().endswith(_LEGEND_WORKBOOK_EXTS)
+
+
+def _sublayer_name(entry: str) -> str:
+    """Sheet name from a legacy QgsDataProvider.subLayers() entry.
+
+    The entry is "index!!::!!name!!::!!featureCount!!::!!geometryType[!!::!!geomColumn]",
+    so the name is field 1 of an UNLIMITED split. A maxsplit=1 split kept
+    "Sheet1!!::!!12!!::!!None" as the name and no sheet ever loaded.
+    """
+    parts = str(entry or "").split(_SUBLAYER_SEP)
+    if len(parts) > 1:
+        return parts[1].strip()
+    return parts[0].strip()
+
+
+def _meters_to_crs_units(meters: float, crs, *, ref_y: float = 0.0) -> float:
+    """Metres -> units of ``crs`` for growing a feature-request rectangle.
+
+    Geographic CRS: divide by the cos(lat)-scaled metres-per-degree so the
+    rectangle over-grows east/west rather than missing features (the same
+    rule _build_reference_index applies). Anything else is taken as metres.
+    """
+    m = max(0.0, float(meters or 0.0))
+    try:
+        if crs is not None and crs.isGeographic():
+            lat = abs(float(ref_y or 0.0))
+            cos_lat = max(0.2, math.cos(math.radians(min(85.0, lat))))
+            return m / (111320.0 * cos_lat)
+    except Exception as _exc:
+        log_swallowed("trench_suggestion_dialog._meters_to_crs_units", _exc)
+    return m
+
+
+def _grave_fetch_margin_m(grave_buffer_m: float, trench_length_m: float) -> float:
+    """How far outside the AOI bbox grave features must be fetched (metres).
+
+    A candidate only has to satisfy inside_ratio >= the user's minimum, so a
+    trench centred inside the AOI can protrude up to half its length past
+    the edge; the buffer and 5 m of slack come on top.
+    """
+    return float(grave_buffer_m or 0.0) + float(trench_length_m or 0.0) * 0.5 + 5.0
+
+
+def _min_true_distance(ids: Iterable[int], geom_by_id: Dict[int, QgsGeometry], ptg: QgsGeometry, px: float, py: float) -> Optional[float]:
+    """Smallest true geometry distance from (px, py) to the features in ``ids``.
+
+    Features are visited in ascending bounding-box distance and the loop stops
+    once a box is farther than the best true distance found, which is safe
+    because box distance never exceeds true distance. A negative distance
+    (QgsGeometry.distance() signals failure that way) is ignored.
+    """
+    cands: List[Tuple[float, QgsGeometry]] = []
+    for fid in ids:
+        g = geom_by_id.get(int(fid))
+        if g is None:
+            continue
+        bd = 0.0  # unknown box distance -> never pruned
+        try:
+            bb = g.boundingBox()
+            dx = max(float(bb.xMinimum()) - px, 0.0, px - float(bb.xMaximum()))
+            dy = max(float(bb.yMinimum()) - py, 0.0, py - float(bb.yMaximum()))
+            bd = math.hypot(dx, dy)
+        except Exception as _exc:
+            log_swallowed("trench_suggestion_dialog._min_true_distance", _exc)
+        cands.append((bd, g))
+    cands.sort(key=lambda t: t[0])
+    dmin: Optional[float] = None
+    for bd, g in cands:
+        if dmin is not None and bd >= dmin:
+            break
+        d: Optional[float] = None
+        try:
+            d = float(g.distance(ptg))
+        except Exception as _exc:
+            log_swallowed("trench_suggestion_dialog._min_true_distance", _exc)
+        if d is None or (not math.isfinite(d)) or d < 0.0:
+            continue
+        if dmin is None or d < dmin:
+            dmin = d
+    return dmin
 
 
 def _safe_float(v, default=None):
@@ -130,22 +293,36 @@ def _safe_float(v, default=None):
     return default
 
 
-def _unary_union_geom(layer: QgsVectorLayer, *, selected_only: bool) -> Tuple[Optional[QgsGeometry], int]:
+def _unary_union_geom(layer: QgsVectorLayer, *, selected_only: bool) -> Tuple[Optional[QgsGeometry], int, bool]:
+    """Union of the layer's (selected) features.
+
+    Returns ``(geometry, feature_count, selection_used)``. When ``selected_only``
+    is requested but nothing is selected, every feature is used and
+    ``selection_used`` is False so the caller can say so instead of silently
+    widening the AOI. ``feature_count`` counts features that contributed a
+    non-empty geometry.
+    """
     if layer is None or not isinstance(layer, QgsVectorLayer):
-        return None, 0
+        return None, 0, False
     geoms: List[QgsGeometry] = []
     n = 0
+    selection_used = False
     try:
-        feats = layer.selectedFeatures() if selected_only and layer.selectedFeatureCount() > 0 else layer.getFeatures()
-    except Exception:
+        if selected_only and layer.selectedFeatureCount() > 0:
+            feats = layer.selectedFeatures()
+            selection_used = True
+        else:
+            feats = layer.getFeatures()
+    except Exception as _exc:
+        log_swallowed("trench_suggestion_dialog._unary_union_geom", _exc)
         feats = []
     for ft in feats:
-        n += 1
         _skip_144 = False
         try:
             g = ft.geometry()
             if g is not None and (not g.isEmpty()):
                 geoms.append(g)
+                n += 1
         except Exception as _exc:
             log_swallowed("trench_suggestion_dialog._unary_union_geom", _exc)
             log_swallowed("tools/trench_suggestion_dialog.py:148 (_unary_union_geom)", _exc)
@@ -153,17 +330,19 @@ def _unary_union_geom(layer: QgsVectorLayer, *, selected_only: bool) -> Tuple[Op
         if _skip_144:
             continue
     if not geoms:
-        return None, 0
+        return None, 0, selection_used
     try:
-        return (geoms[0], n) if len(geoms) == 1 else (QgsGeometry.unaryUnion(geoms), n)
-    except Exception:
+        return (geoms[0], n, selection_used) if len(geoms) == 1 else (QgsGeometry.unaryUnion(geoms), n, selection_used)
+    except Exception as _exc:
+        log_swallowed("trench_suggestion_dialog._unary_union_geom", _exc)
         try:
             out = geoms[0]
             for g in geoms[1:]:
                 out = out.combine(g)
-            return out, n
-        except Exception:
-            return None, 0
+            return out, n, selection_used
+        except Exception as _exc2:
+            log_swallowed("trench_suggestion_dialog._unary_union_geom", _exc2)
+            return None, 0, selection_used
 
 
 def _transform_geom(geom: QgsGeometry, src_crs, dst_crs) -> Optional[QgsGeometry]:
@@ -453,7 +632,9 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
             "<ul>"
             "<li><b>방향 기본값</b>: 등고선 직교</li>"
             "<li><b>평행 옵션</b>: 선형 유구/가마 등 사례 대응</li>"
-            "<li><b>무덤 회피</b>: 수치지형도 속성과 hidden 범례(XLS) 기반 코드·키워드 회피</li>"
+            "<li><b>무덤 회피</b>: 수치지형도 속성과 hidden 범례(XLS/XLSX) 기반 코드·키워드 회피 "
+            f"(검색어 {_GRAVE_SEARCH_TERM_COUNT}종: 무덤·분묘·고분·지석묘·석실묘·토광묘·옹관묘 등, "
+            "총/릉 접미 규칙, tomb/grave/dolmen 등)</li>"
             "</ul>"
             "<p><b>주의:</b> 본 결과는 조사 보조용 가설이며, 유구 존재를 보장하지 않습니다. 최종 판단은 현장 조사자의 책임입니다.</p>"
         )
@@ -489,8 +670,9 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
         if not os.path.isdir(hidden_dir):
             return ""
         try:
-            names = [x for x in os.listdir(hidden_dir) if str(x).lower().endswith(".xls")]
-        except Exception:
+            names = [x for x in os.listdir(hidden_dir) if _is_legend_workbook_name(x)]
+        except Exception as _exc:
+            log_swallowed("trench_suggestion_dialog._hidden_xls_path", _exc)
             names = []
         if not names:
             return ""
@@ -521,31 +703,63 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
                 continue
         return rows
 
-    def _iter_rows_from_xls_qgis(self, xls_path: str) -> Iterable[List[str]]:
-        out: List[List[str]] = []
-        base = QgsVectorLayer(xls_path, "legend_xls", "ogr")
-        if not base.isValid():
-            return out
+    def _legend_sublayers(self, xls_path: str) -> List[QgsVectorLayer]:
+        """Every sheet of the legend workbook as a valid vector layer.
 
+        Prefers QgsProviderRegistry.querySublayers() (QGIS >= 3.22), whose
+        details carry a ready-made per-sheet URI. Falls back to the legacy
+        subLayers() strings parsed by _sublayer_name(), and finally to the
+        workbook opened as a single layer.
+        """
         layers: List[QgsVectorLayer] = []
         try:
-            subs = base.dataProvider().subLayers() or []
-        except Exception:
-            subs = []
-        if subs:
-            for s in subs:
-                name = str(s or "")
-                if "!!::!!" in name:
+            registry = QgsProviderRegistry.instance()
+            query = getattr(registry, "querySublayers", None)
+            if callable(query):
+                for detail in query(xls_path) or []:
+                    uri = ""
+                    name = ""
+                    provider = "ogr"
                     try:
-                        name = name.split("!!::!!", 1)[1]
+                        uri = str(detail.uri() or "")
+                        name = str(detail.name() or "")
+                        provider = str(detail.providerKey() or "ogr")
                     except Exception as _exc:
-                        log_swallowed("tools/trench_suggestion_dialog.py:533 (_iter_rows_from_xls_qgis)", _exc)
-                uri = f"{xls_path}|layername={name}"
-                lyr = QgsVectorLayer(uri, f"legend_{name}", "ogr")
-                if lyr.isValid():
-                    layers.append(lyr)
-        else:
+                        log_swallowed("trench_suggestion_dialog._legend_sublayers", _exc)
+                    if not uri:
+                        continue
+                    lyr = QgsVectorLayer(uri, f"legend_{name or len(layers)}", provider)
+                    if lyr.isValid():
+                        layers.append(lyr)
+        except Exception as _exc:
+            log_swallowed("trench_suggestion_dialog._legend_sublayers", _exc)
+        if layers:
+            return layers
+
+        base = QgsVectorLayer(xls_path, "legend_xls", "ogr")
+        if not base.isValid():
+            return layers
+        try:
+            subs = base.dataProvider().subLayers() or []
+        except Exception as _exc:
+            log_swallowed("trench_suggestion_dialog._legend_sublayers", _exc)
+            subs = []
+        for entry in subs:
+            name = _sublayer_name(entry)
+            if not name:
+                continue
+            lyr = QgsVectorLayer(f"{xls_path}|layername={name}", f"legend_{name}", "ogr")
+            if lyr.isValid():
+                layers.append(lyr)
+        if not layers:
             layers.append(base)
+        return layers
+
+    def _iter_rows_from_xls_qgis(self, xls_path: str) -> Iterable[List[str]]:
+        out: List[List[str]] = []
+        layers = self._legend_sublayers(xls_path)
+        if not layers:
+            return out
 
         for lyr in layers:
             try:
@@ -748,30 +962,49 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
                 continue
         return idx, geom_by_id
 
-    def _nearest_reference_distance(self, idx: QgsSpatialIndex, geom_by_id: Dict[int, QgsGeometry], pt: QgsPointXY) -> Optional[float]:
+    def _nearest_reference_distance(
+        self,
+        idx: QgsSpatialIndex,
+        geom_by_id: Dict[int, QgsGeometry],
+        pt: QgsPointXY,
+        *,
+        radius_m: float = 0.0,
+    ) -> Optional[float]:
+        """True distance from ``pt`` to the nearest reference feature (ref_dist_m).
+
+        QgsSpatialIndex.nearestNeighbor ranks by bounding box, so a fixed k=8
+        could drop a small site that is genuinely closer than eight large
+        polygons whose boxes all contain the point. Every feature whose box
+        touches the square of half-width ``radius_m`` around the point is
+        measured instead (the reference set is already pre-filtered to the
+        AOI bbox + radius, so this is cheap), which makes the value exact
+        whenever a site lies within the radius. Beyond the radius, where
+        ref_score is 0 anyway, a k=32 nearest-neighbour query is the fallback
+        and the value is a best effort.
+        """
         if not geom_by_id:
             return None
         ptg = QgsGeometry.fromPointXY(pt)
-        try:
-            ids = idx.nearestNeighbor(pt, 8)
-        except Exception:
-            ids = list(geom_by_id.keys())[:8]
-        dmin = None
-        for fid in ids:
-            g = geom_by_id.get(int(fid))
-            if g is None:
-                continue
-            _skip_748 = False
+        px = float(pt.x())
+        py = float(pt.y())
+        r = max(0.0, float(radius_m or 0.0))
+        ids: List[int] = []
+        if r > 0.0:
             try:
-                d = float(g.distance(ptg))
+                ids = list(idx.intersects(QgsRectangle(px - r, py - r, px + r, py + r)) or [])
             except Exception as _exc:
                 log_swallowed("trench_suggestion_dialog._nearest_reference_distance", _exc)
-                log_swallowed("tools/trench_suggestion_dialog.py:750 (_nearest_reference_distance)", _exc)
-                _skip_748 = True
-            if _skip_748:
-                continue
-            if (dmin is None) or (d < dmin):
-                dmin = d
+                ids = []
+        dmin = _min_true_distance(ids, geom_by_id, ptg, px, py)
+        if dmin is None or dmin > r:
+            try:
+                more = list(idx.nearestNeighbor(pt, 32) or [])
+            except Exception as _exc:
+                log_swallowed("trench_suggestion_dialog._nearest_reference_distance", _exc)
+                more = list(geom_by_id.keys())[:32]
+            d2 = _min_true_distance(more, geom_by_id, ptg, px, py)
+            if d2 is not None and (dmin is None or d2 < dmin):
+                dmin = d2
         return dmin
 
     def _build_grave_avoid_union(
@@ -782,11 +1015,14 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
         aoi_crs,
         grave_buffer_m: float,
         use_avoid: bool,
+        trench_length_m: float = 0.0,
     ) -> Tuple[Optional[QgsGeometry], int]:
         """Return (avoidance_union, matched_feature_count).
 
         The count is reported to the user so an "avoidance enabled but 0 features
         matched" outcome is stated honestly instead of implying graves were dodged.
+        ``trench_length_m`` widens the fetch rectangle so graves a protruding
+        trench could reach are loaded (see _grave_fetch_margin_m).
         """
         if (not use_avoid) or topo_layer is None or (not isinstance(topo_layer, QgsVectorLayer)):
             return None, 0
@@ -797,7 +1033,11 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
             g_on_topo = _transform_geom(aoi_geom, aoi_crs, topo_layer.crs())
             if g_on_topo is not None and (not g_on_topo.isEmpty()):
                 bb = g_on_topo.boundingBox()
-                bb.grow(max(5.0, float(grave_buffer_m) + 3.0))
+                # The old margin (buffer + 3 m) came from the buffer alone; a 500 m
+                # trench at inside_ratio 0.95 reaches 25 m past the AOI edge and
+                # graves there were never fetched, counted or avoided.
+                margin_m = _grave_fetch_margin_m(grave_buffer_m, trench_length_m)
+                bb.grow(max(1e-9, _meters_to_crs_units(margin_m, topo_layer.crs(), ref_y=bb.center().y())))
                 req.setFilterRect(bb)
         except Exception as _exc:
             log_swallowed("trench_suggestion_dialog._build_grave_avoid_union", _exc)
@@ -1042,10 +1282,22 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
             restore_ui_focus(self)
             return
 
-        aoi_geom, aoi_n = _unary_union_geom(aoi_layer, selected_only=bool(self.chkAoiSelectedOnly.isChecked()))
+        aoi_selected_only = bool(self.chkAoiSelectedOnly.isChecked())
+        aoi_geom, aoi_n, aoi_selection_used = _unary_union_geom(aoi_layer, selected_only=aoi_selected_only)
         if aoi_geom is None or aoi_geom.isEmpty():
             push_message(self.iface, "오류", "AOI 지오메트리를 만들 수 없습니다.", level=2, duration=7)
             return
+        if aoi_selected_only and not aoi_selection_used:
+            # The checkbox is on by default; a forgotten selection must not
+            # silently turn one survey polygon into the whole layer.
+            push_message(
+                self.iface,
+                "경고",
+                f"AOI 레이어에 선택된 피처가 없어 전체 {aoi_n}개 피처를 AOI로 사용합니다.",
+                level=1,
+                duration=8,
+            )
+            log_message(f"TrenchSuggestion: AOI selected-only requested but no selection; using all {aoi_n} features", level=Qgis.Warning)
 
         dem_layer = self.cmbDem.currentLayer()
         if dem_layer is None or not isinstance(dem_layer, QgsRasterLayer):
@@ -1110,6 +1362,9 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
             # Margin covers the footprint-aspect rosette plus a couple of cells for
             # edge continuity. Falls back to the full DEM if clipping fails.
             pixel = self._dem_pixel_size(dem_layer)
+            # >= trench_length also covers a trench protruding past the AOI: its
+            # centre is inside the AOI, so no footprint sample (rosette radius
+            # max(length/2, 2 px)) can lie farther out than length/2 + 2 px.
             clip_buffer = max(float(trench_length), float(grid_step)) + 4.0 * float(pixel)
             self._set_busy("DEM를 AOI 범위로 클립 중…")
             dem_src = self._clip_dem_to_aoi(
@@ -1162,6 +1417,7 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
                 aoi_crs=aoi_layer.crs(),
                 grave_buffer_m=grave_buffer_m,
                 use_avoid=use_avoid,
+                trench_length_m=trench_length,
             )
             # Honest reporting of what avoidance actually did.
             if use_avoid:
@@ -1169,7 +1425,8 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
                     log_message("무덤 회피: 수치지형도 레이어 미지정 → 회피 미적용", level=Qgis.Warning)
                 elif grave_count <= 0:
                     log_message(
-                        "무덤 회피: 조건에 맞는 무덤/분묘 피처 0건 → 회피 대상 없음(제외된 후보 없음)",
+                        "무덤 회피: 조건에 맞는 무덤/분묘 피처 0건 → 회피 대상 없음(제외된 후보 없음). "
+                        f"검색어 {_GRAVE_SEARCH_TERM_COUNT}종 기준: " + ", ".join(_grave_search_terms()),
                         level=Qgis.Info,
                     )
                 else:
@@ -1382,7 +1639,7 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
                         ahp_score = 0.0
 
                     if ref_available:
-                        ref_dist = self._nearest_reference_distance(ref_idx, ref_geoms, pt)
+                        ref_dist = self._nearest_reference_distance(ref_idx, ref_geoms, pt, radius_m=ref_radius_m)
                         ref_score = 0.0 if ref_dist is None else max(
                             0.0, min(1.0, 1.0 - (float(ref_dist) / max(1.0, ref_radius_m)))
                         )
@@ -1506,6 +1763,7 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
             c_pr = center_layer.dataProvider()
             fields = [
                 QgsField("rank", QVariant.Int),
+                QgsField("pick_order", QVariant.Int),
                 QgsField("score", QVariant.Double),
                 QgsField("mode", QVariant.String),
                 QgsField("bearing_deg", QVariant.Double),
@@ -1524,8 +1782,15 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
 
             trench_feats: List[QgsFeature] = []
             center_feats: List[QgsFeature] = []
+            # `rank` follows score (1 = best) so sorting by rank and by score agree;
+            # `pick_order` is the coverage round-robin sequence the trenches were
+            # chosen in, which is not a score order.
+            score_rank: Dict[int, int] = {}
+            for r0, d0 in enumerate(sorted(selected, key=lambda d: float(d.get("score") or 0.0), reverse=True), start=1):
+                score_rank[id(d0)] = int(r0)
             for i, d in enumerate(selected, start=1):
                 vals = [
+                    int(score_rank.get(id(d), i)),
                     int(i),
                     float(d.get("score") or 0.0),
                     str(d.get("mode") or ""),
@@ -1588,9 +1853,18 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
                     "grave_avoid": bool(use_avoid),
                     "grave_matched_features": int(grave_count),
                     "grave_buffer_m": grave_buffer_m,
+                    "grave_fetch_margin_m": float(_grave_fetch_margin_m(grave_buffer_m, trench_length)),
+                    "grave_keyword_terms": int(_GRAVE_SEARCH_TERM_COUNT),
                     "ref_radius_m": ref_radius_m,
+                    # Exact whenever a site lies within ref_radius_m; beyond that a
+                    # k=32 bbox-ranked nearest-neighbour best effort (score is 0 there).
+                    "ref_dist_method": "exact_within_ref_radius_else_k32_bbox_nn",
                     "max_slope_deg": slope_max,
                     "slope_test": "footprint_max_and_centre",
+                    "selection_strategy": "coverage_round_robin",
+                    "coverage_cell_m": float(cov_cell),
+                    "rank_field": "score_desc",
+                    "pick_order_field": "coverage_round_robin",
                     # ahp_score is a min-max stretch over the AOI bounding box, not the
                     # polygon and not the raster's own scale - recorded so a reader can
                     # tell why the same raster scores differently in another AOI.
@@ -1600,6 +1874,8 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
                     "ahp_used": bool(ahp_available),
                     "ref_used": bool(ref_available),
                     "aoi_features": int(aoi_n),
+                    "aoi_selected_only_requested": bool(aoi_selected_only),
+                    "aoi_selection_used": bool(aoi_selection_used),
                     "candidates_scanned": int(scanned),
                     "candidates_kept": int(kept),
                     "scan_truncated": bool(truncated),
@@ -1630,7 +1906,7 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
                 if topo_layer is None:
                     avoid_note = " (무덤 회피: 지형도 미지정으로 미적용)"
                 elif grave_count <= 0:
-                    avoid_note = " (무덤 회피: 대상 0건)"
+                    avoid_note = f" (무덤 회피: 대상 0건 - 검색어 {_GRAVE_SEARCH_TERM_COUNT}종 기준)"
                 else:
                     avoid_note = f" (무덤 회피: {grave_count}건 반영)"
             else:
@@ -1643,6 +1919,7 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
                 "완료",
                 (
                     f"트렌치 후보 {len(selected)}개를 생성했습니다.{shortfall}{avoid_note} "
+                    "선별은 AOI 전체에 분산하는 커버리지 우선 방식이며 rank=점수순, pick_order=선별순입니다. "
                     "결과는 조사 보조용 제안이며, 최종 판단은 현장 조사자가 수행해야 합니다."
                 ),
                 level=0,

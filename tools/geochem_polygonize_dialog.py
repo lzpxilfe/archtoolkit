@@ -21,10 +21,11 @@
 중요: WMS는 원자료 수치가 아니라 "렌더링된 이미지"이므로, 이 도구는 범례(색-값)를 이용한 역추정입니다.
 따라서 안티앨리어싱/경계선/투명도 등으로 인한 오차가 있을 수 있습니다.
 
-현재 프리셋: Fe2O3 (산화철) (사용자가 제공한 범례 포인트 기반)
+프리셋: Fe2O3(사용자 제공 범례 포인트 기반) + Pb/Cu/Zn/Sr/Ba/CaO(백분위 구간값은 범례에서 읽었고,
+색상 팔레트는 Fe2O3와 같다고 가정함 - 실제 팔레트가 다르면 색 매칭 허용오차(RGB_MATCH_TOLERANCE)에 걸려
+NoData로 제외되고 경고가 뜸).
 """
 
-import csv
 import math
 import os
 import re
@@ -77,11 +78,15 @@ from .live_log_dialog import ensure_live_log_dialog
 from .help_dialog import show_help_dialog
 from .i18n import get_output_group_name
 from .geochem_legend import (
+    LegendCsvError,
     LegendPoint,
     RGB_MATCH_TOLERANCE as _RGB_MATCH_TOLERANCE,
     interp_rgb_to_value as _interp_rgb_to_value,
+    legend_points_from_csv as _legend_points_from_csv,
+    legend_sample_rows as _legend_sample_rows,
     mask_black_lines as _mask_black_lines,
     points_to_breaks as _points_to_breaks,
+    sampled_legend_problem as _sampled_legend_problem,
 )
 from .raster_io import inv_geotransform
 
@@ -243,8 +248,17 @@ def _gdal_rasterize_wkt_mask(
     ysize: int,
     geotransform,
     projection_wkt: str,
+    all_touched: bool = True,
 ) -> Optional[np.ndarray]:
-    """Rasterize a polygon WKT into a boolean mask (True inside)."""
+    """Rasterize a polygon WKT into a boolean mask (True inside).
+
+    ``all_touched=True`` burns every pixel the polygon so much as clips (the
+    right thing for the AOI clip mask, where over-inclusion is harmless).
+    ``all_touched=False`` is GDAL's default pixel-centre rule, the one QGIS
+    zonal statistics uses; zone polygons must use it, otherwise pix_in and
+    every derived area are computed over a zone dilated by up to one pixel
+    on every side (a 10 m test pit in 30 m pixels came back as 3600 m2).
+    """
     if not geom_wkt:
         return None
     try:
@@ -276,7 +290,8 @@ def _gdal_rasterize_wkt_mask(
         feat = ogr.Feature(vlyr.GetLayerDefn())
         feat.SetGeometry(geom)
         vlyr.CreateFeature(feat)
-        gdal.RasterizeLayer(ds, [1], vlyr, burn_values=[1], options=["ALL_TOUCHED=TRUE"])
+        rast_opts = ["ALL_TOUCHED=TRUE"] if all_touched else []
+        gdal.RasterizeLayer(ds, [1], vlyr, burn_values=[1], options=rast_opts)
         vds = None
     except Exception:
         ds = None
@@ -386,52 +401,6 @@ def _rgb_for_value(*, points: Sequence[LegendPoint], value: float) -> Tuple[int,
     return pts[-1].rgb
 
 
-def _legend_points_from_csv(csv_path: str) -> List[LegendPoint]:
-    """Load legend points from CSV with columns: value,r,g,b (header optional)."""
-    points: List[LegendPoint] = []
-    with open(csv_path, "r", encoding="utf-8-sig", newline="") as f:
-        reader = csv.reader(f)
-        for row in reader:
-            if not row:
-                continue
-            if len(row) == 1:
-                txt = str(row[0] or "").strip()
-                if not txt or txt.startswith("#"):
-                    continue
-                # Allow "value,r,g,b" in a single cell (copied from spreadsheets)
-                row = [x.strip() for x in txt.split(",") if x.strip()]
-            row = [str(x).strip() for x in row if str(x).strip()]
-            if len(row) < 4:
-                continue
-            if row[0].lower() in ("value", "val"):
-                continue
-            _skip_407 = False
-            try:
-                v = float(row[0])
-                r = int(float(row[1]))
-                g = int(float(row[2]))
-                b = int(float(row[3]))
-            except Exception as _exc:
-                log_swallowed("geochem_polygonize_dialog._legend_points_from_csv", _exc)
-                log_swallowed("tools/geochem_polygonize_dialog.py:412 (_legend_points_from_csv)", _exc)
-                _skip_407 = True
-            if _skip_407:
-                continue
-            r = max(0, min(255, r))
-            g = max(0, min(255, g))
-            b = max(0, min(255, b))
-            points.append(LegendPoint(float(v), (r, g, b)))
-
-    points = sorted(points, key=lambda p: float(p.value))
-    # De-duplicate values (keep last)
-    dedup: Dict[float, LegendPoint] = {}
-    for p in points:
-        dedup[float(p.value)] = p
-    out = list(dedup.values())
-    out = sorted(out, key=lambda p: float(p.value))
-    return out
-
-
 def _parse_float_list(text: str) -> List[float]:
     vals: List[float] = []
     for part in (text or "").replace(";", ",").split(","):
@@ -487,6 +456,38 @@ def _sample_qimage_rgb(image: QImage, x: int, y: int, radius: int = 1) -> Tuple[
     if n <= 0:
         return (204, 204, 204)
     return (int(round(rs / n)), int(round(gs / n)), int(round(bs / n)))
+
+
+def _sample_qimage_alpha(image: QImage, x: int, y: int) -> int:
+    """Alpha (0-255) of one pixel; 255 when the image has no alpha or on error.
+
+    ``_sample_qimage_rgb`` goes through QColor(QRgb), which drops alpha, so a
+    transparent legend margin read as opaque black. The importer needs the
+    alpha separately to recognise that it sampled the margin.
+    """
+    try:
+        if image is None or image.isNull():
+            return 255
+        w = int(image.width() or 0)
+        h = int(image.height() or 0)
+        if w <= 0 or h <= 0:
+            return 255
+        if not image.hasAlphaChannel():
+            return 255
+        xx = max(0, min(w - 1, int(x)))
+        yy = max(0, min(h - 1, int(y)))
+        return int(image.pixelColor(xx, yy).alpha())
+    except Exception as _exc:
+        log_swallowed("geochem_polygonize_dialog._sample_qimage_alpha", _exc)
+        return 255
+
+
+_LEGEND_SAMPLE_PROBLEMS: Dict[str, str] = {
+    "endpoint_transparent": "범례 샘플의 끝 색이 투명합니다(색상바 밖 여백을 샘플링함).",
+    "endpoint_white": "범례 샘플의 끝 색이 흰색입니다(여백/배경을 샘플링함).",
+    "endpoint_black": "범례 샘플의 끝 색이 검정입니다(테두리/배경을 샘플링함).",
+    "all_identical": "샘플링한 색이 모두 같습니다(샘플 x 위치가 색상바 위가 아닙니다).",
+}
 
 
 class GeoChemPolygonizeDialog(QtWidgets.QDialog):
@@ -590,7 +591,10 @@ class GeoChemPolygonizeDialog(QtWidgets.QDialog):
         self.spinPixelSize.setMaximum(1000000.0)
         self.spinPixelSize.setSingleStep(1.0)
         self.spinPixelSize.setValue(0.0)
-        self.spinPixelSize.setToolTip("0이면 현재 지도 해상도(캔버스 mapUnitsPerPixel)를 사용합니다.")
+        self.spinPixelSize.setToolTip(
+            "0이면 현재 지도 해상도(캔버스 mapUnitsPerPixel)를 사용합니다.\n"
+            "프로젝트 CRS와 래스터 CRS가 다르면 조사지역 위치에서 래스터 CRS 단위로 환산합니다."
+        )
 
         self.spinExtentBuffer = QtWidgets.QDoubleSpinBox(grp_clip)
         self.spinExtentBuffer.setDecimals(0)
@@ -680,7 +684,8 @@ class GeoChemPolygonizeDialog(QtWidgets.QDialog):
             "다음이 필요할 때만 켜세요:\n"
             "- 구간형(범주형) 지도가 필요할 때\n"
             "- '폴리곤 생성(구간별)'을 사용할 때(내부적으로 class가 필요함)\n\n"
-            "대부분의 분석(MaxEnt/통계/가중 중심점)은 value 래스터만으로 충분합니다."
+            "대부분의 분석(MaxEnt/통계/가중 중심점)은 value 래스터만으로 충분합니다.\n"
+            "단, value는 WMS 색상에서 역추정한 추정값이므로 안티앨리어싱·경계선·구간표에 따른 오차를 감안하세요."
         )
 
         self.chkMakePolygons = QtWidgets.QCheckBox("폴리곤 생성(구간별)")
@@ -708,7 +713,9 @@ class GeoChemPolygonizeDialog(QtWidgets.QDialog):
         grid3.addWidget(self.chkDropNoData, 3, 0, 1, 2)
 
         self.lblOutHelp = QtWidgets.QLabel(
-            "TIP: value 래스터는 WMS 색상을 그대로 수치화한 ‘원본 데이터’입니다.\n"
+            "TIP: value 래스터는 WMS 렌더링 색상을 범례(색-값)로 역추정한 추정값입니다(원자료 아님).\n"
+            "- 프리셋 범례는 백분위 구간표라서 값은 구간 경계 사이의 선형 보간이며, 최상위 구간 색은 구간 상한값(예: Pb 1363 ppm)으로 기록됩니다.\n"
+            "- 범례 색과 먼 픽셀(경계선·글자 등)은 NoData로 제외되고, 제외 비율이 5% 이상이면 경고합니다.\n"
             "- class 래스터/폴리곤은 ‘구간별(범주형) 결과’가 필요할 때만 켜세요."
         )
         self.lblOutHelp.setWordWrap(True)
@@ -724,7 +731,11 @@ class GeoChemPolygonizeDialog(QtWidgets.QDialog):
         self.chkZonalStats.setToolTip(
             "선택한 구역(행정구역/유적폴리곤 등)마다 value/class 래스터를 집계합니다.\n"
             "- value: 평균/표준편차/최솟값/최댓값\n"
-            "- class: 구간별 픽셀수/면적/비율\n\n"
+            "- class: 구간별 픽셀수/면적/비율\n"
+            "- 픽셀 집계 기준: 픽셀 중심이 구역 안에 있는 픽셀만 셉니다(QGIS 구역 통계와 같은 규칙).\n"
+            "  픽셀보다 작은 구역은 닿은 픽셀로 대체하며 burn_rule 필드에 all_touched로 표시됩니다.\n"
+            "- zone_area: 구역 폴리곤 자체의 면적(타원체 m2). c*_area 합과 비교해 픽셀화 오차를 확인하세요.\n"
+            "- fill_pct: 검은 경계선 제거로 보간된(측정값이 아닌) 픽셀의 비율\n\n"
             "※ 많은 피처/큰 해상도에서는 시간이 오래 걸릴 수 있습니다."
         )
 
@@ -736,6 +747,10 @@ class GeoChemPolygonizeDialog(QtWidgets.QDialog):
 
         self.chkZoneSelectedOnly = QtWidgets.QCheckBox("구역 레이어 선택 피처만 사용")
         self.chkZoneSelectedOnly.setChecked(False)
+        self.chkZoneSelectedOnly.setToolTip(
+            "구역 레이어에서 '선택된 피처'만 통계 대상으로 씁니다.\n"
+            "선택이 없으면 전체 피처를 사용하고 경고를 표시합니다."
+        )
 
         grid_z.addWidget(self.chkZonalStats, 0, 0, 1, 2)
         grid_z.addWidget(QtWidgets.QLabel("구역(폴리곤) 레이어"), 1, 0)
@@ -762,8 +777,8 @@ class GeoChemPolygonizeDialog(QtWidgets.QDialog):
         )
 
         self.cmbWeightRule = QtWidgets.QComboBox(grp_center)
-        self.cmbWeightRule.addItem("값 그대로 (w = value)", "value")
-        self.cmbWeightRule.addItem("값 거듭제곱 (w = value^p)", "power")
+        self.cmbWeightRule.addItem("값 그대로 (w = max(value, 0))", "value")
+        self.cmbWeightRule.addItem("값 거듭제곱 (w = max(value, 0)^p)", "power")
         self.cmbWeightRule.addItem("임계값 이상만 (w = value, value>=t)", "threshold")
         self.cmbWeightRule.addItem("임계값 이상만 (w = 1, value>=t)", "binary")
         self.cmbWeightRule.addItem("상위 %만 (w = value, top X%)", "top_pct")
@@ -772,7 +787,7 @@ class GeoChemPolygonizeDialog(QtWidgets.QDialog):
         self.spinWeightPower.setMinimum(1)
         self.spinWeightPower.setMaximum(8)
         self.spinWeightPower.setValue(2)
-        self.spinWeightPower.setToolTip("거듭제곱 지수 p (w = value^p)")
+        self.spinWeightPower.setToolTip("거듭제곱 지수 p (w = max(value, 0)^p; 음수 값은 가중치 0)")
 
         self.spinWeightThreshold = QtWidgets.QDoubleSpinBox(grp_center)
         self.spinWeightThreshold.setDecimals(2)
@@ -841,20 +856,26 @@ class GeoChemPolygonizeDialog(QtWidgets.QDialog):
             )
             self.chkSelectedOnly.setToolTip(
                 "조사지역 레이어에서 '선택된 피처'만 사용해 경계(extent)를 계산합니다.\n"
-                "선택이 없으면 전체 피처를 사용합니다."
+                "선택이 없으면 전체 피처를 사용하고 경고를 표시합니다."
             )
             self.cmbPreset.setToolTip(
-                "원소/범례 프리셋을 선택합니다.\n"
-                "현재는 Fe2O3(산화철)만 제공됩니다.\n"
-                "다른 원소는 범례(이미지/값/색)를 받으면 추가할 수 있습니다."
+                "원소/범례 프리셋을 선택합니다. 제공: Fe2O3, Pb, Cu, Zn, Sr, Ba, CaO.\n"
+                "- Fe2O3: 사용자가 제공한 범례 포인트(색-값) 기반.\n"
+                "- 나머지 6종: 백분위 구간값은 범례에서 읽었고, 색상 팔레트는 Fe2O3와 같은 파랑-빨강 팔레트로 '가정'했습니다.\n"
+                "  실제 WMS 팔레트가 다르면 색 매칭에 실패한 픽셀이 NoData로 제외되고 경고가 뜹니다.\n"
+                "  확실하게 하려면 '범례 가져오기'로 해당 도면의 범례를 직접 등록하세요."
             )
             self.txtUnit.setToolTip(
                 "표시용 단위입니다.\n"
                 "결과 폴리곤의 라벨(예: 3.1-3.5%)에 붙습니다."
             )
             self.spinPixelSize.setToolTip(
-                "내보낼 래스터의 픽셀 크기(지도 단위/px)입니다.\n"
+                "내보낼 래스터의 픽셀 크기(래스터 CRS 단위/px)입니다.\n"
                 "- 0이면 현재 지도 해상도(mapUnitsPerPixel)를 사용합니다.\n"
+                "  프로젝트 CRS와 래스터 CRS가 다르면 조사지역 위치에서 래스터 CRS 단위로 환산하고,\n"
+                "  환산에 실패하면 '조사지역 긴 변/1024'를 쓰며 경고를 표시합니다.\n"
+                "- 총 픽셀 수가 1,200만을 넘으면 픽셀을 자동으로 키우고 경고를 표시합니다.\n"
+                "- 실제 사용한 픽셀 크기는 로그와 결과 래스터 메타데이터(pixel_size)에 기록됩니다.\n"
                 "- 값이 작을수록 디테일↑, 처리시간/파일크기↑\n"
                 "- WMS 색을 보존하려고 최근접(Nearest)으로 리샘플링합니다."
             )
@@ -867,9 +888,12 @@ class GeoChemPolygonizeDialog(QtWidgets.QDialog):
                 "끄면 폴리곤 조각이 매우 많아질 수 있습니다."
             )
             self.chkFixMax.setToolTip(
-                "색상 매칭 결과의 최댓값이 범례 최댓값(예: 51%)보다 작게 나오면\n"
-                "전체를 비율로 스케일해서 0~최댓값 범위를 맞춥니다.\n"
-                "지도 일부만 잘랐을 때(고농도 구간이 포함되지 않을 때) 유용합니다."
+                "클립 안에서 매칭된 최댓값이 범례 최댓값(예: 51%)보다 작으면 모든 값에\n"
+                "(범례 최댓값 / 클립 최댓값)을 곱해 클립의 최댓값이 범례 최댓값이 되도록 늘립니다.\n"
+                "※ 주의: 클립에 실제로 고농도 구간이 없다면 이 옵션은 없는 고농도 값을 만들어 냅니다.\n"
+                "  WMS가 보이는 범위에 맞춰 색을 다시 스트레치했다는 것을 알 때만 켜세요.\n"
+                "- 최댓값은 조사지역 마스크를 적용한 뒤(마스크를 켠 경우 조사지역 안 픽셀에서만) 구합니다.\n"
+                "- 적용 여부/클립 최댓값/배율은 로그와 결과 래스터 메타데이터(fix_max)에 기록됩니다."
             )
             self.chkSnapMax.setToolTip(
                 "마지막 구간(예: 12~51)에서 고농도 영역이 잘 안 잡힐 때 사용하는 로컬 보정입니다.\n"
@@ -885,7 +909,10 @@ class GeoChemPolygonizeDialog(QtWidgets.QDialog):
             self.chkInpaint.setToolTip(
                 "무채색(검정/짙은 회색) 경계선을 NoData로 만든 뒤 주변 값으로 메웁니다.\n"
                 "지괴 경계선/텍스트 등 '검은 선'이 결과를 깨뜨릴 때 켜세요.\n"
-                "너무 과하면 경계 부근이 부드러워질 수 있습니다."
+                "너무 과하면 경계 부근이 부드러워질 수 있습니다.\n"
+                "※ 메운 픽셀은 측정값이 아닌 보간값이지만 이후 통계(구간 면적/구역 평균 등)에 그대로 포함됩니다.\n"
+                "  메운 픽셀 수/비율은 로그와 결과 래스터 메타데이터(inpaint_fill_pct)에,\n"
+                "  구역별 비율은 구역 통계의 fill_pct 필드에 기록됩니다."
             )
             self.spinFillDist.setToolTip(
                 "보간 최대 검색 거리(px)입니다.\n"
@@ -957,10 +984,30 @@ value/class 래스터와 폴리곤을 생성합니다.
             return
 
         try:
-            points = _legend_points_from_csv(path)
+            csv_result = _legend_points_from_csv(path)
+        except LegendCsvError as e:
+            # Out-of-range, mis-columned or single-colour files are rejected
+            # outright: clamping them used to yield an all-black legend that
+            # sent every map pixel to the legend maximum.
+            push_message(self.iface, "오류", str(e), level=2, duration=10)
+            return
         except Exception as e:
             push_message(self.iface, "오류", f"CSV를 읽을 수 없습니다: {e}", level=2, duration=7)
             return
+        points = list(csv_result.points)
+        for note in csv_result.notes:
+            log_message(f"GeoChem: CSV 프리셋 {os.path.basename(path)}: {note}", level=Qgis.Info)
+        if csv_result.scaled_from_unit:
+            push_message(self.iface, "프리셋", "CSV의 RGB가 0~1 범위라 255배로 환산했습니다.", level=1, duration=7)
+        if csv_result.skipped_rows:
+            rows_txt = ", ".join(str(r) for r in csv_result.skipped_rows[:12])
+            push_message(
+                self.iface,
+                "프리셋",
+                f"CSV에서 {len(csv_result.skipped_rows)}행을 건너뛰었습니다(행: {rows_txt}).",
+                level=1,
+                duration=9,
+            )
         if len(points) < 2:
             push_message(self.iface, "오류", "CSV에는 value,r,g,b 형태의 포인트가 2개 이상 필요합니다.", level=2, duration=7)
             return
@@ -1086,21 +1133,39 @@ value/class 래스터와 폴리곤을 생성합니다.
 
         x = int(round(float(x_ratio) * float(w - 1)))
         n = len(vals)
+        # Sample each anchor at the centre of its band (row (i+0.5)/n*h), never
+        # at row 0 / h-1: those are the margin or frame of any real legend
+        # graphic, and reading them made white (or the border colour) the
+        # legend minimum and maximum.
+        rows = _legend_sample_rows(n, h, low_at_bottom=low_at_bottom)
         points: List[LegendPoint] = []
-        for i, v in enumerate(vals):
-            if n <= 1:
-                frac = 0.5
-            else:
-                frac = float(i) / float(n - 1)
-            # Image coordinate: y=0 is top
-            if low_at_bottom:
-                frac = 1.0 - frac
-            y = int(round(frac * float(h - 1)))
+        alphas: List[int] = []
+        for v, y in zip(vals, rows):
             rgb = _sample_qimage_rgb(img, x, y, radius=1)
+            alphas.append(_sample_qimage_alpha(img, x, y))
             points.append(LegendPoint(float(v), rgb))
+        try:
+            log_message(
+                f"GeoChem: legend image {w}x{h} sampled at x={x} rows={rows} -> "
+                + ", ".join(f"{p.value:g}:{p.rgb}" for p in points),
+                level=Qgis.Info,
+            )
+        except Exception as _exc:
+            log_swallowed("geochem_polygonize_dialog._import_preset_from_legend_image", _exc)
 
         if len(points) < 2:
             push_message(self.iface, "오류", "범례 포인트를 만들 수 없습니다.", level=2, duration=7)
+            return
+        problem = _sampled_legend_problem(points, alphas)
+        if problem:
+            push_message(
+                self.iface,
+                "오류",
+                _LEGEND_SAMPLE_PROBLEMS.get(problem, "범례 샘플이 올바르지 않습니다.")
+                + " 이미지를 색상바만 남기고 잘라 다시 시도하세요.",
+                level=2,
+                duration=10,
+            )
             return
 
         key = _safe_custom_preset_key(label)
@@ -1313,10 +1378,28 @@ value/class 래스터와 폴리곤을 생성합니다.
                 return
 
         # Survey area extent (bounding rectangle), optionally buffered.
+        aoi_selected_only = bool(self.chkSelectedOnly.isChecked())
+        aoi_selection_used = False
         try:
-            feats = aoi.selectedFeatures() if bool(self.chkSelectedOnly.isChecked()) else list(aoi.getFeatures())
-        except Exception:
-            feats = aoi.selectedFeatures() if bool(self.chkSelectedOnly.isChecked()) else []
+            if aoi_selected_only and aoi.selectedFeatureCount() > 0:
+                feats = list(aoi.selectedFeatures())
+                aoi_selection_used = True
+            else:
+                feats = list(aoi.getFeatures())
+        except Exception as _exc:
+            log_swallowed("geochem_polygonize_dialog.run", _exc)
+            feats = []
+        if aoi_selected_only and not aoi_selection_used and feats:
+            # The tooltip promises this fallback; say it out loud so a forgotten
+            # selection cannot silently widen the study area.
+            push_message(
+                self.iface,
+                "경고",
+                f"조사지역 레이어에 선택된 피처가 없어 전체 {len(feats)}개 피처로 경계를 계산합니다.",
+                level=1,
+                duration=7,
+            )
+            log_message(f"GeoChem: AOI selected-only requested but no selection; using all {len(feats)} features", level=Qgis.Warning)
         if not feats:
             push_message(self.iface, "오류", "조사지역 피처가 없습니다. (선택 또는 레이어 내용 확인)", level=2, duration=7)
             restore_ui_focus(self)
@@ -1349,12 +1432,14 @@ value/class 래스터와 폴리곤을 생성합니다.
 
         # Keep a canvas-compatible extent for zooming (destination CRS).
         extent_canvas = QgsRectangle(extent_aoi)
+        extent_canvas_ok = True
         try:
             dest_crs = self.iface.mapCanvas().mapSettings().destinationCrs()
             if dest_crs and aoi.crs() != dest_crs:
                 ct_canvas = QgsCoordinateTransform(aoi.crs(), dest_crs, QgsProject.instance())
                 extent_canvas = ct_canvas.transformBoundingBox(extent_canvas)
         except Exception as _exc:
+            extent_canvas_ok = False
             log_swallowed("tools/geochem_polygonize_dialog.py:1336 (run)", _exc)
 
         # Transform survey-area extent to raster CRS for export.
@@ -1392,19 +1477,50 @@ value/class 래스터와 폴리곤을 생성합니다.
         # Choose pixel size: 0 = use current canvas resolution.
         px_input = float(self.spinPixelSize.value() or 0.0)
         px = px_input
+        px_source = "user"
         if px <= 0:
+            px = 0.0
+            px_source = ""
             try:
-                # mapUnitsPerPixel is in destination CRS units; only use it when raster CRS matches.
-                dest_crs = self.iface.mapCanvas().mapSettings().destinationCrs()
+                # mapUnitsPerPixel is in destination CRS units. Use it directly
+                # when the raster CRS matches; otherwise convert it into the
+                # raster CRS at the AOI. The old silent fallback to extent/1024
+                # gave ~9x fewer samples for the usual EPSG:5186 project /
+                # EPSG:3857 WMS pairing, and different class areas after a
+                # project CRS switch, while the tooltip promised the canvas.
+                canvas = self.iface.mapCanvas()
+                dest_crs = canvas.mapSettings().destinationCrs()
                 if dest_crs and dest_crs == raster.crs():
-                    px = float(self.iface.mapCanvas().mapUnitsPerPixel())
-                else:
-                    px = 0.0
-            except Exception:
+                    px = float(canvas.mapUnitsPerPixel())
+                    px_source = "canvas"
+                elif dest_crs and dest_crs.isValid() and raster.crs().isValid():
+                    centre = extent_canvas.center() if extent_canvas_ok else canvas.extent().center()
+                    px = self._canvas_pixel_size_in_raster_crs(
+                        dest_crs=dest_crs, raster_crs=raster.crs(), centre_dest=centre
+                    )
+                    if px > 0:
+                        px_source = "reprojected_canvas"
+                        log_message(
+                            f"GeoChem: canvas {float(canvas.mapUnitsPerPixel()):g} ({dest_crs.authid()} units/px) "
+                            f"-> {px:g} ({raster.crs().authid()} units/px) at the AOI",
+                            level=Qgis.Info,
+                        )
+            except Exception as _exc:
+                log_swallowed("geochem_polygonize_dialog.run (pixel size)", _exc)
                 px = 0.0
-        if px <= 0:
+        if not (px > 0) or not math.isfinite(px):
             px = max(extent_export.width(), extent_export.height()) / 1024.0
+            px_source = "fallback_1024"
+            push_message(
+                self.iface,
+                "경고",
+                f"캔버스 해상도를 래스터 CRS로 환산하지 못해 픽셀 크기 {px:g}(조사지역 긴 변/1024)을 사용합니다. "
+                "해상도를 고정하려면 픽셀 크기를 직접 입력하세요.",
+                level=1,
+                duration=9,
+            )
         px = max(px, 1e-9)
+        px_requested = px
 
         width = max(1, int(math.ceil(extent_export.width() / px)))
         height = max(1, int(math.ceil(extent_export.height() / px)))
@@ -1429,12 +1545,34 @@ value/class 래스터와 폴리곤을 생성합니다.
             width = max(1, int(math.ceil(extent_export.width() / px)))
             height = max(1, int(math.ceil(extent_export.height() / px)))
             total_px = int(width) * int(height)
+            px_source = "capped"
             log_message(
                 f"GeoChem: auto-adjusted px to {px:g} to cap size => {width}x{height} ({total_px:,} px)",
                 level=Qgis.Warning,
             )
+            push_message(
+                self.iface,
+                "경고",
+                f"픽셀 수 상한({MAX_PIXELS:,})에 걸려 픽셀 크기를 {px_requested:g}에서 {px:g}(으)로 키웠습니다"
+                f" ({width}x{height}). 구간 면적/구역 통계는 이 해상도 기준입니다.",
+                level=1,
+                duration=9,
+            )
 
-        log_message(f"GeoChem: export extent {extent_export.toString()} px={px:g} => {width}x{height}", level=Qgis.Info)
+        log_message(
+            f"GeoChem: export extent {extent_export.toString()} px={px:g} ({px_source}) => {width}x{height}",
+            level=Qgis.Info,
+        )
+        # Recorded in the value/class raster metadata (params_json) so a saved
+        # GeoTIFF can be traced back to the resolution and corrections used.
+        self._last_geochem_run_params = {
+            "pixel_size": float(px),
+            "pixel_size_source": str(px_source),
+            "raster_size_px": f"{int(width)}x{int(height)}",
+        }
+        if px_source == "capped":
+            self._last_geochem_run_params["pixel_size_requested"] = float(px_requested)
+        self._last_geochem_zonal_meta = {}
 
         self._cleanup_tmp()
         self._tmp_dir = tempfile.mkdtemp(prefix="ArchToolkit_GeoChem_")
@@ -1576,21 +1714,11 @@ value/class 래스터와 폴리곤을 생성합니다.
             except Exception as _exc:
                 log_swallowed("geochem_polygonize_dialog.run", _exc)
 
-            # Optional max correction (as in user's script)
-            if do_fix_max:
-                try:
-                    br = _points_to_breaks(preset.points)
-                    target_max = float(br[-1])
-                    valid = np.isfinite(out) & (out >= 0)
-                    if np.any(valid):
-                        cur_max = float(np.nanmax(out[valid]))
-                        if 0 < cur_max < target_max:
-                            log_message(f"GeoChem: max correction {cur_max:g} -> {target_max:g}", level=Qgis.Info)
-                            out[valid] = (out[valid] / cur_max) * target_max
-                except Exception as _exc:
-                    log_swallowed("geochem_polygonize_dialog.run", _exc)
-
-            # Optional black line masking + fill
+            # Optional black line masking + fill. The fill mask is kept: the
+            # filled pixels are invented (nearest-neighbour IDW), yet they are
+            # counted as data by every statistic downstream, so their share is
+            # reported per run (metadata) and per zone (fill_pct).
+            fill_mask = None
             if do_inpaint:
                 log_message("GeoChem: masking dark linework…", level=Qgis.Info)
                 try:
@@ -1610,6 +1738,11 @@ value/class 래스터와 폴리곤을 생성합니다.
                     out[mask] = np.nan
                 except Exception as _exc:
                     log_swallowed("geochem_polygonize_dialog.run", _exc)
+                pre_nodata = None
+                try:
+                    pre_nodata = (~np.isfinite(out)) | (out == nodata_val)
+                except Exception as _exc:
+                    log_swallowed("geochem_polygonize_dialog.run (fill mask)", _exc)
                 log_message("GeoChem: filling masked pixels…", level=Qgis.Info)
                 out = _gdal_fill_nodata_nearestish(arr=out, nodata=float(nodata_val), max_search_dist_px=fill_dist)
                 if transparent is not None:
@@ -1624,6 +1757,12 @@ value/class 래스터와 폴리곤을 생성합니다.
                         out[low_nodata_mask] = nodata_val
                     except Exception as _exc:
                         log_swallowed("geochem_polygonize_dialog.run", _exc)
+                if pre_nodata is not None:
+                    try:
+                        fill_mask = pre_nodata & np.isfinite(out) & (out != nodata_val)
+                    except Exception as _exc:
+                        log_swallowed("geochem_polygonize_dialog.run (fill mask)", _exc)
+                        fill_mask = None
                 try:
                     total = int(out.size)
                     nd = int(np.count_nonzero(out == nodata_val))
@@ -1670,6 +1809,69 @@ value/class 래스터와 폴리곤을 생성합니다.
                             log_swallowed("geochem_polygonize_dialog.run", _exc)
                 except Exception as _exc:
                     log_swallowed("geochem_polygonize_dialog.run", _exc)
+
+            # Inpaint accounting, after the AOI mask so only counted pixels are
+            # in the percentage. Filled pixels are not measurements.
+            inpaint_meta = {"inpaint": bool(do_inpaint), "inpaint_distance_px": int(fill_dist)}
+            if do_inpaint:
+                try:
+                    if fill_mask is not None:
+                        fill_mask &= np.isfinite(out) & (out != nodata_val)
+                        n_fill = int(np.count_nonzero(fill_mask))
+                        n_valid = int(np.count_nonzero(np.isfinite(out) & (out != nodata_val)))
+                        pct_fill = (n_fill / n_valid * 100.0) if n_valid > 0 else 0.0
+                        inpaint_meta["inpaint_fill_px"] = n_fill
+                        inpaint_meta["inpaint_fill_pct"] = round(pct_fill, 3)
+                        log_message(
+                            f"GeoChem: inpaint filled {n_fill:,}/{n_valid:,} valid px ({pct_fill:.2f}%) - "
+                            "이 픽셀은 측정값이 아니라 주변 보간값이며 이후 통계에 그대로 포함됩니다",
+                            level=Qgis.Warning if pct_fill >= 5.0 else Qgis.Info,
+                        )
+                    else:
+                        log_message("GeoChem: inpaint fill mask unavailable; filled share not recorded", level=Qgis.Warning)
+                except Exception as _exc:
+                    log_swallowed("geochem_polygonize_dialog.run (inpaint accounting)", _exc)
+            self._last_geochem_run_params.update(inpaint_meta)
+
+            # Optional max correction: stretch every value so the clip's maximum
+            # becomes the legend maximum. Computed AFTER the AOI mask so pixels
+            # the user excluded (corners of the bounding rectangle) cannot drive
+            # the factor, and recorded in the layer metadata (fix_max), because
+            # when the clip genuinely lacks high values this invents them.
+            fix_max_meta = {"applied": False}
+            if do_fix_max:
+                try:
+                    br = _points_to_breaks(preset.points)
+                    target_max = float(br[-1])
+                    fix_max_meta["target_max"] = target_max
+                    out = out.astype(np.float32, copy=False)
+                    valid = np.isfinite(out) & (out != nodata_val) & (out >= 0)
+                    if np.any(valid):
+                        cur_max = float(np.nanmax(out[valid]))
+                        fix_max_meta["cur_max"] = cur_max
+                        if 0 < cur_max < target_max:
+                            factor = target_max / cur_max
+                            fix_max_meta["applied"] = True
+                            fix_max_meta["factor"] = round(factor, 6)
+                            log_message(
+                                f"GeoChem: max correction {cur_max:g} -> {target_max:g} (x{factor:.3f}) - "
+                                "클립 최댓값을 범례 최댓값으로 늘림 (모든 값에 적용)",
+                                level=Qgis.Warning,
+                            )
+                            push_message(
+                                self.iface,
+                                "GeoChem",
+                                f"최댓값 보정 적용: 모든 값에 x{factor:.2f} (클립 최댓값 {cur_max:g} -> 범례 최댓값 {target_max:g}). "
+                                "클립에 고농도 구간이 원래 없다면 결과가 실제보다 큽니다.",
+                                level=1,
+                                duration=9,
+                            )
+                            out[valid] = (out[valid] / cur_max) * target_max
+                        else:
+                            log_message(f"GeoChem: max correction not needed (cur_max={cur_max:g}, legend max={target_max:g})", level=Qgis.Info)
+                except Exception as _exc:
+                    log_swallowed("geochem_polygonize_dialog.run", _exc)
+            self._last_geochem_run_params["fix_max"] = fix_max_meta
 
             # Ensure explicit nodata
             out = out.astype(np.float32, copy=False)
@@ -1780,6 +1982,8 @@ value/class 래스터와 폴리곤을 생성합니다.
                             preset=preset,
                             unit=unit,
                             run_id=run_id,
+                            fill_mask=fill_mask if do_inpaint else None,
+                            inpaint_on=do_inpaint,
                         )
                     except Exception as e:
                         log_message(f"GeoChem: zonal stats failed: {e}", level=Qgis.Warning)
@@ -1969,6 +2173,40 @@ value/class 래스터와 폴리곤을 생성합니다.
             push_message(self.iface, "오류", f"처리 실패: {e}", level=2, duration=10)
         finally:
             restore_ui_focus(self)
+
+    def _canvas_pixel_size_in_raster_crs(self, *, dest_crs, raster_crs, centre_dest) -> float:
+        """Current canvas pixel size expressed in the raster CRS, measured at ``centre_dest``.
+
+        Transforms a segment one canvas width long (and one canvas height
+        long) through ``centre_dest`` (a QgsPointXY in the project CRS) into
+        the raster CRS and returns the geometric mean of the two per-pixel
+        lengths, which preserves the pixel count. Returns 0.0 when it cannot
+        be derived; the caller then falls back and says so.
+        """
+        try:
+            canvas = self.iface.mapCanvas()
+            mupp = float(canvas.mapUnitsPerPixel())
+            if not (mupp > 0) or not math.isfinite(mupp):
+                return 0.0
+            w_px = max(1, int(canvas.width() or 0))
+            h_px = max(1, int(canvas.height() or 0))
+            cx = float(centre_dest.x())
+            cy = float(centre_dest.y())
+            ct = QgsCoordinateTransform(dest_crs, raster_crs, QgsProject.instance())
+            half_w = mupp * w_px / 2.0
+            half_h = mupp * h_px / 2.0
+            p_l = ct.transform(QgsPointXY(cx - half_w, cy))
+            p_r = ct.transform(QgsPointXY(cx + half_w, cy))
+            p_b = ct.transform(QgsPointXY(cx, cy - half_h))
+            p_t = ct.transform(QgsPointXY(cx, cy + half_h))
+            dx = math.hypot(p_r.x() - p_l.x(), p_r.y() - p_l.y()) / float(w_px)
+            dy = math.hypot(p_t.x() - p_b.x(), p_t.y() - p_b.y()) / float(h_px)
+            if dx > 0 and dy > 0 and math.isfinite(dx) and math.isfinite(dy):
+                return float(math.sqrt(dx * dy))
+            return 0.0
+        except Exception as _exc:
+            log_swallowed("geochem_polygonize_dialog._canvas_pixel_size_in_raster_crs", _exc)
+            return 0.0
 
     def _export_raster_to_geotiff(self, *, raster: QgsRasterLayer, out_path: str, extent: QgsRectangle, width: int, height: int) -> bool:
         """Export the raster (including WMS) to a GeoTIFF.
@@ -2197,6 +2435,18 @@ value/class 래스터와 폴리곤을 생성합니다.
         if not np.any(sel):
             log_message("GeoChem: center skipped (no pixels after selection)", level=Qgis.Warning)
             return None
+        if rule in ("value", "power"):
+            # Label says w = max(value, 0): say how many pixels that clamp touched.
+            try:
+                n_neg = int(np.count_nonzero(sel & (v < np.float32(0.0))))
+            except Exception as _exc:
+                log_swallowed("geochem_polygonize_dialog._make_weighted_center_layer", _exc)
+                n_neg = 0
+            if n_neg > 0:
+                log_message(
+                    f"GeoChem: center rule={rule}: {n_neg:,} negative-valued pixels weighted 0 (w = max(value, 0)); pix_n still counts them",
+                    level=Qgis.Warning,
+                )
 
         sum_w = float(np.sum(w))
         pix_n = 0
@@ -2355,8 +2605,18 @@ value/class 래스터와 폴리곤을 생성합니다.
         preset: GeoChemPreset,
         unit: str,
         run_id: str,
+        fill_mask: Optional[np.ndarray] = None,
+        inpaint_on: bool = False,
     ) -> Optional[QgsVectorLayer]:
-        """Aggregate value/class rasters per zone polygon and return a new polygon memory layer."""
+        """Aggregate value/class rasters per zone polygon and return a new polygon memory layer.
+
+        Pixels are counted by the pixel-centre rule (as QGIS zonal statistics
+        does); a zone too small to contain any pixel centre falls back to the
+        touched pixels and says so in ``burn_rule``. ``zone_area`` carries the
+        polygon's own (ellipsoidal) area so the pixel-derived ``c*_area`` can
+        be checked against it. ``fill_mask`` marks inpainted (invented) pixels;
+        their share of the zone's valid pixels is written to ``fill_pct``.
+        """
         if zone_layer is None or (not isinstance(zone_layer, QgsVectorLayer)):
             return None
         if zone_layer.geometryType() != QgsWkbTypes.PolygonGeometry:
@@ -2439,6 +2699,10 @@ value/class 래스터와 폴리곤을 생성합니다.
             QgsField("val_max", QVariant.Double),
             QgsField("px_area", QVariant.Double),
             QgsField("area_unit", QVariant.String),
+            QgsField("zone_area", QVariant.Double),
+            QgsField("zarea_unit", QVariant.String),
+            QgsField("burn_rule", QVariant.String),
+            QgsField("fill_pct", QVariant.Double),
         ]
 
         n_classes = max(0, int(len(breaks) - 1))
@@ -2459,6 +2723,29 @@ value/class 래스터와 폴리곤을 생성합니다.
                 return None
         out_layer.updateFields()
 
+        # Geometric area of the zone polygon itself: ellipsoidal m2 when an
+        # ellipsoid is available (same setup as _decorate_polygons), otherwise
+        # planar in the raster CRS units, labelled in zarea_unit either way.
+        zone_dist = None
+        zone_area_unit = px_area_unit
+        try:
+            from qgis.core import QgsDistanceArea
+
+            zone_dist = QgsDistanceArea()
+            zone_dist.setSourceCrs(crs, QgsProject.instance().transformContext())
+            ell = (QgsProject.instance().ellipsoid() or "").strip()
+            if not ell or ell.upper() == "NONE":
+                ell = "WGS84"
+            zone_dist.setEllipsoid(ell)
+            if zone_dist.willUseEllipsoid():
+                zone_area_unit = "m2"
+            else:
+                zone_dist = None
+        except Exception as _exc:
+            log_swallowed("geochem_polygonize_dialog._make_zonal_stats_layer (zone area)", _exc)
+            zone_dist = None
+        n_burn_fallback = 0
+
         # Transform zones to raster CRS for rasterization
         ct = None
         try:
@@ -2473,8 +2760,18 @@ value/class 래스터와 폴리곤을 생성합니다.
             if zone_selected_only and zone_layer.selectedFeatureCount() > 0:
                 feats = zone_layer.selectedFeatures()
             else:
+                if zone_selected_only:
+                    push_message(
+                        self.iface,
+                        "경고",
+                        f"구역 레이어 '{zone_layer.name()}'에 선택된 피처가 없어 전체 피처로 구역 통계를 계산합니다.",
+                        level=1,
+                        duration=7,
+                    )
+                    log_message("GeoChem: zone selected-only requested but no selection; using all features", level=Qgis.Warning)
                 feats = zone_layer.getFeatures()
-        except Exception:
+        except Exception as _exc:
+            log_swallowed("geochem_polygonize_dialog._make_zonal_stats_layer", _exc)
             feats = zone_layer.getFeatures()
 
         added = 0
@@ -2545,6 +2842,9 @@ value/class 래스터와 폴리곤을 생성합니다.
                 continue
 
             sub_gt = _window_geotransform(geotransform, xoff, yoff)
+            # Pixel-centre rule (all_touched=False), as QGIS zonal statistics:
+            # ALL_TOUCHED dilated every zone by up to a pixel on each side.
+            burn_rule = "cell_centre"
             try:
                 mask = _gdal_rasterize_wkt_mask(
                     geom_wkt=str(geom_r.asWkt()),
@@ -2552,11 +2852,32 @@ value/class 래스터와 폴리곤을 생성합니다.
                     ysize=int(ysize),
                     geotransform=sub_gt,
                     projection_wkt=str(projection_wkt or ""),
+                    all_touched=False,
                 )
-            except Exception:
+            except Exception as _exc:
+                log_swallowed("geochem_polygonize_dialog._make_zonal_stats_layer (rasterize)", _exc)
                 mask = None
             if mask is None:
                 continue
+            if not np.any(mask):
+                # Zone smaller than a pixel (no pixel centre inside): use the
+                # touched pixels rather than drop the zone, and say so.
+                try:
+                    mask_touch = _gdal_rasterize_wkt_mask(
+                        geom_wkt=str(geom_r.asWkt()),
+                        xsize=int(xsize),
+                        ysize=int(ysize),
+                        geotransform=sub_gt,
+                        projection_wkt=str(projection_wkt or ""),
+                        all_touched=True,
+                    )
+                except Exception as _exc:
+                    log_swallowed("geochem_polygonize_dialog._make_zonal_stats_layer (rasterize fallback)", _exc)
+                    mask_touch = None
+                if mask_touch is not None and np.any(mask_touch):
+                    mask = mask_touch
+                    burn_rule = "all_touched"
+                    n_burn_fallback += 1
 
             v_sub = values[yoff:yoff + ysize, xoff:xoff + xsize]
             c_sub = classes[yoff:yoff + ysize, xoff:xoff + xsize]
@@ -2577,6 +2898,30 @@ value/class 래스터와 폴리곤을 생성합니다.
                 log_swallowed("geochem_polygonize_dialog._make_zonal_stats_layer", _exc)
             pix_val = int(np.count_nonzero(valid)) if pix_in > 0 else 0
             cov_pct = float(pix_val) * 100.0 / float(pix_in) if pix_in > 0 else 0.0
+
+            zone_area = None
+            try:
+                if zone_dist is not None:
+                    zone_area = float(zone_dist.measureArea(out_geom))
+                else:
+                    zone_area = float(geom_r.area())
+                if not math.isfinite(zone_area):
+                    zone_area = None
+            except Exception as _exc:
+                log_swallowed("geochem_polygonize_dialog._make_zonal_stats_layer (zone area)", _exc)
+                zone_area = None
+
+            # Share of the zone's valid pixels that were inpainted (invented).
+            # NULL when inpainting was on but the mask is unavailable.
+            fill_pct = None if inpaint_on else 0.0
+            if fill_mask is not None:
+                try:
+                    f_inside = fill_mask[yoff:yoff + ysize, xoff:xoff + xsize][inside]
+                    n_fill = int(np.count_nonzero(f_inside & valid)) if f_inside.shape == valid.shape else 0
+                    fill_pct = float(n_fill) * 100.0 / float(pix_val) if pix_val > 0 else 0.0
+                except Exception as _exc:
+                    log_swallowed("geochem_polygonize_dialog._make_zonal_stats_layer (fill_pct)", _exc)
+                    fill_pct = None
 
             v_mean = None
             v_std = None
@@ -2633,6 +2978,10 @@ value/class 래스터와 폴리곤을 생성합니다.
                 out_ft["val_max"] = float(v_max) if v_max is not None else None
                 out_ft["px_area"] = float(px_area) if px_area > 0 else None
                 out_ft["area_unit"] = px_area_unit
+                out_ft["zone_area"] = float(zone_area) if zone_area is not None else None
+                out_ft["zarea_unit"] = zone_area_unit
+                out_ft["burn_rule"] = burn_rule
+                out_ft["fill_pct"] = float(fill_pct) if fill_pct is not None else None
 
                 if cls_counts is not None:
                     for cid in range(1, n_classes + 1):
@@ -2655,6 +3004,17 @@ value/class 래스터와 폴리곤을 생성합니다.
                 continue
 
         out_layer.updateExtents()
+        self._last_geochem_zonal_meta = {
+            "zone_burn_rule": "cell_centre",
+            "zone_burn_fallback_n": int(n_burn_fallback),
+            "zone_area_unit": str(zone_area_unit),
+        }
+        if n_burn_fallback > 0:
+            log_message(
+                f"GeoChem zonal: {n_burn_fallback}개 구역이 픽셀보다 작아 닿은 픽셀 기준(all_touched)으로 집계했습니다"
+                " (burn_rule 필드 참조; zone_area와 c*_area 합을 비교하세요)",
+                level=Qgis.Warning,
+            )
         try:
             log_message(f"GeoChem: zonal stats features={added}", level=Qgis.Info)
         except Exception as _exc:
@@ -3075,17 +3435,24 @@ value/class 래스터와 폴리곤을 생성합니다.
                 elif lyr is zone_stats_layer:
                     kind = "zonal_stats"
 
+                params = {
+                    "preset_key": str(getattr(preset, "key", "") or ""),
+                    "preset_label": str(getattr(preset, "label", "") or ""),
+                    "unit": str(unit or ""),
+                }
+                # Resolution and corrections travel with the rasters; the
+                # zonal layer records its pixel-counting rule.
+                if kind in ("value_raster", "class_raster"):
+                    params.update(dict(getattr(self, "_last_geochem_run_params", None) or {}))
+                elif kind == "zonal_stats":
+                    params.update(dict(getattr(self, "_last_geochem_zonal_meta", None) or {}))
                 set_archtoolkit_layer_metadata(
                     lyr,
                     tool_id="geochem",
                     run_id=str(run_id),
                     kind=kind,
                     units=units0,
-                    params={
-                        "preset_key": str(getattr(preset, "key", "") or ""),
-                        "preset_label": str(getattr(preset, "label", "") or ""),
-                        "unit": str(unit or ""),
-                    },
+                    params=params,
                 )
             except Exception as _exc:
                 log_swallowed("geochem_polygonize_dialog._add_to_project", _exc)

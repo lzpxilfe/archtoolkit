@@ -86,6 +86,14 @@ PPA_RNG = "rng"
 VIS_RULE_MUTUAL = "mutual"
 VIS_RULE_EITHER = "either"
 
+# LOS earth-curvature / atmospheric-refraction drop: cc * d^2 / (2R), the same
+# formula and constants as viewshed_dialog (and gdal_viewshed -cc).
+# cc = 1 - refraction coefficient (default k = 0.13 -> cc = 0.87), cc = 0 = flat.
+LOS_EARTH_RADIUS_M = 6371000.0
+LOS_DEFAULT_REFRACTION_K = 0.13
+LOS_SAMPLE_CAP = 5000
+LOS_SAMPLE_MIN = 80
+
 
 @dataclass(frozen=True)
 class _Node:
@@ -230,6 +238,8 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
 <ul>
   <li>LOS는 후보쌍 수가 급증할 수 있습니다. <b>후보 k</b>·<b>최대거리</b>로 제한하는 것을 권장합니다.</li>
   <li>폴리곤 유적은 대표점을 사용합니다(표면상 점/중심점). 필요하면 경계 샘플링 옵션을 켜세요.</li>
+  <li>LOS 판정에는 지구 곡률·대기 굴절 보정이 기본 적용됩니다(굴절 계수 0.13, 가시권 분석 도구와 같은 식).
+      평면 시선으로 판정하려면 <b>지구 곡률 보정</b> 체크를 해제하세요. 설정값은 결과 레이어 메타데이터에 기록됩니다.</li>
   <li>더 자세한 해석은 버튼행의 <b>해석 가이드</b>를 참고하세요.</li>
 </ul>
 """
@@ -246,10 +256,11 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
             "- 지형(DEM) 비용을 쓰지 않고, 유클리드 거리(직선거리)로 최근접 k개를 연결합니다.\n"
             "- k가 작을수록(예: 3~5) 현실적인 '이웃망' 형태가 되며, k가 크면 간선이 급격히 늘어납니다.\n"
             "- 본 도구는 SciPy(KDTree) 같은 외부 의존성 없이 동작합니다.\n\n"
-            "Ref:\n"
-            "- Terrell (1977) Human Biogeography in the Solomon Islands.\n"
-            "- Brughmans & Peeples (2017) Trends in archaeological network research.\n"
-            "- Amati, Shafie & Brandes (2018) Reconstructing Archaeological Networks with Structural Holes."
+            "Ref (REFERENCES.md 구분: (B) 직접 구현, (C) 해석/배경 참고):\n"
+            "- (B) 구현: 유클리드 k-NN / 반경 / Delaunay-Gabriel-RNG 근접 그래프.\n"
+            "- (C) Terrell (1977) Human Biogeography in the Solomon Islands.\n"
+            "- (C) Brughmans & Peeples (2017) Trends in archaeological network research.\n"
+            "- (C) Amati, Shafie & Brandes (2018) Reconstructing Archaeological Networks with Structural Holes."
         )
 
         tooltip_vis = (
@@ -257,11 +268,15 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
             "- DEM 기반 Line of Sight(가시선)으로 두 유적 사이에 지형이 시선을 가리는지 샘플링하여 판정합니다.\n"
             "- 결과 레이어는 '보임/안보임'을 색상으로 구분하고, 거리(km)는 속성(dist_km)으로 저장됩니다.\n"
             "- 계산량이 커질 수 있으므로 '후보 k'와 '최대거리'로 후보 쌍을 줄이는 것을 권장합니다.\n"
-            "- 관측/대상 높이는 지표면(DEM) 위 추가 높이(m)입니다.\n\n"
-            "Ref:\n"
-            "- Van Dyke et al. (2016) Intervisibility in the Chacoan world (viewsheds + viewnets).\n"
-            "- Gillings & Wheatley (2001) unresolved issues in archaeological visibility analysis.\n"
-            "- Turner et al. (2001) From isovists to visibility graphs (VGA)."
+            "- 관측/대상 높이는 지표면(DEM) 위 추가 높이(m)입니다.\n"
+            "- 곡률·굴절 보정: 기본 적용, 계수 0.13 (가시권 분석 도구와 같은 식 cc*d^2/(2R), cc = 1 - 계수).\n"
+            "  장거리 쌍에서는 보정 여부에 따라 판정이 달라질 수 있습니다(25 km에서 약 10 m). 끄려면 '지구 곡률 보정' 해제.\n\n"
+            "Ref (REFERENCES.md 구분: (B) 직접 구현, (C) 해석/배경 참고):\n"
+            "- (B) 구현: DEM 등간격 샘플링 LOS + 곡률·굴절 보정 + 네트워크 지표(degree/component/centrality).\n"
+            "- (C) Van Dyke et al. (2016) Intervisibility in the Chacoan world (viewsheds + viewnets).\n"
+            "- (C) Gillings & Wheatley (2001) unresolved issues in archaeological visibility analysis.\n"
+            "- (C) 참고: Turner et al. (2001) 격자 기반 VGA(visibility graph analysis); 이 도구는 유적 간 상호가시성 네트워크이며\n"
+            "  VGA 지표(visual integration 등)는 계산하지 않습니다."
         )
 
         # Per-item tooltips (combobox dropdown)
@@ -410,7 +425,10 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                 "기본: degree(연결 수), component(연결된 덩어리)."
             )
             self.chkCloseness.setToolTip("Closeness centrality(근접 중심성)를 계산합니다. 노드가 많으면 느릴 수 있습니다.")
-            self.chkBetweenness.setToolTip("Betweenness centrality(매개 중심성)를 계산합니다. 노드가 많으면 매우 느릴 수 있습니다.")
+            self.chkBetweenness.setToolTip(
+                "Betweenness centrality(매개 중심성)를 계산합니다. 노드가 많으면 매우 느릴 수 있습니다.\n"
+                "betweenness는 원시 쌍 개수, betw_norm은 (n-1)(n-2)/2로 나눈 정규화값입니다."
+            )
             self.cmbVisEdgeRule.setToolTip(
                 "가시성 네트워크에서 '연결'로 간주할 규칙입니다.\n"
                 "- Mutual: A↔B 모두 보일 때만 연결\n"
@@ -498,6 +516,39 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                         self.verticalLayout.addWidget(self.groupSna)
                     except Exception as _exc:
                         log_swallowed("tools/spatial_network_dialog.py:499 (_ensure_extra_widgets)", _exc)
+        except Exception as _exc:
+            log_swallowed("spatial_network_dialog._ensure_extra_widgets", _exc)
+
+        # --- Visibility: earth curvature / refraction (same physics as viewshed_dialog) ---
+        try:
+            if not hasattr(self, "chkVisCurvature"):
+                self.chkVisCurvature = QtWidgets.QCheckBox("지구 곡률 보정", self.groupVisibility)
+                self.chkVisCurvature.setObjectName("chkVisCurvature")
+                self.chkVisCurvature.setChecked(True)
+
+                self.lblVisRefraction = QtWidgets.QLabel("굴절 계수", self.groupVisibility)
+                self.lblVisRefraction.setObjectName("lblVisRefraction")
+                self.spinVisRefraction = QtWidgets.QDoubleSpinBox(self.groupVisibility)
+                self.spinVisRefraction.setObjectName("spinVisRefraction")
+                self.spinVisRefraction.setDecimals(2)
+                self.spinVisRefraction.setMinimum(0.0)
+                self.spinVisRefraction.setMaximum(1.0)
+                self.spinVisRefraction.setSingleStep(0.01)
+                self.spinVisRefraction.setValue(LOS_DEFAULT_REFRACTION_K)
+
+                try:
+                    row = int(self.gridLayout_Vis.rowCount())
+                except Exception as _exc:
+                    log_swallowed("spatial_network_dialog._ensure_extra_widgets", _exc)
+                    row = 7
+                self.gridLayout_Vis.addWidget(self.chkVisCurvature, row, 0, 1, 2)
+                self.gridLayout_Vis.addWidget(self.lblVisRefraction, row, 2)
+                self.gridLayout_Vis.addWidget(self.spinVisRefraction, row, 3)
+
+                try:
+                    self.chkVisCurvature.toggled.connect(self._update_visibility_controls)
+                except Exception as _exc:
+                    log_swallowed("spatial_network_dialog._ensure_extra_widgets", _exc)
         except Exception as _exc:
             log_swallowed("spatial_network_dialog._ensure_extra_widgets", _exc)
 
@@ -598,13 +649,27 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                 "노드가 많으면 시간이 오래 걸릴 수 있습니다."
             )
             self.chkPolyBoundaryVis.setToolTip(
-                "입력 레이어가 폴리곤일 때, 대표점 1개가 아니라 폴리곤 경계를 샘플링해\n"
-                "가시성 비율(vis_ratio, 0~1)을 계산합니다. (느릴 수 있음)"
+                "입력 레이어가 폴리곤일 때, 관측 폴리곤의 경계 샘플점 여러 곳에서 상대 유적의 대표점 1개가 보이는지 검사합니다.\n"
+                "vis_ratio_ab = A의 경계 샘플 중 B의 대표점이 보이는 비율(0-1). B가 얼마나 보이는가가 아닙니다.\n"
+                "vis_ab는 샘플 1개라도 보이면 1입니다. (느릴 수 있음)"
             )
             self.spinPolyBoundaryStep.setToolTip("폴리곤 경계에서 샘플 점을 뽑는 간격(m)입니다.")
             self.spinPolyMaxBoundaryPts.setToolTip("폴리곤 1개당 경계 샘플 점의 최대 개수(속도 제한)입니다.")
         except Exception as _exc:
             log_swallowed("tools/spatial_network_dialog.py:606 (_update_ppa_controls)", _exc)
+
+        try:
+            self.chkVisCurvature.setToolTip(
+                "지구 곡률 보정(기본 켬): 관측점에서 수평거리 d인 샘플 지형고도(대상점 포함)에서 cc*d^2/(2R)을 뺍니다.\n"
+                "R = 6,371,000 m, cc = 1 - 굴절 계수. 가시권 분석 도구 / gdal_viewshed -cc 와 같은 식입니다.\n"
+                "끄면 평면 시선(cc = 0)으로 판정하며, 장거리 쌍에서 '보임'이 늘어날 수 있습니다(25 km에서 약 10 m 차이)."
+            )
+            self.spinVisRefraction.setToolTip(
+                "대기 굴절 계수 k (기본 0.13, 표준 대기). cc = 1 - k 로 곡률 보정량을 줄입니다.\n"
+                "0이면 순수 곡률만 적용, 1이면 보정 없음과 같습니다. '지구 곡률 보정'을 켠 경우에만 쓰입니다."
+            )
+        except Exception as _exc:
+            log_swallowed("spatial_network_dialog._update_ppa_controls", _exc)
 
     def _interpretation_guide_html(self) -> str:
         mode = None
@@ -644,7 +709,14 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
             <ul>
               <li><b>Edge layer</b>: the <code>status</code> field distinguishes mutually visible, one-way visible, mutually hidden, and failed samples.</li>
               <li><b>Directionality</b>: <code>vis_ab</code> and <code>vis_ba</code> store A->B and B->A separately.</li>
-              <li><b>Polygon input</b>: if boundary sampling is enabled, fields like <code>vis_ratio_ab</code> show how much of a target is visible.</li>
+              <li><b>Polygon input</b>: with boundary sampling, <code>vis_ratio_ab</code> is the share of A's boundary samples
+                  from which B's representative point is visible (not how much of B is visible);
+                  <code>vis_ab</code> is 1 if any sample sees it.</li>
+              <li><b>Failed samples</b>: pairs that could not be tested (DEM NoData) get <code>status</code> = failed;
+                  the node layer's <code>fail_deg</code> counts them, so degree 0 can mean untested rather than hidden.</li>
+              <li><b>Curvature / refraction</b>: applied by default (refraction coefficient 0.13; the same drop
+                  cc*d^2/(2R) as the viewshed tool). Uncheck <b>earth curvature</b> for a flat sight line.
+                  The setting, heights, step and distance limits are stored in the layer metadata (params_json).</li>
             </ul></p>
 
             <p><b>How can I reduce runtime?</b><br>
@@ -665,7 +737,9 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
               <li><code>closeness</code>: how near a node is to the rest of the network
                   (Wasserman&ndash;Faust corrected: scores are scaled by the share of the
                   network the node can reach, so isolated pairs no longer score highest).</li>
-              <li><code>betweenness</code>: how strongly a node acts as a bridge between others.</li>
+              <li><code>betweenness</code>: how strongly a node acts as a bridge between others. Raw Brandes pair counts
+                  (undirected, halved), not normalised; use <code>betw_norm</code> (= betweenness / ((n-1)(n-2)/2)) to compare
+                  with NetworkX/Gephi defaults or across networks of different size.</li>
             </ul>
             """
 
@@ -674,7 +748,9 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
             <ul>
               <li>Proximity graphs: Delaunay (1934), Gabriel &amp; Sokal (1969), Toussaint (1980)</li>
               <li>Archaeological network review: Brughmans &amp; Peeples (2017)</li>
-              <li>Visibility / visibility graphs: Gillings &amp; Wheatley (2001), Turner et al. (2001), Van Dyke et al. (2016)</li>
+              <li>Intervisibility networks (context): Gillings &amp; Wheatley (2001), Van Dyke et al. (2016)</li>
+              <li>(C) Background only: Turner et al. (2001) grid-based VGA. This tool builds a site-to-site
+                  intervisibility network; it does not compute VGA measures (visual integration etc.).</li>
             </ul>
             """
 
@@ -721,7 +797,13 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
         <ul>
           <li><b>Edge 레이어(LOS)</b>: <code>status</code>로 “상호 보임/단방향 보임/상호 안보임/샘플 실패”를 구분합니다.</li>
           <li><b>방향성</b>: <code>vis_ab</code>, <code>vis_ba</code> (0/1)로 A→B, B→A를 따로 기록합니다.</li>
-          <li><b>폴리곤 입력</b>: 경계 샘플링을 켜면 <code>vis_ratio_ab</code>(0~1)처럼 “얼마나 보이는가”를 비율로 확인할 수 있습니다.</li>
+          <li><b>폴리곤 입력</b>: 경계 샘플링을 켜면 <code>vis_ratio_ab</code>(0-1)는 “A의 경계 샘플 중 B의 대표점이 보이는 비율”입니다
+              (B가 얼마나 보이는가가 아님). <code>vis_ab</code>는 샘플 1개라도 보이면 1입니다.</li>
+          <li><b>샘플 실패</b>: DEM NoData 등으로 검사하지 못한 쌍은 <code>status</code>=“샘플 실패”이며,
+              노드 레이어의 <code>fail_deg</code>가 그 개수입니다. degree 0은 “안 보임”이 아니라 “검사 불가”일 수 있습니다.</li>
+          <li><b>곡률·굴절 보정</b>: 기본 적용, 계수 0.13 (가시권 분석 도구와 같은 식 cc·d²/(2R)).
+              <b>지구 곡률 보정</b>을 끄면 평면 시선으로 판정합니다. 보정 설정·높이·샘플 간격·거리 제한은
+              결과 레이어 메타데이터(params_json)에 기록됩니다.</li>
         </ul></p>
 
         <p><b>연산량 줄이는 팁</b><br>
@@ -742,7 +824,9 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
           <li><code>closeness</code>: 전체에 ‘가까운’ 정도. Wasserman–Faust 보정 적용:
               도달 가능한 노드 비율(r/(n−1))을 곱해, 고립된 소규모 컴포넌트가
               만점을 받는 왜곡을 제거했습니다. (노드가 많으면 느릴 수 있음)</li>
-          <li><code>betweenness</code>: 다른 노드 사이를 ‘중개’하는 정도(매우 느릴 수 있어 큰 데이터는 자동 스킵될 수 있음).</li>
+          <li><code>betweenness</code>: 다른 노드 사이를 ‘중개’하는 정도(매우 느릴 수 있어 큰 데이터는 자동 스킵될 수 있음).
+              값은 정규화하지 않은 Brandes 원시 최단경로 쌍 개수(무방향 x0.5)입니다. NetworkX/Gephi 기본값과 비교하거나
+              크기가 다른 네트워크끼리 비교하려면 <code>betw_norm</code>(= betweenness / ((n-1)(n-2)/2)) 필드를 쓰세요.</li>
         </ul>
         """
 
@@ -751,7 +835,8 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
         <ul>
           <li>근접 그래프: Delaunay(1934), Gabriel &amp; Sokal(1969), Toussaint(1980)</li>
           <li>고고학 네트워크 리뷰: Brughmans &amp; Peeples(2017)</li>
-          <li>가시성/가시성 그래프: Gillings &amp; Wheatley(2001), Turner et al.(2001), Van Dyke et al.(2016)</li>
+          <li>상호가시성 네트워크(해석 맥락): Gillings &amp; Wheatley(2001), Van Dyke et al.(2016)</li>
+          <li>(C) 참고: Turner et al.(2001) 격자 기반 VGA; 이 도구는 유적 간 상호가시성 네트워크이며 VGA 지표는 계산하지 않습니다.</li>
         </ul>
         """
 
@@ -916,6 +1001,14 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                 getattr(self, w).setVisible(show_poly and poly_enabled)
             except Exception as _exc:
                 log_swallowed("tools/spatial_network_dialog.py:917 (_update_visibility_controls)", _exc)
+
+        # The refraction coefficient only matters while curvature is applied.
+        try:
+            curv_on = bool(self.chkVisCurvature.isChecked())
+            self.spinVisRefraction.setEnabled(curv_on)
+            self.lblVisRefraction.setEnabled(curv_on)
+        except Exception as _exc:
+            log_swallowed("spatial_network_dialog._update_visibility_controls", _exc)
 
     def _on_site_layer_changed(self, layer):
         # Populate name fields (string-ish fields only)
@@ -1268,6 +1361,21 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
         max_dist = float(self.spinMaxDist.value())
         step_m = float(self.spinSampleStep.value())
 
+        # Curvature/refraction controls are created at runtime; default to the
+        # viewshed tool's behaviour (curvature on, k = 0.13) if they are missing.
+        curvature_on = True
+        refraction_k = LOS_DEFAULT_REFRACTION_K
+        try:
+            curvature_on = bool(self.chkVisCurvature.isChecked())
+        except Exception as _exc:
+            log_swallowed("spatial_network_dialog.run_analysis", _exc)
+            curvature_on = True
+        try:
+            refraction_k = float(self.spinVisRefraction.value())
+        except Exception as _exc:
+            log_swallowed("spatial_network_dialog.run_analysis", _exc)
+            refraction_k = LOS_DEFAULT_REFRACTION_K
+
         make_nodes = bool(getattr(self, "chkCreateNodeMetrics", None) and self.chkCreateNodeMetrics.isChecked())
         do_close = bool(getattr(self, "chkCloseness", None) and self.chkCloseness.isChecked())
         do_betw = bool(getattr(self, "chkBetweenness", None) and self.chkBetweenness.isChecked())
@@ -1290,6 +1398,10 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
             compute_closeness=do_close,
             compute_betweenness=do_betw,
             vis_edge_rule=vis_rule,
+            curvature=curvature_on,
+            refraction_coeff=refraction_k,
+            poly_boundary_step_m=boundary_step,
+            poly_boundary_max_points=boundary_max_pts,
         )
 
     def _run_ppa(
@@ -1395,6 +1507,17 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
         push_message(self.iface, "PPA", f"근접성 네트워크 생성 중... (노드 {n}, 간선 {len(edges)})", level=0, duration=4)
         QtWidgets.QApplication.processEvents()
 
+        # Run parameters recorded on both output layers (reproducibility).
+        ppa_params: Dict[str, Any] = {
+            "network": "ppa",
+            "method": str(method),
+            "k": (int(k) if method == PPA_KNN else None),
+            "mutual_only": (bool(mutual_only) if method == PPA_KNN else None),
+            "max_dist_m": float(max_dist_m),
+            "n_nodes": int(n),
+            "n_edges": int(len(edges)),
+        }
+
         edge_layer, run_group, run_id = self._add_edge_layer(
             nodes=nodes,
             edges=sorted(edges),
@@ -1402,6 +1525,7 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
             color=QColor(80, 80, 80, 220),
             add_dist=True,
             crs_authid=crs_authid,
+            extra_params=ppa_params,
         )
 
         # Node metrics (SNA) layer
@@ -1415,6 +1539,7 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                 title="PPA_Nodes",
                 compute_closeness=compute_closeness,
                 compute_betweenness=compute_betweenness,
+                extra_params=ppa_params,
             )
 
         # Summary
@@ -1557,26 +1682,50 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
             return set()
 
         # Map vertex coordinates back to node indices (rounded)
-        lookup: Dict[Tuple[int, int], int] = {}
+        # Several sites can share one coordinate (a duplicated row, or two
+        # records of one complex). The triangulation sees one vertex, so keep
+        # every node index per key and let co-located nodes share the edges
+        # instead of publishing the extra ones as isolated.
+        lookup: Dict[Tuple[int, int], List[int]] = {}
         for i, nd in enumerate(nodes):
             key = (int(round(float(nd.x) * 1000.0)), int(round(float(nd.y) * 1000.0)))
-            lookup[key] = int(i)
+            lookup.setdefault(key, []).append(int(i))
+        dup_groups = [ids for ids in lookup.values() if len(ids) > 1]
+        if dup_groups:
+            n_dup = int(sum(len(ids) - 1 for ids in dup_groups))
+            log_message(
+                f"PPA: {n_dup} node(s) share a coordinate (within 1 mm) at {len(dup_groups)} location(s); "
+                "co-located nodes share the same Delaunay/Gabriel/RNG edges.",
+                level=Qgis.Warning,
+            )
+            try:
+                push_message(
+                    self.iface,
+                    "경고",
+                    f"좌표가 같은 노드 {n_dup}개({len(dup_groups)}개 지점): 겹친 노드끼리 같은 이웃 간선을 공유합니다(고립 아님).",
+                    level=1,
+                    duration=8,
+                )
+            except Exception as _exc:
+                log_swallowed("spatial_network_dialog._ppa_delaunay_edges", _exc)
 
         coords = np.array([(float(nd.x), float(nd.y)) for nd in nodes], dtype=np.float64)
 
-        def _idx_for_xy(x: float, y: float) -> Optional[int]:
+        def _idxs_for_xy(x: float, y: float) -> List[int]:
             key = (int(round(float(x) * 1000.0)), int(round(float(y) * 1000.0)))
             if key in lookup:
-                return int(lookup[key])
+                return list(lookup[key])
             # Fallback: nearest
             try:
                 d2 = (coords[:, 0] - float(x)) ** 2 + (coords[:, 1] - float(y)) ** 2
                 j = int(np.argmin(d2))
                 if float(d2[j]) <= 1e-6:
-                    return j
-            except Exception:
-                return None
-            return None
+                    jkey = (int(round(float(coords[j, 0]) * 1000.0)), int(round(float(coords[j, 1]) * 1000.0)))
+                    return list(lookup.get(jkey, [j]))
+            except Exception as _exc:
+                log_swallowed("spatial_network_dialog._ppa_delaunay_edges", _exc)
+                return []
+            return []
 
         edges: Set[Tuple[int, int]] = set()
         for ft in tri_layer.getFeatures():
@@ -1596,19 +1745,26 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                 if len(ring) >= 2 and ring[0] == ring[-1]:
                     ring = ring[:-1]
 
-                idxs: List[int] = []
+                groups: List[List[int]] = []
+                seen_groups: Set[Tuple[int, ...]] = set()
                 for p in ring:
-                    j = _idx_for_xy(p.x(), p.y())
-                    if j is not None:
-                        idxs.append(int(j))
-                idxs = list(dict.fromkeys(idxs))  # stable unique
-                if len(idxs) < 3:
+                    g_ids = _idxs_for_xy(p.x(), p.y())
+                    if not g_ids:
+                        continue
+                    gk = tuple(g_ids)
+                    if gk in seen_groups:
+                        continue
+                    seen_groups.add(gk)
+                    groups.append(g_ids)
+                if len(groups) < 3:
                     continue
-                a, b, c = idxs[0], idxs[1], idxs[2]
-                for u, v in ((a, b), (b, c), (c, a)):
-                    uu, vv = (u, v) if u < v else (v, u)
-                    if uu != vv:
-                        edges.add((uu, vv))
+                ga, gb, gc = groups[0], groups[1], groups[2]
+                for gu, gv in ((ga, gb), (gb, gc), (gc, ga)):
+                    for u in gu:
+                        for v in gv:
+                            uu, vv = (u, v) if u < v else (v, u)
+                            if uu != vv:
+                                edges.add((uu, vv))
             except Exception as _exc:
                 log_swallowed("spatial_network_dialog._ppa_delaunay_edges", _exc)
                 log_swallowed("tools/spatial_network_dialog.py:1575 (_ppa_delaunay_edges)", _exc)
@@ -1675,6 +1831,7 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
         compute_betweenness: bool,
         extra_node_fields: Optional[List[QgsField]] = None,
         extra_values_by_node: Optional[Dict[int, Dict[str, Any]]] = None,
+        extra_params: Optional[Dict[str, Any]] = None,
     ):
         n = int(len(nodes))
         if n <= 0:
@@ -1735,11 +1892,16 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
             fields.append(QgsField("closeness", QVariant.Double))
         if compute_betweenness:
             fields.append(QgsField("betweenness", QVariant.Double))
+            fields.append(QgsField("betw_norm", QVariant.Double))
         if extra_node_fields:
             fields.extend(extra_node_fields)
         pr.addAttributes(fields)
         layer.updateFields()
 
+        # Raw Brandes pair counts scaled by the number of unordered pairs that
+        # exclude i, so networks of different size and NetworkX/Gephi defaults
+        # become comparable.
+        betw_pairs = (float(n - 1) * float(n - 2)) / 2.0 if n > 2 else 0.0
         feats = []
         for i, nd in enumerate(nodes):
             f = QgsFeature(layer.fields())
@@ -1757,8 +1919,10 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
             if compute_betweenness and betweenness is not None:
                 try:
                     f["betweenness"] = float(betweenness[i])
+                    f["betw_norm"] = (float(betweenness[i]) / betw_pairs) if betw_pairs > 0 else 0.0
                 except Exception:
                     f["betweenness"] = 0.0
+                    f["betw_norm"] = 0.0
             if extra_values_by_node and i in extra_values_by_node:
                 for k, v in (extra_values_by_node.get(i) or {}).items():
                     try:
@@ -1773,17 +1937,29 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
         # Styling: degree-based graduated colors (simple, readable)
         try:
             vmax = int(max(deg) if deg else 0)
+            vmin = int(min(deg) if deg else 0)
             if vmax <= 0:
                 sym = QgsMarkerSymbol.createSimple({"name": "circle", "color": "255,0,0,200", "size": "3"})
                 layer.setRenderer(QgsSingleSymbolRenderer(sym))
+            elif vmax == vmin:
+                # Every node has the same degree (regular graph, e.g. K4 from a
+                # mutual 3-NN on four sites). A 5-class ramp with step >= 1 would
+                # end in an inverted "v+4 - v" class; one exact-value category
+                # keeps the exported legend honest.
+                sym = QgsMarkerSymbol.createSimple({"name": "circle", "color": "255,120,60,220", "size": "4"})
+                cat = QgsRendererCategory(int(vmax), sym, f"{int(vmax)} (모든 노드 동일)")
+                layer.setRenderer(QgsCategorizedSymbolRenderer("degree", [cat]))
             else:
-                classes = 5
-                vmin = int(min(deg) if deg else 0)
-                step = max(1.0, (float(vmax) - float(vmin)) / float(classes))
+                # Never more classes than integer degree values in the span, so
+                # every class stays inside [vmin, vmax] and hi >= lo.
+                span = float(vmax) - float(vmin)
+                classes = int(max(1, min(5, int(round(span)))))
+                step = span / float(classes)
                 ranges: List[QgsRendererRange] = []
                 for i in range(classes):
                     lo = float(vmin) + float(i) * step
                     hi = float(vmax) if i == classes - 1 else (float(vmin) + float(i + 1) * step)
+                    hi = max(float(hi), float(lo))
                     t = 0.0 if classes <= 1 else float(i) / float(classes - 1)
                     r = int(255)
                     g = int(round(240.0 * (1.0 - t)))
@@ -1820,13 +1996,23 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
 
         project = QgsProject.instance()
         try:
+            node_params: Dict[str, Any] = dict(extra_params or {})
+            node_params.update(
+                {
+                    "title": str(title or ""),
+                    "n_nodes": int(n),
+                    "n_edges": int(len(edges)),
+                    "closeness": bool(compute_closeness),
+                    "betweenness": bool(compute_betweenness),
+                }
+            )
             set_archtoolkit_layer_metadata(
                 layer,
                 tool_id="spatial_network",
                 run_id=str(run_id),
                 kind="nodes_metrics",
                 units="",
-                params={"title": str(title or "")},
+                params=node_params,
             )
         except Exception as _exc:
             log_swallowed("spatial_network_dialog._add_node_metrics_layer", _exc)
@@ -1854,7 +2040,15 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
         obs_height: float,
         tgt_height: float,
         sample_step_m: float,
+        curvature_cc: float = 0.87,
     ) -> Optional[bool]:
+        """DEM line-of-sight test from (ax, ay) to (bx, by).
+
+        curvature_cc: earth-curvature/refraction coefficient, as gdal_viewshed
+        -cc: every sampled terrain height (target included) is lowered by
+        cc * d^2 / (2R) with d the horizontal distance from the observer.
+        Default 0.87 = 1 - 0.13 (standard refraction); 0 = flat sight line.
+        """
         dx = bx - ax
         dy = by - ay
         total_dist = math.hypot(dx, dy)
@@ -1873,8 +2067,11 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
         # Network use-case: keep sampling reasonable - but say so when the
         # ceiling coarsens a long sight line past the requested step.
         num_samples = int(total_dist / step) if step > 0 else 200
-        num_samples = max(80, min(num_samples, 5000))
+        num_samples = max(LOS_SAMPLE_MIN, min(num_samples, LOS_SAMPLE_CAP))
         eff_step = (total_dist / num_samples) if num_samples > 0 else step
+        # Remembered per run so the output layers can record the step actually used.
+        self._los_step_base_m = float(step)
+        self._los_eff_step_max_m = max(float(getattr(self, "_los_eff_step_max_m", 0.0) or 0.0), float(eff_step))
         if eff_step > step * 1.05 and not getattr(self, "_los_step_warned", False):
             self._los_step_warned = True
             log_message(
@@ -1903,6 +2100,24 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
         if not (math.isfinite(obs_elev) and math.isfinite(tgt_elev)):
             return None
 
+        # Earth curvature + refraction (viewshed_dialog / gdal_viewshed -cc):
+        # apparent drop cc*d^2/(2R) grows with distance from the observer. The
+        # target is a sample at d = total_dist, so it drops too and the sight
+        # line bends with it; intermediate terrain drops by the smaller
+        # cc*(frac*D)^2/(2R), which is what removes the flat-earth over-clearance
+        # of up to D^2/(8R) (about 10 m at 25 km with k = 0.13).
+        try:
+            cc = float(curvature_cc)
+        except Exception as _exc:
+            log_swallowed("spatial_network_dialog._los_visible", _exc)
+            cc = 0.0
+        if not math.isfinite(cc) or cc < 0.0:
+            cc = 0.0
+        cc = min(1.0, cc)
+        two_r = 2.0 * LOS_EARTH_RADIUS_M
+        if cc > 0.0:
+            tgt_elev -= cc * (total_dist * total_dist) / two_r
+
         for i in range(1, num_samples):
             frac = i / num_samples
             x = ax + frac * dx
@@ -1916,6 +2131,9 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                 return None
             if not math.isfinite(z):
                 return None
+            if cc > 0.0:
+                d_sample = frac * total_dist
+                z -= cc * (d_sample * d_sample) / two_r
 
             sight = obs_elev + frac * (tgt_elev - obs_elev)
             if z > sight:
@@ -1937,12 +2155,29 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
         compute_closeness: bool = False,
         compute_betweenness: bool = False,
         vis_edge_rule: str = VIS_RULE_MUTUAL,
+        curvature: bool = True,
+        refraction_coeff: float = LOS_DEFAULT_REFRACTION_K,
+        poly_boundary_step_m: float = 0.0,
+        poly_boundary_max_points: int = 0,
     ):
         # once-per-run notice for the LOS sample ceiling (see _los_visible)
         self._los_step_warned = False
+        self._los_step_base_m = 0.0
+        self._los_eff_step_max_m = 0.0
         n = len(nodes)
         if n < 2:
             return
+
+        # Curvature/refraction coefficient, mirroring viewshed_dialog._calculate_gdal_viewshed_cc:
+        # off -> 0 (flat), on -> 1 - k clamped to [0, 1].
+        cc = 0.0
+        try:
+            if bool(curvature):
+                cc = max(0.0, min(1.0, 1.0 - float(refraction_coeff)))
+        except Exception as _exc:
+            log_swallowed("spatial_network_dialog._run_visibility_network", _exc)
+            cc = 1.0 - LOS_DEFAULT_REFRACTION_K
+        candidate_k_requested = int(candidate_k)
 
         all_pairs = False
         try:
@@ -2040,6 +2275,7 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                     obs_height=obs_h,
                     tgt_height=tgt_h,
                     sample_step_m=sample_step_m,
+                    curvature_cc=cc,
                 )
                 if vis is None:
                     continue
@@ -2093,6 +2329,7 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                     obs_height=obs_height,
                     tgt_height=tgt_height,
                     sample_step_m=sample_step_m,
+                    curvature_cc=cc,
                 )
                 if abs(float(obs_height) - float(tgt_height)) <= 1e-9:
                     vis_ba = vis_ab
@@ -2107,6 +2344,7 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                         obs_height=obs_height,
                         tgt_height=tgt_height,
                         sample_step_m=sample_step_m,
+                        curvature_cc=cc,
                     )
                 # Point nodes: ratio is 0/1 when valid
                 r_ab = None if vis_ab is None else (1.0 if bool(vis_ab) else 0.0)
@@ -2224,10 +2462,66 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
             QgsField("mutual", QVariant.Int),
         ]
 
+        # Layer names carry the result-determining settings (as the PPA branch
+        # does with k/mutual/max), so three runs with different observer
+        # heights no longer produce three identical "Visibility_LOS" layers.
+        def _fmt_m(v: float) -> str:
+            try:
+                return f"{float(v):g}"
+            except Exception as _exc:
+                log_swallowed("spatial_network_dialog._run_visibility_network", _exc)
+                return str(v)
+
+        name_suffix = f"_obs{_fmt_m(obs_height)}m"
+        if abs(float(tgt_height) - float(obs_height)) > 1e-9:
+            name_suffix += f"_tgt{_fmt_m(tgt_height)}m"
+        if max_dist > 0:
+            name_suffix += f"_max{int(round(max_dist))}m"
+        if cc <= 0.0:
+            name_suffix += "_flat"
+        edge_layer_name = f"Visibility_LOS{name_suffix}"
+        node_layer_name = f"LOS_Nodes{name_suffix}"
+
+        # Every value that determines the result, recorded on both output
+        # layers (params_json) so a saved run can be told apart and reproduced.
+        dem_name = ""
+        try:
+            dem_name = str(dem_layer.name() or "")
+        except Exception as _exc:
+            log_swallowed("spatial_network_dialog._run_visibility_network", _exc)
+        run_params: Dict[str, Any] = {
+            "network": "visibility_los",
+            "n_nodes": int(n),
+            "dem_layer": dem_name,
+            "dem_crs": str(dem_layer.crs().authid()),
+            "obs_height_m": float(obs_height),
+            "tgt_height_m": float(tgt_height),
+            "sample_step_m_requested": float(sample_step_m),
+            "sample_step_m_base": float(getattr(self, "_los_step_base_m", 0.0) or 0.0),
+            "sample_step_m_effective_max": float(getattr(self, "_los_eff_step_max_m", 0.0) or 0.0),
+            "sample_step_capped": bool(getattr(self, "_los_step_warned", False)),
+            "samples_per_line_min": int(LOS_SAMPLE_MIN),
+            "samples_per_line_cap": int(LOS_SAMPLE_CAP),
+            "max_dist_m": float(max_dist),
+            "all_pairs": bool(all_pairs),
+            "candidate_k": (None if all_pairs else int(candidate_k)),
+            "candidate_k_requested": (None if all_pairs else int(candidate_k_requested)),
+            "vis_edge_rule": str(vis_edge_rule or VIS_RULE_MUTUAL),
+            "poly_boundary": bool(use_poly_boundary_ratio),
+            "poly_boundary_step_m": (float(poly_boundary_step_m) if use_poly_boundary_ratio else None),
+            "poly_boundary_max_points": (int(poly_boundary_max_points) if use_poly_boundary_ratio else None),
+            "curvature": bool(cc > 0.0),
+            "refraction_coeff": (float(refraction_coeff) if cc > 0.0 else None),
+            "curvature_cc": float(cc),
+            "earth_radius_m": float(LOS_EARTH_RADIUS_M),
+            "tested_pairs": int(tested_pairs),
+            "failed_pairs": int(failed_pairs),
+        }
+
         edge_layer, run_group, run_id = self._add_edge_layer(
             nodes=nodes,
             edges=sorted(edges),
-            layer_name="Visibility_LOS",
+            layer_name=edge_layer_name,
             color=QColor(0, 160, 80, 220),
             add_dist=True,
             crs_authid=dem_layer.crs().authid(),
@@ -2236,7 +2530,21 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
             extra_fields=extra_fields,
             extra_values_by_edge=extra_by_edge,
             label_distance=bool(tested_pairs <= 300),
+            extra_params=run_params,
         )
+
+        # Pairs whose sight line could not be evaluated (DEM NoData, sampling
+        # failure) must not read as "not visible": count them per node so a
+        # degree of 0 can be told apart from "never tested".
+        fail_deg = [0] * int(n)
+        for (fa, fb), st in status_by_edge.items():
+            if st == "샘플 실패":
+                try:
+                    fail_deg[int(fa)] += 1
+                    fail_deg[int(fb)] += 1
+                except Exception as _exc:
+                    log_swallowed("spatial_network_dialog._run_visibility_network", _exc)
+        n_fail_nodes = int(sum(1 for c in fail_deg if c > 0))
 
         # Node metrics layer (SNA)
         if create_node_metrics:
@@ -2270,6 +2578,7 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                 QgsField("out_deg", QVariant.Int),
                 QgsField("in_deg", QVariant.Int),
                 QgsField("vis_total", QVariant.Int),
+                QgsField("fail_deg", QVariant.Int),
             ]
             extra_values_by_node: Dict[int, Dict[str, Any]] = {}
             for i0 in range(int(n)):
@@ -2277,6 +2586,7 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                     "out_deg": int(out_deg[i0]),
                     "in_deg": int(in_deg[i0]),
                     "vis_total": int(out_deg[i0] + in_deg[i0]),
+                    "fail_deg": int(fail_deg[i0]),
                 }
 
             self._add_node_metrics_layer(
@@ -2285,11 +2595,12 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                 crs_authid=dem_layer.crs().authid(),
                 run_group=run_group,
                 run_id=run_id,
-                title="LOS_Nodes",
+                title=node_layer_name,
                 compute_closeness=compute_closeness,
                 compute_betweenness=compute_betweenness,
                 extra_node_fields=extra_node_fields,
                 extra_values_by_node=extra_values_by_node,
+                extra_params=run_params,
             )
 
         mutual_edges = sum(1 for v in status_by_edge.values() if v == "상호 보임")
@@ -2303,11 +2614,18 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
         )
         if use_poly_boundary_ratio:
             msg += "  [vis_ratio]"
+        if fail_edges > 0:
+            msg += (
+                f"  미검사 쌍 {fail_edges}개(노드 {n_fail_nodes}개): 해당 노드의 degree 0은 '안 보임'이 아니라 "
+                "'검사 불가'일 수 있습니다(fail_deg 필드)."
+            )
         log_message(
-            f"VisibilityNetwork: {msg} (all_pairs={all_pairs}, max_dist={max_dist}, poly_ratio={use_poly_boundary_ratio}, rule={vis_edge_rule})",
+            f"VisibilityNetwork: {msg} (all_pairs={all_pairs}, max_dist={max_dist}, poly_ratio={use_poly_boundary_ratio}, "
+            f"rule={vis_edge_rule}, obs={obs_height}, tgt={tgt_height}, curvature_cc={cc:.2f}, "
+            f"step_eff_max={float(getattr(self, '_los_eff_step_max_m', 0.0) or 0.0):.1f}m)",
             level=Qgis.Info,
         )
-        push_message(self.iface, "가시성 네트워크", msg, level=0, duration=8)
+        push_message(self.iface, "가시성 네트워크", msg, level=(1 if fail_edges > 0 else 0), duration=(12 if fail_edges > 0 else 8))
         self.accept()
 
     def _add_edge_layer(
@@ -2324,6 +2642,7 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
         extra_fields: Optional[List[QgsField]] = None,
         extra_values_by_edge: Optional[Dict[Tuple[int, int], Dict[str, Any]]] = None,
         label_distance: bool = False,
+        extra_params: Optional[Dict[str, Any]] = None,
     ):
         project = QgsProject.instance()
         root = project.layerTreeRoot()
@@ -2455,18 +2774,22 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
             log_swallowed("spatial_network_dialog._add_edge_layer", _exc)
 
         try:
+            edge_params: Dict[str, Any] = dict(extra_params or {})
+            edge_params.update(
+                {
+                    "layer_name": str(layer_name or ""),
+                    "add_dist": bool(add_dist),
+                    "has_status": bool(status_by_edge is not None),
+                    "has_ratio": bool(ratio_by_edge is not None),
+                }
+            )
             set_archtoolkit_layer_metadata(
                 layer,
                 tool_id="spatial_network",
                 run_id=str(run_id),
                 kind="edges",
                 units="m",
-                params={
-                    "layer_name": str(layer_name or ""),
-                    "add_dist": bool(add_dist),
-                    "has_status": bool(status_by_edge is not None),
-                    "has_ratio": bool(ratio_by_edge is not None),
-                },
+                params=edge_params,
             )
         except Exception as _exc:
             log_swallowed("spatial_network_dialog._add_edge_layer", _exc)
