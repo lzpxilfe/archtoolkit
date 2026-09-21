@@ -9,6 +9,16 @@ Kriging (Lite) implementation for ArchToolkit.
   nugget is 5% of sample variance, and the range is 3x the median
   nearest-neighbour spacing. No anisotropy. The variance raster is therefore
   assumption-driven — treat it as a relative (not calibrated) uncertainty map.
+- Exactness: the kriging system uses C(0) = partial_sill + nugget on BOTH the
+  matrix diagonal and the right-hand side, so a grid node that coincides with
+  a sample reproduces that sample (weights = unit vector, variance 0), as
+  Ordinary Kriging is defined (Matheron 1963; Cressie 1993). Earlier versions
+  left the nugget out of the right-hand side, which turned the solver into a
+  measurement-error filter: a 30.00 m benchmark came back as 25.05 m at its
+  own location and the variance never reached zero anywhere.
+- Provenance: the returned ``params["value_field"]`` names the attribute the
+  surface was built from, or ``"__geom_z__"`` for geometry Z, so callers can
+  record and display the actual source rather than the "" an auto pick carries.
 
 This is intentionally conservative and best-effort:
 - Uses nearest N points per grid cell (fast enough for moderate grids).
@@ -34,6 +44,34 @@ from qgis.core import (
 )
 
 from .utils import log_swallowed, is_metric_crs, log_message
+
+
+# Sentinel (from the DEM generator UI) meaning "use the geometry's Z
+# coordinate", not an attribute field name.
+GEOM_Z_SENTINEL = "__geom_z__"
+
+# Field names that hold elevation in the datasets this plugin meets (NGII
+# exports, CAD conversions, survey packages, QGIS "Extract Z" output). Shared
+# with the DEM generator dialog so TIN/IDW and Kriging agree on what counts as
+# an elevation column; matched exactly first, then case-insensitively.
+ELEVATION_FIELD_CANDIDATES = (
+    "Z_COORD",
+    "z_coord",
+    "Elevation",
+    "ELEVATION",
+    "elev",
+    "ELEV",
+    "height",
+    "HEIGHT",
+    "표고",
+    "고도",
+    "z",
+    "Z",
+    "z_first",
+)
+
+# Distances at or below this (map units) count as "the grid node IS the sample".
+_EXACT_TOL = 1e-9
 
 
 @dataclass(frozen=True)
@@ -67,28 +105,40 @@ def _auto_value_field(layer: QgsVectorLayer) -> Optional[str]:
     if layer is None:
         return None
 
-    candidates = [
-        "Z_COORD",
-        "z_coord",
-        "Elevation",
-        "ELEVATION",
-        "elev",
-        "ELEV",
-        "height",
-        "HEIGHT",
-        "표고",
-        "고도",
-        "z",
-        "Z",
-    ]
     try:
-        for name in candidates:
-            idx = layer.fields().indexFromName(name)
+        fields = layer.fields()
+        for name in ELEVATION_FIELD_CANDIDATES:
+            idx = fields.indexFromName(name)
             if idx >= 0:
                 return name
+        # Second pass, case-insensitive (QgsFields.lookupField), so "Height"
+        # or "elevation" is found and returned under its real spelling.
+        lookup = getattr(fields, "lookupField", None)
+        if lookup is not None:
+            for name in ELEVATION_FIELD_CANDIDATES:
+                idx = int(lookup(name))
+                if idx >= 0:
+                    return str(fields[idx].name())
     except Exception as _exc:
         log_swallowed("tools/kriging_lite.py:89 (_auto_value_field)", _exc)
     return None
+
+
+def resolve_value_field(layer: QgsVectorLayer, value_field: Optional[str]) -> str:
+    """Name the source the run reads elevations from.
+
+    Returns the attribute name (explicit, or auto-detected by name) or
+    :data:`GEOM_Z_SENTINEL` when the geometry's Z coordinate is used. This is
+    the single decision :func:`_collect_point_samples` acts on, exposed so the
+    caller can record and show it (the "자동" combo entry carries "").
+    """
+    name = str(value_field or "").strip()
+    if name == GEOM_Z_SENTINEL:
+        return GEOM_Z_SENTINEL
+    if name:
+        return name
+    auto = _auto_value_field(layer)
+    return str(auto) if auto else GEOM_Z_SENTINEL
 
 
 def _collect_point_samples(
@@ -104,14 +154,11 @@ def _collect_point_samples(
     if layer.geometryType() != QgsWkbTypes.PointGeometry:
         raise ValueError("Kriging requires a point layer")
 
-    # "__geom_z__" is a sentinel (from the DEM generator UI) meaning "use the
-    # geometry's Z coordinate", not an attribute field name.
-    field_name = (value_field or "").strip()
-    use_geom_z = (field_name == "__geom_z__")
-    if use_geom_z:
-        field_name = ""
-    elif not field_name:
-        field_name = _auto_value_field(layer)
+    # GEOM_Z_SENTINEL (from the DEM generator UI) means "use the geometry's Z
+    # coordinate", not an attribute field name.
+    resolved = resolve_value_field(layer, value_field)
+    use_geom_z = (resolved == GEOM_Z_SENTINEL)
+    field_name = "" if use_geom_z else resolved
 
     sums: Dict[Tuple[float, float], float] = {}
     counts: Dict[Tuple[float, float], int] = {}
@@ -357,7 +404,8 @@ def ordinary_kriging_lite_to_geotiff(
 
     Returns a dict with keys:
     - out_path, variance_path
-    - params (KrigingParams as dict)
+    - params (KrigingParams as dict, plus "neighbors" and "value_field": the
+      attribute actually read, or GEOM_Z_SENTINEL for geometry Z)
     - ncols, nrows, n_points
     """
     if layer is None or not layer.isValid():
@@ -370,8 +418,11 @@ def ordinary_kriging_lite_to_geotiff(
     if not (px > 0):
         raise ValueError("Invalid pixel size")
 
-    # Prepare samples + index
-    points_xy, values, index = _collect_point_samples(layer, value_field=value_field)
+    # Prepare samples + index. Resolve the value source once, up front, so the
+    # log and the returned params say which column the surface came from.
+    resolved_field = resolve_value_field(layer, value_field)
+    log_message(f"[kriging] value source: {resolved_field}")
+    points_xy, values, index = _collect_point_samples(layer, value_field=resolved_field)
 
     # Compute grid size (ceil so we fully cover extent)
     width = float(extent.width())
@@ -478,6 +529,12 @@ def ordinary_kriging_lite_to_geotiff(
             dy0 = coords[:, 1] - float(y)
             dist0 = np.sqrt(dx0 * dx0 + dy0 * dy0)
             cvec = _cov_exponential(dist0, partial_sill=params.partial_sill, rng=params.range)
+            # Exact interpolation: where the grid node coincides with a sample
+            # the right-hand side must carry the same C(0) = partial_sill +
+            # nugget that fill_diagonal put on the matrix. With the continuous
+            # value (partial_sill only) the solver treated every sample as
+            # noisy and smoothed the surveyed values away (DEMGEN-02).
+            cvec = np.where(dist0 <= _EXACT_TOL, float(params.partial_sill + params.nugget), cvec)
 
             b = np.empty((len(key) + 1,), dtype=float)
             b[:-1] = cvec
@@ -492,6 +549,8 @@ def ordinary_kriging_lite_to_geotiff(
 
             # OK variance: sigma^2 = C(0) - lam.c - mu for the augmented system
             # [C 1; 1' 0][lam; mu] = [c; 1] assembled above (Cressie 1993).
+            # C(0) here matches both the diagonal and the exact-hit cvec, so
+            # at a sample location lam = e_i, mu = 0 and the variance is 0.
             vv = float(params.partial_sill + params.nugget) - float(lam.dot(cvec)) - float(mu)
             if vv < 0:
                 vv = 0.0
@@ -530,6 +589,7 @@ def ordinary_kriging_lite_to_geotiff(
             "partial_sill": params.partial_sill,
             "range": params.range,
             "neighbors": neighbor_n,
+            "value_field": resolved_field,
         },
         "ncols": ncols,
         "nrows": nrows,

@@ -15,13 +15,14 @@
 #
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
+import math
 import os
 import uuid
 from qgis.PyQt import uic
 from qgis.PyQt import QtWidgets
 from qgis.PyQt.QtWidgets import QTableWidgetItem, QCheckBox, QWidget, QHBoxLayout, QFileDialog, QListWidgetItem
 from qgis.PyQt.QtCore import Qt, QSize
-from qgis.core import QgsProject, QgsVectorLayer
+from qgis.core import QgsProject, QgsRectangle, QgsVectorLayer, QgsWkbTypes
 from qgis.PyQt.QtGui import QIcon
 import processing
 import tempfile
@@ -34,6 +35,7 @@ from .atomic_output import (
 )
 from .live_log_dialog import ensure_live_log_dialog
 from .help_dialog import show_help_dialog
+from .kriging_lite import ELEVATION_FIELD_CANDIDATES, GEOM_Z_SENTINEL
 
 # Load the UI file
 FORM_CLASS, _ = uic.loadUiType(os.path.join(
@@ -275,9 +277,9 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
             self.cmbZField.setMinimumWidth(220)
             try:
                 self.cmbZField.setToolTip(
-                    "포인트의 해발/값(Z) 필드를 선택하세요.\n"
-                    "- 자동(추천): Z_COORD/Elevation 등 흔한 필드를 자동 탐색\n"
-                    "- 3D geometry Z: 3차원 포인트의 Z값 사용"
+                    "표고/값(Z)을 읽을 필드를 선택하세요. TIN/IDW/Kriging 모두에 적용됩니다.\n"
+                    "- 자동(추천): Z_COORD/Elevation/ELEV/height/표고/고도/z 등 흔한 필드를 자동 탐색\n"
+                    "- Z 좌표(3D geometry): 3차원 지오메트리의 Z값 사용 (2D 레이어는 오류로 중단)"
                 )
             except Exception as _exc:
                 log_swallowed("tools/dem_generator_dialog.py:267 (_setup_kriging_controls)", _exc)
@@ -315,10 +317,10 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
                 log_swallowed("tools/dem_generator_dialog.py:293 (_setup_kriging_controls)", _exc)
             layout.addWidget(self.lblKrigingHint, 6, 0, 1, 2)
 
-            # Fill initial items; shown only when Kriging is selected.
+            # Fill initial items. The Z-field row applies to every method
+            # (TIN/IDW used to guess from a short name list with no way to
+            # override it); neighbour count and hint stay Kriging-only.
             self._refresh_kriging_value_fields()
-            self.lblZField.hide()
-            self.cmbZField.hide()
             self.lblKrigingNeighbors.hide()
             self.spinKrigingNeighbors.hide()
             self.lblKrigingHint.hide()
@@ -335,7 +337,12 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
             return False
 
     def _refresh_kriging_value_fields(self):
-        """Populate the Z/value field dropdown from the currently checked layer (best-effort)."""
+        """Populate the Z/value field dropdown from the checked layers (best-effort).
+
+        Lists the union of numeric fields over every checked layer, so a
+        multi-layer run can still name the attribute explicitly (the merge
+        keeps field names). Used by TIN/IDW and Kriging alike.
+        """
         cmb = getattr(self, "cmbZField", None)
         if cmb is None:
             return
@@ -346,27 +353,39 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
         except Exception:
             layers = []
 
+        previous = ""
+        try:
+            previous = str(cmb.currentData() or "")
+        except Exception as _exc:
+            log_swallowed("dem_generator_dialog._refresh_kriging_value_fields", _exc)
+
         cmb.blockSignals(True)
         try:
             cmb.clear()
             cmb.addItem("자동(추천)", "")
-            cmb.addItem("Z 좌표(3D geometry)", "__geom_z__")
+            cmb.addItem("Z 좌표(3D geometry)", GEOM_Z_SENTINEL)
 
-            if len(layers) == 1 and layers[0] and layers[0].isValid():
-                layer = layers[0]
+            seen = set()
+            for layer in layers:
+                if layer is None or not layer.isValid():
+                    continue
                 try:
                     for f in layer.fields():
-                        _skip_338 = False
                         try:
-                            if f.isNumeric():
-                                cmb.addItem(f.name(), f.name())
+                            name = str(f.name())
+                            if f.isNumeric() and name not in seen:
+                                seen.add(name)
+                                cmb.addItem(name, name)
                         except Exception as _exc:
                             log_swallowed("tools/dem_generator_dialog.py:341 (_refresh_kriging_value_fields)", _exc)
-                            _skip_338 = True
-                        if _skip_338:
-                            continue
                 except Exception as _exc:
                     log_swallowed("dem_generator_dialog._refresh_kriging_value_fields", _exc)
+
+            # Keep the user's explicit pick across layer toggles when it still exists.
+            if previous:
+                idx = cmb.findData(previous)
+                if idx >= 0:
+                    cmb.setCurrentIndex(idx)
         finally:
             cmb.blockSignals(False)
     
@@ -387,8 +406,7 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
         self._updating_checkboxes = False
 
         try:
-            if self._is_kriging_selected():
-                self._refresh_kriging_value_fields()
+            self._refresh_kriging_value_fields()
         except Exception as _exc:
             log_swallowed("tools/dem_generator_dialog.py:367 (on_layer_item_changed)", _exc)
     
@@ -411,8 +429,7 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
                 item.setCheckState(Qt.Checked)
 
         try:
-            if self._is_kriging_selected():
-                self._refresh_kriging_value_fields()
+            self._refresh_kriging_value_fields()
         except Exception as _exc:
             log_swallowed("tools/dem_generator_dialog.py:391 (populate_layers)", _exc)
     
@@ -736,26 +753,56 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
         
         total_features = 0
         loaded_count = 0
-        
+        failed = []
+        empty = []
+
         for dxf_path in dxf_paths:
+            base = os.path.basename(dxf_path)
             try:
-                layer_name = os.path.splitext(os.path.basename(dxf_path))[0] + "_DEM용"
+                layer_name = os.path.splitext(base)[0] + "_DEM용"
                 layer = QgsVectorLayer(dxf_path + "|layername=entities", layer_name, "ogr")
-                
+
                 if layer.isValid():
                     layer.setSubsetString(query)
                     QgsProject.instance().addMapLayer(layer)
                     self.loaded_dxf_layers.append(layer)
-                    total_features += layer.featureCount()
+                    n_feat = int(layer.featureCount())
+                    total_features += n_feat
                     loaded_count += 1
-                    
-            except Exception:
-                push_message(self.iface, "경고", f"{os.path.basename(dxf_path)} 로드 실패", level=1)
-        
+                    if n_feat <= 0:
+                        # Loaded but matched none of the selected codes: visible
+                        # now rather than as an empty DEM at run time.
+                        empty.append(base)
+                else:
+                    # An unreadable file (e.g. a .dwg renamed to .dxf) is not an
+                    # exception: isValid() is simply False, and this used to fall
+                    # through with no message at all.
+                    failed.append(base)
+
+            except Exception as _exc:
+                log_swallowed("dem_generator_dialog.load_dxf_file", _exc)
+                failed.append(base)
+
         self.populate_layers()
-        
+
+        if failed:
+            push_message(
+                self.iface,
+                "경고" if loaded_count > 0 else "오류",
+                f"{loaded_count}개 로드, {len(failed)}개 실패: {', '.join(failed)}",
+                level=1 if loaded_count > 0 else 2,
+                duration=10,
+            )
+        if empty:
+            push_message(
+                self.iface,
+                "경고",
+                f"선택한 레이어 코드에 해당하는 피처가 0개인 파일: {', '.join(empty)} (레이어 코드 선택을 확인하세요)",
+                level=1,
+                duration=10,
+            )
         if loaded_count > 0:
-            push_message(self.iface, "성공", f"{loaded_count}개 DXF 로드 완료: 총 {total_features}개 피처", level=0)
+            push_message(self.iface, "성공", f"{loaded_count}개 DXF 로드 완료: 총 {total_features:,}개 피처", level=0)
     
     def populate_scales(self):
         self.cmbScale.clear()
@@ -788,7 +835,17 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
         self.lblInterpDesc.setText(desc)
 
         show_kriging = str(method_info.get("algorithm") or "") == "archtoolkit:kriging_lite"
-        for w_name in ("lblZField", "cmbZField", "lblKrigingNeighbors", "spinKrigingNeighbors", "lblKrigingHint"):
+        # The Z-field selector is shown for every method: TIN/IDW read the
+        # same attribute (or geometry Z) and the user must be able to pick it.
+        for w_name in ("lblZField", "cmbZField"):
+            w = getattr(self, w_name, None)
+            if w is None:
+                continue
+            try:
+                w.setVisible(True)
+            except Exception as _exc:
+                log_swallowed("tools/dem_generator_dialog.py:760 (on_interpolation_changed)", _exc)
+        for w_name in ("lblKrigingNeighbors", "spinKrigingNeighbors", "lblKrigingHint"):
             w = getattr(self, w_name, None)
             if w is None:
                 continue
@@ -797,11 +854,10 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
             except Exception as _exc:
                 log_swallowed("tools/dem_generator_dialog.py:760 (on_interpolation_changed)", _exc)
 
-        if show_kriging:
-            try:
-                self._refresh_kriging_value_fields()
-            except Exception as _exc:
-                log_swallowed("tools/dem_generator_dialog.py:766 (on_interpolation_changed)", _exc)
+        try:
+            self._refresh_kriging_value_fields()
+        except Exception as _exc:
+            log_swallowed("tools/dem_generator_dialog.py:766 (on_interpolation_changed)", _exc)
 
     def get_selected_layers(self):
         """Get list of checked layers from the list widget"""
@@ -813,6 +869,192 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
                 if layer:
                     selected_layers.append(layer)
         return selected_layers
+
+    def _is_plugin_dxf_layer(self, layer) -> bool:
+        """True for a layer this dialog loaded from DXF (tracked, or named *_DEM용).
+
+        The DXF layer-code filter only makes sense for those: a CAD-derived
+        shapefile also owns a "Layer" column, and filtering it by the code
+        table's defaults dropped its contours (or every feature) silently.
+        """
+        try:
+            if str(layer.name() or "").endswith("_DEM용"):
+                return True
+        except Exception as _exc:
+            log_swallowed("dem_generator_dialog._is_plugin_dxf_layer", _exc)
+        try:
+            lid = str(layer.id())
+        except Exception as _exc:
+            log_swallowed("dem_generator_dialog._is_plugin_dxf_layer", _exc)
+            return False
+        for lyr in list(self.loaded_dxf_layers or []):
+            try:
+                if str(lyr.id()) == lid:
+                    return True
+            except Exception as _exc:
+                # A DXF layer removed from the project leaves a dead wrapper behind.
+                log_swallowed("dem_generator_dialog._is_plugin_dxf_layer", _exc)
+        return False
+
+    @staticmethod
+    def _field_index(fields, name) -> int:
+        """Index of ``name`` in ``fields`` (exact, then case-insensitive) or -1."""
+        try:
+            return int(fields.lookupField(str(name)))
+        except Exception as _exc:
+            log_swallowed("dem_generator_dialog._field_index", _exc)
+        try:
+            return int(fields.indexFromName(str(name)))
+        except Exception as _exc:
+            log_swallowed("dem_generator_dialog._field_index", _exc)
+            return -1
+
+    def _resolve_z_field(self, fields) -> str:
+        """Elevation field NAME auto-detected in ``fields`` (same list as Kriging), or ""."""
+        try:
+            for name in ELEVATION_FIELD_CANDIDATES:
+                idx = int(fields.lookupField(name))
+                if idx >= 0:
+                    return str(fields[idx].name())
+        except Exception as _exc:
+            log_swallowed("dem_generator_dialog._resolve_z_field", _exc)
+        return ""
+
+    def _explicit_z_choice(self) -> str:
+        """The Z-field combo's pick: a field name, GEOM_Z_SENTINEL, or "" for auto."""
+        try:
+            v = getattr(self, "cmbZField", None)
+            if v is not None:
+                return str(v.currentData() or "").strip()
+        except Exception as _exc:
+            log_swallowed("dem_generator_dialog._explicit_z_choice", _exc)
+        return ""
+
+    @staticmethod
+    def _layer_has_z(layer) -> bool:
+        """True when the layer's geometries carry a Z coordinate.
+
+        QgsInterpolator's ValueZ source rejects every 2D feature, so a 2D
+        layer sent down that path yields an all-NoData raster. Trust the WKB
+        type first, then sample a few features (some providers report a
+        generic type).
+        """
+        try:
+            if QgsWkbTypes.hasZ(layer.wkbType()):
+                return True
+        except Exception as _exc:
+            log_swallowed("dem_generator_dialog._layer_has_z", _exc)
+        try:
+            seen = 0
+            for feat in layer.getFeatures():
+                geom = feat.geometry()
+                if geom is None or geom.isEmpty():
+                    continue
+                seen += 1
+                if geom.constGet().is3D():
+                    return True
+                if seen >= 20:
+                    break
+        except Exception as _exc:
+            log_swallowed("dem_generator_dialog._layer_has_z", _exc)
+        return False
+
+    @staticmethod
+    def _snap_extent_to_pixel(extent, pixel_size):
+        """Expand ``extent`` so its width/height are whole multiples of ``pixel_size``.
+
+        qgis:tininterpolation / idwinterpolation only take ceil(extent/pixel)
+        column and row counts from PIXEL_SIZE and QgsGridFileWriter then
+        divides the extent by those counts, so an unsnapped extent yields
+        cells smaller than requested and not square (DEMGEN-05). Anchored at
+        the top-left corner, like the writer. Returns (rect, ncols, nrows).
+        """
+        px = float(pixel_size)
+        xmin = float(extent.xMinimum())
+        ymax = float(extent.yMaximum())
+        width = float(extent.width())
+        height = float(extent.height())
+        ncols = int(max(1, math.ceil(width / px)))
+        nrows = int(max(1, math.ceil(height / px)))
+        xmax = xmin + ncols * px
+        ymin = ymax - nrows * px
+        # Guard the algorithm's own ceil() against float drift
+        # (e.g. 3*0.1/0.1 == 3.0000000000000004 would add a column).
+        for _ in range(8):
+            if math.ceil((xmax - xmin) / px) <= ncols:
+                break
+            xmax = math.nextafter(xmax, xmin)
+        for _ in range(8):
+            if math.ceil((ymax - ymin) / px) <= nrows:
+                break
+            ymin = math.nextafter(ymin, ymax)
+        return QgsRectangle(xmin, ymin, xmax, ymax), ncols, nrows
+
+    @staticmethod
+    def _raster_has_valid_cells(path):
+        """False when band 1 of ``path`` holds no valid (non-NoData) cell; None if unknown.
+
+        Scans in strips with GDAL/numpy instead of QgsRasterDataProvider.
+        bandStatistics(), which would leave an .aux.xml sidecar beside the
+        staged file that the publish rename then orphans.
+        """
+        ds = None
+        try:
+            import numpy as np
+            from osgeo import gdal  # type: ignore
+
+            ds = gdal.Open(str(path))
+            if ds is None:
+                return None
+            band = ds.GetRasterBand(1)
+            if band is None:
+                return None
+            nodata = band.GetNoDataValue()
+            xsize, ysize = int(ds.RasterXSize), int(ds.RasterYSize)
+            step = 256
+            for yoff in range(0, ysize, step):
+                rows = min(step, ysize - yoff)
+                arr = band.ReadAsArray(0, yoff, xsize, rows)
+                if arr is None:
+                    return None
+                arr = np.asarray(arr, dtype=float)
+                valid = np.isfinite(arr)
+                if nodata is not None:
+                    valid &= arr != float(nodata)
+                if bool(valid.any()):
+                    return True
+            return False
+        except Exception as _exc:
+            log_swallowed("dem_generator_dialog._raster_has_valid_cells", _exc)
+            return None
+        finally:
+            ds = None
+
+    @staticmethod
+    def _actual_pixel_size(layer):
+        """(x, y) cell size the published raster really has, or (None, None)."""
+        try:
+            if layer is None or not layer.isValid():
+                return None, None
+            return float(layer.rasterUnitsPerPixelX()), float(layer.rasterUnitsPerPixelY())
+        except Exception as _exc:
+            log_swallowed("dem_generator_dialog._actual_pixel_size", _exc)
+            return None, None
+
+    @staticmethod
+    def _pixel_size_note(requested, actual_x, actual_y) -> str:
+        """"" when the raster's cells match the requested size, else a short disclosure."""
+        try:
+            req = float(requested)
+            if actual_x is None or actual_y is None or not (req > 0):
+                return ""
+            tol = req * 1e-6
+            if abs(float(actual_x) - req) <= tol and abs(float(actual_y) - req) <= tol:
+                return ""
+            return f", 실제 셀 크기 {float(actual_x):.4g} x {float(actual_y):.4g} m"
+        except Exception as _exc:
+            log_swallowed("dem_generator_dialog._pixel_size_note", _exc)
+            return ""
 
     def run_process(self):
         """Run the DEM generation process (Merge → Filter → Interpolate)"""
@@ -842,11 +1084,69 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
         selected_codes = self.get_selected_layer_codes()
 
         # No silent auto-excludes: use exactly what the user selected in the table.
-        if selected_codes:
+        # The code filter is meant for DXF sheets this dialog loaded itself
+        # (NGII layer codes in "Layer"); a CAD-derived shapefile owns a "Layer"
+        # column too, and filtering it by the table's DEFAULT codes silently
+        # dropped its contours (DEMGEN-03). Apply the filter only when every
+        # checked layer is a plugin-loaded DXF layer.
+        dxf_layer_names = [lyr.name() for lyr in selected_layers if self._is_plugin_dxf_layer(lyr)]
+        other_layer_names = [lyr.name() for lyr in selected_layers if not self._is_plugin_dxf_layer(lyr)]
+        if selected_codes and dxf_layer_names and not other_layer_names:
             query = '"Layer" IN (' + ','.join([f"'{code}'" for code in selected_codes]) + ')'
         else:
             query = None
-        
+            if selected_codes and dxf_layer_names and other_layer_names:
+                push_message(
+                    self.iface,
+                    "안내",
+                    "레이어 코드 필터는 DXF 로드 시 적용된 상태를 그대로 쓰고, 일반 레이어("
+                    + ", ".join(other_layer_names[:3])
+                    + ")가 함께 선택되어 실행 시 재적용하지 않습니다.",
+                    level=1,
+                    duration=8,
+                )
+
+        # Decide the elevation source BEFORE merging: native:mergevectorlayers
+        # upgrades the output to Z as soon as ONE input has Z and pads the
+        # others with Z=0, which the ValueZ path would then interpolate as
+        # genuine 0 m elevations (DEMGEN-06). Explicit combo pick first, then
+        # the same name list Kriging uses, else geometry Z - which every
+        # checked layer must actually carry.
+        z_choice = self._explicit_z_choice()
+        if z_choice == GEOM_Z_SENTINEL:
+            planned_field = ""
+        elif z_choice:
+            planned_field = z_choice
+        else:
+            planned_field = ""
+            for lyr in selected_layers:
+                planned_field = self._resolve_z_field(lyr.fields())
+                if planned_field:
+                    break
+        if not planned_field:
+            no_z = [lyr.name() for lyr in selected_layers if not self._layer_has_z(lyr)]
+            if no_z:
+                push_message(
+                    self.iface,
+                    "오류",
+                    "표고 필드를 찾을 수 없고 3D 좌표도 없습니다: " + ", ".join(no_z)
+                    + " (값 필드(Z)를 선택하거나 Z 좌표가 있는 레이어를 사용하세요)",
+                    level=2,
+                    duration=10,
+                )
+                restore_ui_focus(self)
+                return
+        elif len(selected_layers) > 1:
+            missing = [lyr.name() for lyr in selected_layers if self._field_index(lyr.fields(), planned_field) < 0]
+            if missing:
+                push_message(
+                    self.iface,
+                    "안내",
+                    f"'{planned_field}' 필드가 없는 레이어의 피처는 보간에서 제외됩니다: " + ", ".join(missing),
+                    level=1,
+                    duration=8,
+                )
+
         push_message(self.iface, "처리 중", f"{len(selected_layers)}개 레이어 병합 중...", level=0)
         self.hide()
         QtWidgets.QApplication.processEvents()
@@ -895,30 +1195,79 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
                 restore_ui_focus(self)
                 return
 
-            # Step 2: Apply query filter
+            # Step 2: Apply query filter (plugin-loaded DXF layers only, see above)
             if query and merged_layer.fields().indexFromName('Layer') >= 0:
+                before_n = int(merged_layer.featureCount())
                 merged_layer.setSubsetString(query)
-            
-            # Step 3: Find Z field
+                after_n = int(merged_layer.featureCount())
+                if after_n <= 0:
+                    push_message(
+                        self.iface,
+                        "오류",
+                        f"레이어 코드 필터로 {before_n:,}개 중 0개만 남았습니다. 레이어 코드 선택(표)을 확인하세요.",
+                        level=2,
+                        duration=10,
+                    )
+                    restore_ui_focus(self)
+                    return
+                if after_n < before_n:
+                    push_message(
+                        self.iface,
+                        "안내",
+                        f"레이어 코드 필터로 {before_n:,}개 중 {after_n:,}개 피처만 사용합니다.",
+                        level=1,
+                        duration=8,
+                    )
+
+            # Step 3: Resolve the elevation source on the merged layer
+            merged_fields = merged_layer.fields()
             z_field_idx = -1
-            for fn in ['Z_COORD', 'z_coord', 'Elevation', 'ELEVATION', 'z_first']:
-                idx = merged_layer.fields().indexFromName(fn)
-                if idx >= 0:
-                    z_field_idx = idx
-                    break
-            
+            z_field_name = ""
+            if planned_field:
+                z_field_idx = self._field_index(merged_fields, planned_field)
+                if z_field_idx < 0:
+                    push_message(self.iface, "오류", f"값 필드 '{planned_field}'가 병합 레이어에 없습니다.", level=2)
+                    restore_ui_focus(self)
+                    return
+                z_field_name = str(merged_fields[z_field_idx].name())
+            elif not self._layer_has_z(merged_layer):
+                # ValueZ on a 2D layer: QgsInterpolator rejects every feature and
+                # QgsGridFileWriter writes -9999 into each pixel - an "empty"
+                # DEM that used to be reported as success (DEMGEN-01).
+                push_message(
+                    self.iface,
+                    "오류",
+                    "표고 필드를 찾을 수 없고 3D 좌표도 없습니다. 값 필드(Z)를 선택하거나 Z 좌표가 있는 레이어를 사용하세요.",
+                    level=2,
+                    duration=10,
+                )
+                restore_ui_focus(self)
+                return
+            value_source_label = z_field_name if z_field_idx >= 0 else "Z 좌표(3D geometry)"
+
             geom_type = merged_layer.geometryType()
             interp_type = 0 if geom_type == 0 else 1
-            
+
             # Use source() for file-based layer
             source_path = merged_layer.source()
-            
+
             if z_field_idx >= 0:
                 interp_data = f'{source_path}::~::0::~::{z_field_idx}::~::{interp_type}'
             else:
                 interp_data = f'{source_path}::~::1::~::0::~::{interp_type}'
-            
+
             combined_extent = merged_layer.extent()
+            try:
+                _ext_w, _ext_h = float(combined_extent.width()), float(combined_extent.height())
+            except Exception as _exc:
+                log_swallowed("dem_generator_dialog.run_process", _exc)
+                _ext_w = _ext_h = float("nan")
+            if combined_extent.isNull() or not (math.isfinite(_ext_w) and math.isfinite(_ext_h)):
+                # Used to surface as "cannot convert float NaN to integer" from
+                # inside the algorithm, naming neither the layer nor the cause.
+                push_message(self.iface, "오류", "입력 레이어의 범위를 구할 수 없습니다(피처가 없나요?). 레이어와 코드 필터를 확인하세요.", level=2, duration=10)
+                restore_ui_focus(self)
+                return
 
             # Kriging (Lite) path: implemented in pure Python (numpy) + QGIS, no external providers.
             if str(algorithm or "") == "archtoolkit:kriging_lite":
@@ -1010,8 +1359,14 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
                     staging_pred = None
                     staging_var = None
 
+                    # DEMGEN-07: record the field kriging_lite actually read
+                    # (the "자동" entry carries "") and say it on completion.
+                    resolved_field = str((info.get("params") or {}).get("value_field") or value_field or "")
+                    value_label = "Z 좌표(3D geometry)" if resolved_field == GEOM_Z_SENTINEL else (resolved_field or "자동")
+
                     if os.path.exists(output_path):
                         out_layer = self.iface.addRasterLayer(output_path, "생성된 DEM (Kriging)")
+                        actual_px_x, actual_px_y = self._actual_pixel_size(out_layer)
                         try:
                             if out_layer is not None:
                                 set_archtoolkit_layer_metadata(
@@ -1022,9 +1377,11 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
                                     units="m",
                                     params={
                                         "pixel_size_m": float(pixel_size),
+                                        "pixel_size_x_m": actual_px_x,
+                                        "pixel_size_y_m": actual_px_y,
                                         "method": str(method_name or ""),
                                         "algorithm": str(algorithm or ""),
-                                        "value_field": str(value_field or ""),
+                                        "value_field": resolved_field,
                                         "kriging": dict(info.get("params") or {}),
                                         "n_points": int(info.get("n_points") or 0),
                                         "grid": {
@@ -1048,16 +1405,18 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
                                         units="m^2",
                                         params={
                                             "pixel_size_m": float(pixel_size),
+                                            "pixel_size_x_m": actual_px_x,
+                                            "pixel_size_y_m": actual_px_y,
                                             "method": str(method_name or ""),
                                             "algorithm": str(algorithm or ""),
-                                            "value_field": str(value_field or ""),
+                                            "value_field": resolved_field,
                                             "kriging": dict(info.get("params") or {}),
                                         },
                                     )
                         except Exception as _exc:
                             log_swallowed("dem_generator_dialog.run_process", _exc)
 
-                        push_message(self.iface, "완료", "Kriging 보간 완료!", level=0, duration=6)
+                        push_message(self.iface, "완료", f"Kriging 보간 완료! (값 필드: {value_label})", level=0, duration=6)
                         self.accept()
                     else:
                         push_message(self.iface, "오류", "Kriging 출력이 생성되지 않았습니다.", level=2)
@@ -1084,29 +1443,57 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
             # Interpolate into a staged sibling of the final path so a failed or
             # killed run cannot truncate a previously-generated DEM at output_path.
             staging_out = reserve_staging_path(output_path, run_id)
+            # Snap the extent so PIXEL_SIZE is the cell size actually written
+            # (the algorithms only take ceil(extent/pixel) counts from it).
+            interp_extent, snap_cols, snap_rows = self._snap_extent_to_pixel(combined_extent, pixel_size)
             params = {
                 'INTERPOLATION_DATA': interp_data,
-                'EXTENT': combined_extent,
+                'EXTENT': interp_extent,
                 'PIXEL_SIZE': pixel_size,
                 'OUTPUT': staging_out
             }
             if method_param is not None:
                 params['METHOD'] = method_param
 
-            push_message(self.iface, "처리 중", f"{method_name} 보간 실행 중...", level=0)
+            push_message(
+                self.iface,
+                "처리 중",
+                f"{method_name} 보간 실행 중... (값: {value_source_label}, {snap_cols}x{snap_rows}셀)",
+                level=0,
+            )
             QtWidgets.QApplication.processEvents()
 
             # Step 4: Run TIN interpolation
             result = processing.run(algorithm, params)
 
+            # An all-NoData raster (every feature rejected by the interpolator)
+            # is a failure, not a DEM: never publish it over a previous result.
+            if result and os.path.exists(staging_out) and self._raster_has_valid_cells(staging_out) is False:
+                push_message(
+                    self.iface,
+                    "오류",
+                    "보간 결과에 유효한 셀이 없습니다(전부 NoData). 표고 필드/3D 좌표와 레이어 코드 필터를 확인하세요. "
+                    "출력 파일은 갱신하지 않았습니다.",
+                    level=2,
+                    duration=10,
+                )
+                restore_ui_focus(self)
+                return
+
             # Publish atomically only once the interpolation produced a file.
+            # Success below is bound to THIS publish, not to output_path merely
+            # existing (a stale DEM from an earlier run used to be re-loaded
+            # and stamped with this run's parameters - DEMGEN-04).
+            published = False
             if result and os.path.exists(staging_out):
                 atomic_publish_file(staging_out, output_path)
                 staging_out = None
+                published = True
 
             # Add result to map
-            if result and os.path.exists(output_path):
+            if published and os.path.exists(output_path):
                 out_layer = self.iface.addRasterLayer(output_path, "생성된 DEM")
+                actual_px_x, actual_px_y = self._actual_pixel_size(out_layer)
                 try:
                     if out_layer is not None:
                         set_archtoolkit_layer_metadata(
@@ -1117,16 +1504,44 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
                             units="m",
                             params={
                                 "pixel_size_m": float(pixel_size),
+                                "pixel_size_x_m": actual_px_x,
+                                "pixel_size_y_m": actual_px_y,
                                 "method": str(method_name or ""),
                                 "algorithm": str(algorithm or ""),
+                                "value_field": z_field_name if z_field_idx >= 0 else GEOM_Z_SENTINEL,
+                                "grid": {"ncols": int(snap_cols), "nrows": int(snap_rows)},
                             },
                         )
                 except Exception as _exc:
                     log_swallowed("dem_generator_dialog.run_process", _exc)
-                push_message(self.iface, "완료", f"DEM 생성 완료! ({len(selected_layers)}개 레이어 병합)", level=0)
+                px_note = self._pixel_size_note(pixel_size, actual_px_x, actual_px_y)
+                if px_note:
+                    push_message(
+                        self.iface,
+                        "안내",
+                        f"요청 픽셀 크기 {float(pixel_size):g} m와 실제 셀 크기가 다릅니다{px_note} (레이어 메타데이터에 실제값 기록)",
+                        level=1,
+                        duration=8,
+                    )
+                push_message(
+                    self.iface,
+                    "완료",
+                    f"DEM 생성 완료! ({len(selected_layers)}개 레이어 병합, 값: {value_source_label}{px_note})",
+                    level=0,
+                    duration=6,
+                )
                 self.accept()
             else:
-                push_message(self.iface, "오류", "DEM이 생성되지 않았습니다.", level=2)
+                if os.path.exists(output_path):
+                    push_message(
+                        self.iface,
+                        "오류",
+                        "DEM이 생성되지 않았습니다. 출력 경로에 있는 파일은 이전 실행의 결과입니다.",
+                        level=2,
+                        duration=10,
+                    )
+                else:
+                    push_message(self.iface, "오류", "DEM이 생성되지 않았습니다.", level=2)
                 restore_ui_focus(self)
             
         except Exception as e:
