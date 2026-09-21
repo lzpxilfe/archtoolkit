@@ -116,6 +116,9 @@
 **(B) 무작위 지수(RI) 표의 확장(n>10)** — `RI_TABLE`의 n=11-15 값:
 > Alonso, J.A., & Lamata, M.T. (2006). "Consistency in the Analytic Hierarchy Process: a new approach." *International Journal of Uncertainty, Fuzziness and Knowledge-Based Systems*, 14(4), pp. 445-459. DOI: 10.1142/S0218488506004114
 
+**(C) GIS 기반 입지적합도 분석 개관 (WLC/AHP의 적용과 한계):**
+> Malczewski, J. (2004). "GIS-based land-use suitability analysis: a critical overview." *Progress in Planning*, 62(1), pp. 3-65. DOI: 10.1016/j.progress.2003.09.002
+
 주: 표에 없는 크기(n>15)의 행렬에서는 CR이 정의되지 않으므로, `ahp_core.py`는 0.0이 아니라 **NaN**을 반환하고, 대화상자는 이를 `CR=-`로 표시합니다. 0.0을 보고하면 일관적이라고 잘못 인증하는 셈이기 때문입니다(그런 경우에는 계층형으로 나누어 기준 수를 줄이십시오).
 
 ## 최소비용경로 / 비용-거리 (Least-cost path / Cost-distance)
@@ -190,6 +193,9 @@
 
 주: 두 논문은 저자가 같아 혼동되기 쉽지만, GDAL이 구현한 것은 2000년 논문의 기준면 방식입니다.
 
+**(C) 누적 가시권(cumulative viewshed)의 고고학적 적용 맥락:**
+> Wheatley, D. (1995). "Cumulative viewshed analysis: a GIS-based method for investigating intervisibility, and its archaeological application." In: Lock, G., & Stančič, Z. (eds), *Archaeology and Geographic Information Systems: A European Perspective*. Taylor & Francis, London. (2022년 Routledge 재간행판 DOI: 10.1201/9780367810467-13)
+
 ## 히구치 거리대 (Higuchi view zones)
 
 **(C) 거리대 개념의 출처 (미터 기준값의 출처는 아님):**
@@ -249,6 +255,15 @@
 - 그 결과 본 플러그인의 부호는 ESRI 문서의 **서술적 설명**("음의 종단곡률 = 볼록")과 일치합니다.
 - 반면 GRASS `r.slope.aspect`는 **반대 부호**를 사용합니다. 따라서 GRASS나 SAGA로 교차 검증하면 값의 크기는 같고 **부호만 뒤집혀** 보입니다. 오류가 아니라 규약 차이입니다.
 - 정리: 종단(profile) 음(−)=볼록(침식 경향) / 양(+)=오목(퇴적 경향); 횡단(plan) 음(−)=수렴(물 모임) / 양(+)=발산(능선).
+
+## 공변량 상관 / VIF (Covariate report)
+
+**(B) 분산팽창지수 VIF = 1 / (1 - R²)** — `tools/covariate_report_dialog.py`가 직접 계산. 임계값 5·10은 경험 규칙이며 특정 문헌의 규정이 아닙니다.
+
+**(C) VIF 경험 규칙의 한계에 관한 경고:**
+> O'Brien, R.M. (2007). "A caution regarding rules of thumb for variance inflation factors." *Quality & Quantity*, 41(5), pp. 673-690. DOI: 10.1007/s11135-006-9018-6
+
+주: O'Brien은 VIF 4·10 같은 임계값을 기계적으로 적용해 변수를 제거하는 관행을 비판하고, 표본 크기와 효과 크기를 함께 고려하라고 권합니다. 본 도구의 리포트는 임계값을 참고선으로만 표시합니다.
 
 ## 후속 분석 참고 (이 플러그인이 구현하지 않음)
 
