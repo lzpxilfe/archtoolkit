@@ -1148,6 +1148,9 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
         if not str(self._weight_input_mode or "").startswith("hierarchy"):
             return
         self._invalidate_weight_input_mode()
+        # The refresh that ran before this hook still assigned the hierarchy
+        # weights; recompute so the table column shows the table's own weights.
+        self._update_consistency_and_weights()
         try:
             push_message(
                 self.iface,
@@ -1663,9 +1666,16 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
             return
 
         w, lam, cr = _ahp_weights_from_matrix(mat)
+        # Single source of truth for the criterion weights: in hierarchy mode
+        # the flat table is only a clamped seed, so the hierarchy's global
+        # weights are what the table column, the run and the metadata all use.
+        # (This refresh runs again inside _on_run; assigning here keeps the
+        # run from silently reverting to the seed's eigenvector.)
+        hier_w = self._hierarchy_global_weight_vector()
+        use_w = hier_w if hier_w is not None else w
         for i, c in enumerate(self._criteria):
             try:
-                c.weight = float(w[i])
+                c.weight = float(use_w[i])
             except Exception:
                 c.weight = None
 
@@ -1677,6 +1687,8 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
                 note = " (주의: 0.10 초과)"
         except Exception:
             note = ""
+        if hier_w is not None:
+            note += " | 가중치: 계층 전역가중치 사용(표는 근사 seed)"
         self.lblConsistency.setText(f"λmax={lam_txt}, CR={cr_txt}{note}")
         self._update_criteria_weight_column()
 
