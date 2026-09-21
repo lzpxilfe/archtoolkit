@@ -358,7 +358,8 @@ class AlignExportQgisIntegrationTests(unittest.TestCase):
             QObject(), source, output, 2.0, "0,10,0,10", "EPSG:32652",
             nearest=True, nodata=-9999.0, progress=progress, force_float32=True,
         )
-        band = gdal.Open(output).GetRasterBand(1)
+        written = gdal.Open(output)  # keep the dataset alive while the band is used
+        band = written.GetRasterBand(1)
         self.assertEqual(band.DataType, gdal.GDT_Float32)
         self.assertAlmostEqual(float(band.GetNoDataValue()), -9999.0, places=6)
         values = set(band.ReadAsArray().ravel().tolist()) - {-9999.0}
@@ -473,7 +474,8 @@ class AlignExportQgisIntegrationTests(unittest.TestCase):
             QObject(), source, output, 2.0, "0,10,0,10", "EPSG:32652",
             nearest=True, nodata=0.0, progress=progress,
         )
-        band = gdal.Open(output).GetRasterBand(1)
+        written = gdal.Open(output)  # keep the dataset alive while the band is used
+        band = written.GetRasterBand(1)
         array = band.ReadAsArray()
         nodata = band.GetNoDataValue()
         valid = array[array != nodata] if nodata is not None else array.ravel()
