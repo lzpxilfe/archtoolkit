@@ -15,8 +15,10 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install numpy (analysis cores) and linters
-        run: python -m pip install --upgrade numpy flake8 pyflakes
+      # PyQt6 (no QGIS) lets tests/test_qt6_compat.py prove every Qt name the
+      # sources spell exists in the binding QGIS 4 is built on.
+      - name: Install numpy (analysis cores), linters and PyQt6
+        run: python -m pip install --upgrade numpy flake8 pyflakes PyQt6
 
       # Every tests/test_*.py is discovered; QGIS-gated modules skip themselves.
       - name: Unit tests (QGIS-free)

@@ -237,7 +237,15 @@ def _build_stubs(driver):
     core = types.ModuleType("qgis.core")
 
     class Qgis:
-        Info, Warning, Critical = 0, 1, 2
+        # Scoped spellings, as used by the sources (they also run on QGIS 4).
+        class MessageLevel:
+            Info, Warning, Critical, Success = 0, 1, 2, 3
+
+        class GeometryType:
+            Point, Line, Polygon = 0, 1, 2
+
+        class DistanceUnit:
+            Meters = 0
 
     class QgsMessageLog:
         @staticmethod

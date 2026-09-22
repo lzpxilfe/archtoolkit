@@ -1,0 +1,39 @@
+name: Release
+
+# Push a tag like v0.1.4 to build the plugin ZIP, verify it against the
+# plugin-repository rules, and attach it to a GitHub release. The same ZIP
+# is what gets uploaded to https://plugins.qgis.org.
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Release identity must match the tag
+        run: |
+          tag_date="$(git show -s --format=%cs "${GITHUB_REF_NAME}^{commit}")"
+          python scripts/check_release_identity.py --release-tag "${GITHUB_REF_NAME}" --release-date "${tag_date}"
+
+      - name: Build and verify the plugin ZIP
+        run: python scripts/build_plugin_zip.py --check
+
+      - name: Attach the ZIP to the GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/ArchToolkit-*.zip
+          generate_release_notes: true

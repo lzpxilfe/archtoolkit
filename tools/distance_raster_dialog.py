@@ -48,12 +48,11 @@ from qgis.core import (
     Qgis,
     QgsCoordinateReferenceSystem,
     QgsProject,
-    QgsRasterBandStats,
     QgsRasterLayer,
     QgsRectangle,
     QgsVectorLayer,
-    QgsWkbTypes,
 )
+from .qtcompat import RBS_ALL
 from qgis.gui import QgsMapLayerComboBox
 
 import processing
@@ -114,12 +113,13 @@ class DistanceRasterDialog(QtWidgets.QDialog):
         form_src = QtWidgets.QFormLayout(grp_src)
         self.cmbSource = QgsMapLayerComboBox(grp_src)
         try:
-            from qgis.core import QgsMapLayerProxyModel
-            self.cmbSource.setFilters(
-                QgsMapLayerProxyModel.PointLayer
-                | QgsMapLayerProxyModel.LineLayer
-                | QgsMapLayerProxyModel.PolygonLayer
-            )
+            # Qgis.LayerFilters(...) keeps the combined flags typed on PyQt5, where
+            # `a | b` degrades to int and would hit the deprecated overload.
+            self.cmbSource.setFilters(Qgis.LayerFilters(
+                Qgis.LayerFilter.PointLayer
+                | Qgis.LayerFilter.LineLayer
+                | Qgis.LayerFilter.PolygonLayer
+            ))
         except Exception as _exc:
             log_swallowed("distance_raster_dialog._setup_ui", _exc)
         self.cmbSource.layerChanged.connect(self._on_source_changed)
@@ -132,8 +132,7 @@ class DistanceRasterDialog(QtWidgets.QDialog):
         form_grid = QtWidgets.QFormLayout(grp_grid)
         self.cmbRef = QgsMapLayerComboBox(grp_grid)
         try:
-            from qgis.core import QgsMapLayerProxyModel
-            self.cmbRef.setFilters(QgsMapLayerProxyModel.RasterLayer)
+            self.cmbRef.setFilters(Qgis.LayerFilter.RasterLayer)
         except Exception as _exc:
             log_swallowed("tools/distance_raster_dialog.py:136 (_setup_ui)", _exc)
         form_grid.addRow("기준 래스터:", self.cmbRef)
@@ -309,7 +308,7 @@ class DistanceRasterDialog(QtWidgets.QDialog):
             log_message(
                 f"거리 래스터: 비정사각 픽셀 기준 래스터 거부 ({ref.name()}: "
                 f"{px_x:g} x {px_y:g}).",
-                level=Qgis.Warning,
+                level=Qgis.MessageLevel.Warning,
             )
             push_message(
                 self.iface, "오류",
@@ -329,7 +328,7 @@ class DistanceRasterDialog(QtWidgets.QDialog):
         temp_files = []
         self.btnRun.setEnabled(False)
         progress = QtWidgets.QProgressDialog("거리 계산 중…", None, 0, 3, self)
-        progress.setWindowModality(2)  # Qt.WindowModal
+        progress.setWindowModality(2)  # Qt.WindowModality.WindowModal
         progress.setMinimumDuration(0)
         progress.setValue(0)
         progress.show()
@@ -397,7 +396,7 @@ class DistanceRasterDialog(QtWidgets.QDialog):
                     log_message(
                         f"거리 래스터: 대상 레이어 일부가 기준 래스터 범위 밖에 있습니다. "
                         f"범위 밖 피처는 거리 계산에서 제외됩니다 ({key}).",
-                        level=Qgis.Warning,
+                        level=Qgis.MessageLevel.Warning,
                     )
                     push_message(
                         self.iface, "주의",
@@ -452,7 +451,7 @@ class DistanceRasterDialog(QtWidgets.QDialog):
                     log_message(
                         f"거리 래스터: 대상 레이어 '{source.name()}'가 기준 격자 어느 셀에도 "
                         f"구워지지 않아 중단합니다 ({key}, 기준 {ref.name()}).",
-                        level=Qgis.Warning,
+                        level=Qgis.MessageLevel.Warning,
                     )
                     push_message(
                         self.iface, "오류",
@@ -467,7 +466,7 @@ class DistanceRasterDialog(QtWidgets.QDialog):
             else:
                 log_message(
                     f"거리 래스터: 구운 셀 수를 확인하지 못했습니다 ({key}). 계속 진행합니다.",
-                    level=Qgis.Warning,
+                    level=Qgis.MessageLevel.Warning,
                 )
 
             # 3. Distance from every cell to the nearest burned cell.
@@ -507,7 +506,7 @@ class DistanceRasterDialog(QtWidgets.QDialog):
                     log_message(
                         f"거리 래스터: 결과가 전부 NoData여서 레이어를 추가하지 않습니다 "
                         f"({key}, 기준 {ref.name()}).",
-                        level=Qgis.Warning,
+                        level=Qgis.MessageLevel.Warning,
                     )
                     push_message(
                         self.iface, "오류",
@@ -519,7 +518,7 @@ class DistanceRasterDialog(QtWidgets.QDialog):
             else:
                 log_message(
                     f"거리 래스터: 결과의 유효 셀 수를 확인하지 못했습니다 ({key}).",
-                    level=Qgis.Warning,
+                    level=Qgis.MessageLevel.Warning,
                 )
 
             progress.setValue(3)
@@ -589,7 +588,7 @@ class DistanceRasterDialog(QtWidgets.QDialog):
         the wider rule is never wrong, only the label would be.
         """
         try:
-            if layer.geometryType() == QgsWkbTypes.PointGeometry:
+            if layer.geometryType() == Qgis.GeometryType.Point:
                 return "cell_centre"
         except Exception as _exc:
             log_swallowed("distance_raster_dialog._burn_rule", _exc)
@@ -612,7 +611,7 @@ class DistanceRasterDialog(QtWidgets.QDialog):
             if not probe.isValid():
                 return None
             stats = probe.dataProvider().bandStatistics(
-                1, QgsRasterBandStats.All, QgsRectangle(), 0)
+                1, RBS_ALL, QgsRectangle(), 0)
             return (int(stats.elementCount), float(stats.sum), float(stats.maximumValue))
         except Exception as _exc:
             log_swallowed("distance_raster_dialog._band_summary", _exc)

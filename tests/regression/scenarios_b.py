@@ -201,16 +201,16 @@ def _run_ppa(ctx, pts, *, method, k=2, mutual=False, betweenness=True):
 
 
 def scenario_network_ppa(ctx):
-    from qgis.PyQt.QtCore import QVariant
+    from tools.qtcompat import FT_INT
     out = {}
-    pts = ctx.env.make_points("sites6", _six_points(), fields=[("val", QVariant.Int)], attrs=[[i] for i in range(6)])
+    pts = ctx.env.make_points("sites6", _six_points(), fields=[("val", FT_INT)], attrs=[[i] for i in range(6)])
     out["knn2"] = _run_ppa(ctx, pts, method="knn", k=2, mutual=False)
     out["knn2_mutual"] = _run_ppa(ctx, pts, method="knn", k=2, mutual=True)
     out["delaunay"] = _run_ppa(ctx, pts, method="delaunay")
     # Two sites at exactly the same coordinate (P6 == P3).
     coords = _six_points()
     coords[5] = coords[2]
-    dup = ctx.env.make_points("sites6_dup", coords, fields=[("val", QVariant.Int)], attrs=[[i] for i in range(6)])
+    dup = ctx.env.make_points("sites6_dup", coords, fields=[("val", FT_INT)], attrs=[[i] for i in range(6)])
     out["dup_delaunay"] = _run_ppa(ctx, dup, method="delaunay")
     out["dup_knn2"] = _run_ppa(ctx, dup, method="knn", k=2)
     return out
@@ -249,10 +249,10 @@ def _run_vis(ctx, pts, dem, *, curvature=None, max_dist=450.0, step=5.0):
 
 
 def scenario_network_visibility(ctx):
-    from qgis.PyQt.QtCore import QVariant
+    from tools.qtcompat import FT_INT
     dem_path = ctx.env.make_dem(os.path.join(ctx.tmp, "dem.tif"), kind="ridge")
     dem = _add_raster(dem_path, "dem")
-    pts = ctx.env.make_points("sites6", _six_points(), fields=[("val", QVariant.Int)], attrs=[[i] for i in range(6)])
+    pts = ctx.env.make_points("sites6", _six_points(), fields=[("val", FT_INT)], attrs=[[i] for i in range(6)])
     out = {}
     out["default"] = _run_vis(ctx, pts, dem)              # NEW: curvature on by default
     out["flat"] = _run_vis(ctx, pts, dem, curvature=False)  # NEW: flat; OLD: same as default (no widget)
@@ -280,7 +280,7 @@ def scenario_network_visibility(ctx):
 
 # ---------------------------------------------------------------- DEM generator
 def _grid_points(name, field, *, x0=200000.0, y0=500000.0, n=5, spacing=50.0):
-    from qgis.PyQt.QtCore import QVariant
+    from tools.qtcompat import FT_DOUBLE
     coords, attrs = [], []
     for j in range(n):
         for i in range(n):
@@ -289,7 +289,7 @@ def _grid_points(name, field, *, x0=200000.0, y0=500000.0, n=5, spacing=50.0):
             coords.append((x, y))
             attrs.append([100.0 + 0.2 * (x - x0) + 0.1 * (y0 - y) + 5.0 * math.sin(i) * math.cos(j)])
     from qgis_env import make_points
-    return make_points(name, coords, fields=[(field, QVariant.Double)], attrs=attrs)
+    return make_points(name, coords, fields=[(field, FT_DOUBLE)], attrs=attrs)
 
 
 def _run_dem(ctx, layer, *, method_needle, out_name, px=10.0, z_choice=None):
@@ -335,7 +335,7 @@ def scenario_dem_generator(ctx):
 
 
 def scenario_kriging_direct(ctx):
-    from qgis.PyQt.QtCore import QVariant
+    from tools.qtcompat import FT_DOUBLE
     from qgis.core import QgsRectangle
     from osgeo import gdal
     from tools.kriging_lite import ordinary_kriging_lite_to_geotiff
@@ -351,7 +351,7 @@ def scenario_kriging_direct(ctx):
                 z = 30.0
             coords.append((x, y))
             attrs.append([z])
-    lyr = ctx.env.make_points("bench49", coords, fields=[("ELEV", QVariant.Double)], attrs=attrs)
+    lyr = ctx.env.make_points("bench49", coords, fields=[("ELEV", FT_DOUBLE)], attrs=attrs)
     out_path = os.path.join(ctx.tmp, "krig_direct.tif")
     var_path = os.path.join(ctx.tmp, "krig_direct_var.tif")
     info = ordinary_kriging_lite_to_geotiff(
@@ -384,8 +384,8 @@ def scenario_kriging_direct(ctx):
 
 # ------------------------------------------------------------- geology rasterize
 def _geology_layers():
-    from qgis.PyQt.QtCore import QVariant
-    fields = [("LITHO", QVariant.String), ("LITHOIDX", QVariant.Int), ("LITHONAME", QVariant.String)]
+    from tools.qtcompat import FT_INT, FT_STRING
+    fields = [("LITHO", FT_STRING), ("LITHOIDX", FT_INT), ("LITHONAME", FT_STRING)]
     a = _memory_layer("Polygon", "Litho_sheetA", fields, [
         (_rect_geom(200000, 499700, 200300, 500000), ["Kgr", 5, "Granite"]),
         (_rect_geom(200000, 499400, 200300, 499700), ["Qa", 1, "Alluvium"]),
@@ -549,11 +549,11 @@ def _geochem_dialog(ctx, rgb, aoi, zones, *, inpaint, full):
 
 
 def scenario_geochem_polygonize(ctx):
-    from qgis.PyQt.QtCore import QVariant
+    from tools.qtcompat import FT_INT
     rgb_path = _geochem_rgb(os.path.join(ctx.tmp, "fe2o3_rgb.tif"))
     rgb = _add_raster(rgb_path, "fe2o3_wms_clone")
     aoi = ctx.env.make_polygon("aoi", [(200050, 499950), (200550, 499950), (200550, 499450), (200050, 499450)])
-    zones = _memory_layer("Polygon", "zones", [("zid", QVariant.Int)], [
+    zones = _memory_layer("Polygon", "zones", [("zid", FT_INT)], [
         (_rect_geom(200055, 499705, 200295, 499945), [1]),
         (_rect_geom(200305, 499455, 200545, 499695), [2]),
     ])
@@ -609,17 +609,17 @@ def _run_distance(ctx, source, dem, var):
 
 def scenario_distance_raster(ctx):
     from qgis.core import QgsGeometry, QgsPointXY
-    from qgis.PyQt.QtCore import QVariant
+    from tools.qtcompat import FT_STRING
     dem_path = ctx.env.make_dem(os.path.join(ctx.tmp, "dem.tif"), kind="ridge")
     dem = _add_raster(dem_path, "dem")
-    lines = _memory_layer("LineString", "rivers", [("nm", QVariant.String)], [
+    lines = _memory_layer("LineString", "rivers", [("nm", FT_STRING)], [
         (QgsGeometry.fromPolylineXY([QgsPointXY(200050, 499950), QgsPointXY(200550, 499650)]), ["a"]),
         (QgsGeometry.fromPolylineXY([QgsPointXY(200100, 499450), QgsPointXY(200500, 499500)]), ["b"]),
     ])
-    strip = _memory_layer("Polygon", "strip5m", [("nm", QVariant.String)], [
+    strip = _memory_layer("Polygon", "strip5m", [("nm", FT_STRING)], [
         (_rect_geom(200397, 499420, 200402, 499980), ["s"]),   # 5 m wide, misses every 10 m cell centre
     ])
-    strip_on = _memory_layer("Polygon", "strip5m_oncentre", [("nm", QVariant.String)], [
+    strip_on = _memory_layer("Polygon", "strip5m_oncentre", [("nm", FT_STRING)], [
         (_rect_geom(200402.5, 499420, 200407.5, 499980), ["s"]),   # 5 m wide, contains centre x=200405
     ])
     from qgis_env import make_points

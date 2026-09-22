@@ -40,7 +40,6 @@ from osgeo import gdal, ogr, osr
 
 import processing
 from qgis.PyQt import QtWidgets
-from qgis.PyQt.QtCore import QVariant
 from qgis.PyQt.QtGui import QColor, QImage
 from qgis.core import (
     Qgis,
@@ -49,15 +48,14 @@ from qgis.core import (
     QgsFeature,
     QgsField,
     QgsGeometry,
-    QgsMapLayerProxyModel,
     QgsPointXY,
     QgsProject,
     QgsRasterLayer,
     QgsRectangle,
     QgsRendererCategory,
     QgsVectorLayer,
-    QgsWkbTypes,
 )
+from .qtcompat import FT_INT, FT_DOUBLE, FT_STRING, SHADER_INTERPOLATED
 from qgis.gui import QgsMapLayerComboBox
 
 from .utils import (
@@ -533,9 +531,9 @@ class GeoChemPolygonizeDialog(QtWidgets.QDialog):
         grid = QtWidgets.QGridLayout(grp_in)
 
         self.cmbRaster = QgsMapLayerComboBox(grp_in)
-        self.cmbRaster.setFilters(QgsMapLayerProxyModel.RasterLayer)
+        self.cmbRaster.setFilters(Qgis.LayerFilter.RasterLayer)
         self.cmbAoi = QgsMapLayerComboBox(grp_in)
-        self.cmbAoi.setFilters(QgsMapLayerProxyModel.VectorLayer)
+        self.cmbAoi.setFilters(Qgis.LayerFilter.VectorLayer)
 
         grid.addWidget(QtWidgets.QLabel("RGB 래스터(WMS)"), 0, 0)
         grid.addWidget(self.cmbRaster, 0, 1, 1, 2)
@@ -561,7 +559,7 @@ class GeoChemPolygonizeDialog(QtWidgets.QDialog):
         self.btnPresetImport = QtWidgets.QToolButton(grp_preset)
         self.btnPresetImport.setText("불러오기")
         self.btnPresetImport.setToolTip("사용자 범례 프리셋을 추가합니다(CSV/이미지 샘플링).")
-        self.btnPresetImport.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+        self.btnPresetImport.setPopupMode(QtWidgets.QToolButton.ToolButtonPopupMode.InstantPopup)
         try:
             menu = QtWidgets.QMenu(self.btnPresetImport)
             act_csv = menu.addAction("CSV로 프리셋 불러오기…")
@@ -736,9 +734,9 @@ class GeoChemPolygonizeDialog(QtWidgets.QDialog):
 
         self.cmbZoneLayer = QgsMapLayerComboBox(grp_zonal)
         try:
-            self.cmbZoneLayer.setFilters(QgsMapLayerProxyModel.PolygonLayer)
+            self.cmbZoneLayer.setFilters(Qgis.LayerFilter.PolygonLayer)
         except Exception:
-            self.cmbZoneLayer.setFilters(QgsMapLayerProxyModel.VectorLayer)
+            self.cmbZoneLayer.setFilters(Qgis.LayerFilter.VectorLayer)
 
         self.chkZoneSelectedOnly = QtWidgets.QCheckBox("구역 레이어 선택 피처만 사용")
         self.chkZoneSelectedOnly.setChecked(False)
@@ -991,7 +989,7 @@ value/class 래스터와 폴리곤을 생성합니다.
             return
         points = list(csv_result.points)
         for note in csv_result.notes:
-            log_message(f"GeoChem: CSV 프리셋 {os.path.basename(path)}: {note}", level=Qgis.Info)
+            log_message(f"GeoChem: CSV 프리셋 {os.path.basename(path)}: {note}", level=Qgis.MessageLevel.Info)
         if csv_result.scaled_from_unit:
             push_message(self.iface, "프리셋", "CSV의 RGB가 0~1 범위라 255배로 환산했습니다.", level=1, duration=7)
         if csv_result.skipped_rows:
@@ -1140,7 +1138,7 @@ value/class 래스터와 폴리곤을 생성합니다.
             log_message(
                 f"GeoChem: legend image {w}x{h} sampled at x={x} rows={rows} -> "
                 + ", ".join(f"{p.value:g}:{p.rgb}" for p in points),
-                level=Qgis.Info,
+                level=Qgis.MessageLevel.Info,
             )
         except Exception as _exc:
             log_swallowed("geochem_polygonize_dialog._import_preset_from_legend_image", _exc)
@@ -1282,7 +1280,7 @@ value/class 래스터와 폴리곤을 생성합니다.
 
         try:
             if self._tmp_dir_in_use(tmp_dir):
-                log_message(f"GeoChem: tmp dir still in use, skip cleanup: {tmp_dir}", level=Qgis.Warning)
+                log_message(f"GeoChem: tmp dir still in use, skip cleanup: {tmp_dir}", level=Qgis.MessageLevel.Warning)
                 return
         except Exception as _exc:
             log_swallowed("tools/geochem_polygonize_dialog.py:1209 (_cleanup_tmp)", _exc)
@@ -1317,7 +1315,7 @@ value/class 래스터와 폴리곤을 생성합니다.
             push_message(self.iface, "오류", "조사지역 폴리곤 레이어를 선택해주세요.", level=2, duration=7)
             restore_ui_focus(self)
             return
-        if aoi.geometryType() != QgsWkbTypes.PolygonGeometry:
+        if aoi.geometryType() != Qgis.GeometryType.Polygon:
             push_message(self.iface, "오류", "조사지역은 폴리곤 레이어여야 합니다.", level=2, duration=7)
             restore_ui_focus(self)
             return
@@ -1364,7 +1362,7 @@ value/class 래스터와 폴리곤을 생성합니다.
                 push_message(self.iface, "오류", "구역 통계용 폴리곤 레이어를 선택해주세요.", level=2, duration=7)
                 restore_ui_focus(self)
                 return
-            if zone_layer.geometryType() != QgsWkbTypes.PolygonGeometry:
+            if zone_layer.geometryType() != Qgis.GeometryType.Polygon:
                 push_message(self.iface, "오류", "구역 통계 레이어는 폴리곤 레이어여야 합니다.", level=2, duration=7)
                 restore_ui_focus(self)
                 return
@@ -1391,7 +1389,7 @@ value/class 래스터와 폴리곤을 생성합니다.
                 level=1,
                 duration=7,
             )
-            log_message(f"GeoChem: AOI selected-only requested but no selection; using all {len(feats)} features", level=Qgis.Warning)
+            log_message(f"GeoChem: AOI selected-only requested but no selection; using all {len(feats)} features", level=Qgis.MessageLevel.Warning)
         if not feats:
             push_message(self.iface, "오류", "조사지역 피처가 없습니다. (선택 또는 레이어 내용 확인)", level=2, duration=7)
             restore_ui_focus(self)
@@ -1450,7 +1448,7 @@ value/class 래스터와 폴리곤을 생성합니다.
                     if rc != 0:
                         log_message(
                             f"GeoChem: AOI reprojection failed (code {rc}) — AOI 마스킹을 건너뜁니다.",
-                            level=Qgis.Warning,
+                            level=Qgis.MessageLevel.Warning,
                         )
                         aoi_geom_raster = None
                 except Exception:
@@ -1458,7 +1456,7 @@ value/class 래스터와 폴리곤을 생성합니다.
         except Exception as e:
             # Transform failed outright: do NOT restore the untransformed AOI
             # (it would mask in the wrong CRS and blank the output). Skip masking.
-            log_message(f"GeoChem: extent transform failed: {e} — AOI 마스킹을 건너뜁니다.", level=Qgis.Warning)
+            log_message(f"GeoChem: extent transform failed: {e} — AOI 마스킹을 건너뜁니다.", level=Qgis.MessageLevel.Warning)
             aoi_geom_raster = None
 
         if extent_export.isEmpty() or extent_export.width() <= 0 or extent_export.height() <= 0:
@@ -1495,7 +1493,7 @@ value/class 래스터와 폴리곤을 생성합니다.
                         log_message(
                             f"GeoChem: canvas {float(canvas.mapUnitsPerPixel()):g} ({dest_crs.authid()} units/px) "
                             f"-> {px:g} ({raster.crs().authid()} units/px) at the AOI",
-                            level=Qgis.Info,
+                            level=Qgis.MessageLevel.Info,
                         )
             except Exception as _exc:
                 log_swallowed("geochem_polygonize_dialog.run (pixel size)", _exc)
@@ -1540,7 +1538,7 @@ value/class 래스터와 폴리곤을 생성합니다.
             px_source = "capped"
             log_message(
                 f"GeoChem: auto-adjusted px to {px:g} to cap size => {width}x{height} ({total_px:,} px)",
-                level=Qgis.Warning,
+                level=Qgis.MessageLevel.Warning,
             )
             push_message(
                 self.iface,
@@ -1553,7 +1551,7 @@ value/class 래스터와 폴리곤을 생성합니다.
 
         log_message(
             f"GeoChem: export extent {extent_export.toString()} px={px:g} ({px_source}) => {width}x{height}",
-            level=Qgis.Info,
+            level=Qgis.MessageLevel.Info,
         )
         # Recorded in the value/class raster metadata (params_json) so a saved
         # GeoTIFF can be traced back to the resolution and corrections used.
@@ -1572,10 +1570,10 @@ value/class 래스터와 폴리곤을 생성합니다.
         rgb_path = os.path.join(self._tmp_dir, f"wms_rgb_{run_id}.tif")
         val_path = os.path.join(self._tmp_dir, f"{preset.key}_value_{run_id}.tif")
         cls_path = os.path.join(self._tmp_dir, f"{preset.key}_class_{run_id}.tif")
-        log_message(f"GeoChem: tmp={self._tmp_dir}", level=Qgis.Info)
-        log_message(f"GeoChem: out rgb={rgb_path}", level=Qgis.Info)
-        log_message(f"GeoChem: out val={val_path}", level=Qgis.Info)
-        log_message(f"GeoChem: out cls={cls_path}", level=Qgis.Info)
+        log_message(f"GeoChem: tmp={self._tmp_dir}", level=Qgis.MessageLevel.Info)
+        log_message(f"GeoChem: out rgb={rgb_path}", level=Qgis.MessageLevel.Info)
+        log_message(f"GeoChem: out val={val_path}", level=Qgis.MessageLevel.Info)
+        log_message(f"GeoChem: out cls={cls_path}", level=Qgis.MessageLevel.Info)
 
         try:
             # 1) Export WMS RGB to GeoTIFF within survey-area extent (rectangular).
@@ -1588,7 +1586,7 @@ value/class 래스터와 폴리곤을 생성합니다.
                 return
 
             # 2) RGB -> value raster
-            log_message("GeoChem: reading exported RGB…", level=Qgis.Info)
+            log_message("GeoChem: reading exported RGB…", level=Qgis.MessageLevel.Info)
             ds = gdal.Open(rgb_path)
             if ds is None:
                 raise RuntimeError("Cannot open exported RGB GeoTIFF")
@@ -1615,14 +1613,14 @@ value/class 래스터와 폴리곤을 생성합니다.
             try:
                 log_message(
                     f"GeoChem: exported bands={band_count} shape={getattr(r, 'shape', None)} dtype={getattr(r, 'dtype', None)}",
-                    level=Qgis.Info,
+                    level=Qgis.MessageLevel.Info,
                 )
             except Exception as _exc:
                 log_swallowed("tools/geochem_polygonize_dialog.py:1469 (run)", _exc)
 
-            log_message("GeoChem: RGB -> value mapping…", level=Qgis.Info)
+            log_message("GeoChem: RGB -> value mapping…", level=Qgis.MessageLevel.Info)
             if do_snap_max:
-                log_message(f"GeoChem: high-end snap enabled (last segment t>{snap_t:g} -> max)", level=Qgis.Info)
+                log_message(f"GeoChem: high-end snap enabled (last segment t>{snap_t:g} -> max)", level=Qgis.MessageLevel.Info)
             out, residual = _interp_rgb_to_value(
                 r=r,
                 g=g,
@@ -1649,7 +1647,7 @@ value/class 래스터와 폴리곤을 생성합니다.
                     log_message(
                         f"GeoChem: {n_rej:,}/{int(out.size):,} 픽셀({pct_rej:.2f}%)이 범례 색에서 RGB 거리 "
                         f"{_RGB_MATCH_TOLERANCE:g} 이상 떨어져 NoData 처리 (검정 선·문자·범례 밖 색)",
-                        level=Qgis.Warning if pct_rej >= 5.0 else Qgis.Info,
+                        level=Qgis.MessageLevel.Warning if pct_rej >= 5.0 else Qgis.MessageLevel.Info,
                     )
                     if pct_rej >= 5.0:
                         push_message(
@@ -1672,7 +1670,7 @@ value/class 래스터와 폴리곤을 생성합니다.
                         tr = int(np.count_nonzero(transparent))
                         log_message(
                             f"GeoChem: alpha transparent {tr:,}/{total:,} ({(tr / total * 100.0):.2f}%)",
-                            level=Qgis.Info,
+                            level=Qgis.MessageLevel.Info,
                         )
                     except Exception as _exc:
                         log_swallowed("geochem_polygonize_dialog.run", _exc)
@@ -1691,7 +1689,7 @@ value/class 래스터와 폴리곤을 생성합니다.
                         out[low_nodata_mask] = nodata_val
                         log_message(
                             f"GeoChem: treat <{min_valid:g} as nodata {n_low:,} px (legend low-end)",
-                            level=Qgis.Info,
+                            level=Qgis.MessageLevel.Info,
                         )
                 except Exception:
                     low_nodata_mask = None
@@ -1701,7 +1699,7 @@ value/class 래스터와 폴리곤을 생성합니다.
                 nd = int(np.count_nonzero(out == nodata_val))
                 log_message(
                     f"GeoChem: nodata pixels {nd:,}/{total:,} ({(nd / total * 100.0):.2f}%)",
-                    level=Qgis.Info,
+                    level=Qgis.MessageLevel.Info,
                 )
             except Exception as _exc:
                 log_swallowed("geochem_polygonize_dialog.run", _exc)
@@ -1712,7 +1710,7 @@ value/class 래스터와 폴리곤을 생성합니다.
             # reported per run (metadata) and per zone (fill_pct).
             fill_mask = None
             if do_inpaint:
-                log_message("GeoChem: masking dark linework…", level=Qgis.Info)
+                log_message("GeoChem: masking dark linework…", level=Qgis.MessageLevel.Info)
                 try:
                     mask = _mask_black_lines(r, g, b)
                     if transparent is not None:
@@ -1722,7 +1720,7 @@ value/class 래스터와 폴리곤을 생성합니다.
                         t = int(mask.size)
                         log_message(
                             f"GeoChem: linework mask {m:,}/{t:,} ({(m / t * 100.0):.2f}%)",
-                            level=Qgis.Info,
+                            level=Qgis.MessageLevel.Info,
                         )
                     except Exception as _exc:
                         log_swallowed("geochem_polygonize_dialog.run", _exc)
@@ -1735,7 +1733,7 @@ value/class 래스터와 폴리곤을 생성합니다.
                     pre_nodata = (~np.isfinite(out)) | (out == nodata_val)
                 except Exception as _exc:
                     log_swallowed("geochem_polygonize_dialog.run (fill mask)", _exc)
-                log_message("GeoChem: filling masked pixels…", level=Qgis.Info)
+                log_message("GeoChem: filling masked pixels…", level=Qgis.MessageLevel.Info)
                 out = _gdal_fill_nodata_nearestish(arr=out, nodata=float(nodata_val), max_search_dist_px=fill_dist)
                 if transparent is not None:
                     try:
@@ -1760,7 +1758,7 @@ value/class 래스터와 폴리곤을 생성합니다.
                     nd = int(np.count_nonzero(out == nodata_val))
                     log_message(
                         f"GeoChem: nodata pixels after fill {nd:,}/{total:,} ({(nd / total * 100.0):.2f}%)",
-                        level=Qgis.Info,
+                        level=Qgis.MessageLevel.Info,
                     )
                 except Exception as _exc:
                     log_swallowed("geochem_polygonize_dialog.run", _exc)
@@ -1786,7 +1784,7 @@ value/class 래스터와 폴리곤을 생성합니다.
                             inside = int(np.count_nonzero(mask_aoi))
                             log_message(
                                 f"GeoChem: AOI mask inside {inside:,}/{total:,} ({(inside / total * 100.0):.2f}%)",
-                                level=Qgis.Info,
+                                level=Qgis.MessageLevel.Info,
                             )
                         except Exception as _exc:
                             log_swallowed("geochem_polygonize_dialog.run", _exc)
@@ -1795,7 +1793,7 @@ value/class 래스터와 폴리곤을 생성합니다.
                             nd2 = int(np.count_nonzero(out == nodata_val))
                             log_message(
                                 f"GeoChem: nodata pixels after AOI mask {nd2:,}/{total2:,} ({(nd2 / total2 * 100.0):.2f}%)",
-                                level=Qgis.Info,
+                                level=Qgis.MessageLevel.Info,
                             )
                         except Exception as _exc:
                             log_swallowed("geochem_polygonize_dialog.run", _exc)
@@ -1817,10 +1815,10 @@ value/class 래스터와 폴리곤을 생성합니다.
                         log_message(
                             f"GeoChem: inpaint filled {n_fill:,}/{n_valid:,} valid px ({pct_fill:.2f}%) - "
                             "이 픽셀은 측정값이 아니라 주변 보간값이며 이후 통계에 그대로 포함됩니다",
-                            level=Qgis.Warning if pct_fill >= 5.0 else Qgis.Info,
+                            level=Qgis.MessageLevel.Warning if pct_fill >= 5.0 else Qgis.MessageLevel.Info,
                         )
                     else:
-                        log_message("GeoChem: inpaint fill mask unavailable; filled share not recorded", level=Qgis.Warning)
+                        log_message("GeoChem: inpaint fill mask unavailable; filled share not recorded", level=Qgis.MessageLevel.Warning)
                 except Exception as _exc:
                     log_swallowed("geochem_polygonize_dialog.run (inpaint accounting)", _exc)
             self._last_geochem_run_params.update(inpaint_meta)
@@ -1848,7 +1846,7 @@ value/class 래스터와 폴리곤을 생성합니다.
                             log_message(
                                 f"GeoChem: max correction {cur_max:g} -> {target_max:g} (x{factor:.3f}) - "
                                 "클립 최댓값을 범례 최댓값으로 늘림 (모든 값에 적용)",
-                                level=Qgis.Warning,
+                                level=Qgis.MessageLevel.Warning,
                             )
                             push_message(
                                 self.iface,
@@ -1860,7 +1858,7 @@ value/class 래스터와 폴리곤을 생성합니다.
                             )
                             out[valid] = (out[valid] / cur_max) * target_max
                         else:
-                            log_message(f"GeoChem: max correction not needed (cur_max={cur_max:g}, legend max={target_max:g})", level=Qgis.Info)
+                            log_message(f"GeoChem: max correction not needed (cur_max={cur_max:g}, legend max={target_max:g})", level=Qgis.MessageLevel.Info)
                 except Exception as _exc:
                     log_swallowed("geochem_polygonize_dialog.run", _exc)
             self._last_geochem_run_params["fix_max"] = fix_max_meta
@@ -1870,7 +1868,7 @@ value/class 래스터와 폴리곤을 생성합니다.
             out[~np.isfinite(out)] = nodata_val
 
             # Write value raster
-            log_message("GeoChem: writing value raster…", level=Qgis.Info)
+            log_message("GeoChem: writing value raster…", level=Qgis.MessageLevel.Info)
             self._write_single_band_geotiff(ds, out_path=val_path, data=out, nodata=float(nodata_val))
 
             try:
@@ -1879,9 +1877,9 @@ value/class 래스터와 폴리곤을 생성합니다.
                     vmin = float(np.nanmin(out[valid]))
                     vmax = float(np.nanmax(out[valid]))
                     p99 = float(np.nanpercentile(out[valid], 99.0))
-                    log_message(f"GeoChem: value stats min={vmin:g} max={vmax:g} p99={p99:g}", level=Qgis.Info)
+                    log_message(f"GeoChem: value stats min={vmin:g} max={vmax:g} p99={p99:g}", level=Qgis.MessageLevel.Info)
                 else:
-                    log_message("GeoChem: value stats (no valid pixels)", level=Qgis.Warning)
+                    log_message("GeoChem: value stats (no valid pixels)", level=Qgis.MessageLevel.Warning)
             except Exception as _exc:
                 log_swallowed("geochem_polygonize_dialog.run", _exc)
 
@@ -1890,7 +1888,7 @@ value/class 래스터와 폴리곤을 생성합니다.
             if need_class:
                 # 3) Class raster (optional output, required internally for polygonize)
                 breaks = _points_to_breaks(preset.points)
-                log_message(f"GeoChem: classify to {len(breaks) - 1} bins…", level=Qgis.Info)
+                log_message(f"GeoChem: classify to {len(breaks) - 1} bins…", level=Qgis.MessageLevel.Info)
                 cls = _classify_to_bins(values=out, breaks=breaks, nodata_class=0, nodata_value=float(nodata_val))
                 try:
                     flat = cls.ravel()
@@ -1900,7 +1898,7 @@ value/class 래스터와 폴리곤을 생성합니다.
                         v0 = float(breaks[i - 1])
                         v1 = float(breaks[i])
                         parts.append(f"class{i}({v0:g}-{v1:g})={int(counts[i]):,}")
-                    log_message("GeoChem: class counts " + " | ".join(parts), level=Qgis.Info)
+                    log_message("GeoChem: class counts " + " | ".join(parts), level=Qgis.MessageLevel.Info)
 
                     # Store counts so we can write per-class pixel stats into the polygon layer.
                     pix_counts = {}
@@ -1941,7 +1939,7 @@ value/class 래스터와 폴리곤을 생성합니다.
                         try:
                             last_cid = len(breaks) - 1
                             if int(last_cid) in means:
-                                log_message(f"GeoChem: class{last_cid} mean={means[int(last_cid)]:g}", level=Qgis.Info)
+                                log_message(f"GeoChem: class{last_cid} mean={means[int(last_cid)]:g}", level=Qgis.MessageLevel.Info)
                         except Exception as _exc:
                             log_swallowed("geochem_polygonize_dialog.run", _exc)
                     else:
@@ -1978,7 +1976,7 @@ value/class 래스터와 폴리곤을 생성합니다.
                             inpaint_on=do_inpaint,
                         )
                     except Exception as e:
-                        log_message(f"GeoChem: zonal stats failed: {e}", level=Qgis.Warning)
+                        log_message(f"GeoChem: zonal stats failed: {e}", level=Qgis.MessageLevel.Warning)
             else:
                 self._last_geochem_pix_counts = {}
                 self._last_geochem_class_mean = {}
@@ -1997,10 +1995,10 @@ value/class 래스터와 폴리곤을 생성합니다.
                     )
                     log_message(
                         f"GeoChem: saved rasters val={persist_val_path} cls={persist_cls_path}",
-                        level=Qgis.Info,
+                        level=Qgis.MessageLevel.Info,
                     )
                 except Exception as e:
-                    log_message(f"GeoChem: failed to save rasters: {e}", level=Qgis.Warning)
+                    log_message(f"GeoChem: failed to save rasters: {e}", level=Qgis.MessageLevel.Warning)
                     persist_val_path = None
                     persist_cls_path = None
 
@@ -2010,7 +2008,7 @@ value/class 래스터와 폴리곤을 생성합니다.
                     if not do_mask_aoi:
                         log_message(
                             "GeoChem: AOI 마스크가 꺼져 있어 가중 중심점이 경계 사각형(extent) 기준으로 계산됩니다.",
-                            level=Qgis.Warning,
+                            level=Qgis.MessageLevel.Warning,
                         )
                 except Exception as _exc:
                     log_swallowed("tools/geochem_polygonize_dialog.py:1770 (run)", _exc)
@@ -2031,13 +2029,13 @@ value/class 래스터와 폴리곤을 생성합니다.
                         weight_top_pct=weight_top_pct,
                     )
                 except Exception as e:
-                    log_message(f"GeoChem: center failed: {e}", level=Qgis.Warning)
+                    log_message(f"GeoChem: center failed: {e}", level=Qgis.MessageLevel.Warning)
                     center_layer = None
 
             poly: Optional[QgsVectorLayer] = None
             if do_make_polygons:
                 # 4) Polygonize -> dissolve
-                log_message("GeoChem: polygonize…", level=Qgis.Info)
+                log_message("GeoChem: polygonize…", level=Qgis.MessageLevel.Info)
                 poly_path = os.path.join(self._tmp_dir, f"{preset.key}_poly_{run_id}.gpkg")
                 try:
                     if os.path.exists(poly_path):
@@ -2056,7 +2054,7 @@ value/class 래스터와 폴리곤을 생성합니다.
                     },
                 ).get("OUTPUT")
 
-                log_message(f"GeoChem: polygonize OUTPUT type={type(poly_out).__name__} value={poly_out}", level=Qgis.Info)
+                log_message(f"GeoChem: polygonize OUTPUT type={type(poly_out).__name__} value={poly_out}", level=Qgis.MessageLevel.Info)
 
                 if isinstance(poly_out, QgsVectorLayer):
                     poly = poly_out
@@ -2069,7 +2067,7 @@ value/class 래스터와 폴리곤을 생성합니다.
                     try:
                         exists = os.path.exists(poly_path)
                         size = os.path.getsize(poly_path) if exists else 0
-                        log_message(f"GeoChem: polygonize file exists={exists} size={size}", level=Qgis.Info)
+                        log_message(f"GeoChem: polygonize file exists={exists} size={size}", level=Qgis.MessageLevel.Info)
                     except Exception as _exc:
                         log_swallowed("tools/geochem_polygonize_dialog.py:1828 (run)", _exc)
 
@@ -2095,7 +2093,7 @@ value/class 래스터와 폴리곤을 생성합니다.
                                 if _skip_1842:
                                     continue
                             vds = None
-                            log_message(f"GeoChem: gpkg layers={names}", level=Qgis.Info)
+                            log_message(f"GeoChem: gpkg layers={names}", level=Qgis.MessageLevel.Info)
                             if names:
                                 layer_name = names[0]
                     except Exception as _exc:
@@ -2134,7 +2132,7 @@ value/class 래스터와 폴리곤을 생성합니다.
                         log_swallowed("geochem_polygonize_dialog.run", _exc)
 
                 if do_dissolve:
-                    log_message("GeoChem: dissolve by class…", level=Qgis.Info)
+                    log_message("GeoChem: dissolve by class…", level=Qgis.MessageLevel.Info)
                     poly = processing.run(
                         "native:dissolve",
                         {"INPUT": poly, "FIELD": ["class_id"], "OUTPUT": "memory:"},
@@ -2159,7 +2157,7 @@ value/class 래스터와 폴리곤을 생성합니다.
         except Exception as e:
             log_exception("GeoChem error", e)
             try:
-                log_message(f"GeoChem: kept temp folder for debug: {self._tmp_dir}", level=Qgis.Warning)
+                log_message(f"GeoChem: kept temp folder for debug: {self._tmp_dir}", level=Qgis.MessageLevel.Warning)
             except Exception as _exc:
                 log_swallowed("tools/geochem_polygonize_dialog.py:1910 (run)", _exc)
             push_message(self.iface, "오류", f"처리 실패: {e}", level=2, duration=10)
@@ -2224,12 +2222,12 @@ value/class 래스터와 폴리곤을 생성합니다.
             ctx = QgsProject.instance().transformContext()
             res = writer.writeRaster(pipe, int(width), int(height), extent, raster.crs(), ctx)
             if res != 0:
-                log_message(f"GeoChem: writeRaster returned {res}", level=Qgis.Warning)
+                log_message(f"GeoChem: writeRaster returned {res}", level=Qgis.MessageLevel.Warning)
                 raise RuntimeError(f"writeRaster failed ({res})")
             if os.path.exists(out_path):
                 return True
         except Exception as e:
-            log_message(f"GeoChem: QGIS export failed, trying GDAL warp… ({e})", level=Qgis.Warning)
+            log_message(f"GeoChem: QGIS export failed, trying GDAL warp… ({e})", level=Qgis.MessageLevel.Warning)
 
         # Fallback: GDAL warp through Processing (more provider-compatible)
         try:
@@ -2257,10 +2255,10 @@ value/class 래스터와 폴리곤을 생성합니다.
             )
             if os.path.exists(out_path):
                 return True
-            log_message("GeoChem: GDAL warp completed but output missing", level=Qgis.Warning)
+            log_message("GeoChem: GDAL warp completed but output missing", level=Qgis.MessageLevel.Warning)
             return False
         except Exception as e:
-            log_message(f"GeoChem: GDAL warp export failed: {e}", level=Qgis.Warning)
+            log_message(f"GeoChem: GDAL warp export failed: {e}", level=Qgis.MessageLevel.Warning)
             return False
 
     def _write_single_band_geotiff(
@@ -2308,7 +2306,7 @@ value/class 래스터와 폴리곤을 생성합니다.
                 from qgis.PyQt.QtCore import QStandardPaths
 
                 out_dir = os.path.join(
-                    QStandardPaths.writableLocation(QStandardPaths.DocumentsLocation),
+                    QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DocumentsLocation),
                     "ArchToolkit_outputs",
                     "geochem",
                 )
@@ -2376,7 +2374,7 @@ value/class 래스터와 폴리곤을 생성합니다.
         except Exception as _exc:
             log_swallowed("geochem_polygonize_dialog._make_weighted_center_layer", _exc)
         if not np.any(valid):
-            log_message("GeoChem: center skipped (no valid pixels)", level=Qgis.Warning)
+            log_message("GeoChem: center skipped (no valid pixels)", level=Qgis.MessageLevel.Warning)
             return None
 
         method = (center_method or "weighted_mean").strip()
@@ -2421,11 +2419,11 @@ value/class 래스터와 폴리곤을 생성합니다.
                 w[sel] = vv
                 param = float(1.0)
         except Exception:
-            log_message("GeoChem: center skipped (weight computation failed)", level=Qgis.Warning)
+            log_message("GeoChem: center skipped (weight computation failed)", level=Qgis.MessageLevel.Warning)
             return None
 
         if not np.any(sel):
-            log_message("GeoChem: center skipped (no pixels after selection)", level=Qgis.Warning)
+            log_message("GeoChem: center skipped (no pixels after selection)", level=Qgis.MessageLevel.Warning)
             return None
         if rule in ("value", "power"):
             # Label says w = max(value, 0): say how many pixels that clamp touched.
@@ -2437,7 +2435,7 @@ value/class 래스터와 폴리곤을 생성합니다.
             if n_neg > 0:
                 log_message(
                     f"GeoChem: center rule={rule}: {n_neg:,} negative-valued pixels weighted 0 (w = max(value, 0)); pix_n still counts them",
-                    level=Qgis.Warning,
+                    level=Qgis.MessageLevel.Warning,
                 )
 
         sum_w = float(np.sum(w))
@@ -2460,30 +2458,30 @@ value/class 래스터와 폴리곤을 생성합니다.
                 mean_col = float(idx % ncol)
                 peak_val = float(vv[int(mean_row), int(mean_col)])
             except Exception:
-                log_message("GeoChem: center skipped (peak computation failed)", level=Qgis.Warning)
+                log_message("GeoChem: center skipped (peak computation failed)", level=Qgis.MessageLevel.Warning)
                 return None
         else:
             if method == "weighted_mean":
                 if not math.isfinite(sum_w) or sum_w <= 0:
-                    log_message("GeoChem: center skipped (sum_w <= 0)", level=Qgis.Warning)
+                    log_message("GeoChem: center skipped (sum_w <= 0)", level=Qgis.MessageLevel.Warning)
                     return None
                 denom = float(sum_w)
                 try:
                     row_sums = np.sum(w, axis=1, dtype=np.float64)
                     col_sums = np.sum(w, axis=0, dtype=np.float64)
                 except Exception:
-                    log_message("GeoChem: center skipped (centroid accumulation failed)", level=Qgis.Warning)
+                    log_message("GeoChem: center skipped (centroid accumulation failed)", level=Qgis.MessageLevel.Warning)
                     return None
             else:
                 denom = float(pix_n)
                 if not math.isfinite(denom) or denom <= 0:
-                    log_message("GeoChem: center skipped (pix_n <= 0)", level=Qgis.Warning)
+                    log_message("GeoChem: center skipped (pix_n <= 0)", level=Qgis.MessageLevel.Warning)
                     return None
                 try:
                     row_sums = np.sum(sel, axis=1, dtype=np.float64)
                     col_sums = np.sum(sel, axis=0, dtype=np.float64)
                 except Exception:
-                    log_message("GeoChem: center skipped (centroid accumulation failed)", level=Qgis.Warning)
+                    log_message("GeoChem: center skipped (centroid accumulation failed)", level=Qgis.MessageLevel.Warning)
                     return None
 
             try:
@@ -2492,7 +2490,7 @@ value/class 래스터와 폴리곤을 생성합니다.
                 mean_row = float(np.dot(row_sums, rows) / denom)
                 mean_col = float(np.dot(col_sums, cols) / denom)
             except Exception:
-                log_message("GeoChem: center skipped (centroid accumulation failed)", level=Qgis.Warning)
+                log_message("GeoChem: center skipped (centroid accumulation failed)", level=Qgis.MessageLevel.Warning)
                 return None
 
         if mean_row is None or mean_col is None:
@@ -2533,14 +2531,14 @@ value/class 래스터와 폴리곤을 생성합니다.
         pr = layer.dataProvider()
         pr.addAttributes(
             [
-                QgsField("element", QVariant.String),
-                QgsField("unit", QVariant.String),
-                QgsField("c_method", QVariant.String),
-                QgsField("w_rule", QVariant.String),
-                QgsField("w_param", QVariant.Double),
-                QgsField("w_thr", QVariant.Double),
-                QgsField("w_sum", QVariant.Double),
-                QgsField("pix_n", QVariant.Int),
+                QgsField("element", FT_STRING),
+                QgsField("unit", FT_STRING),
+                QgsField("c_method", FT_STRING),
+                QgsField("w_rule", FT_STRING),
+                QgsField("w_param", FT_DOUBLE),
+                QgsField("w_thr", FT_DOUBLE),
+                QgsField("w_sum", FT_DOUBLE),
+                QgsField("pix_n", FT_INT),
             ]
         )
         layer.updateFields()
@@ -2575,7 +2573,7 @@ value/class 래스터와 폴리곤을 생성합니다.
                 extra = f" peak={peak_val:g}"
             log_message(
                 f"GeoChem: center method={method} rule={rule} param={param:g} sum_w={sum_w:g} pix_n={pix_n:,}{extra}",
-                level=Qgis.Info,
+                level=Qgis.MessageLevel.Info,
             )
         except Exception as _exc:
             log_swallowed("geochem_polygonize_dialog._make_weighted_center_layer", _exc)
@@ -2611,7 +2609,7 @@ value/class 래스터와 폴리곤을 생성합니다.
         """
         if zone_layer is None or (not isinstance(zone_layer, QgsVectorLayer)):
             return None
-        if zone_layer.geometryType() != QgsWkbTypes.PolygonGeometry:
+        if zone_layer.geometryType() != Qgis.GeometryType.Polygon:
             return None
         if geotransform is None:
             return None
@@ -2641,7 +2639,7 @@ value/class 래스터와 폴리곤을 생성합니다.
                 px_area_unit = "deg2"
                 log_message(
                     "GeoChem zonal: 래스터 CRS가 위경도라 px_area/c*_area는 제곱도(deg²)입니다. 면적으로 읽지 마세요.",
-                    level=Qgis.Warning,
+                    level=Qgis.MessageLevel.Warning,
                 )
             elif rcrs is not None and rcrs.isValid():
                 # Projected: label with the CRS authid so the unit is traceable
@@ -2679,31 +2677,31 @@ value/class 래스터와 폴리곤을 생성합니다.
             orig_fields = []
 
         extra_fields: List[QgsField] = [
-            QgsField("element", QVariant.String),
-            QgsField("unit", QVariant.String),
-            QgsField("run_id", QVariant.String),
-            QgsField("pix_in", QVariant.Int),
-            QgsField("pix_val", QVariant.Int),
-            QgsField("cov_pct", QVariant.Double),
-            QgsField("val_mean", QVariant.Double),
-            QgsField("val_std", QVariant.Double),
-            QgsField("val_min", QVariant.Double),
-            QgsField("val_max", QVariant.Double),
-            QgsField("px_area", QVariant.Double),
-            QgsField("area_unit", QVariant.String),
-            QgsField("zone_area", QVariant.Double),
-            QgsField("zarea_unit", QVariant.String),
-            QgsField("burn_rule", QVariant.String),
-            QgsField("fill_pct", QVariant.Double),
+            QgsField("element", FT_STRING),
+            QgsField("unit", FT_STRING),
+            QgsField("run_id", FT_STRING),
+            QgsField("pix_in", FT_INT),
+            QgsField("pix_val", FT_INT),
+            QgsField("cov_pct", FT_DOUBLE),
+            QgsField("val_mean", FT_DOUBLE),
+            QgsField("val_std", FT_DOUBLE),
+            QgsField("val_min", FT_DOUBLE),
+            QgsField("val_max", FT_DOUBLE),
+            QgsField("px_area", FT_DOUBLE),
+            QgsField("area_unit", FT_STRING),
+            QgsField("zone_area", FT_DOUBLE),
+            QgsField("zarea_unit", FT_STRING),
+            QgsField("burn_rule", FT_STRING),
+            QgsField("fill_pct", FT_DOUBLE),
         ]
 
         n_classes = max(0, int(len(breaks) - 1))
         width = min(3, max(2, len(str(max(1, n_classes)))))
         for cid in range(1, n_classes + 1):
             s = str(cid).zfill(width)
-            extra_fields.append(QgsField(f"c{s}_n", QVariant.Int))
-            extra_fields.append(QgsField(f"c{s}_pct", QVariant.Double))
-            extra_fields.append(QgsField(f"c{s}_area", QVariant.Double))
+            extra_fields.append(QgsField(f"c{s}_n", FT_INT))
+            extra_fields.append(QgsField(f"c{s}_pct", FT_DOUBLE))
+            extra_fields.append(QgsField(f"c{s}_area", FT_DOUBLE))
 
         try:
             pr.addAttributes(orig_fields + extra_fields)
@@ -2760,7 +2758,7 @@ value/class 래스터와 폴리곤을 생성합니다.
                         level=1,
                         duration=7,
                     )
-                    log_message("GeoChem: zone selected-only requested but no selection; using all features", level=Qgis.Warning)
+                    log_message("GeoChem: zone selected-only requested but no selection; using all features", level=Qgis.MessageLevel.Warning)
                 feats = zone_layer.getFeatures()
         except Exception as _exc:
             log_swallowed("geochem_polygonize_dialog._make_zonal_stats_layer", _exc)
@@ -3005,10 +3003,10 @@ value/class 래스터와 폴리곤을 생성합니다.
             log_message(
                 f"GeoChem zonal: {n_burn_fallback}개 구역이 픽셀보다 작아 닿은 픽셀 기준(all_touched)으로 집계했습니다"
                 " (burn_rule 필드 참조; zone_area와 c*_area 합을 비교하세요)",
-                level=Qgis.Warning,
+                level=Qgis.MessageLevel.Warning,
             )
         try:
-            log_message(f"GeoChem: zonal stats features={added}", level=Qgis.Info)
+            log_message(f"GeoChem: zonal stats features={added}", level=Qgis.MessageLevel.Info)
         except Exception as _exc:
             log_swallowed("tools/geochem_polygonize_dialog.py:2568 (_make_zonal_stats_layer)", _exc)
         return out_layer
@@ -3020,7 +3018,7 @@ value/class 래스터와 폴리곤을 생성합니다.
 
             shader = QgsRasterShader()
             ramp = QgsColorRampShader()
-            ramp.setColorRampType(QgsColorRampShader.Interpolated)
+            ramp.setColorRampType(SHADER_INTERPOLATED)
             items = []
             for p in preset.points:
                 _skip_2582 = False
@@ -3089,19 +3087,19 @@ value/class 래스터와 폴리곤을 생성합니다.
         pr = layer.dataProvider()
         pr.addAttributes(
             [
-                QgsField("element", QVariant.String),
-                QgsField("unit", QVariant.String),
-                QgsField("v_min", QVariant.Double),
-                QgsField("v_max", QVariant.Double),
-                QgsField("v_mid", QVariant.Double),
-                QgsField("val_mean", QVariant.Double),
-                QgsField("val_std", QVariant.Double),
-                QgsField("label", QVariant.String),
-                QgsField("pix_n", QVariant.Int),
-                QgsField("pix_pct", QVariant.Double),
-                QgsField("area_m2", QVariant.Double),
-                QgsField("area_ha", QVariant.Double),
-                QgsField("area_pct", QVariant.Double),
+                QgsField("element", FT_STRING),
+                QgsField("unit", FT_STRING),
+                QgsField("v_min", FT_DOUBLE),
+                QgsField("v_max", FT_DOUBLE),
+                QgsField("v_mid", FT_DOUBLE),
+                QgsField("val_mean", FT_DOUBLE),
+                QgsField("val_std", FT_DOUBLE),
+                QgsField("label", FT_STRING),
+                QgsField("pix_n", FT_INT),
+                QgsField("pix_pct", FT_DOUBLE),
+                QgsField("area_m2", FT_DOUBLE),
+                QgsField("area_ha", FT_DOUBLE),
+                QgsField("area_pct", FT_DOUBLE),
             ]
         )
         layer.updateFields()
@@ -3255,7 +3253,7 @@ value/class 래스터와 폴리곤을 생성합니다.
             try:
                 log_message(
                     "GeoChem: dissolve가 꺼져 있어 class_id별 픽셀 통계를 폴리곤 피처에 직접 기록하지 않습니다.",
-                    level=Qgis.Warning,
+                    level=Qgis.MessageLevel.Warning,
                 )
             except Exception as _exc:
                 log_swallowed("tools/geochem_polygonize_dialog.py:2808 (_decorate_polygons)", _exc)

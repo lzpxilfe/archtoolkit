@@ -95,6 +95,19 @@ CI(`.github/workflows/ci.yml`)는 push마다 위 순수 테스트·정적 검사
 | 버전 삼중(metadata.txt · README 배지 · CITATION.cff) 일치 | `tests/test_release_identity.py` |
 | 도움말의 학술 근거 노트가 REFERENCES.md와 일치 | `tests/test_scholar_notes.py` |
 | 상대 import·구문 오류 없음 | `tests/check_static.py` |
+| QGIS 3 전용 표기 금지: `QVariant.Type`, `exec_()`, 스코프 없는 Qt 열거형, `QgsWkbTypes.*Geometry`, `QgsMapLayerProxyModel.Filter` 등 (QGIS 4/PyQt6에서 사라짐) | `tests/test_qt6_compat.py` |
+
+### QGIS 4(PyQt6) 호환 표기
+
+`qgisMaximumVersion=4.99`를 지키기 위해 소스는 PyQt5·PyQt6 양쪽에서 통하는 표기만 씁니다.
+
+- Qt 열거형은 스코프 포함으로: `Qt.AlignmentFlag.AlignCenter`, `QMessageBox.StandardButton.Yes`, `Qt.GlobalColor.black`.
+- 필드 타입은 `tools/qtcompat.py`의 `FT_INT`·`FT_DOUBLE`·`FT_STRING` 등(`QgsField("x", FT_DOUBLE)`, `field.type() in FT_NUMERIC_TYPES`).
+- 기하·레이어·단위·메시지 열거형은 `Qgis.GeometryType.Point`, `Qgis.LayerType.Vector`, `Qgis.LayerFilter.RasterLayer`, `Qgis.DistanceUnit.Meters`, `Qgis.MessageLevel.Warning`.
+- 버전에 따라 이름이 다른 것(밴드 통계 플래그, 색 램프 보간, 러버밴드 아이콘, 심볼 속성)은 `tools/qtcompat.py`의 상수(`RBS_*`, `SHADER_*`, `RUBBER_BAND_CIRCLE`, `SYMBOL_PROPERTY_*`).
+- 대화상자는 `exec()`, `QAction`은 `qgis.PyQt.QtGui`에서, 마우스 좌표는 `event.pos().x()`.
+
+`scripts/qt6_migrate.py`가 이관을 돕습니다: QGIS 3 Python에서 `resolve`(스코프 없는 토큰 찾기), PyQt6가 있는 Python에서 `verify`·`verify6`(모든 Qt 이름 존재 확인), `apply`(치환). `tests/test_qt6_compat.py`가 같은 검사를 게이트로 겁니다. QGIS 4 빌드에서의 실행 검증은 아직 없으며, 그 범위는 `docs/PUBLISHING.md` 6절에 적혀 있습니다.
 
 ### 기여 규칙
 - 예외를 삼키고 계속 진행할 때는 `except Exception as _exc: log_swallowed("module.func", _exc)`를 쓰세요. **맨 `pass`와 `continue`는 금지입니다** — QGIS 플러그인 디렉터리의 Bandit 보안 스캔(B110/B112)이 맨 형태를 발견하면 플러그인 자체를 차단하고, 계산·레이어·파일 작업이 조용히 실패하면 틀린 결과가 보고서까지 흔적 없이 흘러갑니다. `[swallowed]` 접두어로 로그에서 걸러볼 수 있어야 합니다. 순수 모듈(`qgis` import 없음)은 `tools/swallow_log.py`를, 그 외는 `tools/utils.py`의 `log_swallowed`를 쓰세요. 로깅 싱크(`utils._write_log_line`·`_queue_ui_log`·`log_swallowed`)의 예외 처리는 `return` 터미널로 두어 재귀를 막습니다. `tests/test_ui_assets.py`가 이 규칙을 회귀 검사합니다.

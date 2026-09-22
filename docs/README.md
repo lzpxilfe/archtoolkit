@@ -11,6 +11,7 @@
 | [../tests/regression/README.md](../tests/regression/README.md) | 회귀 비교 하네스 사용법 | 기여자 |
 | [STABILITY.md](STABILITY.md) | 브랜치·태그 운영 규칙 | 기여자 |
 | [SMOKE_TEST.md](SMOKE_TEST.md) | 수동 스모크 테스트 체크리스트 | 기여자 |
+| [PUBLISHING.md](PUBLISHING.md) | 플러그인 저장소 업로드 절차, ZIP 빌드, QGIS 4 호환 범위 | 기여자·관리자 |
 | [HARDENING_IMPLEMENTATION_DESIGN.md](HARDENING_IMPLEMENTATION_DESIGN.md) | 원자적 출력·검증 설계 기록 | 기여자 |
 | [../DEVELOPMENT.md](../DEVELOPMENT.md) | 개발 원칙, 테스트 실행, 게이트 | 기여자 |
 | [../CONTRIBUTING.md](../CONTRIBUTING.md) | 기여 가이드와 정직성 규칙 | 기여자 |

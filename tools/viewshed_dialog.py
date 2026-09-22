@@ -27,19 +27,39 @@ import processing
 import numpy as np
 from osgeo import gdal, ogr
 from qgis.PyQt import uic, QtWidgets, QtCore
-from qgis.PyQt.QtCore import Qt, QVariant, QPointF
+from qgis.PyQt.QtCore import Qt, QPointF
 from qgis.PyQt.QtGui import QColor, QPainter, QPen, QBrush, QFont, QImage, QPolygonF
 from qgis.PyQt.QtWidgets import QDialog, QVBoxLayout, QPushButton, QWidget, QFileDialog, QHBoxLayout, QLabel, QCheckBox
 from qgis.core import (
-    QgsProject, QgsRasterLayer, QgsVectorLayer, QgsMapLayerProxyModel, QgsRectangle,
-    QgsCoordinateTransform, QgsFeatureRequest,
-    QgsPointXY, QgsWkbTypes, QgsFeature, QgsGeometry, QgsField,
-    QgsRasterShader, QgsColorRampShader, QgsSingleBandPseudoColorRenderer,
-    QgsLineSymbol, QgsRendererCategory,
-    QgsCategorizedSymbolRenderer, QgsSingleSymbolRenderer, QgsPointLocator,
-    QgsMarkerSymbol, QgsFillSymbol, QgsPalLayerSettings, QgsTextFormat, QgsTextBufferSettings, QgsVectorLayerSimpleLabeling,
-    QgsTextAnnotation, Qgis, QgsUnitTypes
+    QgsProject,
+    QgsRasterLayer,
+    QgsVectorLayer,
+    QgsRectangle,
+    QgsCoordinateTransform,
+    QgsFeatureRequest,
+    QgsPointXY,
+    QgsFeature,
+    QgsGeometry,
+    QgsField,
+    QgsRasterShader,
+    QgsColorRampShader,
+    QgsSingleBandPseudoColorRenderer,
+    QgsLineSymbol,
+    QgsRendererCategory,
+    QgsCategorizedSymbolRenderer,
+    QgsSingleSymbolRenderer,
+    QgsPointLocator,
+    QgsMarkerSymbol,
+    QgsFillSymbol,
+    QgsPalLayerSettings,
+    QgsTextFormat,
+    QgsTextBufferSettings,
+    QgsVectorLayerSimpleLabeling,
+    QgsTextAnnotation,
+    Qgis,
+    QgsUnitTypes,
 )
+from .qtcompat import FT_INT, FT_DOUBLE, FT_STRING, SHADER_INTERPOLATED, SHADER_DISCRETE, RUBBER_BAND_CIRCLE
 from qgis.gui import QgsMapToolEmitPoint, QgsRubberBand, QgsSnapIndicator, QgsMapCanvasAnnotationItem
 from qgis.PyQt.QtGui import QTextDocument, QTextOption
 
@@ -118,17 +138,11 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         
         
         # Setup layer combos
-        # QGIS API compatibility: Filter may be scoped or unscoped depending on build.
-        try:
-            self._mlpm_filter = QgsMapLayerProxyModel.Filter
-        except Exception:
-            self._mlpm_filter = QgsMapLayerProxyModel
-
-        self.cmbDemLayer.setFilters(self._mlpm_filter.RasterLayer)
-        self.cmbObserverLayer.setFilters(self._mlpm_filter.VectorLayer)
+        self.cmbDemLayer.setFilters(Qgis.LayerFilter.RasterLayer)
+        self.cmbObserverLayer.setFilters(Qgis.LayerFilter.VectorLayer)
         try:
             if hasattr(self, "cmbAoiStatsLayer"):
-                self.cmbAoiStatsLayer.setFilters(self._mlpm_filter.PolygonLayer)
+                self.cmbAoiStatsLayer.setFilters(Qgis.LayerFilter.PolygonLayer)
         except Exception as _exc:
             log_swallowed("tools/viewshed_dialog.py:109 (__init__)", _exc)
 
@@ -200,11 +214,11 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         self.original_tool = None
         
         # Rubber band for showing selected point
-        self.point_marker = QgsRubberBand(self.canvas, QgsWkbTypes.PointGeometry)
+        self.point_marker = QgsRubberBand(self.canvas, Qgis.GeometryType.Point)
         self.point_marker.setColor(QColor(255, 0, 0))
         self.point_marker.setWidth(3)
         self.point_marker.setIconSize(8)
-        self.point_marker.setIcon(QgsRubberBand.ICON_CIRCLE)
+        self.point_marker.setIcon(RUBBER_BAND_CIRCLE)
         
         # Set default colors for visibility styling
         if hasattr(self, 'btnNotVisibleColor'):
@@ -261,7 +275,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             # Keep the main UI clean: show only a short summary + a "details" dialog.
             self.lblScienceSummary = QtWidgets.QLabel(self)
             self.lblScienceSummary.setWordWrap(True)
-            self.lblScienceSummary.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            self.lblScienceSummary.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             layout.addWidget(self.lblScienceSummary, 6, 0)
 
             self.btnScienceHelp = QtWidgets.QToolButton(self)
@@ -411,7 +425,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             for layer in reversed(layers):  # top-most first
                 if not isinstance(layer, QgsVectorLayer) or not layer.isValid():
                     continue
-                if layer.geometryType() != QgsWkbTypes.PolygonGeometry:
+                if layer.geometryType() != Qgis.GeometryType.Polygon:
                     continue
 
                 _skip_385 = False
@@ -443,7 +457,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                         # If geometry predicates fail due to invalid geometry, still accept bbox match.
                         return geom, layer.crs(), layer.name(), feat.id()
         except Exception as e:
-            log_message(f"Polygon identify error: {e}", level=Qgis.Warning)
+            log_message(f"Polygon identify error: {e}", level=Qgis.MessageLevel.Warning)
         return None
 
     def _build_gdal_viewshed_extra(self, curvature, refraction, refraction_coeff):
@@ -578,10 +592,10 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
 
             text = QtWidgets.QTextBrowser(dlg)
             text.setOpenExternalLinks(True)
-            text.setLineWrapMode(QtWidgets.QTextEdit.NoWrap)
-            text.setWordWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
-            text.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-            text.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+            text.setLineWrapMode(QtWidgets.QTextEdit.LineWrapMode.NoWrap)
+            text.setWordWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+            text.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+            text.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
             text.setHtml(html)
             layout.addWidget(text)
 
@@ -590,7 +604,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             layout.addWidget(btn_close)
 
             dlg.resize(640, 480)
-            dlg.exec_()
+            dlg.exec()
         except Exception as _exc:
             log_swallowed("tools/viewshed_dialog.py:558 (_show_curvature_refraction_help_dialog)", _exc)
     
@@ -608,7 +622,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             self.drawn_line_points = []
         self.los_click_count = 0
         if hasattr(self, 'point_marker'):
-            self.point_marker.reset(QgsWkbTypes.PointGeometry)
+            self.point_marker.reset(Qgis.GeometryType.Point)
         
         # Clear point number labels (Canvas items)
         if hasattr(self, 'point_labels'):
@@ -665,7 +679,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             return item
             
         except Exception as e:
-            log_message(f"Canvas labeling error: {e}", level=Qgis.Warning)
+            log_message(f"Canvas labeling error: {e}", level=Qgis.MessageLevel.Warning)
             return None
     
     # _get_or_create_label_layer REMOVED - deprecated, was returning None
@@ -747,7 +761,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             self.groupObserver.setTitle("3. 분석 대상(선형/둘레) 설정")
             
             # Filter layer for Line/Polygon only
-            self.cmbObserverLayer.setFilters(self._mlpm_filter.LineLayer | self._mlpm_filter.PolygonLayer)
+            self.cmbObserverLayer.setFilters(Qgis.LayerFilters(Qgis.LayerFilter.LineLayer | Qgis.LayerFilter.PolygonLayer))
             
             if self.radioFromLayer.isChecked():
                 self.btnSelectPoint.setText("추가 관측점 클릭 (선택사항)")
@@ -825,10 +839,10 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         # 4. Layer filters: Filter by geometry type based on mode
         if is_line_mode:
             # Only show Line or Polygon layers for Line Viewshed (those with length/perimeter)
-            self.cmbObserverLayer.setFilters(self._mlpm_filter.LineLayer | self._mlpm_filter.PolygonLayer)
+            self.cmbObserverLayer.setFilters(Qgis.LayerFilters(Qgis.LayerFilter.LineLayer | Qgis.LayerFilter.PolygonLayer))
         else:
             # Show Point and Polygon layers (to support centroid-based analysis)
-            self.cmbObserverLayer.setFilters(self._mlpm_filter.PointLayer | self._mlpm_filter.PolygonLayer)
+            self.cmbObserverLayer.setFilters(Qgis.LayerFilters(Qgis.LayerFilter.PointLayer | Qgis.LayerFilter.PolygonLayer))
         
         # Trigger source change handler to update dependent UI
         self.on_source_changed()
@@ -885,7 +899,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                 self.lblSelectedPoint.setText("소스: 선택된 레이어")
             
             if not is_multi and not is_line_mode:
-                self.point_marker.reset(QgsWkbTypes.PointGeometry)
+                self.point_marker.reset(Qgis.GeometryType.Point)
         else:
             if is_line_mode:
                 if hasattr(self, 'drawn_line_points') and self.drawn_line_points:
@@ -943,7 +957,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             is_multi = self.radioMultiPoint.isChecked()
             from_layer = self.radioFromLayer.isChecked()
             obs_layer = self.cmbObserverLayer.currentLayer() if from_layer else None
-            is_poly = bool(obs_layer and hasattr(obs_layer, "geometryType") and obs_layer.geometryType() == QgsWkbTypes.PolygonGeometry)
+            is_poly = bool(obs_layer and hasattr(obs_layer, "geometryType") and obs_layer.geometryType() == Qgis.GeometryType.Polygon)
             show = is_multi and from_layer and is_poly
             self.chkCutoutInputPolygon.setVisible(show)
             self.chkCutoutInputPolygon.setEnabled(show)
@@ -965,11 +979,11 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                     try:
                         if m:
                             m.hide() # Force hide first
-                            m.reset(QgsWkbTypes.PointGeometry) # Clear geometry
+                            m.reset(Qgis.GeometryType.Point) # Clear geometry
                             if self.canvas and self.canvas.scene():
                                 self.canvas.scene().removeItem(m) # Remove from scene
                     except Exception as e:
-                        log_message(f"Marker cleanup error: {e}", level=Qgis.Warning)
+                        log_message(f"Marker cleanup error: {e}", level=Qgis.MessageLevel.Warning)
                 del self.result_marker_map[lid]
                 
             # 2. Clean up Text Annotations (Labels)
@@ -980,7 +994,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                         if item and self.canvas.scene():
                             self.canvas.scene().removeItem(item)
                     except Exception as e:
-                        log_message(f"Annotation cleanup error: {e}", level=Qgis.Warning)
+                        log_message(f"Annotation cleanup error: {e}", level=Qgis.MessageLevel.Warning)
                 del self.result_annotation_map[lid]
             
             # 3. Clean up linked Observer Layer (red points layer)
@@ -1039,7 +1053,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             if layer_id in getattr(self, "_los_profile_data", {}):
                 self.open_los_profile(layer_id)
         except Exception as e:
-            log_message(f"Current layer handler error: {e}", level=Qgis.Warning)
+            log_message(f"Current layer handler error: {e}", level=Qgis.MessageLevel.Warning)
 
     def _on_layer_tree_clicked(self, _index):
         try:
@@ -1050,7 +1064,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             if layer_id in getattr(self, "_los_profile_data", {}):
                 self.open_los_profile(layer_id)
         except Exception as e:
-            log_message(f"Layer tree handler error: {e}", level=Qgis.Warning)
+            log_message(f"Layer tree handler error: {e}", level=Qgis.MessageLevel.Warning)
 
     def get_context_point_and_crs(self):
         """Helper to get observer point(s) and their source CRS
@@ -1221,7 +1235,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                         log_swallowed("viewshed_dialog.set_observer_point", _exc)
 
                     self.observer_point = marker_pt
-                    self.point_marker.reset(QgsWkbTypes.PointGeometry)
+                    self.point_marker.reset(Qgis.GeometryType.Point)
                     self.point_marker.addPoint(marker_pt)
 
                     self.lblSelectedPoint.setText(f"선택된 폴리곤: {layer_name} (FID: {fid})")
@@ -1234,7 +1248,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                     return
 
             self.observer_point = point
-            self.point_marker.reset(QgsWkbTypes.PointGeometry)
+            self.point_marker.reset(Qgis.GeometryType.Point)
             self.point_marker.addPoint(point)
             
             self.lblSelectedPoint.setText(f"선택된 위치: {point.x():.1f}, {point.y():.1f}")
@@ -1274,7 +1288,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             self._reverse_target_fid = None
 
             # Show the polygon outline on map (selection marker)
-            self.point_marker.reset(QgsWkbTypes.LineGeometry)
+            self.point_marker.reset(Qgis.GeometryType.Line)
             for pt in ring:
                 self.point_marker.addPoint(pt)
 
@@ -1294,7 +1308,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         self.observer_point = points[0]
 
         # Maintain vertex visibility on the map
-        self.point_marker.reset(QgsWkbTypes.LineGeometry)
+        self.point_marker.reset(Qgis.GeometryType.Line)
         for pt in points:
             self.point_marker.addPoint(pt)
         if is_closed:
@@ -1437,8 +1451,8 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                               f"가시권_링분석_{int(buffer_radius)}m", "memory")
         pr = layer.dataProvider()
         pr.addAttributes([
-            QgsField("status", QVariant.String),
-            QgsField("score", QVariant.Double)
+            QgsField("status", FT_STRING),
+            QgsField("score", FT_DOUBLE)
         ])
         layer.updateFields()
         
@@ -1571,9 +1585,9 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         
         # Add fields
         has_weights = bool((weights is not None) and (not is_line))
-        fields = [QgsField("no", QVariant.Int)]
+        fields = [QgsField("no", FT_INT)]
         if has_weights:
-            fields.append(QgsField("weight", QVariant.Double))
+            fields.append(QgsField("weight", FT_DOUBLE))
         pr.addAttributes(fields)
         layer.updateFields()
         
@@ -1641,7 +1655,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             label_settings.enabled = True
             
             # Placement: Around the point (more stable than OverPoint in some Python bindings)
-            label_settings.placement = QgsPalLayerSettings.AroundPoint
+            label_settings.placement = Qgis.LabelPlacement.AroundPoint
             label_settings.dist = 1
             
             layer.setLabeling(QgsVectorLayerSimpleLabeling(label_settings))
@@ -1706,7 +1720,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
     ):
         if not raster_path or not os.path.exists(raster_path):
             return None, None
-        if not aoi_layer or aoi_layer.geometryType() != QgsWkbTypes.PolygonGeometry:
+        if not aoi_layer or aoi_layer.geometryType() != Qgis.GeometryType.Polygon:
             return None, None
 
         ds = gdal.Open(raster_path, gdal.GA_ReadOnly)
@@ -1741,12 +1755,12 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         pr = out.dataProvider()
         pr.addAttributes(
             [
-                QgsField("src_id", QVariant.Int),
-                QgsField("tot_px", QVariant.Int),
-                QgsField("vis_px", QVariant.Int),
-                QgsField("tot_m2", QVariant.Double),
-                QgsField("vis_m2", QVariant.Double),
-                QgsField("vis_pct", QVariant.Double),
+                QgsField("src_id", FT_INT),
+                QgsField("tot_px", FT_INT),
+                QgsField("vis_px", FT_INT),
+                QgsField("tot_m2", FT_DOUBLE),
+                QgsField("vis_m2", FT_DOUBLE),
+                QgsField("vis_pct", FT_DOUBLE),
             ]
         )
         out.updateFields()
@@ -1866,7 +1880,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             pal = QgsPalLayerSettings()
             pal.isExpression = True
             pal.fieldName = "round(\"vis_pct\", 1) || '%'"
-            pal.placement = QgsPalLayerSettings.OverPoint
+            pal.placement = Qgis.LabelPlacement.OverPoint
 
             fmt = QgsTextFormat()
             fmt.setSize(10.0)
@@ -1901,7 +1915,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         if not aoi_layer or not isinstance(aoi_layer, QgsVectorLayer):
             push_message(self.iface, "AOI 통계", "AOI 폴리곤 레이어를 선택하세요.", level=1, duration=6)
             return
-        if aoi_layer.geometryType() != QgsWkbTypes.PolygonGeometry:
+        if aoi_layer.geometryType() != Qgis.GeometryType.Polygon:
             push_message(self.iface, "AOI 통계", "AOI 레이어는 폴리곤이어야 합니다.", level=1, duration=6)
             return
 
@@ -2303,7 +2317,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                 interval = 50
 
         msg = QMessageBox(self)
-        msg.setIcon(QMessageBox.Question)
+        msg.setIcon(QMessageBox.Icon.Question)
         msg.setWindowTitle("역방향 가시권: 폴리곤 처리")
         msg.setText("폴리곤(면) 대상물을 선택했습니다.\n어떤 기준으로 역방향 가시권을 계산할까요?")
         if allow_boundary:
@@ -2313,14 +2327,14 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         else:
             msg.setInformativeText("히구치 거리대는 폴리곤 테두리(다중점) 모드에서 지원되지 않습니다.")
 
-        btn_centroid = msg.addButton("중심점(빠름)", QMessageBox.AcceptRole)
+        btn_centroid = msg.addButton("중심점(빠름)", QMessageBox.ButtonRole.AcceptRole)
         btn_boundary = None
         if allow_boundary:
-            btn_boundary = msg.addButton("테두리(합집합)", QMessageBox.AcceptRole)
-        btn_cancel = msg.addButton("취소", QMessageBox.RejectRole)
+            btn_boundary = msg.addButton("테두리(합집합)", QMessageBox.ButtonRole.AcceptRole)
+        btn_cancel = msg.addButton("취소", QMessageBox.ButtonRole.RejectRole)
         msg.setDefaultButton(btn_centroid)
 
-        msg.exec_()
+        msg.exec()
         clicked = msg.clickedButton()
         if clicked == btn_centroid:
             return "centroid"
@@ -2458,7 +2472,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             except Exception as _exc:
                 log_swallowed("tools/viewshed_dialog.py:2391 (_burn_nodata_for_geometries_in_raster)", _exc)
         except Exception as e:
-            log_message(f"Raster mask error: {e}", level=Qgis.Warning)
+            log_message(f"Raster mask error: {e}", level=Qgis.MessageLevel.Warning)
         finally:
             mem_ds = None
             ds = None
@@ -2492,7 +2506,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             from qgis.PyQt.QtWidgets import QMessageBox
 
             msg = QMessageBox(self)
-            msg.setIcon(QMessageBox.Warning)
+            msg.setIcon(QMessageBox.Icon.Warning)
             msg.setWindowTitle("대상점 개수 경고")
             msg.setText(
                 f"전체 분석에 {len(points)}개의 대상점이 포함되어 있습니다.\n"
@@ -2504,14 +2518,14 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                 f"아니오(No): 전체 {len(points)}개 분석 (매우 느림)\n"
                 "취소(Cancel): 취소 및 설정으로 복귀"
             )
-            msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel)
-            msg.setDefaultButton(QMessageBox.Yes)
+            msg.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel)
+            msg.setDefaultButton(QMessageBox.StandardButton.Yes)
 
-            res_msg = msg.exec_()
-            if res_msg == QMessageBox.Cancel:
+            res_msg = msg.exec()
+            if res_msg == QMessageBox.StandardButton.Cancel:
                 restore_ui_focus(self)
                 return
-            if res_msg == QMessageBox.Yes:
+            if res_msg == QMessageBox.StandardButton.Yes:
                 # Evenly spaced indices across the whole sequence (see the
                 # multi-viewshed sampling note: step-based slicing truncates).
                 n_total = len(points)
@@ -2531,7 +2545,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         extra = self._build_gdal_viewshed_extra(curvature, refraction, refraction_coeff)
 
         progress = QtWidgets.QProgressDialog("역방향 가시권 분석 실행 중...", "취소", 0, len(points), self)
-        progress.setWindowModality(QtCore.Qt.WindowModal)
+        progress.setWindowModality(QtCore.Qt.WindowModality.WindowModal)
         progress.show()
         QtWidgets.QApplication.processEvents()
 
@@ -2600,7 +2614,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                         },
                     )
                 except Exception as e:
-                    log_message(f"reverse viewshed failed for point #{i}: {e}", level=Qgis.Warning)
+                    log_message(f"reverse viewshed failed for point #{i}: {e}", level=Qgis.MessageLevel.Warning)
                     log_swallowed("tools/viewshed_dialog.py:2534 (_run_union_viewshed_for_points)", e)
                     _skip_2520 = True
                 if _skip_2520:
@@ -2633,7 +2647,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                         except Exception as _exc:
                             log_swallowed("viewshed_dialog._run_union_viewshed_for_points", _exc)
                 except Exception as e:
-                    log_message(f"warpreproject failed for reverse viewshed #{i}: {e}", level=Qgis.Warning)
+                    log_message(f"warpreproject failed for reverse viewshed #{i}: {e}", level=Qgis.MessageLevel.Warning)
 
             progress.setValue(len(points))
 
@@ -2954,7 +2968,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         # Polygon target (layer selection)
         if self.radioFromLayer.isChecked():
             obs_layer = self.cmbObserverLayer.currentLayer()
-            if obs_layer and obs_layer.isValid() and obs_layer.geometryType() == QgsWkbTypes.PolygonGeometry:
+            if obs_layer and obs_layer.isValid() and obs_layer.geometryType() == Qgis.GeometryType.Polygon:
                 selected = obs_layer.selectedFeatures()
                 features = selected if selected else []
                 if not features:
@@ -3136,10 +3150,10 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                     f"가시선 길이가 {total_dist:.0f}m로 깁니다. 장거리에서는 DEM 해상도·지구곡률의 영향이 커집니다.\n"
                     "(곡률/굴절 보정 체크박스가 가시선 판정에 반영됩니다)\n계속 진행할까요?"
                 ),
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.Yes,
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes,
             )
-            if res == QMessageBox.No:
+            if res == QMessageBox.StandardButton.No:
                 restore_ui_focus(self)
                 return
         
@@ -3248,10 +3262,10 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         )
         pr = layer.dataProvider()
         pr.addAttributes([
-            QgsField("status", QVariant.String),  # "보임" / "안보임"
-            QgsField("from_m", QVariant.Double),
-            QgsField("to_m", QVariant.Double),
-            QgsField("length_m", QVariant.Double),
+            QgsField("status", FT_STRING),  # "보임" / "안보임"
+            QgsField("from_m", FT_DOUBLE),
+            QgsField("to_m", FT_DOUBLE),
+            QgsField("length_m", FT_DOUBLE),
         ])
         layer.updateFields()
 
@@ -3323,7 +3337,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             "memory",
         )
         observer_pr = observer_layer.dataProvider()
-        observer_pr.addAttributes([QgsField("status", QVariant.String)])
+        observer_pr.addAttributes([QgsField("status", FT_STRING)])
         observer_layer.updateFields()
 
         observer_status = "보이는 대상 있음" if is_visible_overall else "보이는 대상 없음"
@@ -3355,7 +3369,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             "memory",
         )
         target_pr = target_layer.dataProvider()
-        target_pr.addAttributes([QgsField("status", QVariant.String)])
+        target_pr.addAttributes([QgsField("status", FT_STRING)])
         target_layer.updateFields()
 
         target_status = "보임" if is_visible_overall else "안보임"
@@ -3389,8 +3403,8 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                                        "첫번째_장애물", "memory")
             obs_pr = obs_layer.dataProvider()
             obs_pr.addAttributes([
-                QgsField("distance", QVariant.Double),
-                QgsField("elevation", QVariant.Double)
+                QgsField("distance", FT_DOUBLE),
+                QgsField("elevation", FT_DOUBLE)
             ])
             obs_layer.updateFields()
             
@@ -3548,7 +3562,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                 return
             self.open_los_profile(layer_id)
         except Exception as e:
-            log_message(f"LOS selection handler error: {e}", level=Qgis.Warning)
+            log_message(f"LOS selection handler error: {e}", level=Qgis.MessageLevel.Warning)
 
     def open_los_profile(self, layer_id):
         payload = self._los_profile_data.get(layer_id)
@@ -3605,8 +3619,8 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                 line_end_canvas=line_end_canvas,
                 parent=self.iface.mainWindow(),
             )
-            profiler.setWindowModality(Qt.NonModal)
-            profiler.setAttribute(Qt.WA_DeleteOnClose, True)
+            profiler.setWindowModality(Qt.WindowModality.NonModal)
+            profiler.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
             if result_layer_id:
                 self._los_profile_dialogs[result_layer_id] = profiler
                 profiler.destroyed.connect(
@@ -3616,7 +3630,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             profiler.raise_()
             profiler.activateWindow()
         except Exception as e:
-            log_message(f"Profiler error: {e}", level=Qgis.Warning)
+            log_message(f"Profiler error: {e}", level=Qgis.MessageLevel.Warning)
     
     def combine_viewsheds_numpy(
         self,
@@ -3740,8 +3754,8 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         except Exception as e:
             import traceback
 
-            log_message(f"Viewshed merge error: {e}", level=Qgis.Critical)
-            log_message(traceback.format_exc(), level=Qgis.Critical)
+            log_message(f"Viewshed merge error: {e}", level=Qgis.MessageLevel.Critical)
+            log_message(traceback.format_exc(), level=Qgis.MessageLevel.Critical)
             # Close any open dataset and drop the partial cumulative raster so a
             # failed merge never orphans a truncated file (matches the Higuchi
             # reclass path's cleanup).
@@ -3818,7 +3832,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             obs_layer = self.cmbObserverLayer.currentLayer()
             if obs_layer:
                 transform_to_dem = None
-                if want_cutout_input_polygon and obs_layer.geometryType() == QgsWkbTypes.PolygonGeometry:
+                if want_cutout_input_polygon and obs_layer.geometryType() == Qgis.GeometryType.Polygon:
                     try:
                         transform_to_dem = QgsCoordinateTransform(
                             obs_layer.crs(), dem_layer.crs(), QgsProject.instance()
@@ -3856,7 +3870,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                     geom = feat.geometry()
                     if not geom or geom.isEmpty(): continue
 
-                    if geom.type() == QgsWkbTypes.PointGeometry:
+                    if geom.type() == Qgis.GeometryType.Point:
                         if geom.isMultipart():
                             for pt in geom.asMultiPoint():
                                 points.append((pt, obs_layer.crs()))
@@ -3865,7 +3879,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                             points.append((geom.asPoint(), obs_layer.crs()))
                             weights.append(1.0)
 
-                    elif geom.type() == QgsWkbTypes.LineGeometry:
+                    elif geom.type() == Qgis.GeometryType.Line:
                         geom_m = _to_dem_geom(geom)
                         if geom_m is None:
                             continue
@@ -3877,7 +3891,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                             points.append((pt, dem_layer.crs()))
                             weights.append(1.0)
 
-                    elif geom.type() == QgsWkbTypes.PolygonGeometry:
+                    elif geom.type() == Qgis.GeometryType.Polygon:
                         if want_cutout_input_polygon:
                             try:
                                 geom_dem = QgsGeometry(geom)
@@ -3924,7 +3938,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         if total_needed > MAX_POINTS:
             from qgis.PyQt.QtWidgets import QMessageBox
             msg = QMessageBox(self)
-            msg.setIcon(QMessageBox.Warning)
+            msg.setIcon(QMessageBox.Icon.Warning)
             msg.setWindowTitle("관측점 개수 경고")
             msg.setText(f"전체 분석에 {total_needed}개의 관측점이 포함되어 있습니다.\n"
                        f"성능을 위해 기본적으로 {MAX_POINTS}개로 제한됩니다.")
@@ -3932,16 +3946,16 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                                   f"• 예(Yes): {MAX_POINTS}개로 축소하여 안전하게 진행\n"
                                   f"• 아니오(No): 전체 {total_needed}개 분석 (매우 느림)\n"
                                   f"• 취소(Cancel): 취소 및 설정으로 복귀")
-            msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel)
-            msg.setDefaultButton(QMessageBox.Yes)
+            msg.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel)
+            msg.setDefaultButton(QMessageBox.StandardButton.Yes)
             
-            res_msg = msg.exec_()
-            if res_msg == QMessageBox.Cancel:
+            res_msg = msg.exec()
+            if res_msg == QMessageBox.StandardButton.Cancel:
                 self.show()
                 self.raise_()
                 self.activateWindow()
                 return
-            elif res_msg == QMessageBox.Yes:
+            elif res_msg == QMessageBox.StandardButton.Yes:
                 # Evenly spaced indices across the WHOLE sequence. The old
                 # `points[::N//M][:M]` kept only the first M points when
                 # M < N < 2M (step=1), silently discarding e.g. the far half
@@ -3972,7 +3986,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
 
         # Setup progress dialog
         progress = QtWidgets.QProgressDialog("다중점 가시권 분석 초기화 중...", "취소", 0, len(points), self)
-        progress.setWindowModality(QtCore.Qt.WindowModal)
+        progress.setWindowModality(QtCore.Qt.WindowModality.WindowModal)
         progress.show()
         QtWidgets.QApplication.processEvents() # Ensure visibility
         # Smart Analysis Extent Optimization
@@ -4057,9 +4071,9 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                             except Exception as _exc:
                                 log_swallowed("viewshed_dialog.run_multi_viewshed", _exc)
                     except Exception as e:
-                        log_message(f"warpreproject failed for viewshed #{i}: {e}", level=Qgis.Warning)
+                        log_message(f"warpreproject failed for viewshed #{i}: {e}", level=Qgis.MessageLevel.Warning)
             except Exception as e:
-                log_message(f"viewshed failed for point #{i}: {e}", level=Qgis.Warning)
+                log_message(f"viewshed failed for point #{i}: {e}", level=Qgis.MessageLevel.Warning)
                 log_swallowed("tools/viewshed_dialog.py:3981 (run_multi_viewshed)", e)
                 _skip_3954 = True
             if _skip_3954:
@@ -4277,7 +4291,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         english = is_english_ui()
         shader = QgsRasterShader()
         color_ramp = QgsColorRampShader()
-        color_ramp.setColorRampType(QgsColorRampShader.Interpolated)
+        color_ramp.setColorRampType(SHADER_INTERPOLATED)
         
         layer.dataProvider().setNoDataValue(1, -9999)
         
@@ -4330,7 +4344,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
 
         shader = QgsRasterShader()
         color_ramp = QgsColorRampShader()
-        color_ramp.setColorRampType(QgsColorRampShader.Discrete)
+        color_ramp.setColorRampType(SHADER_DISCRETE)
 
         not_visible_color = self.btnNotVisibleColor.color()
         if not_visible_color.alpha() == 255:
@@ -4386,7 +4400,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
 
             shader = QgsRasterShader()
             color_ramp = QgsColorRampShader()
-            color_ramp.setColorRampType(QgsColorRampShader.Interpolated)
+            color_ramp.setColorRampType(SHADER_INTERPOLATED)
 
             def _lbl(v):
                 if is_percent:
@@ -4431,7 +4445,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             layer.setOpacity(0.8)
             layer.triggerRepaint()
         except Exception as e:
-            log_message(f"Weighted style error: {e}", level=Qgis.Warning)
+            log_message(f"Weighted style error: {e}", level=Qgis.MessageLevel.Warning)
 
     def apply_visual_imbalance_style(self, layer):
         """Apply styling for visual imbalance raster (forward vs reverse mismatch)."""
@@ -4440,7 +4454,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
 
         shader = QgsRasterShader()
         color_ramp = QgsColorRampShader()
-        color_ramp.setColorRampType(QgsColorRampShader.Discrete)
+        color_ramp.setColorRampType(SHADER_DISCRETE)
 
         colors = [
             QgsColorRampShader.ColorRampItem(nodata_value, QColor(0, 0, 0, 0), "NoData"),
@@ -4466,7 +4480,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         """
         shader = QgsRasterShader()
         color_ramp = QgsColorRampShader()
-        color_ramp.setColorRampType(QgsColorRampShader.Discrete)
+        color_ramp.setColorRampType(SHADER_DISCRETE)
         
         layer.dataProvider().setNoDataValue(1, -9999)
         
@@ -4831,7 +4845,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
 
         shader = QgsRasterShader()
         color_ramp = QgsColorRampShader()
-        color_ramp.setColorRampType(QgsColorRampShader.Discrete)
+        color_ramp.setColorRampType(SHADER_DISCRETE)
 
         # Use the user's "Not visible" color (default: pink) for non-visible cells (value 0).
         not_visible_color = self.btnNotVisibleColor.color() if hasattr(self, "btnNotVisibleColor") else QColor(255, 105, 180, 180)
@@ -4889,7 +4903,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         recommended_dist = int(min(round(mid_m * 2.0), spin_max))
 
         msg = QMessageBox(self)
-        msg.setIcon(QMessageBox.Warning)
+        msg.setIcon(QMessageBox.Icon.Warning)
         msg.setWindowTitle("히구치 거리대 안내")
         msg.setText(
             "히구치 거리대는 '보이는 영역'을 거리별로 근경/중경/원경으로 나눠 색으로 표시합니다.\n"
@@ -4901,16 +4915,16 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             "   대상 유적의 높이·규모에 맞게 '근경/중경 상한'을 조정해 사용하세요."
         )
 
-        btn_min = msg.addButton(f"{minimum_dist:,}m로 설정", QMessageBox.AcceptRole)
+        btn_min = msg.addButton(f"{minimum_dist:,}m로 설정", QMessageBox.ButtonRole.AcceptRole)
         # Both suggestions collapse onto the spinbox maximum when the mid break
         # is set very high; offering the same number twice would just confuse.
         btn_recommended = None
         if recommended_dist > minimum_dist:
-            btn_recommended = msg.addButton(f"{recommended_dist:,}m로 설정(권장)", QMessageBox.AcceptRole)
-        btn_keep = msg.addButton("유지", QMessageBox.RejectRole)
+            btn_recommended = msg.addButton(f"{recommended_dist:,}m로 설정(권장)", QMessageBox.ButtonRole.AcceptRole)
+        btn_keep = msg.addButton("유지", QMessageBox.ButtonRole.RejectRole)
         msg.setDefaultButton(btn_recommended if btn_recommended is not None else btn_min)
 
-        msg.exec_()
+        msg.exec()
         clicked = msg.clickedButton()
         if clicked == btn_min:
             self.spinMaxDistance.setValue(minimum_dist)
@@ -4929,8 +4943,8 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         layer = QgsVectorLayer("LineString?crs=" + dem_layer.crs().authid(), "히구치_거리대", "memory")
         pr = layer.dataProvider()
         pr.addAttributes([
-            QgsField("zone", QVariant.String),
-            QgsField("distance_m", QVariant.Int),
+            QgsField("zone", FT_STRING),
+            QgsField("distance_m", FT_INT),
         ])
         layer.updateFields()
         
@@ -5009,7 +5023,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         pr = layer.dataProvider()
         pr.addAttributes(
             [
-                QgsField("distance_m", QVariant.Int),
+                QgsField("distance_m", FT_INT),
             ]
         )
         layer.updateFields()
@@ -5057,7 +5071,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         
         shader = QgsRasterShader()
         color_ramp = QgsColorRampShader()
-        color_ramp.setColorRampType(QgsColorRampShader.Discrete)
+        color_ramp.setColorRampType(SHADER_DISCRETE)
         
         # Get user-defined colors from UI
         visible_color = self.btnVisibleColor.color()
@@ -5086,12 +5100,12 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         """Register point markers and annotations to be cleaned up when layer_id is removed.
         Ensures points are transformed to Canvas CRS for visibility.
         """
-        result_marker = QgsRubberBand(self.canvas, QgsWkbTypes.PointGeometry)
+        result_marker = QgsRubberBand(self.canvas, Qgis.GeometryType.Point)
         result_marker.setColor(QColor(255, 0, 0, 200)) # Semi-transparent red
         # ... (rest of rubberband setup is same, skipping lines for brevity if possible, but replace needs context)
         result_marker.setWidth(2)
         result_marker.setIconSize(4) # Small dots
-        result_marker.setIcon(QgsRubberBand.ICON_CIRCLE)
+        result_marker.setIcon(RUBBER_BAND_CIRCLE)
         
         canvas_crs = self.canvas.mapSettings().destinationCrs()
         
@@ -5122,7 +5136,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
     def accept(self):
         """Close dialog after successful analysis - keep only result markers visible"""
         # Clear the transient selection markers immediately
-        self.point_marker.reset(QgsWkbTypes.PointGeometry)
+        self.point_marker.reset(Qgis.GeometryType.Point)
         
         # Reset state for next use
         self.observer_points = []
@@ -5137,7 +5151,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
     
     def reject(self):
         """Clear markers on cancel (no analysis run)"""
-        self.point_marker.reset(QgsWkbTypes.PointGeometry)
+        self.point_marker.reset(Qgis.GeometryType.Point)
         self.observer_points = []
         self.observer_point = None
         self.target_point = None
@@ -5162,7 +5176,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         points picked before closing leak into the next run (e.g. an invisible
         multi-point set would be reused in run_multi_viewshed).
         """
-        self.point_marker.reset(QgsWkbTypes.PointGeometry)
+        self.point_marker.reset(Qgis.GeometryType.Point)
         if self.original_tool:
             self.canvas.setMapTool(self.original_tool)
         self.observer_points = []
@@ -5234,7 +5248,7 @@ class ViewshedPointTool(QgsMapToolEmitPoint):
             self.snap_indicator.setMatch(QgsPointLocator.Match())
     
     def canvasReleaseEvent(self, event):
-        if event.button() == Qt.RightButton:
+        if event.button() == Qt.MouseButton.RightButton:
             self.finish_selection()
             return
         
@@ -5248,7 +5262,7 @@ class ViewshedPointTool(QgsMapToolEmitPoint):
     
     def keyPressEvent(self, event):
         from qgis.PyQt.QtCore import Qt
-        if event.key() == Qt.Key_Escape:
+        if event.key() == Qt.Key.Key_Escape:
             self.finish_selection()
     
     def finish_selection(self):
@@ -5271,7 +5285,7 @@ class ViewshedLineTool(QgsMapToolEmitPoint):
         self.dialog = dialog
         self.snap_indicator = QgsSnapIndicator(canvas)
         self.points = []
-        self.rubber_band = QgsRubberBand(canvas, QgsWkbTypes.LineGeometry)
+        self.rubber_band = QgsRubberBand(canvas, Qgis.GeometryType.Line)
         self.rubber_band.setColor(QColor(0, 100, 255, 180))
         self.rubber_band.setWidth(2)
     
@@ -5295,7 +5309,7 @@ class ViewshedLineTool(QgsMapToolEmitPoint):
                 is_near_start = True
         
         if self.points:
-            self.rubber_band.reset(QgsWkbTypes.LineGeometry)
+            self.rubber_band.reset(Qgis.GeometryType.Line)
             if is_near_start:
                 self.rubber_band.setColor(QColor(0, 200, 0, 180)) # Green when snapping for closure
                 self.rubber_band.setWidth(3)
@@ -5309,15 +5323,15 @@ class ViewshedLineTool(QgsMapToolEmitPoint):
     
     def canvasReleaseEvent(self, event):
         from qgis.PyQt.QtCore import Qt
-        if event.button() == Qt.RightButton:
+        if event.button() == Qt.MouseButton.RightButton:
             self.finish_line()
             return
         
         res = self.canvas().snappingUtils().snapToMap(event.pos())
         point = res.point() if res.isValid() else self.toMapCoordinates(event.pos())
 
-        modifiers = event.modifiers() if hasattr(event, "modifiers") else Qt.NoModifier
-        shift_pressed = bool(modifiers & Qt.ShiftModifier)
+        modifiers = event.modifiers() if hasattr(event, "modifiers") else Qt.KeyboardModifier.NoModifier
+        shift_pressed = bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
 
         # Reverse viewshed: first click on an existing polygon selects it directly
         # (unless Shift is held to force drawing a custom polygon).
@@ -5366,12 +5380,12 @@ class ViewshedLineTool(QgsMapToolEmitPoint):
     
     def keyPressEvent(self, event):
         from qgis.PyQt.QtCore import Qt
-        if event.key() == Qt.Key_Escape:
+        if event.key() == Qt.Key.Key_Escape:
             self.cleanup()
             self.dialog.show()
-        elif event.key() == Qt.Key_C:
+        elif event.key() == Qt.Key.Key_C:
             self.finish_line(close_line=True)
-        elif event.key() in (Qt.Key_Return, Qt.Key_Enter):
+        elif event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
             self.finish_line(close_line=False)
     
     def finish_line(self, close_line=False):
@@ -5406,14 +5420,14 @@ class ViewshedLineTool(QgsMapToolEmitPoint):
         self.dialog.iface.messageBar().pushMessage("알림", "최소 2개 점이 필요합니다", level=1)
     
     def cleanup(self):
-        self.rubber_band.reset(QgsWkbTypes.LineGeometry)
+        self.rubber_band.reset(Qgis.GeometryType.Line)
         self.snap_indicator.setMatch(QgsPointLocator.Match())
         self.points = []
         if self.dialog.original_tool:
             self.dialog.canvas.setMapTool(self.dialog.original_tool)
     
     def deactivate(self):
-        self.rubber_band.reset(QgsWkbTypes.LineGeometry)
+        self.rubber_band.reset(Qgis.GeometryType.Line)
         self.snap_indicator.setMatch(QgsPointLocator.Match())
         super().deactivate()
 
@@ -5519,7 +5533,7 @@ class ProfilePlotWidget(QWidget):
         if self.is_dragging and self.zoom_level > 1.0:
             view = self._get_view_params()
             if view:
-                delta_x = event.x() - self.drag_start_x
+                delta_x = event.pos().x() - self.drag_start_x
                 delta_distance = (delta_x / view["plot_w"]) * view["visible_range"]
                 self.pan_offset = self.drag_start_offset - delta_distance
                 self.set_hover_distance(None)
@@ -5528,7 +5542,7 @@ class ProfilePlotWidget(QWidget):
                 self.update()
             return
 
-        distance = self._distance_from_mouse(event.x(), event.y())
+        distance = self._distance_from_mouse(event.pos().x(), event.pos().y())
         if distance is None:
             self.setToolTip("")
             self.set_hover_distance(None)
@@ -5546,25 +5560,25 @@ class ProfilePlotWidget(QWidget):
         self.update()
 
     def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton:
+        if event.button() == Qt.MouseButton.LeftButton:
             view = self._get_view_params()
             if view and self.zoom_level > 1.0:
                 self.is_dragging = True
-                self.drag_start_x = event.x()
+                self.drag_start_x = event.pos().x()
                 self.drag_start_offset = float(self.pan_offset)
-                self.setCursor(Qt.ClosedHandCursor)
+                self.setCursor(Qt.CursorShape.ClosedHandCursor)
                 return
         super().mousePressEvent(event)
 
     def mouseReleaseEvent(self, event):
-        if event.button() == Qt.LeftButton and self.is_dragging:
+        if event.button() == Qt.MouseButton.LeftButton and self.is_dragging:
             self.is_dragging = False
-            self.setCursor(Qt.ArrowCursor)
+            self.setCursor(Qt.CursorShape.ArrowCursor)
             return
         super().mouseReleaseEvent(event)
 
     def mouseDoubleClickEvent(self, event):
-        if event.button() == Qt.LeftButton:
+        if event.button() == Qt.MouseButton.LeftButton:
             self.reset_view()
             return
         super().mouseDoubleClickEvent(event)
@@ -5625,7 +5639,7 @@ class ProfilePlotWidget(QWidget):
         if not self.profile_data: return
         
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         
         width = self.width()
         height = self.height()
@@ -5658,7 +5672,7 @@ class ProfilePlotWidget(QWidget):
             return sx, sy
 
         # --- 1. Draw Axes ---
-        painter.setPen(QPen(Qt.black, 1))
+        painter.setPen(QPen(Qt.GlobalColor.black, 1))
         painter.drawLine(self.margin_left, self.margin_top + plot_h, self.margin_left + plot_w, self.margin_top + plot_h)  # X
         painter.drawLine(self.margin_left, self.margin_top, self.margin_left, self.margin_top + plot_h)  # Y
         
@@ -5670,7 +5684,7 @@ class ProfilePlotWidget(QWidget):
         painter.drawText(5, self.margin_top + 10, f"{int(max_elev)}m")
         
         # Title
-        painter.setFont(QFont("Arial", 10, QFont.Bold))
+        painter.setFont(QFont("Arial", 10, QFont.Weight.Bold))
         painter.drawText(self.margin_left, 18, "지형 단면 및 가시선 (Terrain Profile & Line of Sight)")
         
         # --- 2. Calculate Visibility using Max-Angle Algorithm ---
@@ -5696,7 +5710,7 @@ class ProfilePlotWidget(QWidget):
         # --- 3. Fill Terrain by Visibility (Green/Red) ---
         fill_visible = QColor(0, 200, 0, 70)
         fill_hidden = QColor(255, 0, 0, 70)
-        painter.setPen(Qt.NoPen)
+        painter.setPen(Qt.PenStyle.NoPen)
 
         for i in range(len(distances) - 1):
             d1, e1 = distances[i], elevations[i]
@@ -5774,7 +5788,7 @@ class ProfilePlotWidget(QWidget):
             painter.drawLine(QPointF(x1, y1), QPointF(x2, y2))
 
         # Redraw axes on top of fills for readability
-        painter.setPen(QPen(Qt.black, 1))
+        painter.setPen(QPen(Qt.GlobalColor.black, 1))
         painter.drawLine(self.margin_left, self.margin_top + plot_h, self.margin_left + plot_w, self.margin_top + plot_h)  # X
         painter.drawLine(self.margin_left, self.margin_top, self.margin_left, self.margin_top + plot_h)  # Y
 
@@ -5784,14 +5798,14 @@ class ProfilePlotWidget(QWidget):
             hover_x = max(self.margin_left, min(self.margin_left + plot_w, hover_x))
             hover_y = to_screen(self.hover_distance, self.hover_elevation)[1]
 
-            painter.setPen(QPen(QColor(255, 0, 0, 160), 1, Qt.DashLine))
+            painter.setPen(QPen(QColor(255, 0, 0, 160), 1, Qt.PenStyle.DashLine))
             painter.drawLine(int(hover_x), self.margin_top, int(hover_x), self.margin_top + plot_h)
 
             painter.setPen(QPen(QColor(255, 0, 0), 2))
             painter.setBrush(QBrush(QColor(255, 255, 255)))
             painter.drawEllipse(QPointF(hover_x, hover_y), 5, 5)
 
-            painter.setPen(QPen(Qt.black))
+            painter.setPen(QPen(Qt.GlobalColor.black))
             painter.setFont(QFont("Arial", 8))
             painter.drawText(int(hover_x) + 8, int(hover_y) - 6, f"{self.hover_distance:.0f}m")
         
@@ -5809,7 +5823,7 @@ class ProfilePlotWidget(QWidget):
                 return
             p1 = QPointF(*to_screen(sd1, sight_elev_at(sd1)))
             p2 = QPointF(*to_screen(sd2, sight_elev_at(sd2)))
-            painter.setPen(QPen(color, 1, Qt.DashLine))
+            painter.setPen(QPen(color, 1, Qt.PenStyle.DashLine))
             painter.drawLine(p1, p2)
 
         if self.first_obstruction and not self.is_visible_overall:
@@ -5822,30 +5836,30 @@ class ProfilePlotWidget(QWidget):
             if view_start <= obstruction_dist <= view_end:
                 obstruct_screen = to_screen(obstruction_dist, sight_elev_at(obstruction_dist))
                 painter.setBrush(QBrush(QColor(255, 0, 0)))
-                painter.setPen(QPen(Qt.white, 1))
+                painter.setPen(QPen(Qt.GlobalColor.white, 1))
                 painter.drawEllipse(QPointF(*obstruct_screen), 4, 4)
         else:
             draw_sight_segment(0.0, max_dist, QColor(0, 100, 255, 150))
         
         # --- 7. Draw Start (S) and End (E) Markers ---
-        painter.setFont(QFont("Arial", 9, QFont.Bold))
+        painter.setFont(QFont("Arial", 9, QFont.Weight.Bold))
 
         # Observer (Blue Circle with S)
         if view_start <= 0.0 <= view_end:
             obs_screen = to_screen(0.0, obs_elev)
             painter.setBrush(QBrush(QColor(0, 100, 255)))
-            painter.setPen(QPen(Qt.white, 1))
+            painter.setPen(QPen(Qt.GlobalColor.white, 1))
             painter.drawEllipse(QPointF(*obs_screen), 8, 8)
-            painter.setPen(Qt.white)
+            painter.setPen(Qt.GlobalColor.white)
             painter.drawText(int(obs_screen[0]) - 4, int(obs_screen[1]) + 4, "S")
 
         # Target (Orange Circle with E)
         if view_start <= max_dist <= view_end:
             tgt_screen = to_screen(max_dist, tgt_elev)
             painter.setBrush(QBrush(QColor(255, 140, 0)))
-            painter.setPen(QPen(Qt.white, 1))
+            painter.setPen(QPen(Qt.GlobalColor.white, 1))
             painter.drawEllipse(QPointF(*tgt_screen), 8, 8)
-            painter.setPen(Qt.white)
+            painter.setPen(Qt.GlobalColor.white)
             painter.drawText(int(tgt_screen[0]) - 4, int(tgt_screen[1]) + 4, "E")
         
         # --- 8. Draw Legend ---
@@ -5855,12 +5869,12 @@ class ProfilePlotWidget(QWidget):
         
         painter.setPen(pen_visible)
         painter.drawLine(legend_x, legend_y, legend_x + 20, legend_y)
-        painter.setPen(Qt.black)
+        painter.setPen(Qt.GlobalColor.black)
         painter.drawText(legend_x + 25, legend_y + 4, "보임 (Visible)")
         
         painter.setPen(pen_hidden)
         painter.drawLine(legend_x, legend_y + 15, legend_x + 20, legend_y + 15)
-        painter.setPen(Qt.black)
+        painter.setPen(Qt.GlobalColor.black)
         painter.drawText(legend_x + 25, legend_y + 19, "안보임 (Hidden)")
 
 
@@ -5936,10 +5950,10 @@ class ViewshedProfilerDialog(QDialog):
         layout.addWidget(self.plot)
 
         # Hover marker on map
-        self.hover_marker = QgsRubberBand(self.canvas, QgsWkbTypes.PointGeometry)
+        self.hover_marker = QgsRubberBand(self.canvas, Qgis.GeometryType.Point)
         self.hover_marker.setColor(QColor(255, 0, 0))
         self.hover_marker.setWidth(10)
-        self.hover_marker.setIcon(QgsRubberBand.ICON_CIRCLE)
+        self.hover_marker.setIcon(RUBBER_BAND_CIRCLE)
         self.hover_marker.hide()
 
         # Sync map cursor -> profile cursor
@@ -5967,11 +5981,11 @@ class ViewshedProfilerDialog(QDialog):
         
     def _set_map_marker(self, point):
         if point is None:
-            self.hover_marker.reset(QgsWkbTypes.PointGeometry)
+            self.hover_marker.reset(Qgis.GeometryType.Point)
             self.hover_marker.hide()
             return
 
-        self.hover_marker.reset(QgsWkbTypes.PointGeometry)
+        self.hover_marker.reset(Qgis.GeometryType.Point)
         self.hover_marker.addPoint(point)
         self.hover_marker.show()
 
@@ -6043,9 +6057,9 @@ class ViewshedProfilerDialog(QDialog):
         filename, _ = QFileDialog.getSaveFileName(self, "이미지 저장", "viewshed_profile.png", "PNG (*.png)")
         if filename:
             # Render the widget to image
-            image = QImage(self.plot.size(), QImage.Format_ARGB32)
+            image = QImage(self.plot.size(), QImage.Format.Format_ARGB32)
             # Fill with white background
-            image.fill(Qt.white)
+            image.fill(Qt.GlobalColor.white)
             painter = QPainter(image)
             self.plot.render(painter)
             painter.end()

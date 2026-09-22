@@ -10,8 +10,8 @@
 </p>
 
 <p align="center">
-  <img alt="QGIS 3.40+" src="https://img.shields.io/badge/QGIS-3.40%2B-589632?logo=qgis&logoColor=white">
-  <img alt="Version 0.2.0" src="https://img.shields.io/badge/version-0.2.0-2d7ff9">
+  <img alt="QGIS 3.40 - 4.x" src="https://img.shields.io/badge/QGIS-3.40%20--%204.x-589632?logo=qgis&logoColor=white">
+  <img alt="Version 0.1.4" src="https://img.shields.io/badge/version-0.1.4-2d7ff9">
   <img alt="Status stable" src="https://img.shields.io/badge/status-stable-2ea44f">
   <a href="https://github.com/lzpxilfe/archtoolkit/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/lzpxilfe/archtoolkit/actions/workflows/ci.yml/badge.svg"></a>
   <img alt="License GPL-3.0-or-later" src="https://img.shields.io/badge/license-GPL--3.0--or--later-1f6feb">
@@ -86,7 +86,12 @@ ArchToolkit은 한국의 고고학·문화유산 조사와 연구에서 반복�
 
 **요구 사항**: QGIS 3.40 LTR 이상, Processing 프레임워크, GDAL 프로바이더, NumPy가 포함된 QGIS Python. `AI 조사요약`의 Gemini 모드에서만 Gemini API 키가 필요합니다.
 
-공식 플러그인 저장소 등록을 준비 중이므로 당분간 GitHub에서 설치합니다. 저장소를 `ArchToolkit` 폴더명으로 아래 위치에 복사하거나 `git clone`한 뒤 QGIS를 재시작하세요.
+**QGIS 4(Qt6)**: 소스는 PyQt6와 QGIS 4가 요구하는 표기로 작성돼 있고(`qgisMaximumVersion=4.99`), QGIS 3.34에서 결과가 같음과 PyQt6 6.11에서 모든 Qt 이름이 존재함을 확인했습니다. 다만 QGIS 4 빌드에서 실제로 실행해 보지는 못했으므로, QGIS 4에서 문제가 보이면 [이슈](https://github.com/lzpxilfe/archtoolkit/issues)로 알려 주세요. 자세한 범위는 `docs/PUBLISHING.md` 6절에 있습니다.
+
+공식 플러그인 저장소 등록을 준비 중이므로 당분간 GitHub에서 설치합니다. 두 가지 방법이 있습니다.
+
+1. **ZIP으로 설치**: [Releases](https://github.com/lzpxilfe/archtoolkit/releases)의 `ArchToolkit-<버전>.zip`을 받아 QGIS의 **플러그인 → 플러그인 관리 및 설치 → ZIP에서 설치**로 올립니다. (개발자는 `python scripts/build_plugin_zip.py --check`로 같은 ZIP을 만듭니다.)
+2. **폴더로 설치**: 저장소를 `ArchToolkit` 폴더명으로 아래 위치에 복사하거나 `git clone`한 뒤 QGIS를 재시작하세요.
 
 ```text
 Windows: %APPDATA%\QGIS\QGIS3\profiles\default\python\plugins\ArchToolkit
@@ -130,9 +135,12 @@ QT_QPA_PLATFORM=offscreen /usr/bin/python3 -m unittest discover -s tests -p "tes
 
 # 수정 전후 회귀 비교 (tests/regression/README.md)
 QT_QPA_PLATFORM=offscreen /usr/bin/python3 tests/regression/run_scenarios.py . /tmp/new.json
+
+# QGIS 4(PyQt6) 표기 검사: QGIS 없이 PyQt6만 설치해 소스가 쓰는 모든 Qt 이름의 존재를 확인
+python -m pip install PyQt6 && python -m unittest tests.test_qt6_compat
 ```
 
-CI는 push마다 순수 테스트·정적 검사·flake8 차단 규칙·릴리스 정합성을 돌리고, QGIS 컨테이너에서 QGIS 의존 테스트를 실행합니다.
+CI는 push마다 순수 테스트·정적 검사·flake8 차단 규칙·릴리스 정합성·PyQt6 표기 검사를 돌리고, QGIS 컨테이너에서 QGIS 의존 테스트를 실행합니다.
 
 ## 문서
 
@@ -146,6 +154,7 @@ CI는 push마다 순수 테스트·정적 검사·flake8 차단 규칙·릴리�
 | [docs/AUDIT_BACKLOG.md](docs/AUDIT_BACKLOG.md) | 감사 결과와 반영 상태 |
 | [CHANGELOG.md](CHANGELOG.md) | 버전별 변경 이력 |
 | [DEVELOPMENT.md](DEVELOPMENT.md) | 개발 원칙, 테스트, 게이트 |
+| [docs/PUBLISHING.md](docs/PUBLISHING.md) | 플러그인 저장소 업로드, ZIP 빌드, QGIS 4 호환 범위 |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | 기여 가이드 |
 
 ## 인용
@@ -157,7 +166,7 @@ CI는 push마다 순수 테스트·정적 검사·flake8 차단 규칙·릴리�
   author  = {Hwang, Jinseo},
   title   = {ArchToolkit: Archaeology Toolkit for QGIS},
   year    = {2026},
-  version = {0.2.0},
+  version = {0.1.4},
   url     = {https://github.com/lzpxilfe/archtoolkit}
 }
 ```

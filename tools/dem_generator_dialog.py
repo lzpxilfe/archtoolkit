@@ -22,7 +22,7 @@ from qgis.PyQt import uic
 from qgis.PyQt import QtWidgets
 from qgis.PyQt.QtWidgets import QTableWidgetItem, QCheckBox, QWidget, QHBoxLayout, QFileDialog, QListWidgetItem
 from qgis.PyQt.QtCore import Qt, QSize
-from qgis.core import QgsProject, QgsRectangle, QgsVectorLayer, QgsWkbTypes
+from qgis.core import QgsProject, QgsRectangle, QgsVectorLayer, QgsWkbTypes, Qgis
 import processing
 import tempfile
 from .utils import log_swallowed, new_run_id, push_message, restore_ui_focus, set_archtoolkit_layer_metadata
@@ -266,7 +266,7 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
     
     def setup_layer_list(self):
         """Setup multi-select layer list with checkboxes"""
-        self.listLayers.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
+        self.listLayers.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
         self.listLayers.itemChanged.connect(self.on_layer_item_changed)
         self._updating_checkboxes = False
 
@@ -420,18 +420,18 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
         self.listLayers.clear()
         layers = QgsProject.instance().mapLayers().values()
         for layer in layers:
-            if layer.type() == layer.VectorLayer:
+            if layer.type() == Qgis.LayerType.Vector:
                 item = QListWidgetItem(layer.name())
-                item.setData(Qt.UserRole, layer)
-                item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-                item.setCheckState(Qt.Unchecked)
+                item.setData(Qt.ItemDataRole.UserRole, layer)
+                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                item.setCheckState(Qt.CheckState.Unchecked)
                 self.listLayers.addItem(item)
         
         # Auto-check layers containing 'DEM용' in name
         for i in range(self.listLayers.count()):
             item = self.listLayers.item(i)
             if 'DEM용' in item.text() or '등고선' in item.text().lower():
-                item.setCheckState(Qt.Checked)
+                item.setCheckState(Qt.CheckState.Checked)
 
         try:
             self._refresh_kriging_value_fields()
@@ -461,20 +461,20 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
             widget = QWidget()
             layout = QHBoxLayout(widget)
             layout.addWidget(checkbox)
-            layout.setAlignment(Qt.AlignCenter)
+            layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
             layout.setContentsMargins(0, 0, 0, 0)
             self.tblLayers.setCellWidget(row, 0, widget)
             
             code_item = QTableWidgetItem(layer_code)
-            code_item.setFlags(code_item.flags() & ~Qt.ItemIsEditable)
+            code_item.setFlags(code_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
             self.tblLayers.setItem(row, 1, code_item)
             
             name_item = QTableWidgetItem(info['name'])
-            name_item.setFlags(name_item.flags() & ~Qt.ItemIsEditable)
+            name_item.setFlags(name_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
             self.tblLayers.setItem(row, 2, name_item)
             
             desc_item = QTableWidgetItem(info['desc'])
-            desc_item.setFlags(desc_item.flags() & ~Qt.ItemIsEditable)
+            desc_item.setFlags(desc_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
             self.tblLayers.setItem(row, 3, desc_item)
 
             self.layer_row_by_code[str(layer_code)] = int(row)
@@ -505,12 +505,12 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
                 self.cmbDxfEra.setItemData(
                     0,
                     "현행 수치지형도는 보통 F***/H*** 같은 표준코드(예: F0017111, F0017114, F0027217)를 사용합니다.",
-                    Qt.ToolTipRole,
+                    Qt.ItemDataRole.ToolTipRole,
                 )
                 self.cmbDxfEra.setItemData(
                     1,
                     "구 수치지형도는 레이어가 숫자 코드로 들어오는 경우가 있습니다. (예: 7111, 7114, 2121, 2122)",
-                    Qt.ToolTipRole,
+                    Qt.ItemDataRole.ToolTipRole,
                 )
             except Exception as _exc:
                 log_swallowed("dem_generator_dialog.setup_layer_presets", _exc)
@@ -525,7 +525,7 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
             def _sync_tip():
                 try:
                     self.cmbLayerPreset.setToolTip(
-                        str(self.cmbLayerPreset.itemData(self.cmbLayerPreset.currentIndex(), Qt.ToolTipRole) or "")
+                        str(self.cmbLayerPreset.itemData(self.cmbLayerPreset.currentIndex(), Qt.ItemDataRole.ToolTipRole) or "")
                     )
                 except Exception as _exc:
                     log_swallowed("tools/dem_generator_dialog.py:483 (_sync_tip)", _exc)
@@ -537,7 +537,7 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
             def _sync_era_tip():
                 try:
                     self.cmbDxfEra.setToolTip(
-                        str(self.cmbDxfEra.itemData(self.cmbDxfEra.currentIndex(), Qt.ToolTipRole) or "")
+                        str(self.cmbDxfEra.itemData(self.cmbDxfEra.currentIndex(), Qt.ItemDataRole.ToolTipRole) or "")
                     )
                 except Exception as _exc:
                     log_swallowed("tools/dem_generator_dialog.py:495 (_sync_era_tip)", _exc)
@@ -644,7 +644,7 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
                 idx = self.cmbLayerPreset.count() - 1
                 tip = item.get("tooltip", "")
                 if tip:
-                    self.cmbLayerPreset.setItemData(idx, tip, Qt.ToolTipRole)
+                    self.cmbLayerPreset.setItemData(idx, tip, Qt.ItemDataRole.ToolTipRole)
         finally:
             try:
                 self.cmbLayerPreset.blockSignals(False)
@@ -869,8 +869,8 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
         selected_layers = []
         for i in range(self.listLayers.count()):
             item = self.listLayers.item(i)
-            if item.checkState() == Qt.Checked:
-                layer = item.data(Qt.UserRole)
+            if item.checkState() == Qt.CheckState.Checked:
+                layer = item.data(Qt.ItemDataRole.UserRole)
                 if layer:
                     selected_layers.append(layer)
         return selected_layers
@@ -1332,7 +1332,7 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
 
                     progress = QtWidgets.QProgressDialog("Kriging 계산 중…", "취소", 0, 100, self.iface.mainWindow())
                     try:
-                        progress.setWindowModality(Qt.WindowModal)
+                        progress.setWindowModality(Qt.WindowModality.WindowModal)
                         progress.setMinimumDuration(0)
                     except Exception as _exc:
                         log_swallowed("tools/dem_generator_dialog.py:928 (run_process)", _exc)

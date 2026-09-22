@@ -53,3 +53,9 @@ RGB 래스터 등)로 19개 도구를 수정 전 체크아웃(d1ecf88)과 수정
 ## 재현
 
 `tests/regression/README.md` 참조. 전체 27개 시나리오는 체크아웃당 약 20초 걸립니다.
+
+## Qt6 이관 라운드 (2026-09-22)
+
+QGIS 4(PyQt6) 대비 표기 이관(스코프 열거형, `QMetaType` 필드 타입, `Qgis.*` 열거형, `tools/qtcompat.py`) 뒤 같은 27개 시나리오를
+이관 전 커밋과 다시 비교했습니다. 27건 모두 실행, 25건 수치 지문 동일, 나머지 2건(trench_suggestion, geochem_polygonize)은
+실행마다 달라지는 run id·시각이 든 레이어 이름만 다르고 수치는 같습니다. 대화상자 19개 생성과 initGui/unload도 확인했습니다.

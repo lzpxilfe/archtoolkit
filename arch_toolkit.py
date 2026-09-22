@@ -15,7 +15,8 @@
 #
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
-from qgis.PyQt.QtWidgets import QAction, QMenu, QToolButton, QMessageBox
+from qgis.PyQt.QtGui import QAction
+from qgis.PyQt.QtWidgets import QMenu, QToolButton, QMessageBox
 
 from .tools.utils import log_exception, log_swallowed, start_ui_log_pump, stop_ui_log_pump
 from .tools.icons import MAIN_ICON, icon
@@ -193,7 +194,7 @@ class ArchToolkit:
             tool_button = QToolButton()
             tool_button.setDefaultAction(self.main_action)
             tool_button.setMenu(self.tool_menu)
-            tool_button.setPopupMode(QToolButton.InstantPopup)
+            tool_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
             
             self.toolbar.addWidget(tool_button)
             
@@ -305,7 +306,7 @@ class ArchToolkit:
         try:
             from .tools.dem_generator_dialog import DemGeneratorDialog
             dlg = DemGeneratorDialog(self.iface)
-            dlg.exec_()
+            dlg.exec()
         except Exception as e:
             log_exception("DEM tool error", e)
             QMessageBox.critical(self.iface.mainWindow(), "오류", f"도구를 여는 중 오류가 발생했습니다: {str(e)}")
@@ -314,7 +315,7 @@ class ArchToolkit:
         try:
             from .tools.contour_extractor_dialog import ContourExtractorDialog
             dlg = ContourExtractorDialog(self.iface)
-            dlg.exec_()
+            dlg.exec()
         except Exception as e:
             log_exception("Contour tool error", e)
             QMessageBox.critical(self.iface.mainWindow(), "오류", f"도구를 여는 중 오류가 발생했습니다: {str(e)}")
@@ -324,7 +325,7 @@ class ArchToolkit:
             from .tools.cadastral_overlap_dialog import CadastralOverlapDialog
 
             dlg = CadastralOverlapDialog(self.iface)
-            dlg.exec_()
+            dlg.exec()
         except Exception as e:
             log_exception("Cadastral overlap tool error", e)
             QMessageBox.critical(self.iface.mainWindow(), "오류", f"도구를 여는 중 오류가 발생했습니다: {str(e)}")
@@ -333,7 +334,7 @@ class ArchToolkit:
         try:
             from .tools.terrain_analysis_dialog import TerrainAnalysisDialog
             dlg = TerrainAnalysisDialog(self.iface)
-            dlg.exec_()
+            dlg.exec()
         except Exception as e:
             log_exception("Terrain tool error", e)
             QMessageBox.critical(self.iface.mainWindow(), "오류", f"도구를 여는 중 오류가 발생했습니다: {str(e)}")
@@ -343,7 +344,7 @@ class ArchToolkit:
             from .tools.ahp_suitability_dialog import AhpSuitabilityDialog
 
             dlg = AhpSuitabilityDialog(self.iface)
-            dlg.exec_()
+            dlg.exec()
         except Exception as e:
             log_exception("AHP tool error", e)
             QMessageBox.critical(self.iface.mainWindow(), "오류", f"도구를 여는 중 오류가 발생했습니다: {str(e)}")
@@ -353,7 +354,7 @@ class ArchToolkit:
             from .tools.align_export_dialog import AlignExportDialog
 
             dlg = AlignExportDialog(self.iface)
-            dlg.exec_()
+            dlg.exec()
         except Exception as e:
             log_exception("Align & export tool error", e)
             QMessageBox.critical(self.iface.mainWindow(), "오류", f"도구를 여는 중 오류가 발생했습니다: {str(e)}")
@@ -363,7 +364,7 @@ class ArchToolkit:
             from .tools.covariate_report_dialog import CovariateReportDialog
 
             dlg = CovariateReportDialog(self.iface)
-            dlg.exec_()
+            dlg.exec()
         except Exception as e:
             log_exception("Covariate report tool error", e)
             QMessageBox.critical(self.iface.mainWindow(), "오류", f"도구를 여는 중 오류가 발생했습니다: {str(e)}")
@@ -373,7 +374,7 @@ class ArchToolkit:
             from .tools.distance_raster_dialog import DistanceRasterDialog
 
             dlg = DistanceRasterDialog(self.iface)
-            dlg.exec_()
+            dlg.exec()
         except Exception as e:
             log_exception("Distance raster tool error", e)
             QMessageBox.critical(self.iface.mainWindow(), "오류", f"도구를 여는 중 오류가 발생했습니다: {str(e)}")
@@ -396,7 +397,7 @@ class ArchToolkit:
             from .tools.geochem_polygonize_dialog import GeoChemPolygonizeDialog
 
             dlg = GeoChemPolygonizeDialog(self.iface)
-            dlg.exec_()
+            dlg.exec()
         except Exception as e:
             log_exception("GeoChem tool error", e)
             QMessageBox.critical(self.iface.mainWindow(), "오류", f"도구를 여는 중 오류가 발생했습니다: {str(e)}")
@@ -406,7 +407,7 @@ class ArchToolkit:
             from .tools.geology_zip_dialog import GeologyZipDialog
 
             dlg = GeologyZipDialog(self.iface)
-            dlg.exec_()
+            dlg.exec()
         except Exception as e:
             log_exception("KIGAM geology tool error", e)
             QMessageBox.critical(self.iface.mainWindow(), "오류", f"도구를 여는 중 오류가 발생했습니다: {str(e)}")
@@ -416,7 +417,7 @@ class ArchToolkit:
             from .tools.ai_report_dialog import AiAoiReportDialog
 
             dlg = AiAoiReportDialog(self.iface)
-            dlg.exec_()
+            dlg.exec()
         except Exception as e:
             log_exception("AI AOI report tool error", e)
             QMessageBox.critical(self.iface.mainWindow(), "오류", f"도구를 여는 중 오류가 발생했습니다: {str(e)}")
@@ -425,7 +426,7 @@ class ArchToolkit:
         try:
             from .tools.map_styling_dialog import MapStylingDialog
             dlg = MapStylingDialog(self.iface)
-            dlg.exec_()
+            dlg.exec()
         except Exception as e:
             log_exception("Map styling tool error", e)
             QMessageBox.critical(self.iface.mainWindow(), "오류", f"도구를 여는 중 오류가 발생했습니다: {str(e)}")
@@ -434,7 +435,7 @@ class ArchToolkit:
         try:
             from .tools.slope_aspect_drafting_dialog import SlopeAspectDraftingDialog
             dlg = SlopeAspectDraftingDialog(self.iface)
-            dlg.exec_()
+            dlg.exec()
         except Exception as e:
             log_exception("Slope/aspect drafting tool error", e)
             QMessageBox.critical(self.iface.mainWindow(), "오류", f"도구를 여는 중 오류가 발생했습니다: {str(e)}")
@@ -443,7 +444,7 @@ class ArchToolkit:
         try:
             from .tools.trench_suggestion_dialog import TrenchSuggestionDialog
             dlg = TrenchSuggestionDialog(self.iface)
-            dlg.exec_()
+            dlg.exec()
         except Exception as e:
             log_exception("Trench suggestion tool error", e)
             QMessageBox.critical(self.iface.mainWindow(), "오류", f"도구 실행 중 오류가 발생했습니다: {str(e)}")
@@ -453,7 +454,7 @@ class ArchToolkit:
             if self.cost_dlg is None:
                 from .tools.cost_surface_dialog import CostSurfaceDialog
                 self.cost_dlg = CostSurfaceDialog(self.iface)
-            self.cost_dlg.exec_()
+            self.cost_dlg.exec()
         except Exception as e:
             log_exception("Cost surface tool error", e)
             QMessageBox.critical(self.iface.mainWindow(), "오류", f"도구를 여는 중 오류가 발생했습니다: {str(e)}")
@@ -462,7 +463,7 @@ class ArchToolkit:
         try:
             from .tools.cost_network_dialog import CostNetworkDialog
             dlg = CostNetworkDialog(self.iface)
-            dlg.exec_()
+            dlg.exec()
         except Exception as e:
             log_exception("Least-cost network tool error", e)
             QMessageBox.critical(self.iface.mainWindow(), "오류", f"도구 실행 중 오류가 발생했습니다: {str(e)}")
@@ -471,7 +472,7 @@ class ArchToolkit:
         try:
             from .tools.spatial_network_dialog import SpatialNetworkDialog
             dlg = SpatialNetworkDialog(self.iface)
-            dlg.exec_()
+            dlg.exec()
         except Exception as e:
             log_exception("Spatial network tool error", e)
             QMessageBox.critical(
@@ -489,7 +490,7 @@ class ArchToolkit:
             
             # Show the dialog. exec_() is modal and blocks until closed.
             # In a future version we might switch to .show() for non-modal interaction.
-            self.viewshed_dlg.exec_()
+            self.viewshed_dlg.exec()
         except Exception as e:
             log_exception("Viewshed tool error", e)
             QMessageBox.critical(self.iface.mainWindow(), "오류", f"도구를 여는 중 오류가 발생했습니다: {str(e)}")

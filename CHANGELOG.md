@@ -2,7 +2,7 @@
 
 모든 버전의 요약은 `metadata.txt`의 changelog에도 있습니다. 여기가 상세본입니다.
 
-## 0.2.0 (2026-09-22)
+## 0.1.4 (2026-09-22)
 
 **주제: 실용성과 정직성.** 실제 QGIS 3.34에서 수정 전후를 비교해 검증한 세 차례 감사 라운드의 결과입니다. 기능을 제거한 항목은 없습니다. 자세한 근거는 `docs/REGRESSION_REPORT.md`와 `docs/AUDIT_BACKLOG.md`에 있습니다.
 
@@ -13,6 +13,9 @@
 - 히구치 거리대 경계를 조정할 수 있습니다(기본 500/2500 m 유지).
 - 가시성 네트워크의 LOS에 지구 곡률·굴절 보정이 기본 적용됩니다(끌 수 있음).
 - 상대 경사 비용(구 "Conolly & Lake")의 기준 경사 기본값이 1°에서 5°로 바뀌었습니다.
+- **QGIS 4(Qt6/PyQt6) 대비**: `qgisMaximumVersion`을 4.99로 올렸습니다. PyQt6가 없앤 표기(스코프 없는 열거형, `QVariant.Type`, `exec_()`)와 QGIS 4가 지운 3.x 열거형(`QgsWkbTypes.PointGeometry`, `QgsMapLayerProxyModel.Filter`, `QgsRasterBandStats.Stats`, `QgsUnitTypes.Distance*` 등)을 소스 전체에서 양쪽에 통하는 표기로 바꿨고, 버전에 따라 이름이 다른 몇 가지는 `tools/qtcompat.py`가 실행 중인 QGIS를 조사해 고릅니다. QGIS 3.34에서는 결과가 수치까지 같고(회귀 27건), PyQt6 6.11에서 소스가 쓰는 모든 Qt 이름의 존재를 확인했습니다. **QGIS 4 빌드에서 실제로 실행해 보지는 못했습니다**(`docs/PUBLISHING.md` 6절).
+- 플러그인 저장소 업로드용 ZIP 빌드(`scripts/build_plugin_zip.py --check`), 태그 푸시 시 ZIP을 첨부하는 릴리스 워크플로, 업로드 절차 문서(`docs/PUBLISHING.md`).
+- 원본 1024 px 아이콘은 `docs/art/`에 보존합니다.
 
 ### 결과가 달라지는 수정
 - 지형 분석: 사용자 반경 TPI의 창을 (2r+1)셀로 교정. 작은 DEM에서는 3x3으로 대체하고 알림.
@@ -33,7 +36,8 @@
 - 플러그인이 정한 등급 구간은 "플러그인 정의"로 표기.
 
 ### 검증
-- QGIS 의존 테스트를 포함한 346건이 실제 QGIS에서 통과. CI에 QGIS 컨테이너 작업 추가.
+- QGIS 의존 테스트를 포함한 350건이 실제 QGIS 3.34에서 통과. CI에 QGIS 컨테이너 작업 추가.
+- `tests/test_qt6_compat.py`: QGIS 3 전용 표기 금지(항상), PyQt5에서 스코프 없는 열거형 0건, PyQt6에서 소스가 쓰는 Qt 이름 전부 존재(CI static-checks가 PyQt6를 설치해 실행).
 - `tests/regression/`: 수정 전후 비교 하네스(27개 시나리오). 비교 과정에서 결함 2건 발견·수정.
 
 ## 0.1.3

@@ -30,18 +30,18 @@ from qgis.PyQt import QtWidgets
 from qgis.PyQt.QtCore import Qt, QTimer
 from qgis.PyQt.QtGui import QColor
 from qgis.core import (
+    Qgis,
     QgsColorRampShader,
     QgsCoordinateTransform,
     QgsPointXY,
     QgsProject,
-    QgsRasterBandStats,
     QgsRasterLayer,
     QgsRasterShader,
     QgsRectangle,
     QgsSingleBandPseudoColorRenderer,
     QgsVectorLayer,
-    QgsWkbTypes,
 )
+from .qtcompat import RBS_MIN, RBS_MAX, SHADER_INTERPOLATED
 from qgis.gui import QgsMapLayerComboBox
 
 from .live_log_dialog import ensure_live_log_dialog
@@ -212,7 +212,7 @@ class _CriterionPreferenceDialog(QtWidgets.QDialog):
         layout.addWidget(hint)
 
         buttons = QtWidgets.QDialogButtonBox(
-            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel, parent=self
+            QtWidgets.QDialogButtonBox.StandardButton.Ok | QtWidgets.QDialogButtonBox.StandardButton.Cancel, parent=self
         )
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
@@ -274,7 +274,7 @@ class _CriterionReclassDialog(QtWidgets.QDialog):
         layout.addLayout(btn_row)
 
         buttons = QtWidgets.QDialogButtonBox(
-            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel, parent=self
+            QtWidgets.QDialogButtonBox.StandardButton.Ok | QtWidgets.QDialogButtonBox.StandardButton.Cancel, parent=self
         )
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
@@ -376,16 +376,16 @@ class _HierarchyConfigDialog(QtWidgets.QDialog):
         self.tblAssign.setColumnCount(2)
         self.tblAssign.setHorizontalHeaderLabels(["Criterion", "Parent group"] if english else ["기준", "상위그룹"])
         self.tblAssign.horizontalHeader().setStretchLastSection(True)
-        self.tblAssign.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.tblAssign.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
         self.tblAssign.setRowCount(len(self._criteria_rows))
         for row, (layer_id, label) in enumerate(self._criteria_rows):
             item = QtWidgets.QTableWidgetItem(label or layer_id)
-            item.setData(Qt.UserRole, layer_id)
+            item.setData(Qt.ItemDataRole.UserRole, layer_id)
             self.tblAssign.setItem(row, 0, item)
 
             cmb = QtWidgets.QComboBox()
             cmb.setEditable(True)
-            cmb.setInsertPolicy(QtWidgets.QComboBox.NoInsert)
+            cmb.setInsertPolicy(QtWidgets.QComboBox.InsertPolicy.NoInsert)
             cmb.setEditText(str(assigned.get(layer_id) or label or layer_id))
             cmb.currentIndexChanged.connect(self._rebuild_pair_sections)
             try:
@@ -413,7 +413,7 @@ class _HierarchyConfigDialog(QtWidgets.QDialog):
         layout.addWidget(self._pairs_area, 2)
 
         buttons = QtWidgets.QDialogButtonBox(
-            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel, parent=self
+            QtWidgets.QDialogButtonBox.StandardButton.Ok | QtWidgets.QDialogButtonBox.StandardButton.Cancel, parent=self
         )
         buttons.accepted.connect(self._on_accept)
         buttons.rejected.connect(self.reject)
@@ -657,8 +657,8 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
             config=self._sanitize_hierarchy_config(self._hierarchy_config),
             parent=self,
         )
-        res = dlg.exec_() if hasattr(dlg, "exec_") else dlg.exec()
-        if res != QtWidgets.QDialog.Accepted:
+        res = dlg.exec() if hasattr(dlg, "exec_") else dlg.exec()
+        if res != QtWidgets.QDialog.DialogCode.Accepted:
             restore_ui_focus(self)
             return
 
@@ -696,12 +696,7 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
 
         self.cmbAoi = QgsMapLayerComboBox(grp_in)
         try:
-            from qgis.core import QgsMapLayerProxyModel
-
-            try:
-                poly_filter = QgsMapLayerProxyModel.Filter.PolygonLayer
-            except Exception:
-                poly_filter = QgsMapLayerProxyModel.PolygonLayer
+            poly_filter = Qgis.LayerFilter.PolygonLayer
             self.cmbAoi.setFilters(poly_filter)
         except Exception as _exc:
             log_swallowed("ahp_suitability_dialog._setup_ui", _exc)
@@ -734,12 +729,7 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
         row_add = QtWidgets.QHBoxLayout()
         self.cmbRaster = QgsMapLayerComboBox(grp_crit)
         try:
-            from qgis.core import QgsMapLayerProxyModel
-
-            try:
-                raster_filter = QgsMapLayerProxyModel.Filter.RasterLayer
-            except Exception:
-                raster_filter = QgsMapLayerProxyModel.RasterLayer
+            raster_filter = Qgis.LayerFilter.RasterLayer
             self.cmbRaster.setFilters(raster_filter)
         except Exception as _exc:
             log_swallowed("ahp_suitability_dialog._setup_ui", _exc)
@@ -769,9 +759,9 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
         self.tblCriteria.setColumnCount(5)
         self.tblCriteria.setHorizontalHeaderLabels(["레이어", "방향", "min", "max", "weight"])
         self.tblCriteria.horizontalHeader().setStretchLastSection(True)
-        self.tblCriteria.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
-        self.tblCriteria.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
-        self.tblCriteria.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.tblCriteria.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        self.tblCriteria.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.tblCriteria.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
         # Double-click a criterion row to edit its scoring preference
         # (benefit/cost/target/range/reclass).
         self.tblCriteria.cellDoubleClicked.connect(lambda *a: self._on_edit_selected_preference())
@@ -793,14 +783,14 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
         vw.addWidget(hint)
 
         self.tblPairwise = QtWidgets.QTableWidget()
-        self.tblPairwise.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.tblPairwise.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
         vw.addWidget(self.tblPairwise, 1)
 
         row_w = QtWidgets.QHBoxLayout()
         self.btnResetPairwise = QtWidgets.QPushButton("초기화(모두 1)")
         self.btnResetPairwise.clicked.connect(self._on_reset_pairwise)
         self.lblConsistency = QtWidgets.QLabel("CR: -")
-        self.lblConsistency.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
+        self.lblConsistency.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse | Qt.TextInteractionFlag.TextSelectableByKeyboard)
         try:
             self.lblConsistency.setToolTip(_CR_TOOLTIP)
         except Exception as _exc:
@@ -1348,8 +1338,8 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
                 criterion=crit,
                 parent=self,
             )
-            res = dlg.exec_() if hasattr(dlg, "exec_") else dlg.exec()
-            if res != QtWidgets.QDialog.Accepted:
+            res = dlg.exec() if hasattr(dlg, "exec_") else dlg.exec()
+            if res != QtWidgets.QDialog.DialogCode.Accepted:
                 return
             crit.score_ranges = dlg.values()
             self._refresh_criteria_table()
@@ -1360,8 +1350,8 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
             criterion=crit,
             parent=self,
         )
-        res = dlg.exec_() if hasattr(dlg, "exec_") else dlg.exec()
-        if res != QtWidgets.QDialog.Accepted:
+        res = dlg.exec() if hasattr(dlg, "exec_") else dlg.exec()
+        if res != QtWidgets.QDialog.DialogCode.Accepted:
             return
 
         values = dlg.values()
@@ -1412,7 +1402,7 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
             self.tblCriteria.insertRow(i)
 
             it = QtWidgets.QTableWidgetItem(name)
-            it.setData(Qt.UserRole, str(crit.layer_id))
+            it.setData(Qt.ItemDataRole.UserRole, str(crit.layer_id))
             self.tblCriteria.setItem(i, 0, it)
 
             cmb = QtWidgets.QComboBox()
@@ -1529,7 +1519,7 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
             for j in range(n):
                 if i == j:
                     item = QtWidgets.QTableWidgetItem("1")
-                    item.setFlags(item.flags() & ~Qt.ItemIsEnabled)
+                    item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEnabled)
                     self.tblPairwise.setItem(i, j, item)
                     continue
 
@@ -1564,7 +1554,7 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
                     self.tblPairwise.setCellWidget(i, j, cmb)
                 else:
                     item = QtWidgets.QTableWidgetItem("1")
-                    item.setFlags(item.flags() & ~Qt.ItemIsEnabled)
+                    item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEnabled)
                     self.tblPairwise.setItem(i, j, item)
 
         # Reciprocal cells are plain items created above; sync them to the
@@ -1614,7 +1604,7 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
             item = self.tblPairwise.item(int(j), int(i))
             if item is None:
                 item = QtWidgets.QTableWidgetItem(label)
-                item.setFlags(item.flags() & ~Qt.ItemIsEnabled)
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEnabled)
                 self.tblPairwise.setItem(int(j), int(i), item)
             else:
                 item.setText(label)
@@ -1742,7 +1732,7 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
         try:
             dp = raster.dataProvider()
             extent = self._extent_for_raster_stats(raster)
-            stats = dp.bandStatistics(1, QgsRasterBandStats.Min | QgsRasterBandStats.Max, extent or QgsRectangle(), 0)
+            stats = dp.bandStatistics(1, RBS_MIN | RBS_MAX, extent or QgsRectangle(), 0)
             mn = float(stats.minimumValue) if stats is not None else None
             mx = float(stats.maximumValue) if stats is not None else None
             if mn is not None and mx is not None and math.isfinite(mn) and math.isfinite(mx):
@@ -1884,7 +1874,7 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
         if validation_layer is None or not isinstance(validation_layer, QgsVectorLayer):
             return {}
         try:
-            if validation_layer.geometryType() != QgsWkbTypes.PointGeometry:
+            if validation_layer.geometryType() != Qgis.GeometryType.Point:
                 return {
                     "layer_id": str(validation_layer.id() or ""),
                     "layer_name": str(validation_layer.name() or ""),
@@ -2065,7 +2055,7 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
         try:
             shader = QgsRasterShader()
             ramp = QgsColorRampShader()
-            ramp.setColorRampType(QgsColorRampShader.Interpolated)
+            ramp.setColorRampType(SHADER_INTERPOLATED)
             items = [
                 QgsColorRampShader.ColorRampItem(0.0, QColor("#d73027"), "Low"),
                 QgsColorRampShader.ColorRampItem(0.5, QColor("#fee08b"), "Mid"),
@@ -2242,7 +2232,7 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
         aoi_layer = self.cmbAoi.currentLayer()
         if aoi_layer is not None and isinstance(aoi_layer, QgsVectorLayer):
             try:
-                if aoi_layer.geometryType() != QgsWkbTypes.PolygonGeometry:
+                if aoi_layer.geometryType() != Qgis.GeometryType.Polygon:
                     push_message(self.iface, "오류", "AOI는 폴리곤 레이어여야 합니다.", level=2, duration=7)
                     return
             except Exception as _exc:

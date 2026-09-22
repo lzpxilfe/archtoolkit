@@ -46,17 +46,17 @@ MAX_WIDTH = 960
 
 
 def _sample_project(tmp):
-    from qgis.PyQt.QtCore import QVariant
+    from tools.qtcompat import FT_STRING
     from qgis.core import QgsProject, QgsRasterLayer
     dem = qgis_env.make_dem(os.path.join(tmp, "DEM_5m.tif"), ncols=120, nrows=100, px=5.0)
     lyr = QgsRasterLayer(dem, "DEM_5m")
     QgsProject.instance().addMapLayer(lyr)
     sites = [(200150 + 60 * i, 499700 - 45 * (i % 4)) for i in range(8)]
-    qgis_env.make_points("유적_분포", sites, fields=[("유적명", QVariant.String), ("시대", QVariant.String)],
+    qgis_env.make_points("유적_분포", sites, fields=[("유적명", FT_STRING), ("시대", FT_STRING)],
                          attrs=[[f"유적 {i + 1}", "삼국"] for i in range(8)])
     qgis_env.make_polygon("조사구역", [(200100, 499800), (200500, 499800), (200500, 499600), (200100, 499600)])
     qgis_env.make_polygon("연속지적도", [(200050, 499850), (200550, 499850), (200550, 499550), (200050, 499550)],
-                          fields=[("PNU", QVariant.String), ("JIBUN", QVariant.String)], attrs=["4111010100100010000", "1-1 전"])
+                          fields=[("PNU", FT_STRING), ("JIBUN", FT_STRING)], attrs=["4111010100100010000", "1-1 전"])
     return lyr
 
 

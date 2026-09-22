@@ -11,7 +11,6 @@ from qgis.core import (
     QgsCoordinateTransform,
     QgsMessageLog,
     QgsProject,
-    QgsUnitTypes,
     Qgis,
 )
 
@@ -38,7 +37,7 @@ def transform_point(point, src_crs, dest_crs):
         return transform.transform(point)
     except Exception as e:
         try:
-            log_message(f"CRS transform failed (fallback to original point): {e}", level=Qgis.Warning)
+            log_message(f"CRS transform failed (fallback to original point): {e}", level=Qgis.MessageLevel.Warning)
         except Exception as _exc:
             log_swallowed("tools/utils.py:42 (transform_point)", _exc)
         return point
@@ -140,7 +139,7 @@ def _is_main_thread():
         return True
 
 
-def _queue_ui_log(message: str, level=Qgis.Info):
+def _queue_ui_log(message: str, level=Qgis.MessageLevel.Info):
     """Queue a message to be flushed to QgsMessageLog on the main thread."""
     try:
         _ui_log_queue.put_nowait((str(message), level))
@@ -249,13 +248,13 @@ def ensure_log_panel_visible(iface, show_hint: bool = True):
         log_swallowed("tools/utils.py:248 (ensure_log_panel_visible)", _exc)
 
 
-def log_message(message, level=Qgis.Info):
+def log_message(message, level=Qgis.MessageLevel.Info):
     """Log to file + QGIS Message Log (file is always attempted; QGIS log only on main thread)."""
     try:
         level_name = "INFO"
-        if level == Qgis.Warning:
+        if level == Qgis.MessageLevel.Warning:
             level_name = "WARN"
-        elif level == Qgis.Critical:
+        elif level == Qgis.MessageLevel.Critical:
             level_name = "ERROR"
         _write_log_line(level_name, str(message))
     except Exception as _exc:
@@ -302,12 +301,12 @@ def log_swallowed(context: str, exc: Exception = None) -> None:
     """
     try:
         _write_log_line("SWALLOWED", f"[swallowed] {context}: {exc!r}")
-        _queue_ui_log(f"[swallowed] {context}: {exc}", Qgis.Info)
+        _queue_ui_log(f"[swallowed] {context}: {exc}", Qgis.MessageLevel.Info)
     except Exception:
         return
 
 
-def log_exception(context: str, exc: Exception = None, level=Qgis.Critical):
+def log_exception(context: str, exc: Exception = None, level=Qgis.MessageLevel.Critical):
     """Log a stack trace to file + (main thread only) QGIS log."""
     try:
         msg = f"{context}: {exc}" if exc is not None else str(context)
@@ -324,7 +323,7 @@ def log_exception(context: str, exc: Exception = None, level=Qgis.Critical):
 def is_metric_crs(crs):
     """Return True if CRS map units are meters (recommended for distance-based tools)."""
     try:
-        return (not crs.isGeographic()) and crs.mapUnits() == QgsUnitTypes.DistanceMeters
+        return (not crs.isGeographic()) and crs.mapUnits() == Qgis.DistanceUnit.Meters
     except Exception:
         return False
 
@@ -357,11 +356,11 @@ def restore_ui_focus(dialog):
 def push_message(iface, title, text, level=0, duration=3):
     """Helper to push message to QGIS message bar"""
     try:
-        lvl = Qgis.Info
+        lvl = Qgis.MessageLevel.Info
         if level == 1:
-            lvl = Qgis.Warning
+            lvl = Qgis.MessageLevel.Warning
         elif level == 2:
-            lvl = Qgis.Critical
+            lvl = Qgis.MessageLevel.Critical
         log_message(f"{title}: {text}", level=lvl)
     except Exception as _exc:
         log_swallowed("tools/utils.py:366 (push_message)", _exc)
@@ -375,7 +374,7 @@ def push_message(iface, title, text, level=0, duration=3):
     except Exception:
         # Never crash due to message bar errors
         try:
-            log_message(f"(messageBar failed) {title}: {text}", level=Qgis.Warning)
+            log_message(f"(messageBar failed) {title}: {text}", level=Qgis.MessageLevel.Warning)
         except Exception as _exc:
             log_swallowed("tools/utils.py:379 (push_message)", _exc)
 

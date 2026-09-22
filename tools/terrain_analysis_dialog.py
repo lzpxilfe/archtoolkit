@@ -37,9 +37,14 @@ from qgis.PyQt import uic
 from qgis.PyQt import QtCore, QtWidgets
 from qgis.PyQt.QtGui import QColor
 from qgis.core import (
-    QgsProject, QgsRasterLayer, QgsMapLayerProxyModel,
-    QgsRasterShader, QgsColorRampShader, QgsSingleBandPseudoColorRenderer
+    Qgis,
+    QgsProject,
+    QgsRasterLayer,
+    QgsRasterShader,
+    QgsColorRampShader,
+    QgsSingleBandPseudoColorRenderer,
 )
+from .qtcompat import SHADER_INTERPOLATED, SHADER_DISCRETE
 import processing
 from .utils import (
     log_swallowed,
@@ -164,7 +169,7 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
         self.setupUi(self)
         self.iface = iface
         
-        self.cmbDemLayer.setFilters(QgsMapLayerProxyModel.RasterLayer)
+        self.cmbDemLayer.setFilters(Qgis.LayerFilter.RasterLayer)
         self.btnRun.clicked.connect(self.run_analysis)
         self.btnClose.clicked.connect(self.reject)
         
@@ -319,7 +324,7 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
     def apply_style(self, layer, classes, max_val):
         """Apply discrete color classification"""
         color_ramp = QgsColorRampShader()
-        color_ramp.setColorRampType(QgsColorRampShader.Discrete)
+        color_ramp.setColorRampType(SHADER_DISCRETE)
         
         items = []
         for cls in classes:
@@ -1000,7 +1005,7 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
             # responding".
             progress = QtWidgets.QProgressDialog(
                 f"TRI 반경 {radius}셀 계산 중…", "취소", 0, window_cells - 1, self)
-            progress.setWindowModality(QtCore.Qt.WindowModal)
+            progress.setWindowModality(QtCore.Qt.WindowModality.WindowModal)
             progress.setMinimumDuration(500)
 
             def _progress(done, total):
@@ -1220,7 +1225,7 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
             if not np.isfinite(absmax) or absmax <= 0:
                 absmax = 1.0
             ramp = QgsColorRampShader()
-            ramp.setColorRampType(QgsColorRampShader.Interpolated)
+            ramp.setColorRampType(SHADER_INTERPOLATED)
             ramp.setColorRampItemList([
                 QgsColorRampShader.ColorRampItem(-absmax, QColor('#2166ac'), f"{-absmax:.4f} ({neg_label})"),
                 QgsColorRampShader.ColorRampItem(0.0, QColor('#f7f7f7'), "0 (평탄)"),
@@ -1413,7 +1418,7 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
         """Cool-to-warm sequential ramp for 0..1 style indices (e.g., TRASP)."""
         try:
             ramp = QgsColorRampShader()
-            ramp.setColorRampType(QgsColorRampShader.Interpolated)
+            ramp.setColorRampType(SHADER_INTERPOLATED)
             mid = (vmin + vmax) / 2.0
             ramp.setColorRampItemList([
                 QgsColorRampShader.ColorRampItem(vmin, QColor('#2c7bb6'), f"{vmin:.2f} ({min_label})"),

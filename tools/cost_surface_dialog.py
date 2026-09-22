@@ -24,7 +24,7 @@ import re
 
 from qgis.PyQt import QtWidgets, uic
 from qgis.PyQt.QtWidgets import QMessageBox
-from qgis.PyQt.QtCore import Qt, QVariant
+from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtGui import QColor, QPainter, QPen
 from qgis.core import (
     Qgis,
@@ -36,7 +36,6 @@ from qgis.core import (
     QgsField,
     QgsGeometry,
     QgsLineSymbol,
-    QgsMapLayerProxyModel,
     QgsMapLayer,
     QgsMarkerSymbol,
     QgsPointLocator,
@@ -53,8 +52,8 @@ from qgis.core import (
     QgsTextFormat,
     QgsVectorLayer,
     QgsVectorLayerSimpleLabeling,
-    QgsWkbTypes,
 )
+from .qtcompat import FT_DOUBLE, FT_STRING, SHADER_INTERPOLATED, SHADER_DISCRETE, RUBBER_BAND_CIRCLE
 from qgis.gui import QgsMapToolEmitPoint, QgsRubberBand, QgsSnapIndicator
 
 from .utils import (
@@ -931,7 +930,7 @@ class CostSurfaceWorker(QgsTask):
         friction_vector_multiplier=1.0,
         on_done,
     ):
-        super().__init__("비용표면/최소비용경로 (Cost Surface / LCP)", QgsTask.CanCancel)
+        super().__init__("비용표면/최소비용경로 (Cost Surface / LCP)", QgsTask.Flag.CanCancel)
         self._cancel_event = threading.Event()
         self.dem_source = dem_source
         self.dem_authid = dem_authid
@@ -987,12 +986,12 @@ class CostSurfaceWorker(QgsTask):
             if self.on_done:
                 self.on_done(self.result_obj)
         except Exception as e:
-            log_message(f"Cost task finished callback error: {e}", level=Qgis.Warning)
+            log_message(f"Cost task finished callback error: {e}", level=Qgis.MessageLevel.Warning)
 
     def _run_impl(self):
         log_message(
             f"CostSurface: start (model={self.model_label or self.model_key}, diagonal={self.allow_diagonal}, buffer_m={self.buffer_m})",
-            level=Qgis.Info,
+            level=Qgis.MessageLevel.Info,
         )
         ds = gdal.Open(self.dem_source, gdal.GA_ReadOnly)
         if ds is None:
@@ -1057,7 +1056,7 @@ class CostSurfaceWorker(QgsTask):
 
         log_message(
             f"CostSurface: DEM window {win_xsize}x{win_ysize} ({cell_count:,} cells)",
-            level=Qgis.Info,
+            level=Qgis.MessageLevel.Info,
         )
         dem = band.ReadAsArray(xoff, yoff, win_xsize, win_ysize)
         if dem is None:
@@ -1108,7 +1107,7 @@ class CostSurfaceWorker(QgsTask):
                 bucket = int(overall // 10.0)
                 if bucket != last_bucket:
                     last_bucket = bucket
-                    log_message(f"CostSurface: {stage}… {bucket * 10}%", level=Qgis.Info)
+                    log_message(f"CostSurface: {stage}… {bucket * 10}%", level=Qgis.MessageLevel.Info)
 
             return _cb
 
@@ -1279,7 +1278,7 @@ class CostSurfaceWorker(QgsTask):
         prev_for_path = None
         end_cost_for_path = None
         if create_path:
-            log_message("CostSurface: computing least-cost path (A*)…", level=Qgis.Info)
+            log_message("CostSurface: computing least-cost path (A*)…", level=Qgis.MessageLevel.Info)
             if path_cost_mode == "energy_j":
                 if prev_energy is None:
                     prev_energy, end_energy_j = _astar_path(
@@ -1332,7 +1331,7 @@ class CostSurfaceWorker(QgsTask):
         isoenergy_vector_path = None
         corridor_raster_path = None
         corridor_vector_path = None
-        log_message("CostSurface: writing outputs…", level=Qgis.Info)
+        log_message("CostSurface: writing outputs…", level=Qgis.MessageLevel.Info)
         if create_time_raster and dist_time is not None:
             dist2d_s = dist_time.reshape((rows, cols))
             valid = np.isfinite(dist2d_s) & (~nodata_mask)
@@ -1647,16 +1646,16 @@ class MultiLineChartWidget(QtWidgets.QWidget):
         self.update()
 
     def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton and self.zoom_level > 1.0:
+        if event.button() == Qt.MouseButton.LeftButton and self.zoom_level > 1.0:
             self.is_dragging = True
-            self.drag_start_x = event.x()
+            self.drag_start_x = event.pos().x()
             self.drag_start_offset = self.pan_offset
-            self.setCursor(Qt.ClosedHandCursor)
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
 
     def mouseReleaseEvent(self, event):
-        if event.button() == Qt.LeftButton:
+        if event.button() == Qt.MouseButton.LeftButton:
             self.is_dragging = False
-            self.setCursor(Qt.ArrowCursor)
+            self.setCursor(Qt.CursorShape.ArrowCursor)
 
     def mouseMoveEvent(self, event):
         if not self.series:
@@ -1674,14 +1673,14 @@ class MultiLineChartWidget(QtWidgets.QWidget):
         max_offset = max(0.0, max_d - visible_range)
 
         if self.is_dragging and self.zoom_level > 1.0:
-            delta_x = self.drag_start_x - event.x()
+            delta_x = self.drag_start_x - event.pos().x()
             delta_d = (float(delta_x) / float(w)) * visible_range
             self.pan_offset = max(0.0, min(max_offset, self.drag_start_offset + delta_d))
             self.update()
             return
 
         # Tooltip: nearest point values for each series
-        if not (self.margin_left <= event.x() <= self.margin_left + w):
+        if not (self.margin_left <= event.pos().x() <= self.margin_left + w):
             self.setToolTip("")
             if self.on_hover_distance:
                 try:
@@ -1689,7 +1688,7 @@ class MultiLineChartWidget(QtWidgets.QWidget):
                 except Exception as _exc:
                     log_swallowed("cost_surface_dialog.mouseMoveEvent", _exc)
             return
-        rel = float(event.x() - self.margin_left) / float(w)
+        rel = float(event.pos().x() - self.margin_left) / float(w)
         d = self.pan_offset + rel * visible_range
         if d < 0 or d > max_d:
             self.setToolTip("")
@@ -1720,7 +1719,7 @@ class MultiLineChartWidget(QtWidgets.QWidget):
 
     def paintEvent(self, _event):
         p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing, True)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
 
         rect_w = self.width()
         rect_h = self.height()
@@ -1769,7 +1768,7 @@ class MultiLineChartWidget(QtWidgets.QWidget):
             color = s.get("color") or QColor(0, 120, 255, 220)
             pen = QPen(color, 2)
             if s.get("dash"):
-                pen.setStyle(Qt.DashLine)
+                pen.setStyle(Qt.PenStyle.DashLine)
             p.setPen(pen)
 
             path_started = False
@@ -1818,19 +1817,19 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
         self._start_canvas = None
         self._end_canvas = None
 
-        self._rb_start = QgsRubberBand(self.canvas, QgsWkbTypes.PointGeometry)
+        self._rb_start = QgsRubberBand(self.canvas, Qgis.GeometryType.Point)
         self._rb_start.setColor(QColor(0, 180, 0, 220))
         self._rb_start.setWidth(3)
-        self._rb_start.setIcon(QgsRubberBand.ICON_CIRCLE)
+        self._rb_start.setIcon(RUBBER_BAND_CIRCLE)
         self._rb_start.setIconSize(7)
 
-        self._rb_end = QgsRubberBand(self.canvas, QgsWkbTypes.PointGeometry)
+        self._rb_end = QgsRubberBand(self.canvas, Qgis.GeometryType.Point)
         self._rb_end.setColor(QColor(220, 0, 0, 220))
         self._rb_end.setWidth(3)
-        self._rb_end.setIcon(QgsRubberBand.ICON_CIRCLE)
+        self._rb_end.setIcon(RUBBER_BAND_CIRCLE)
         self._rb_end.setIconSize(7)
 
-        self._rb_line = QgsRubberBand(self.canvas, QgsWkbTypes.LineGeometry)
+        self._rb_line = QgsRubberBand(self.canvas, Qgis.GeometryType.Line)
         self._rb_line.setColor(QColor(0, 120, 255, 200))
         self._rb_line.setWidth(2)
 
@@ -1845,12 +1844,12 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
         # Ensure no lingering preview graphics on startup
         self._reset_preview()
 
-        self.cmbDemLayer.setFilters(QgsMapLayerProxyModel.RasterLayer)
+        self.cmbDemLayer.setFilters(Qgis.LayerFilter.RasterLayer)
         try:
             if hasattr(self, "cmbFrictionRaster"):
-                self.cmbFrictionRaster.setFilters(QgsMapLayerProxyModel.RasterLayer)
+                self.cmbFrictionRaster.setFilters(Qgis.LayerFilter.RasterLayer)
             if hasattr(self, "cmbFrictionVector"):
-                self.cmbFrictionVector.setFilters(QgsMapLayerProxyModel.VectorLayer)
+                self.cmbFrictionVector.setFilters(Qgis.LayerFilter.VectorLayer)
         except Exception as _exc:
             log_swallowed("tools/cost_surface_dialog.py:1853 (__init__)", _exc)
         self._init_models()
@@ -2207,11 +2206,11 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
 
     def _reset_preview(self):
         try:
-            self._rb_start.reset(QgsWkbTypes.PointGeometry)
+            self._rb_start.reset(Qgis.GeometryType.Point)
             self._rb_start.hide()
-            self._rb_end.reset(QgsWkbTypes.PointGeometry)
+            self._rb_end.reset(Qgis.GeometryType.Point)
             self._rb_end.hide()
-            self._rb_line.reset(QgsWkbTypes.LineGeometry)
+            self._rb_line.reset(Qgis.GeometryType.Line)
             self._rb_line.hide()
         except Exception as _exc:
             log_swallowed("cost_surface_dialog._reset_preview", _exc)
@@ -2464,10 +2463,10 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
             f"예상 소요 시간: {duration}\n"
             f"예상 메모리: {verdict.gigabytes:.1f}GB\n\n"
             "계속 진행할까요? (분석 제한(m)을 줄이면 훨씬 빨라집니다)",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
         )
-        return answer == QMessageBox.Yes
+        return answer == QMessageBox.StandardButton.Yes
 
     def _set_running_ui(self, running: bool):
         self.btnRun.setEnabled(not running)
@@ -2485,7 +2484,7 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
         try:
             self._add_result_layers(res)
         except Exception as e:
-            log_message(f"Add cost result layers error: {e}", level=Qgis.Critical)
+            log_message(f"Add cost result layers error: {e}", level=Qgis.MessageLevel.Critical)
             push_message(self.iface, "오류", f"결과 레이어 추가 실패: {e}", level=2, duration=8)
             return
 
@@ -2654,7 +2653,7 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
         if res.start_xy and res.dem_authid:
             pt_layer = QgsVectorLayer(f"Point?crs={res.dem_authid}", "시작/도착점 (Start/End)", "memory")
             pr = pt_layer.dataProvider()
-            pr.addAttributes([QgsField("role", QVariant.String)])
+            pr.addAttributes([QgsField("role", FT_STRING)])
             pt_layer.updateFields()
             self._tag_cost_surface_layer(pt_layer, run_id, "start_end_points", res)
 
@@ -2693,11 +2692,11 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
             pr = path_layer.dataProvider()
             pr.addAttributes(
                 [
-                    QgsField("kind", QVariant.String),
-                    QgsField("model", QVariant.String),
-                    QgsField("dist_m", QVariant.Double),
-                    QgsField("time_min", QVariant.Double),
-                    QgsField("energy_kcal", QVariant.Double),
+                    QgsField("kind", FT_STRING),
+                    QgsField("model", FT_STRING),
+                    QgsField("dist_m", FT_DOUBLE),
+                    QgsField("time_min", FT_DOUBLE),
+                    QgsField("energy_kcal", FT_DOUBLE),
                 ]
             )
             path_layer.updateFields()
@@ -2765,7 +2764,7 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
                     "  || coalesce(' / ' || round(\"energy_kcal\", 0) || 'kcal', '')"
                     "end"
                 )
-                pal.placement = QgsPalLayerSettings.Curved
+                pal.placement = Qgis.LabelPlacement.Curved
                 fmt = QgsTextFormat()
                 fmt.setSize(10.0)
                 fmt.setColor(QColor(10, 10, 10))
@@ -2825,7 +2824,7 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
                         self._tag_cost_surface_layer(milestone_layer, run_id, "milestones", res)
                         bottom_to_top.append(milestone_layer)
             except Exception as e:
-                log_message(f"Milestone layer error: {e}", level=Qgis.Warning)
+                log_message(f"Milestone layer error: {e}", level=Qgis.MessageLevel.Warning)
 
         for lyr in bottom_to_top:
             project.addMapLayer(lyr, False)
@@ -2949,7 +2948,7 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
                 "else round(\"minutes\", 0) || '분' "
                 "end"
             )
-            pal.placement = QgsPalLayerSettings.Curved
+            pal.placement = Qgis.LabelPlacement.Curved
 
             fmt = QgsTextFormat()
             fmt.setSize(10.0)
@@ -2966,7 +2965,7 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
             layer.setLabelsEnabled(True)
             layer.triggerRepaint()
         except Exception as e:
-            log_message(f"Isochrone style error: {e}", level=Qgis.Warning)
+            log_message(f"Isochrone style error: {e}", level=Qgis.MessageLevel.Warning)
 
     def _apply_isoenergy_style(self, layer: QgsVectorLayer):
         try:
@@ -2978,7 +2977,7 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
             pal = QgsPalLayerSettings()
             pal.isExpression = True
             pal.fieldName = "round(\"kcal\", 0) || ' kcal'"
-            pal.placement = QgsPalLayerSettings.Curved
+            pal.placement = Qgis.LabelPlacement.Curved
 
             fmt = QgsTextFormat()
             fmt.setSize(10.0)
@@ -2995,7 +2994,7 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
             layer.setLabelsEnabled(True)
             layer.triggerRepaint()
         except Exception as e:
-            log_message(f"Iso-energy style error: {e}", level=Qgis.Warning)
+            log_message(f"Iso-energy style error: {e}", level=Qgis.MessageLevel.Warning)
 
     def _apply_corridor_raster_style(self, layer: QgsRasterLayer):
         try:
@@ -3004,7 +3003,7 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
 
             shader = QgsRasterShader()
             ramp = QgsColorRampShader()
-            ramp.setColorRampType(QgsColorRampShader.Discrete)
+            ramp.setColorRampType(SHADER_DISCRETE)
             items = [
                 QgsColorRampShader.ColorRampItem(nodata_value, QColor(0, 0, 0, 0), "Outside"),
                 QgsColorRampShader.ColorRampItem(1.0, QColor(0, 170, 255, 210), "Corridor"),
@@ -3017,7 +3016,7 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
             layer.setOpacity(0.65)
             layer.triggerRepaint()
         except Exception as e:
-            log_message(f"Corridor raster style error: {e}", level=Qgis.Warning)
+            log_message(f"Corridor raster style error: {e}", level=Qgis.MessageLevel.Warning)
 
     def _apply_corridor_polygon_style(self, layer: QgsVectorLayer):
         try:
@@ -3031,7 +3030,7 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
             layer.setRenderer(QgsSingleSymbolRenderer(symbol))
             layer.triggerRepaint()
         except Exception as e:
-            log_message(f"Corridor polygon style error: {e}", level=Qgis.Warning)
+            log_message(f"Corridor polygon style error: {e}", level=Qgis.MessageLevel.Warning)
 
     def _apply_cost_raster_style(self, layer: QgsRasterLayer, vmin, vmax):
         try:
@@ -3068,7 +3067,7 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
 
             shader = QgsRasterShader()
             ramp = QgsColorRampShader()
-            ramp.setColorRampType(QgsColorRampShader.Interpolated)
+            ramp.setColorRampType(SHADER_INTERPOLATED)
 
             colors = [
                 QColor("#2c7bb6"),
@@ -3107,7 +3106,7 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
             layer.setOpacity(0.7)
             layer.triggerRepaint()
         except Exception as e:
-            log_message(f"Cost raster style error: {e}", level=Qgis.Warning)
+            log_message(f"Cost raster style error: {e}", level=Qgis.MessageLevel.Warning)
 
     def _apply_energy_raster_style(self, layer: QgsRasterLayer, vmin, vmax):
         try:
@@ -3140,7 +3139,7 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
 
             shader = QgsRasterShader()
             ramp = QgsColorRampShader()
-            ramp.setColorRampType(QgsColorRampShader.Interpolated)
+            ramp.setColorRampType(SHADER_INTERPOLATED)
 
             colors = [
                 QColor("#2c7bb6"),
@@ -3179,7 +3178,7 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
             layer.setOpacity(0.7)
             layer.triggerRepaint()
         except Exception as e:
-            log_message(f"Energy raster style error: {e}", level=Qgis.Warning)
+            log_message(f"Energy raster style error: {e}", level=Qgis.MessageLevel.Warning)
 
     def _create_lcp_milestones_layer(
         self,
@@ -3281,10 +3280,10 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
         pr = layer.dataProvider()
         pr.addAttributes(
             [
-                QgsField("dist_m", QVariant.Double),
-                QgsField("time_min", QVariant.Double),
-                QgsField("energy_kcal", QVariant.Double),
-                QgsField("label", QVariant.String),
+                QgsField("dist_m", FT_DOUBLE),
+                QgsField("time_min", FT_DOUBLE),
+                QgsField("energy_kcal", FT_DOUBLE),
+                QgsField("label", FT_STRING),
             ]
         )
         layer.updateFields()
@@ -3315,7 +3314,7 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
 
         pal = QgsPalLayerSettings()
         pal.fieldName = "label"
-        pal.placement = QgsPalLayerSettings.AroundPoint
+        pal.placement = Qgis.LabelPlacement.AroundPoint
         fmt = QgsTextFormat()
         fmt.setSize(9.5)
         fmt.setColor(QColor(10, 10, 10))
@@ -3338,7 +3337,7 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
                 return
             self.open_cost_profile(layer_id)
         except Exception as e:
-            log_message(f"Cost profile selection handler error: {e}", level=Qgis.Warning)
+            log_message(f"Cost profile selection handler error: {e}", level=Qgis.MessageLevel.Warning)
 
     def open_cost_profile(self, layer_id: str):
         payload = self._profile_payloads.get(layer_id)
@@ -3468,7 +3467,7 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
         dlg.setWindowTitle(f"최소비용경로 프로파일 (LCP Profile) - {model_label}".strip())
         dlg.setModal(False)
         try:
-            dlg.setAttribute(Qt.WA_DeleteOnClose, True)
+            dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         except Exception as _exc:
             log_swallowed("tools/cost_surface_dialog.py:3471 (open_cost_profile)", _exc)
         layout = QtWidgets.QVBoxLayout(dlg)
@@ -3525,10 +3524,10 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
             layout.addWidget(energy_chart)
 
         # Map synchronization: hover over profile → show position marker on map (along LCP when available).
-        rb = QgsRubberBand(self.canvas, QgsWkbTypes.PointGeometry)
+        rb = QgsRubberBand(self.canvas, Qgis.GeometryType.Point)
         rb.setColor(QColor(0, 120, 255, 220))
         rb.setWidth(4)
-        rb.setIcon(QgsRubberBand.ICON_CIRCLE)
+        rb.setIcon(RUBBER_BAND_CIRCLE)
         rb.setIconSize(10)
         rb.hide()
 
@@ -3552,12 +3551,12 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
             try:
                 if d is None:
                     rb.hide()
-                    rb.reset(QgsWkbTypes.PointGeometry)
+                    rb.reset(Qgis.GeometryType.Point)
                     return
                 pt = point_at_distance(base_coords, float(d))
                 if not pt:
                     return
-                rb.reset(QgsWkbTypes.PointGeometry)
+                rb.reset(Qgis.GeometryType.Point)
                 rb.addPoint(QgsPointXY(pt[0], pt[1]))
                 rb.show()
             except Exception as _exc:
@@ -3717,7 +3716,7 @@ class CostPathPointTool(QgsMapToolEmitPoint):
             self.snap_indicator.setMatch(QgsPointLocator.Match())
 
     def canvasReleaseEvent(self, event):
-        if event.button() == Qt.RightButton:
+        if event.button() == Qt.MouseButton.RightButton:
             self.finish_selection()
             return
 
@@ -3737,7 +3736,7 @@ class CostPathPointTool(QgsMapToolEmitPoint):
         self.finish_selection()
 
     def keyPressEvent(self, event):
-        if event.key() == Qt.Key_Escape:
+        if event.key() == Qt.Key.Key_Escape:
             self.finish_selection()
 
     def finish_selection(self):

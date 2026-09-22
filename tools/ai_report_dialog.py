@@ -17,7 +17,7 @@ from typing import List, Optional
 from qgis.PyQt import QtWidgets
 from qgis.PyQt.QtCore import QSettings, Qt
 
-from qgis.core import QgsLayerTreeGroup, QgsMapLayerProxyModel, QgsProject, QgsRasterLayer, QgsVectorLayer
+from qgis.core import QgsLayerTreeGroup, QgsProject, QgsRasterLayer, QgsVectorLayer, Qgis
 from qgis.gui import QgsMapLayerComboBox  # noqa: F401 (needed for custom widget)
 
 from . import ai_aoi_summary
@@ -84,7 +84,7 @@ class _LayerMultiSelectDialog(QtWidgets.QDialog):
         quick.addStretch(1)
         layout.addLayout(quick)
 
-        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.StandardButton.Ok | QtWidgets.QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
@@ -112,9 +112,9 @@ class _LayerMultiSelectDialog(QtWidgets.QDialog):
                 text = f"{group_path} / {text}"
 
             item = QtWidgets.QListWidgetItem(text)
-            item.setData(Qt.UserRole, lyr.id())
-            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-            item.setCheckState(Qt.Checked if lyr.id() in self._preselected else Qt.Unchecked)
+            item.setData(Qt.ItemDataRole.UserRole, lyr.id())
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Checked if lyr.id() in self._preselected else Qt.CheckState.Unchecked)
             self.listLayers.addItem(item)
 
     def _apply_filter(self, text: str):
@@ -127,7 +127,7 @@ class _LayerMultiSelectDialog(QtWidgets.QDialog):
             item.setHidden(q not in str(item.text() or "").lower())
 
     def _set_all_checked(self, checked: bool, *, visible_only: bool):
-        state = Qt.Checked if checked else Qt.Unchecked
+        state = Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
         for i in range(self.listLayers.count()):
             item = self.listLayers.item(i)
             if visible_only and item.isHidden():
@@ -138,9 +138,9 @@ class _LayerMultiSelectDialog(QtWidgets.QDialog):
         ids: List[str] = []
         for i in range(self.listLayers.count()):
             item = self.listLayers.item(i)
-            if item.checkState() != Qt.Checked:
+            if item.checkState() != Qt.CheckState.Checked:
                 continue
-            lid = str(item.data(Qt.UserRole) or "").strip()
+            lid = str(item.data(Qt.ItemDataRole.UserRole) or "").strip()
             if lid and lid not in ids:
                 ids.append(lid)
         return ids
@@ -280,11 +280,7 @@ class AiAoiReportDialog(QtWidgets.QDialog):
         form = QtWidgets.QFormLayout(grp_in)
 
         self.cmbAoi = QgsMapLayerComboBox(grp_in)
-        # QGIS API compatibility: Filter may be scoped or unscoped depending on build.
-        try:
-            poly_filter = QgsMapLayerProxyModel.Filter.PolygonLayer
-        except Exception:
-            poly_filter = QgsMapLayerProxyModel.PolygonLayer
+        poly_filter = Qgis.LayerFilter.PolygonLayer
         self.cmbAoi.setFilters(poly_filter)
         form.addRow("조사지역 폴리곤(AOI):", self.cmbAoi)
 
@@ -354,10 +350,7 @@ class AiAoiReportDialog(QtWidgets.QDialog):
         form.addRow("", self.chkReferenceSites)
 
         self.cmbReferenceLayer = QgsMapLayerComboBox(grp_in)
-        try:
-            vec_filter = QgsMapLayerProxyModel.Filter.VectorLayer
-        except Exception:
-            vec_filter = QgsMapLayerProxyModel.VectorLayer
+        vec_filter = Qgis.LayerFilter.VectorLayer
         self.cmbReferenceLayer.setFilters(vec_filter)
         self.cmbReferenceLayer.layerChanged.connect(self._on_reference_layer_changed)
         form.addRow("추가 유적 레이어:", self.cmbReferenceLayer)
@@ -399,7 +392,7 @@ class AiAoiReportDialog(QtWidgets.QDialog):
         self.cmbProvider.currentIndexChanged.connect(self._on_provider_changed)
 
         self.lblKeyStatus = QtWidgets.QLabel("(키 상태: 확인 중)")
-        self.lblKeyStatus.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
+        self.lblKeyStatus.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse | Qt.TextInteractionFlag.TextSelectableByKeyboard)
 
         self.btnSetKey = QtWidgets.QPushButton("API 키 설정/변경…")
         self.btnSetKey.clicked.connect(self._on_set_key)
@@ -592,8 +585,8 @@ class AiAoiReportDialog(QtWidgets.QDialog):
             aoi_id = ""
 
         dlg = _LayerMultiSelectDialog(self, aoi_layer_id=aoi_id, preselected_ids=self._selected_layer_ids)
-        res = dlg.exec_() if hasattr(dlg, "exec_") else dlg.exec()
-        if res != QtWidgets.QDialog.Accepted:
+        res = dlg.exec() if hasattr(dlg, "exec_") else dlg.exec()
+        if res != QtWidgets.QDialog.DialogCode.Accepted:
             return
         self._selected_layer_ids = dlg.selected_layer_ids()
         self._update_selected_layers_label()
@@ -1119,7 +1112,7 @@ class AiAoiReportDialog(QtWidgets.QDialog):
                 level=1,
                 duration=7,
             )
-            QtWidgets.QApplication.setOverrideCursor(Qt.WaitCursor)
+            QtWidgets.QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
             try:
                 text, api_err, used_model = ai_gemini.generate_text_with_fallback(
                     api_key=str(api_key or ""),

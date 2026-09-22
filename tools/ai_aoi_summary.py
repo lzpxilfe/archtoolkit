@@ -26,7 +26,6 @@ except Exception:  # pragma: no cover
     gdal = None
     ogr = None
 
-from qgis.PyQt.QtCore import QVariant
 from qgis.core import (
     Qgis,
     QgsCoordinateTransform,
@@ -38,10 +37,10 @@ from qgis.core import (
     QgsProject,
     QgsRasterLayer,
     QgsRectangle,
-    QgsUnitTypes,
     QgsVectorLayer,
     QgsWkbTypes,
 )
+from .qtcompat import FT_INT, FT_UINT, FT_LONGLONG, FT_ULONGLONG, FT_DOUBLE, FT_STRING
 
 from .utils import is_null_value, log_swallowed, get_archtoolkit_layer_metadata, is_metric_crs, log_message
 from .utils import split_qgis_source_path
@@ -108,11 +107,11 @@ _CATEGORICAL_HINTS = (
 )
 
 _NUMERIC_QVARIANTS = (
-    QVariant.Int,
-    QVariant.UInt,
-    QVariant.LongLong,
-    QVariant.ULongLong,
-    QVariant.Double,
+    FT_INT,
+    FT_UINT,
+    FT_LONGLONG,
+    FT_ULONGLONG,
+    FT_DOUBLE,
 )
 
 
@@ -154,7 +153,7 @@ def _classify_fields(layer, *, max_numeric: int = 12, tool_id: str = ""):
             if tool_re is not None and tool_re.match(name):
                 continue
             numeric.append(name)
-        elif ftype == QVariant.String:
+        elif ftype == FT_STRING:
             string_candidates.append(name)
 
     # Order numeric fields: semantically-known (whitelist) first, then the rest.
@@ -254,7 +253,7 @@ def _safe_distance_area(crs) -> QgsDistanceArea:
             log_message(
                 "AI 요약: 프로젝트 타원체가 설정되지 않아(NONE) 지리좌표계 레이어의 "
                 "면적/거리 계산에 WGS84 타원체를 대신 사용합니다.",
-                level=Qgis.Warning,
+                level=Qgis.MessageLevel.Warning,
             )
         if ellps:
             da.setEllipsoid(ellps)
@@ -267,7 +266,7 @@ def _safe_distance_area(crs) -> QgsDistanceArea:
         log_message(
             "AI 요약: 타원체 기준 측정을 설정하지 못해 지리좌표계 레이어의 면적/거리를 "
             "생략합니다(제곱도를 ㎡로 적지 않기 위함).",
-            level=Qgis.Warning,
+            level=Qgis.MessageLevel.Warning,
         )
     return da
 
@@ -283,7 +282,7 @@ def _to_m2(da: QgsDistanceArea, area: float) -> float:
     is the pre-conversion behaviour and exact for a metre CRS.
     """
     try:
-        return float(da.convertAreaMeasurement(float(area), QgsUnitTypes.AreaSquareMeters))
+        return float(da.convertAreaMeasurement(float(area), Qgis.AreaUnit.SquareMeters))
     except Exception as _exc:
         log_swallowed("ai_aoi_summary._to_m2", _exc)
         return float(area)
@@ -292,7 +291,7 @@ def _to_m2(da: QgsDistanceArea, area: float) -> float:
 def _to_m(da: QgsDistanceArea, length: float) -> float:
     """Convert a measureLength()/measureLine() result to metres (see _to_m2)."""
     try:
-        return float(da.convertLengthMeasurement(float(length), QgsUnitTypes.DistanceMeters))
+        return float(da.convertLengthMeasurement(float(length), Qgis.DistanceUnit.Meters))
     except Exception as _exc:
         log_swallowed("ai_aoi_summary._to_m", _exc)
         return float(length)
@@ -556,7 +555,7 @@ def _vector_layer_stats_in_geom(
         num_acc[str(f)] = {"sum": 0.0, "min": float("inf"), "max": float("-inf"), "n": 0}
 
     dist_acc = None
-    if geom_type == QgsWkbTypes.PointGeometry and da_origin is not None and origin_point is not None:
+    if geom_type == Qgis.GeometryType.Point and da_origin is not None and origin_point is not None:
         dist_acc = {"sum": 0.0, "min": float("inf"), "max": float("-inf"), "n": 0}
 
     scan_cap = int(max_features_scan)
@@ -591,14 +590,14 @@ def _vector_layer_stats_in_geom(
             continue
 
         n += 1
-        if geom_type == QgsWkbTypes.LineGeometry:
+        if geom_type == Qgis.GeometryType.Line:
             try:
                 _len = _length_m(da, g.intersection(geom), layer_crs)
                 if _len is not None:
                     total_len += _len
             except Exception as _exc:
                 log_swallowed("ai_aoi_summary._vector_layer_stats_in_geom", _exc)
-        elif geom_type == QgsWkbTypes.PolygonGeometry:
+        elif geom_type == Qgis.GeometryType.Polygon:
             try:
                 _area = _area_m2(da, g.intersection(geom), layer_crs)
                 if _area is not None:
@@ -673,13 +672,13 @@ def _vector_layer_stats_in_geom(
             log_message(
                 f"AI 요약: 레이어 '{layer.name()}' 피처 스캔 한도({scan_cap:,}개)에 도달했습니다. "
                 "피처 수/총 길이/총 면적/필드 통계는 부분값입니다.",
-                level=Qgis.Warning,
+                level=Qgis.MessageLevel.Warning,
             )
         except Exception as _exc:
             log_swallowed("ai_aoi_summary._vector_layer_stats_in_geom", _exc)
-    if geom_type == QgsWkbTypes.LineGeometry and metric_totals:
+    if geom_type == Qgis.GeometryType.Line and metric_totals:
         out["total_length_m"] = float(total_len)
-    if geom_type == QgsWkbTypes.PolygonGeometry and metric_totals:
+    if geom_type == Qgis.GeometryType.Polygon and metric_totals:
         out["total_area_m2"] = float(total_area)
     if hist is not None:
         # keep top 20
@@ -767,7 +766,7 @@ def _pick_reference_name_field(layer: QgsVectorLayer, preferred: str = "") -> st
 
     try:
         for f in layer.fields():
-            if int(f.type()) == int(QVariant.String):
+            if int(f.type()) == int(FT_STRING):
                 return str(f.name() or "")
     except Exception as _exc:
         log_swallowed("ai_aoi_summary._pick_reference_name_field", _exc)
@@ -796,7 +795,7 @@ def _extract_representative_point(geom: QgsGeometry) -> Optional[QgsPointXY]:
     if geom is None or geom.isEmpty():
         return None
     try:
-        if geom.type() == QgsWkbTypes.PointGeometry:
+        if geom.type() == Qgis.GeometryType.Point:
             if geom.isMultipart():
                 pts = geom.asMultiPoint()
                 if pts:
@@ -1006,7 +1005,7 @@ def _reference_sites_summary(
             log_message(
                 f"AI 요약: 추가 유적 레이어 '{layer.name()}' 스캔 한도({max_scan:,}개)에 도달했습니다. "
                 "분류 집계와 '가장 가까운 유적'은 스캔된 범위 내의 값입니다.",
-                level=Qgis.Warning,
+                level=Qgis.MessageLevel.Warning,
             )
         except Exception as _exc:
             log_swallowed("ai_aoi_summary._reference_sites_summary", _exc)
@@ -1076,7 +1075,7 @@ def _reference_sites_summary(
             gt = int(g.type())
         except Exception:
             gt = -1
-        if gt == int(QgsWkbTypes.PolygonGeometry):
+        if gt == int(Qgis.GeometryType.Polygon):
             try:
                 feature_area_m2 = _area_m2(da, g, aoi_crs)
             except Exception:
@@ -1106,7 +1105,7 @@ def _reference_sites_summary(
                     outside_buffer_area_pct = max(0.0, min(100.0, (outside_buffer_area_m2 / float(feature_area_m2)) * 100.0))
             except Exception as _exc:
                 log_swallowed("ai_aoi_summary._reference_sites_summary", _exc)
-        elif gt == int(QgsWkbTypes.LineGeometry):
+        elif gt == int(Qgis.GeometryType.Line):
             try:
                 feature_length_m = _length_m(da, g, aoi_crs)
             except Exception:
@@ -1479,7 +1478,7 @@ def build_aoi_context(
     reference_max_features: int = 120,
     max_layers: int = 40,
 ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
-    if aoi_layer is None or aoi_layer.geometryType() != QgsWkbTypes.PolygonGeometry:
+    if aoi_layer is None or aoi_layer.geometryType() != Qgis.GeometryType.Polygon:
         return None, "AOI 레이어는 폴리곤이어야 합니다."
 
     aoi_crs = aoi_layer.crs()
@@ -1505,7 +1504,7 @@ def build_aoi_context(
                 log_message(
                     "AI 요약: '선택된 피처만 사용'이 켜져 있으나 AOI 레이어에 선택된 피처가 없어 "
                     "전체 피처를 사용합니다. AOI 면적/버퍼/모든 통계가 레이어 전체 기준입니다.",
-                    level=Qgis.Warning,
+                    level=Qgis.MessageLevel.Warning,
                 )
             except Exception as _exc:
                 log_swallowed("ai_aoi_summary.build_aoi_context", _exc)
@@ -1574,7 +1573,7 @@ def build_aoi_context(
             log_message(
                 f"AI 요약: 대상 레이어 {len(layers)}개가 레이어 한도({int(max_layers)}개)를 넘어 한도를 "
                 f"{effective_max_layers}개로 올렸습니다.",
-                level=Qgis.Info,
+                level=Qgis.MessageLevel.Info,
             )
         except Exception as _exc:
             log_swallowed("ai_aoi_summary.build_aoi_context", _exc)
@@ -1686,7 +1685,7 @@ def build_aoi_context(
             log_message(
                 f"AI 요약: 레이어 한도({effective_max_layers}개)에 도달해 후보 {layers_candidates}개 중 "
                 f"{len(summaries)}개만 요약했습니다.",
-                level=Qgis.Warning,
+                level=Qgis.MessageLevel.Warning,
             )
         except Exception as _exc:
             log_swallowed("ai_aoi_summary.build_aoi_context", _exc)
@@ -1741,7 +1740,7 @@ def build_aoi_context(
         ctx["reference_sites"] = reference_sites
 
     try:
-        log_message(f"AI AOI summary: layers={len(summaries)} (archtoolkit_only={only_archtoolkit_layers})", level=Qgis.Info)
+        log_message(f"AI AOI summary: layers={len(summaries)} (archtoolkit_only={only_archtoolkit_layers})", level=Qgis.MessageLevel.Info)
     except Exception as _exc:
         log_swallowed("tools/ai_aoi_summary.py:1323 (build_aoi_context)", _exc)
 

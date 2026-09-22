@@ -26,19 +26,32 @@ from datetime import datetime
 
 from qgis.PyQt import uic
 from qgis.PyQt import QtWidgets
-from qgis.PyQt.QtCore import Qt, QVariant, QPointF, QUrl
+from qgis.PyQt.QtCore import Qt, QPointF, QUrl
 from qgis.PyQt.QtGui import QColor, QPainter, QDesktopServices
 from qgis.core import (
-    QgsProject, QgsVectorLayer, QgsRasterLayer, QgsMapLayerProxyModel,
-    QgsLineSymbol, QgsFillSymbol,
-    QgsRuleBasedRenderer, QgsSingleSymbolRenderer,
-    QgsSimpleLineSymbolLayer, QgsSimpleFillSymbolLayer,
-    QgsUnitTypes, QgsField, QgsFeature, QgsGeometry,
-    QgsWkbTypes, QgsFeatureRequest,
-    QgsSingleBandPseudoColorRenderer, QgsRasterShader, QgsColorRampShader,
-    QgsSingleBandGrayRenderer, QgsHillshadeRenderer,
-    QgsRasterBandStats, QgsLayerTreeLayer, QgsCoordinateTransform
+    Qgis,
+    QgsProject,
+    QgsVectorLayer,
+    QgsRasterLayer,
+    QgsLineSymbol,
+    QgsFillSymbol,
+    QgsRuleBasedRenderer,
+    QgsSingleSymbolRenderer,
+    QgsSimpleLineSymbolLayer,
+    QgsSimpleFillSymbolLayer,
+    QgsField,
+    QgsFeature,
+    QgsGeometry,
+    QgsFeatureRequest,
+    QgsSingleBandPseudoColorRenderer,
+    QgsRasterShader,
+    QgsColorRampShader,
+    QgsSingleBandGrayRenderer,
+    QgsHillshadeRenderer,
+    QgsLayerTreeLayer,
+    QgsCoordinateTransform,
 )
+from .qtcompat import FT_STRING, RBS_ALL, SHADER_DISCRETE
 from .utils import (
     log_swallowed,
     get_archtoolkit_layer_metadata,
@@ -105,7 +118,7 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
         
         # Setup
         self.populate_layers()
-        self.cmbDemLayer.setFilters(QgsMapLayerProxyModel.RasterLayer)
+        self.cmbDemLayer.setFilters(Qgis.LayerFilter.RasterLayer)
         self.code_config = self._load_code_config()
         self._sync_code_config_ui()
         
@@ -273,21 +286,21 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
         for layer in layers:
             if isinstance(layer, QgsVectorLayer):
                 item = QtWidgets.QListWidgetItem(layer.name())
-                item.setData(Qt.UserRole, layer.id())
-                item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-                item.setCheckState(Qt.Unchecked)
+                item.setData(Qt.ItemDataRole.UserRole, layer.id())
+                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                item.setCheckState(Qt.CheckState.Unchecked)
                 self.lstLayers.addItem(item)
 
     def set_all_checks(self, state):
         for i in range(self.lstLayers.count()):
-            self.lstLayers.item(i).setCheckState(Qt.Checked if state else Qt.Unchecked)
+            self.lstLayers.item(i).setCheckState(Qt.CheckState.Checked if state else Qt.CheckState.Unchecked)
 
     def get_selected_layers(self):
         selected = []
         for i in range(self.lstLayers.count()):
             item = self.lstLayers.item(i)
-            if item.checkState() == Qt.Checked:
-                lid = item.data(Qt.UserRole)
+            if item.checkState() == Qt.CheckState.Checked:
+                lid = item.data(Qt.ItemDataRole.UserRole)
                 layer = QgsProject.instance().mapLayer(lid)
                 if layer:
                     selected.append(layer)
@@ -502,7 +515,7 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
         gray_layer.setName(f"{source_raster.name()}_그레이")
         gray_layer.setRenderer(QgsSingleBandGrayRenderer(gray_layer.dataProvider(), 1))
         gray_layer.setOpacity(0.4)
-        gray_layer.setBlendMode(QPainter.CompositionMode_Multiply) 
+        gray_layer.setBlendMode(QPainter.CompositionMode.CompositionMode_Multiply) 
         try:
             set_archtoolkit_layer_metadata(
                 gray_layer,
@@ -522,11 +535,11 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
         color_layer = source_raster.clone()
         color_layer.setName(f"{source_raster.name()}_고도색상")
         
-        stats = color_layer.dataProvider().bandStatistics(1, QgsRasterBandStats.All)
+        stats = color_layer.dataProvider().bandStatistics(1, RBS_ALL)
         min_val, max_val = stats.minimumValue, stats.maximumValue
         shader = QgsRasterShader()
         color_ramp = QgsColorRampShader(min_val, max_val)
-        color_ramp.setColorRampType(QgsColorRampShader.Discrete)
+        color_ramp.setColorRampType(SHADER_DISCRETE)
         items = [
             QgsColorRampShader.ColorRampItem(min_val + (max_val - min_val) * 0.0, QColor("#ffffcc"), "<= Min"),
             QgsColorRampShader.ColorRampItem(min_val + (max_val - min_val) * 0.25, QColor("#c2e699"), "Low"),
@@ -574,7 +587,7 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
         dest_geom_type = "MultiPolygon" if is_building else "LineString"
         dest_layer = QgsVectorLayer(f"{dest_geom_type}?crs={crs}", name, "memory")
         pr = dest_layer.dataProvider()
-        pr.addAttributes([QgsField("Layer", QVariant.String)])
+        pr.addAttributes([QgsField("Layer", FT_STRING)])
         dest_layer.updateFields()
         
         all_features = []
@@ -618,7 +631,7 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
                 if is_building:
                     # Robust polygonization for buildings
                     poly_geom = None
-                    if geom.type() == QgsWkbTypes.LineGeometry:
+                    if geom.type() == Qgis.GeometryType.Line:
                         try:
                             # Try to create polygon from points
                             if geom.isMultipart():
@@ -742,7 +755,7 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
             shadow_alpha = 100
         shadow_alpha = max(0, min(255, shadow_alpha))
         
-        if layer.geometryType() == QgsWkbTypes.PolygonGeometry:
+        if layer.geometryType() == Qgis.GeometryType.Polygon:
             symbol = QgsFillSymbol.createSimple({
                 'color': str(fill_color),
                 'outline_color': str(outline_color),
@@ -750,9 +763,9 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
             })
             shadow_layer = QgsSimpleFillSymbolLayer()
             shadow_layer.setFillColor(QColor(0, 0, 0, shadow_alpha))
-            shadow_layer.setStrokeColor(Qt.transparent)
+            shadow_layer.setStrokeColor(Qt.GlobalColor.transparent)
             shadow_layer.setOffset(QPointF(offset_val, offset_val))
-            shadow_layer.setOffsetUnit(QgsUnitTypes.RenderMillimeters)
+            shadow_layer.setOffsetUnit(Qgis.RenderUnit.Millimeters)
             symbol.insertSymbolLayer(0, shadow_layer)
         else:
             symbol = QgsLineSymbol.createSimple({'color': '#ffffff', 'width': '0.3'})
@@ -796,7 +809,7 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
         # Vector styles (templates)
         try:
             roads_layer = QgsVectorLayer(f"LineString?crs={project_crs}", "roads_style_template", "memory")
-            roads_layer.dataProvider().addAttributes([QgsField("Layer", QVariant.String)])
+            roads_layer.dataProvider().addAttributes([QgsField("Layer", FT_STRING)])
             roads_layer.updateFields()
             self.style_road_layer(roads_layer, "Layer")
             if self._save_named_style(roads_layer, os.path.join(preset_dir, "roads.qml")):
@@ -806,7 +819,7 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
 
         try:
             rivers_layer = QgsVectorLayer(f"LineString?crs={project_crs}", "rivers_style_template", "memory")
-            rivers_layer.dataProvider().addAttributes([QgsField("Layer", QVariant.String)])
+            rivers_layer.dataProvider().addAttributes([QgsField("Layer", FT_STRING)])
             rivers_layer.updateFields()
             self.style_river_layer(rivers_layer, "Layer")
             if self._save_named_style(rivers_layer, os.path.join(preset_dir, "rivers.qml")):
@@ -816,7 +829,7 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
 
         try:
             buildings_layer = QgsVectorLayer(f"MultiPolygon?crs={project_crs}", "buildings_style_template", "memory")
-            buildings_layer.dataProvider().addAttributes([QgsField("Layer", QVariant.String)])
+            buildings_layer.dataProvider().addAttributes([QgsField("Layer", FT_STRING)])
             buildings_layer.updateFields()
             self.style_building_layer(buildings_layer, "Layer")
             if self._save_named_style(buildings_layer, os.path.join(preset_dir, "buildings.qml")):
@@ -839,7 +852,7 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
                 gray_layer = dem_layer.clone()
                 gray_layer.setRenderer(QgsSingleBandGrayRenderer(gray_layer.dataProvider(), 1))
                 gray_layer.setOpacity(0.4)
-                gray_layer.setBlendMode(QPainter.CompositionMode_Multiply)
+                gray_layer.setBlendMode(QPainter.CompositionMode.CompositionMode_Multiply)
                 if self._save_named_style(gray_layer, os.path.join(preset_dir, "dem_gray.qml")):
                     exported.append("dem_gray.qml")
             except Exception as _exc:
@@ -847,11 +860,11 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
 
             try:
                 color_layer = dem_layer.clone()
-                stats = color_layer.dataProvider().bandStatistics(1, QgsRasterBandStats.All)
+                stats = color_layer.dataProvider().bandStatistics(1, RBS_ALL)
                 min_val, max_val = stats.minimumValue, stats.maximumValue
                 shader = QgsRasterShader()
                 color_ramp = QgsColorRampShader(min_val, max_val)
-                color_ramp.setColorRampType(QgsColorRampShader.Discrete)
+                color_ramp.setColorRampType(SHADER_DISCRETE)
                 items = [
                     QgsColorRampShader.ColorRampItem(min_val + (max_val - min_val) * 0.0, QColor("#ffffcc"), "<= Min"),
                     QgsColorRampShader.ColorRampItem(min_val + (max_val - min_val) * 0.25, QColor("#c2e699"), "Low"),

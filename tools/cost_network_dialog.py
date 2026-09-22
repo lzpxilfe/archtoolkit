@@ -23,7 +23,7 @@ import numpy as np
 from osgeo import gdal
 
 from qgis.PyQt import QtWidgets, uic
-from qgis.PyQt.QtCore import Qt, QVariant
+from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtGui import QColor, QTextOption
 from qgis.core import (
     Qgis,
@@ -33,7 +33,6 @@ from qgis.core import (
     QgsField,
     QgsGeometry,
     QgsLineSymbol,
-    QgsMapLayerProxyModel,
     QgsMarkerSymbol,
     QgsPalLayerSettings,
     QgsPointXY,
@@ -44,8 +43,8 @@ from qgis.core import (
     QgsTextFormat,
     QgsVectorLayer,
     QgsVectorLayerSimpleLabeling,
-    QgsWkbTypes,
 )
+from .qtcompat import FT_INT, FT_DOUBLE, FT_STRING
 
 from .cost_surface_dialog import (
     MODEL_CONOLLY_LAKE,
@@ -225,7 +224,7 @@ class CostNetworkWorker(QgsTask):
         cost_mode: str,
         on_done,
     ):
-        super().__init__("최소비용 네트워크 (Least-cost Network)", QgsTask.CanCancel)
+        super().__init__("최소비용 네트워크 (Least-cost Network)", QgsTask.Flag.CanCancel)
         self._cancel_event = threading.Event()
         self.dem_source = dem_source
         self.dem_authid = dem_authid
@@ -275,7 +274,7 @@ class CostNetworkWorker(QgsTask):
             if self.on_done:
                 self.on_done(self.result_obj)
         except Exception as e:
-            log_message(f"Network task finished callback error: {e}", level=Qgis.Warning)
+            log_message(f"Network task finished callback error: {e}", level=Qgis.MessageLevel.Warning)
 
     def _run_impl(self) -> NetworkTaskResult:
         log_message(
@@ -284,7 +283,7 @@ class CostNetworkWorker(QgsTask):
                 f"(mode={self.network_mode}, cost={self.cost_mode}, model={self.model_label or self.model_key}, "
                 f"candidate_k={self.candidate_k}, pair_buffer_m={self.pair_buffer_m}, diagonal={self.allow_diagonal})"
             ),
-            level=Qgis.Info,
+            level=Qgis.MessageLevel.Info,
         )
         ds = gdal.Open(self.dem_source, gdal.GA_ReadOnly)
         if ds is None:
@@ -334,8 +333,8 @@ class CostNetworkWorker(QgsTask):
 
         nodes = valid_nodes
         if removed:
-            log_message(f"CostNetwork: filtered out {removed} node(s) outside DEM/NoData", level=Qgis.Info)
-        log_message(f"CostNetwork: using {len(nodes)} node(s)", level=Qgis.Info)
+            log_message(f"CostNetwork: filtered out {removed} node(s) outside DEM/NoData", level=Qgis.MessageLevel.Info)
+        log_message(f"CostNetwork: using {len(nodes)} node(s)", level=Qgis.MessageLevel.Info)
         coords = np.array([(float(n.x), float(n.y)) for n in nodes], dtype=np.float64)
         n_nodes = int(coords.shape[0])
 
@@ -409,7 +408,7 @@ class CostNetworkWorker(QgsTask):
 
         log_message(
             f"CostNetwork: candidate pairs={len(candidate_pairs)} (directed paths={len(candidate_pairs) * 2})",
-            level=Qgis.Info,
+            level=Qgis.MessageLevel.Info,
         )
 
         # Internal solver cost mode
@@ -438,7 +437,7 @@ class CostNetworkWorker(QgsTask):
                     last_bucket = bucket
                     log_message(
                         f"CostNetwork: computing pair costs… {bucket * 10}% ({done_dir}/{total_dir})",
-                        level=Qgis.Info,
+                        level=Qgis.MessageLevel.Info,
                     )
             except Exception as _exc:
                 log_swallowed("cost_network_dialog.update_progress", _exc)
@@ -494,13 +493,13 @@ class CostNetworkWorker(QgsTask):
                 f"CostNetwork: 긴 작업 - 방향 경로 {total_dir}개, 가장 큰 창 {largest:,} cells, "
                 f"전체 상한 약 {budget.minutes:.0f}분 (A*는 회랑만 방문하므로 실제는 이보다 짧음). "
                 "오래 걸리면 작업 관리자에서 취소하고 버퍼(m)나 후보 간선(k)을 줄이세요.",
-                level=Qgis.Warning,
+                level=Qgis.MessageLevel.Warning,
             )
         else:
             log_message(
                 f"CostNetwork: budget ok - {total_dir} directed paths, largest window "
                 f"{largest:,} cells, est. <= {budget.minutes:.1f} min",
-                level=Qgis.Info,
+                level=Qgis.MessageLevel.Info,
             )
 
         for (a, b), (xoff, yoff, win_xsize, win_ysize) in zip(candidate_pairs, windows):
@@ -681,7 +680,7 @@ class CostNetworkWorker(QgsTask):
 
             log_message(
                 f"CostNetwork: MST selected {len(chosen)} edge(s); computing detailed paths…",
-                level=Qgis.Info,
+                level=Qgis.MessageLevel.Info,
             )
             mst_done = 0
             mst_total = max(1, len(chosen))
@@ -701,7 +700,7 @@ class CostNetworkWorker(QgsTask):
                         mst_last_bucket = bucket
                         log_message(
                             f"CostNetwork: MST paths… {int(100.0 * mst_done / mst_total)}% ({mst_done}/{mst_total})",
-                            level=Qgis.Info,
+                            level=Qgis.MessageLevel.Info,
                         )
                 except Exception as _exc:
                     log_swallowed("cost_network_dialog._run_impl", _exc)
@@ -1086,7 +1085,7 @@ class CostNetworkWorker(QgsTask):
             self.setProgress(100.0)
         except Exception as _exc:
             log_swallowed("tools/cost_network_dialog.py:1065 (_run_impl)", _exc)
-        log_message(f"CostNetwork: done ({msg})", level=Qgis.Info)
+        log_message(f"CostNetwork: done ({msg})", level=Qgis.MessageLevel.Info)
 
         return NetworkTaskResult(
             ok=True,
@@ -1140,8 +1139,8 @@ class CostNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
         self._task = None
         self._task_running = False
 
-        self.cmbDemLayer.setFilters(QgsMapLayerProxyModel.RasterLayer)
-        self.cmbSiteLayer.setFilters(QgsMapLayerProxyModel.VectorLayer)
+        self.cmbDemLayer.setFilters(Qgis.LayerFilter.RasterLayer)
+        self.cmbSiteLayer.setFilters(Qgis.LayerFilter.VectorLayer)
 
         # Populate combos
         self.cmbPolyPointMode.clear()
@@ -1198,9 +1197,9 @@ class CostNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
         for label, key, tip in mode_items:
             self.cmbNetworkMode.addItem(label, key)
             idx = self.cmbNetworkMode.count() - 1
-            self.cmbNetworkMode.setItemData(idx, tip, Qt.ToolTipRole)
+            self.cmbNetworkMode.setItemData(idx, tip, Qt.ItemDataRole.ToolTipRole)
 
-        # Item tooltips are stored in Qt.ToolTipRole; let Qt handle showing them.
+        # Item tooltips are stored in Qt.ItemDataRole.ToolTipRole; let Qt handle showing them.
 
         self.cmbCostMode.clear()
         self.cmbCostMode.addItem("시간(분) (Time, min)", COST_TIME)
@@ -1374,8 +1373,8 @@ MST/k-NN/Hub 네트워크를 생성합니다.
         scroll = QtWidgets.QScrollArea(self)
         scroll.setObjectName("scrollArea_Main")
         scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
         container = QtWidgets.QWidget(scroll)
         container_layout = QtWidgets.QVBoxLayout(container)
@@ -1783,7 +1782,7 @@ MST/k-NN/Hub 네트워크를 생성합니다.
             values=values,
             selected=selected,
         )
-        if dlg.exec_() != QtWidgets.QDialog.Accepted:
+        if dlg.exec() != QtWidgets.QDialog.DialogCode.Accepted:
             return
 
         picked = dlg.selected_values()
@@ -1807,9 +1806,9 @@ MST/k-NN/Hub 네트워크를 생성합니다.
         for label, key in items:
             self.cmbModel.addItem(label, key)
             idx = self.cmbModel.count() - 1
-            self.cmbModel.setItemData(idx, self._model_help_text(key), Qt.ToolTipRole)
+            self.cmbModel.setItemData(idx, self._model_help_text(key), Qt.ItemDataRole.ToolTipRole)
 
-        # Item tooltips are stored in Qt.ToolTipRole; let Qt handle showing them.
+        # Item tooltips are stored in Qt.ItemDataRole.ToolTipRole; let Qt handle showing them.
 
     def _on_model_changed(self):
         try:
@@ -2052,17 +2051,17 @@ MST/k-NN/Hub 네트워크를 생성합니다.
                     log_swallowed("tools/cost_network_dialog.py:1980 (_show_interpretation_guide)", _exc)
 
             dlg = QtWidgets.QDialog(self)
-            dlg.setAttribute(Qt.WA_DeleteOnClose, True)
+            dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
             dlg.setWindowTitle("해석 가이드 (Least-cost Network)")
             dlg.resize(560, 520)
 
             layout = QtWidgets.QVBoxLayout(dlg)
             browser = QtWidgets.QTextBrowser(dlg)
             browser.setOpenExternalLinks(True)
-            browser.setLineWrapMode(QtWidgets.QTextEdit.NoWrap)
-            browser.setWordWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
-            browser.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-            browser.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+            browser.setLineWrapMode(QtWidgets.QTextEdit.LineWrapMode.NoWrap)
+            browser.setWordWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+            browser.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+            browser.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
             browser.setHtml(self._interpretation_guide_html())
             layout.addWidget(browser)
 
@@ -2101,7 +2100,7 @@ MST/k-NN/Hub 네트워크를 생성합니다.
 
             dlg.show()
         except Exception as e:
-            log_message(f"CostNetwork InterpretGuide: failed to open: {e}", level=Qgis.Warning)
+            log_message(f"CostNetwork InterpretGuide: failed to open: {e}", level=Qgis.MessageLevel.Warning)
 
     def _on_mode_changed(self):
         mode = self.cmbNetworkMode.currentData()
@@ -2220,14 +2219,14 @@ MST/k-NN/Hub 네트워크를 생성합니다.
                     continue
 
                 pt = None
-                if geom.type() == QgsWkbTypes.PointGeometry:
+                if geom.type() == Qgis.GeometryType.Point:
                     if geom.isMultipart():
                         mp = geom.asMultiPoint()
                         if mp:
                             pt = QgsPointXY(mp[0])
                     else:
                         pt = QgsPointXY(geom.asPoint())
-                elif geom.type() == QgsWkbTypes.PolygonGeometry:
+                elif geom.type() == Qgis.GeometryType.Polygon:
                     gpt = geom.pointOnSurface() if poly_mode == "surface" else geom.centroid()
                     if gpt is not None and (not gpt.isEmpty()):
                         pt = QgsPointXY(gpt.asPoint())
@@ -2379,7 +2378,7 @@ MST/k-NN/Hub 네트워크를 생성합니다.
         try:
             self._add_result_layers(res)
         except Exception as e:
-            log_message(f"Add network result layers error: {e}", level=Qgis.Critical)
+            log_message(f"Add network result layers error: {e}", level=Qgis.MessageLevel.Critical)
             push_message(self.iface, "오류", f"결과 레이어 추가 실패: {e}", level=2, duration=9)
             return
 
@@ -2489,7 +2488,7 @@ MST/k-NN/Hub 네트워크를 생성합니다.
                 if int(n_nodes) > 500 and (do_close or do_betw):
                     log_message(
                         f"CostNetwork: SNA closeness/betweenness skipped (n={int(n_nodes)} > 500)",
-                        level=Qgis.Warning,
+                        level=Qgis.MessageLevel.Warning,
                     )
                     do_close = False
                     do_betw = False
@@ -2508,7 +2507,7 @@ MST/k-NN/Hub 네트워크를 생성합니다.
                     if do_betw:
                         betweenness = _sna_betweenness_centrality_weighted(n=int(n_nodes), adj=adj)
             except Exception as e:
-                log_message(f"CostNetwork: SNA compute error: {e}", level=Qgis.Warning)
+                log_message(f"CostNetwork: SNA compute error: {e}", level=Qgis.MessageLevel.Warning)
                 do_sna = False
                 do_close = False
                 do_betw = False
@@ -2516,19 +2515,19 @@ MST/k-NN/Hub 네트워크를 생성합니다.
         # Nodes
         pt_layer = QgsVectorLayer(f"Point?crs={res.dem_authid}", "유적 노드 (Sites)", "memory")
         pr = pt_layer.dataProvider()
-        fields = [QgsField("fid", QVariant.String), QgsField("name", QVariant.String), QgsField("is_hub", QVariant.Int)]
+        fields = [QgsField("fid", FT_STRING), QgsField("name", FT_STRING), QgsField("is_hub", FT_INT)]
         if do_sna:
             fields.extend(
                 [
-                    QgsField("degree", QVariant.Int),
-                    QgsField("component", QVariant.Int),
-                    QgsField("comp_size", QVariant.Int),
+                    QgsField("degree", FT_INT),
+                    QgsField("component", FT_INT),
+                    QgsField("comp_size", FT_INT),
                 ]
             )
             if do_close:
-                fields.append(QgsField("closeness", QVariant.Double))
+                fields.append(QgsField("closeness", FT_DOUBLE))
             if do_betw:
-                fields.append(QgsField("betweenness", QVariant.Double))
+                fields.append(QgsField("betweenness", FT_DOUBLE))
         pr.addAttributes(fields)
         pt_layer.updateFields()
 
@@ -2591,19 +2590,19 @@ MST/k-NN/Hub 네트워크를 생성합니다.
         pr = line_layer.dataProvider()
         pr.addAttributes(
             [
-                QgsField("kind", QVariant.String),
-                QgsField("from_id", QVariant.String),
-                QgsField("to_id", QVariant.String),
-                QgsField("from_nm", QVariant.String),
-                QgsField("to_nm", QVariant.String),
-                QgsField("dist_m", QVariant.Double),
-                QgsField("time_ab", QVariant.Double),
-                QgsField("time_ba", QVariant.Double),
-                QgsField("time_sym", QVariant.Double),
-                QgsField("kcal_ab", QVariant.Double),
-                QgsField("kcal_ba", QVariant.Double),
-                QgsField("kcal_sym", QVariant.Double),
-                QgsField("model", QVariant.String),
+                QgsField("kind", FT_STRING),
+                QgsField("from_id", FT_STRING),
+                QgsField("to_id", FT_STRING),
+                QgsField("from_nm", FT_STRING),
+                QgsField("to_nm", FT_STRING),
+                QgsField("dist_m", FT_DOUBLE),
+                QgsField("time_ab", FT_DOUBLE),
+                QgsField("time_ba", FT_DOUBLE),
+                QgsField("time_sym", FT_DOUBLE),
+                QgsField("kcal_ab", FT_DOUBLE),
+                QgsField("kcal_ba", FT_DOUBLE),
+                QgsField("kcal_sym", FT_DOUBLE),
+                QgsField("model", FT_STRING),
             ]
         )
         line_layer.updateFields()
@@ -2686,7 +2685,7 @@ MST/k-NN/Hub 네트워크를 생성합니다.
                 "else round(\"time_sym\", 0) || '분' "
                 "end"
             )
-        pal.placement = QgsPalLayerSettings.Curved
+        pal.placement = Qgis.LabelPlacement.Curved
 
         fmt = QgsTextFormat()
         fmt.setSize(10.0)
@@ -2771,13 +2770,13 @@ class _ValuePickerDialog(QtWidgets.QDialog):
         layout.addWidget(self.txtFilter)
 
         self.listWidget = QtWidgets.QListWidget()
-        self.listWidget.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
+        self.listWidget.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.NoSelection)
         layout.addWidget(self.listWidget, 1)
 
         for v in values:
             item = QtWidgets.QListWidgetItem(str(v))
-            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-            item.setCheckState(Qt.Checked if str(v) in selected else Qt.Unchecked)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Checked if str(v) in selected else Qt.CheckState.Unchecked)
             self.listWidget.addItem(item)
 
         btn_row = QtWidgets.QHBoxLayout()
@@ -2788,7 +2787,7 @@ class _ValuePickerDialog(QtWidgets.QDialog):
         btn_row.addStretch(1)
         layout.addLayout(btn_row)
 
-        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.StandardButton.Ok | QtWidgets.QDialogButtonBox.StandardButton.Cancel)
         layout.addWidget(buttons)
 
         def apply_filter(text: str):
@@ -2804,7 +2803,7 @@ class _ValuePickerDialog(QtWidgets.QDialog):
         buttons.rejected.connect(self.reject)
 
     def _set_all(self, checked: bool):
-        state = Qt.Checked if checked else Qt.Unchecked
+        state = Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
         for i in range(self.listWidget.count()):
             it = self.listWidget.item(i)
             if not it.isHidden():
@@ -2814,6 +2813,6 @@ class _ValuePickerDialog(QtWidgets.QDialog):
         out: List[str] = []
         for i in range(self.listWidget.count()):
             it = self.listWidget.item(i)
-            if it.checkState() == Qt.Checked:
+            if it.checkState() == Qt.CheckState.Checked:
                 out.append(it.text())
         return out

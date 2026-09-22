@@ -63,12 +63,12 @@ from qgis.core import (
     QgsProcessingFeedback,
     QgsProject,
     QgsPoint,
-    QgsRasterBandStats,
     QgsRasterDataProvider,
     QgsRasterLayer,
     QgsRectangle,
     QgsVectorLayer,
 )
+from .qtcompat import RBS_ALL, RBS_MIN, RBS_MAX
 from qgis.gui import QgsMapLayerComboBox
 
 from .aoi_extent import resolve_aoi_extent
@@ -247,9 +247,9 @@ def _categorical_output_nodata(layer: QgsRasterLayer):
         # nothing downstream can verify.
         log_message(
             f"범주형 NoData 결정을 위해 값 범위를 확인합니다: {layer.name()}",
-            level=Qgis.Info,
+            level=Qgis.MessageLevel.Info,
         )
-        stats = provider.bandStatistics(1, QgsRasterBandStats.Min | QgsRasterBandStats.Max)
+        stats = provider.bandStatistics(1, RBS_MIN | RBS_MAX)
         data_min, data_max = float(stats.minimumValue), float(stats.maximumValue)
     except Exception:
         return None, "no_statistics"
@@ -292,7 +292,7 @@ def _expected_nodata_values(layer: QgsRasterLayer, nodata):
 def _band_valid_count(provider, band: int) -> Optional[int]:
     """Number of non-NoData cells in a band from full-resolution statistics, or None."""
     try:
-        stats = provider.bandStatistics(int(band), QgsRasterBandStats.All, QgsRectangle(), 0)
+        stats = provider.bandStatistics(int(band), RBS_ALL, QgsRectangle(), 0)
         return int(stats.elementCount)
     except Exception as exc:
         log_swallowed("align_export_dialog._band_valid_count", exc)
@@ -371,15 +371,15 @@ def _ensure_supported_reference_grid(layer: QgsRasterLayer, px: float, *, pixel_
     try:
         origin = provider.transformCoordinates(
             QgsPoint(0, 0),
-            QgsRasterDataProvider.TransformImageToLayer,
+            QgsRasterDataProvider.TransformType.TransformImageToLayer,
         )
         x_step = provider.transformCoordinates(
             QgsPoint(1, 0),
-            QgsRasterDataProvider.TransformImageToLayer,
+            QgsRasterDataProvider.TransformType.TransformImageToLayer,
         )
         y_step = provider.transformCoordinates(
             QgsPoint(0, 1),
-            QgsRasterDataProvider.TransformImageToLayer,
+            QgsRasterDataProvider.TransformType.TransformImageToLayer,
         )
     except Exception as exc:
         raise RuntimeError("기준 래스터의 격자 변환을 확인할 수 없습니다.") from exc
@@ -537,7 +537,7 @@ class AlignExportDialog(QtWidgets.QDialog):
         hint.setStyleSheet("color:#455a64;")
         vl.addWidget(hint)
         self.listLayers = QtWidgets.QListWidget()
-        self.listLayers.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
+        self.listLayers.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.NoSelection)
         vl.addWidget(self.listLayers, 1)
         row = QtWidgets.QHBoxLayout()
         self.btnAll = QtWidgets.QPushButton("모두 선택")
@@ -586,17 +586,10 @@ class AlignExportDialog(QtWidgets.QDialog):
 
     def _set_filter(self, combo, *, raster: bool):
         try:
-            from qgis.core import QgsMapLayerProxyModel
             if raster:
-                try:
-                    combo.setFilters(QgsMapLayerProxyModel.Filter.RasterLayer)
-                except Exception:
-                    combo.setFilters(QgsMapLayerProxyModel.RasterLayer)
+                combo.setFilters(Qgis.LayerFilter.RasterLayer)
             else:
-                try:
-                    combo.setFilters(QgsMapLayerProxyModel.Filter.PolygonLayer)
-                except Exception:
-                    combo.setFilters(QgsMapLayerProxyModel.PolygonLayer)
+                combo.setFilters(Qgis.LayerFilter.PolygonLayer)
         except Exception as _exc:
             log_swallowed("align_export_dialog._set_filter", _exc)
 
@@ -631,28 +624,28 @@ class AlignExportDialog(QtWidgets.QDialog):
                 # measurement or class codes. Say so where the user checks it.
                 label += "  (메타데이터 없음: 연속형으로 처리)"
             item = QtWidgets.QListWidgetItem(label)
-            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-            item.setCheckState(Qt.Checked if auto_check else Qt.Unchecked)
-            item.setData(Qt.UserRole, lyr.id())
-            item.setData(Qt.UserRole + 1, bool(auto_check))
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Checked if auto_check else Qt.CheckState.Unchecked)
+            item.setData(Qt.ItemDataRole.UserRole, lyr.id())
+            item.setData(Qt.ItemDataRole.UserRole + 1, bool(auto_check))
             self.listLayers.addItem(item)
         if self.listLayers.count() == 0:
             item = QtWidgets.QListWidgetItem("(프로젝트에 래스터 레이어가 없습니다)")
-            item.setFlags(Qt.NoItemFlags)
+            item.setFlags(Qt.ItemFlag.NoItemFlags)
             self.listLayers.addItem(item)
 
     def _check_all(self, state: bool):
         for i in range(self.listLayers.count()):
             it = self.listLayers.item(i)
-            if it.flags() & Qt.ItemIsUserCheckable:
-                it.setCheckState(Qt.Checked if state else Qt.Unchecked)
+            if it.flags() & Qt.ItemFlag.ItemIsUserCheckable:
+                it.setCheckState(Qt.CheckState.Checked if state else Qt.CheckState.Unchecked)
 
     def _check_arch_only(self):
         for i in range(self.listLayers.count()):
             it = self.listLayers.item(i)
-            if it.flags() & Qt.ItemIsUserCheckable:
-                is_arch = bool(it.data(Qt.UserRole + 1))
-                it.setCheckState(Qt.Checked if is_arch else Qt.Unchecked)
+            if it.flags() & Qt.ItemFlag.ItemIsUserCheckable:
+                is_arch = bool(it.data(Qt.ItemDataRole.UserRole + 1))
+                it.setCheckState(Qt.CheckState.Checked if is_arch else Qt.CheckState.Unchecked)
 
     def _on_browse(self):
         d = QtWidgets.QFileDialog.getExistingDirectory(self, "내보내기 폴더 선택")
@@ -665,9 +658,9 @@ class AlignExportDialog(QtWidgets.QDialog):
         project = QgsProject.instance()
         for i in range(self.listLayers.count()):
             it = self.listLayers.item(i)
-            if not (it.flags() & Qt.ItemIsUserCheckable) or it.checkState() != Qt.Checked:
+            if not (it.flags() & Qt.ItemFlag.ItemIsUserCheckable) or it.checkState() != Qt.CheckState.Checked:
                 continue
-            lid = str(it.data(Qt.UserRole) or "")
+            lid = str(it.data(Qt.ItemDataRole.UserRole) or "")
             lyr = project.mapLayer(lid)
             if not isinstance(lyr, QgsRasterLayer) or not lyr.isValid():
                 continue
@@ -797,7 +790,7 @@ class AlignExportDialog(QtWidgets.QDialog):
         for item in items:
             log_message(
                 f"변수명 '{item.key}' ← {item.name}" + item.semantics_note,
-                level=Qgis.Info,
+                level=Qgis.MessageLevel.Info,
             )
 
         # A source that does not overlap the target grid still warps "successfully"
@@ -808,7 +801,7 @@ class AlignExportDialog(QtWidgets.QDialog):
             names = ", ".join(outside)
             log_message(
                 f"기준 격자와 겹치지 않는 입력 래스터: {names} (정렬 결과가 전부 NoData가 됩니다)",
-                level=Qgis.Warning,
+                level=Qgis.MessageLevel.Warning,
             )
             push_message(
                 self.iface, "주의",
@@ -825,7 +818,7 @@ class AlignExportDialog(QtWidgets.QDialog):
             return
 
         progress = QtWidgets.QProgressDialog("래스터 정렬 중…", "취소", 0, len(items), self)
-        progress.setWindowModality(Qt.WindowModal)
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
         progress.setMinimumDuration(0)
         progress.setValue(0)
         progress.show()
@@ -859,13 +852,13 @@ class AlignExportDialog(QtWidgets.QDialog):
                             f"메타데이터 없는 래스터가 정수형이고 표본의 서로 다른 값이 "
                             f"{CLASS_CODE_MAX_DISTINCT}개 이하라 클래스 코드로 보고 최근접으로 "
                             f"재배열합니다 (manifest categorical=unknown(nearest)): {item.name}",
-                            level=Qgis.Warning,
+                            level=Qgis.MessageLevel.Warning,
                         )
                     else:
                         log_message(
                             f"메타데이터 없는 래스터를 연속형으로 처리합니다 (이중선형, manifest "
                             f"categorical=unknown). 실제로 범주형이면 결과가 잘못됩니다: {item.name}",
-                            level=Qgis.Warning,
+                            level=Qgis.MessageLevel.Warning,
                         )
                 src_crs = src_layer.crs()
                 item.source_crs = _crs_label(src_crs)
@@ -880,7 +873,7 @@ class AlignExportDialog(QtWidgets.QDialog):
                             f"레이어 CRS가 파일 CRS와 다릅니다 ({item.name}): 레이어 "
                             f"{_crs_label(src_crs)} / 파일 {_crs_label(file_crs)}. "
                             "레이어에 지정된 CRS를 원본 CRS로 사용합니다.",
-                            level=Qgis.Warning,
+                            level=Qgis.MessageLevel.Warning,
                         )
                 except Exception as exc:
                     log_swallowed("align_export_dialog._on_run", exc)
@@ -892,7 +885,7 @@ class AlignExportDialog(QtWidgets.QDialog):
                         log_message(
                             f"범주형 래스터 NoData를 정할 수 없습니다 ({item.name}, "
                             f"사유: {item.nodata_reason}). NoData 없이 내보냅니다.",
-                            level=Qgis.Warning,
+                            level=Qgis.MessageLevel.Warning,
                         )
                 else:
                     item.nodata, item.nodata_reason = CONTINUOUS_NODATA, "continuous"
@@ -950,7 +943,7 @@ class AlignExportDialog(QtWidgets.QDialog):
                 level=1,
                 duration=8,
             )
-            log_message(f"Align & export cancelled (run {run_id})", level=Qgis.Warning)
+            log_message(f"Align & export cancelled (run {run_id})", level=Qgis.MessageLevel.Warning)
             restore_ui_focus(self)
             return
         except Exception as e:
@@ -1039,7 +1032,7 @@ class AlignExportDialog(QtWidgets.QDialog):
             msg += " (파일은 완성됐지만 프로젝트 추가에 실패했습니다)"
         level = 1 if layer_add_error is not None else 0
         push_message(self.iface, "정렬/내보내기", msg, level=level, duration=10)
-        log_level = Qgis.Warning if layer_add_error is not None else Qgis.Info
+        log_level = Qgis.MessageLevel.Warning if layer_add_error is not None else Qgis.MessageLevel.Info
         log_message(f"Align & export done: {len(outputs)} rasters (run {run_id})", level=log_level)
         restore_ui_focus(self)
 
@@ -1103,7 +1096,7 @@ class AlignExportDialog(QtWidgets.QDialog):
             task_id = QgsApplication.taskManager().addTask(task)
             if not task_id:
                 raise RuntimeError("GDAL 정렬 작업을 QGIS 작업 관리자에 등록하지 못했습니다.")
-            loop.exec_()
+            loop.exec()
         finally:
             try:
                 progress.canceled.disconnect(_cancel_active_warp)
@@ -1126,7 +1119,7 @@ class AlignExportDialog(QtWidgets.QDialog):
             details = " | ".join(item.message for item in outcome.diagnostics[-3:])
             log_message(
                 f"GDAL alignment completed with non-fatal diagnostics: {details[:1200]}",
-                level=Qgis.Warning,
+                level=Qgis.MessageLevel.Warning,
             )
         result_path = str(state["results"].get("OUTPUT") or "")
         if result_path and os.path.realpath(result_path) != os.path.realpath(out):
@@ -1205,7 +1198,7 @@ class AlignExportDialog(QtWidgets.QDialog):
             if fraction is None:
                 log_message(
                     f"정렬 결과의 유효 픽셀 비율을 읽지 못했습니다: {source_name} band {band}",
-                    level=Qgis.Warning,
+                    level=Qgis.MessageLevel.Warning,
                 )
                 continue
             if fraction <= 0.0:
@@ -1223,14 +1216,14 @@ class AlignExportDialog(QtWidgets.QDialog):
                 log_message(
                     f"정렬 결과 표본에는 유효 픽셀이 없었지만 전체 통계로 {full_valid:,}개를 확인했습니다: "
                     f"{source_name} band {band}",
-                    level=Qgis.Warning,
+                    level=Qgis.MessageLevel.Warning,
                 )
             band_pct = 100.0 * fraction
             valid_pct = band_pct if valid_pct is None else min(valid_pct, band_pct)
         if valid_pct is not None and valid_pct < 100.0:
             log_message(
                 f"정렬 결과 유효 픽셀(표본) {valid_pct:.1f}%: {source_name}",
-                level=Qgis.Warning if valid_pct < 50.0 else Qgis.Info,
+                level=Qgis.MessageLevel.Warning if valid_pct < 50.0 else Qgis.MessageLevel.Info,
             )
         return valid_pct
 

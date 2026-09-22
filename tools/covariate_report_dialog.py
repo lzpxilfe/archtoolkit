@@ -45,6 +45,7 @@ except Exception:  # pragma: no cover
 from qgis.PyQt import QtWidgets
 from qgis.PyQt.QtCore import Qt
 from qgis.core import (
+    Qgis,
     QgsCoordinateTransform,
     QgsPointXY,
     QgsProject,
@@ -156,7 +157,7 @@ class CovariateReportDialog(QtWidgets.QDialog):
         grp = QtWidgets.QGroupBox("1. 변수(래스터) 선택")
         vl = QtWidgets.QVBoxLayout(grp)
         self.listLayers = QtWidgets.QListWidget()
-        self.listLayers.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
+        self.listLayers.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.NoSelection)
         vl.addWidget(self.listLayers, 1)
         row = QtWidgets.QHBoxLayout()
         b1 = QtWidgets.QPushButton("모두 선택")
@@ -181,11 +182,7 @@ class CovariateReportDialog(QtWidgets.QDialog):
         from qgis.gui import QgsMapLayerComboBox
         self.cmbAoi = QgsMapLayerComboBox(grp2)
         try:
-            from qgis.core import QgsMapLayerProxyModel
-            try:
-                self.cmbAoi.setFilters(QgsMapLayerProxyModel.Filter.PolygonLayer)
-            except Exception:
-                self.cmbAoi.setFilters(QgsMapLayerProxyModel.PolygonLayer)
+            self.cmbAoi.setFilters(Qgis.LayerFilter.PolygonLayer)
             self.cmbAoi.setAllowEmptyLayer(True)
         except Exception as _exc:
             log_swallowed("covariate_report_dialog._setup_ui", _exc)
@@ -227,36 +224,36 @@ class CovariateReportDialog(QtWidgets.QDialog):
             if is_categorical:
                 label += "  (범주형 — 상관/VIF 부적합)"
             item = QtWidgets.QListWidgetItem(label)
-            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-            item.setCheckState(Qt.Checked if (is_arch and not is_categorical) else Qt.Unchecked)
-            item.setData(Qt.UserRole, lyr.id())
-            item.setData(Qt.UserRole + 1, bool(is_arch and not is_categorical))
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Checked if (is_arch and not is_categorical) else Qt.CheckState.Unchecked)
+            item.setData(Qt.ItemDataRole.UserRole, lyr.id())
+            item.setData(Qt.ItemDataRole.UserRole + 1, bool(is_arch and not is_categorical))
             self.listLayers.addItem(item)
         if self.listLayers.count() == 0:
             item = QtWidgets.QListWidgetItem("(프로젝트에 래스터 레이어가 없습니다)")
-            item.setFlags(Qt.NoItemFlags)
+            item.setFlags(Qt.ItemFlag.NoItemFlags)
             self.listLayers.addItem(item)
 
     def _check_all(self, state):
         for i in range(self.listLayers.count()):
             it = self.listLayers.item(i)
-            if it.flags() & Qt.ItemIsUserCheckable:
-                it.setCheckState(Qt.Checked if state else Qt.Unchecked)
+            if it.flags() & Qt.ItemFlag.ItemIsUserCheckable:
+                it.setCheckState(Qt.CheckState.Checked if state else Qt.CheckState.Unchecked)
 
     def _check_arch_only(self):
         for i in range(self.listLayers.count()):
             it = self.listLayers.item(i)
-            if it.flags() & Qt.ItemIsUserCheckable:
-                it.setCheckState(Qt.Checked if bool(it.data(Qt.UserRole + 1)) else Qt.Unchecked)
+            if it.flags() & Qt.ItemFlag.ItemIsUserCheckable:
+                it.setCheckState(Qt.CheckState.Checked if bool(it.data(Qt.ItemDataRole.UserRole + 1)) else Qt.CheckState.Unchecked)
 
     def _selected_layers(self):
         out = []
         project = QgsProject.instance()
         for i in range(self.listLayers.count()):
             it = self.listLayers.item(i)
-            if not (it.flags() & Qt.ItemIsUserCheckable) or it.checkState() != Qt.Checked:
+            if not (it.flags() & Qt.ItemFlag.ItemIsUserCheckable) or it.checkState() != Qt.CheckState.Checked:
                 continue
-            lyr = project.mapLayer(str(it.data(Qt.UserRole) or ""))
+            lyr = project.mapLayer(str(it.data(Qt.ItemDataRole.UserRole) or ""))
             if isinstance(lyr, QgsRasterLayer) and lyr.isValid():
                 out.append(lyr)
         return out
@@ -330,7 +327,7 @@ class CovariateReportDialog(QtWidgets.QDialog):
 
             rows = []
             progress = QtWidgets.QProgressDialog("표본 추출 중…", "취소", 0, len(ys), self)
-            progress.setWindowModality(Qt.WindowModal)
+            progress.setWindowModality(Qt.WindowModality.WindowModal)
             progress.setMinimumDuration(0)
             for jy, y in enumerate(ys):
                 if progress.wasCanceled():
@@ -434,7 +431,7 @@ class CovariateReportDialog(QtWidgets.QDialog):
         v.addLayout(rr)
         btn_close.clicked.connect(dlg.accept)
         btn_csv.clicked.connect(lambda: self._save_csv(names, corr, vifs))
-        dlg.exec_()
+        dlg.exec()
 
     def _save_csv(self, names, corr, vifs):
         path, _flt = QtWidgets.QFileDialog.getSaveFileName(

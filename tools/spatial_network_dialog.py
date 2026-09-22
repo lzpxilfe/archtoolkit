@@ -24,7 +24,7 @@ import numpy as np
 import processing
 
 from qgis.PyQt import QtWidgets, uic
-from qgis.PyQt.QtCore import Qt, QVariant
+from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtGui import QColor, QTextOption
 from qgis.core import (
     Qgis,
@@ -35,7 +35,6 @@ from qgis.core import (
     QgsGeometry,
     QgsLineSymbol,
     QgsMarkerSymbol,
-    QgsMapLayerProxyModel,
     QgsPalLayerSettings,
     QgsPointXY,
     QgsProject,
@@ -47,8 +46,8 @@ from qgis.core import (
     QgsGraduatedSymbolRenderer,
     QgsVectorLayer,
     QgsVectorLayerSimpleLabeling,
-    QgsWkbTypes,
 )
+from .qtcompat import FT_INT, FT_LONGLONG, FT_DOUBLE, FT_STRING
 from qgis.gui import QgsMapLayerComboBox  # noqa: F401 (needed for .ui custom widget loading)
 
 from .utils import (
@@ -122,8 +121,8 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
             log_swallowed("spatial_network_dialog.__init__", _exc)
 
         # Layer filters
-        self.cmbSiteLayer.setFilters(QgsMapLayerProxyModel.VectorLayer)
-        self.cmbDemLayer.setFilters(QgsMapLayerProxyModel.RasterLayer)
+        self.cmbSiteLayer.setFilters(Qgis.LayerFilter.VectorLayer)
+        self.cmbDemLayer.setFilters(Qgis.LayerFilter.RasterLayer)
 
         # Polygon representative point mode
         self.cmbPolyPointMode.clear()
@@ -271,15 +270,15 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
 
         # Per-item tooltips (combobox dropdown)
         try:
-            self.cmbNetworkType.setItemData(0, tooltip_ppa, Qt.ToolTipRole)
-            self.cmbNetworkType.setItemData(1, tooltip_vis, Qt.ToolTipRole)
+            self.cmbNetworkType.setItemData(0, tooltip_ppa, Qt.ItemDataRole.ToolTipRole)
+            self.cmbNetworkType.setItemData(1, tooltip_vis, Qt.ItemDataRole.ToolTipRole)
         except Exception as _exc:
             log_swallowed("tools/spatial_network_dialog.py:271 (_setup_tooltips)", _exc)
 
         # Show the currently selected item's tooltip even when the dropdown is closed.
         def _sync_network_type_tooltip():
             try:
-                tip = self.cmbNetworkType.itemData(self.cmbNetworkType.currentIndex(), Qt.ToolTipRole) or ""
+                tip = self.cmbNetworkType.itemData(self.cmbNetworkType.currentIndex(), Qt.ItemDataRole.ToolTipRole) or ""
                 self.cmbNetworkType.setToolTip(str(tip))
             except Exception as _exc:
                 log_swallowed("tools/spatial_network_dialog.py:279 (_sync_network_type_tooltip)", _exc)
@@ -358,11 +357,11 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                 key = str(self.cmbPpaGraph.itemData(idx) or "")
                 tip = ppa_tips.get(key, "")
                 if tip:
-                    self.cmbPpaGraph.setItemData(idx, tip, Qt.ToolTipRole)
+                    self.cmbPpaGraph.setItemData(idx, tip, Qt.ItemDataRole.ToolTipRole)
 
             def _sync_ppa_graph_tooltip():
                 try:
-                    tip = self.cmbPpaGraph.itemData(self.cmbPpaGraph.currentIndex(), Qt.ToolTipRole) or ""
+                    tip = self.cmbPpaGraph.itemData(self.cmbPpaGraph.currentIndex(), Qt.ItemDataRole.ToolTipRole) or ""
                     self.cmbPpaGraph.setToolTip(str(tip))
                 except Exception as _exc:
                     log_swallowed("tools/spatial_network_dialog.py:362 (_sync_ppa_graph_tooltip)", _exc)
@@ -392,11 +391,11 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                 key = str(self.cmbVisEdgeRule.itemData(idx) or "")
                 tip = vis_rule_tips.get(key, "")
                 if tip:
-                    self.cmbVisEdgeRule.setItemData(idx, tip, Qt.ToolTipRole)
+                    self.cmbVisEdgeRule.setItemData(idx, tip, Qt.ItemDataRole.ToolTipRole)
 
             def _sync_vis_rule_tooltip():
                 try:
-                    tip = self.cmbVisEdgeRule.itemData(self.cmbVisEdgeRule.currentIndex(), Qt.ToolTipRole) or ""
+                    tip = self.cmbVisEdgeRule.itemData(self.cmbVisEdgeRule.currentIndex(), Qt.ItemDataRole.ToolTipRole) or ""
                     self.cmbVisEdgeRule.setToolTip(str(tip))
                 except Exception as _exc:
                     log_swallowed("tools/spatial_network_dialog.py:396 (_sync_vis_rule_tooltip)", _exc)
@@ -861,17 +860,17 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                     log_swallowed("tools/spatial_network_dialog.py:785 (_show_interpretation_guide)", _exc)
 
             dlg = QtWidgets.QDialog(self)
-            dlg.setAttribute(Qt.WA_DeleteOnClose, True)
+            dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
             dlg.setWindowTitle("해석 가이드 (Network Interpretation)")
             dlg.resize(560, 520)
 
             layout = QtWidgets.QVBoxLayout(dlg)
             browser = QtWidgets.QTextBrowser(dlg)
             browser.setOpenExternalLinks(True)
-            browser.setLineWrapMode(QtWidgets.QTextEdit.NoWrap)
-            browser.setWordWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
-            browser.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-            browser.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+            browser.setLineWrapMode(QtWidgets.QTextEdit.LineWrapMode.NoWrap)
+            browser.setWordWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+            browser.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+            browser.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
             browser.setHtml(self._interpretation_guide_html())
             layout.addWidget(browser)
 
@@ -910,7 +909,7 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
 
             dlg.show()
         except Exception as e:
-            log_message(f"InterpretGuide: failed to open guide dialog: {e}", level=Qgis.Warning)
+            log_message(f"InterpretGuide: failed to open guide dialog: {e}", level=Qgis.MessageLevel.Warning)
 
     def _on_mode_changed(self):
         mode = self.cmbNetworkType.currentData()
@@ -956,7 +955,7 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
         is_polygon_layer = False
         try:
             if site_layer and site_layer.isValid():
-                is_polygon_layer = site_layer.geometryType() == QgsWkbTypes.PolygonGeometry
+                is_polygon_layer = site_layer.geometryType() == Qgis.GeometryType.Polygon
         except Exception:
             is_polygon_layer = False
 
@@ -1011,7 +1010,7 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                 for f in layer.fields():
                     _skip_929 = False
                     try:
-                        if f.type() in (QVariant.String, QVariant.Int, QVariant.LongLong):
+                        if f.type() in (FT_STRING, FT_INT, FT_LONGLONG):
                             self.cmbNameField.addItem(f.name(), f.name())
                     except Exception as _exc:
                         log_swallowed("tools/spatial_network_dialog.py:932 (_on_site_layer_changed)", _exc)
@@ -1064,7 +1063,7 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                     skipped += 1
                     continue
 
-                is_polygon = geom.type() == QgsWkbTypes.PolygonGeometry
+                is_polygon = geom.type() == Qgis.GeometryType.Polygon
 
                 # Work in target CRS (meters expected for distance-based tools)
                 geom_t = geom
@@ -1076,14 +1075,14 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                         geom_t = geom
 
                 pt_t = None
-                if geom_t.type() == QgsWkbTypes.PointGeometry:
+                if geom_t.type() == Qgis.GeometryType.Point:
                     if geom_t.isMultipart():
                         mp = geom_t.asMultiPoint()
                         if mp:
                             pt_t = QgsPointXY(mp[0])
                     else:
                         pt_t = QgsPointXY(geom_t.asPoint())
-                elif geom_t.type() == QgsWkbTypes.PolygonGeometry:
+                elif geom_t.type() == Qgis.GeometryType.Polygon:
                     gpt = geom_t.pointOnSurface() if poly_mode == "surface" else geom_t.centroid()
                     if gpt is not None and (not gpt.isEmpty()):
                         pt_t = QgsPointXY(gpt.asPoint())
@@ -1134,7 +1133,7 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                 skipped += 1
 
         if skipped:
-            log_message(f"SpatialNetwork: skipped {skipped} feature(s) (empty/unsupported geometry)", level=Qgis.Warning)
+            log_message(f"SpatialNetwork: skipped {skipped} feature(s) (empty/unsupported geometry)", level=Qgis.MessageLevel.Warning)
         return nodes
 
     def _sample_polygon_boundary_points(
@@ -1229,7 +1228,7 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                         "거리·임계값이 중요하면 EPSG:5186 등 한국 투영좌표계로 재투영하세요.",
                         level=1, duration=10,
                     )
-                    log_message("CRS가 Web Mercator입니다: 거리와 임계값이 위도에 따라 과대(37.5N에서 약 1.26배).", level=Qgis.Warning)
+                    log_message("CRS가 Web Mercator입니다: 거리와 임계값이 위도에 따라 과대(37.5N에서 약 1.26배).", level=Qgis.MessageLevel.Warning)
             except Exception as _exc:
                 log_swallowed("spatial_network_dialog._ensure_metric", _exc)
             return True
@@ -1427,7 +1426,7 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
 
         if method == PPA_KNN:
             k_eff = max(1, min(int(k), max(1, n - 1)))
-            log_message(f"PPA: k-NN building (n={n}, k={k_eff}, mutual={bool(mutual_only)})", level=Qgis.Info)
+            log_message(f"PPA: k-NN building (n={n}, k={k_eff}, mutual={bool(mutual_only)})", level=Qgis.MessageLevel.Info)
 
             neigh: List[Set[int]] = [set() for _ in range(n)]
             for i in range(n):
@@ -1450,7 +1449,7 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
 
         elif method == PPA_THRESHOLD:
             r2 = float(max_dist_m) ** 2
-            log_message(f"PPA: threshold building (n={n}, max_dist_m={max_dist_m})", level=Qgis.Info)
+            log_message(f"PPA: threshold building (n={n}, max_dist_m={max_dist_m})", level=Qgis.MessageLevel.Info)
             for i in range(n - 1):
                 dx = coords[i + 1 :, 0] - coords[i, 0]
                 dy = coords[i + 1 :, 1] - coords[i, 1]
@@ -1536,7 +1535,7 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
         deg = self._degrees(n, edges)
         comps, comp_sizes = self._components(n, edges)
         msg = f"완료: 노드 {n} / 간선 {len(edges)}  " f"(평균 degree {float(sum(deg)) / max(1, n):.2f}, components {len(comp_sizes)})"
-        log_message(f"PPA: {msg}  [method={method}]", level=Qgis.Info)
+        log_message(f"PPA: {msg}  [method={method}]", level=Qgis.MessageLevel.Info)
         push_message(self.iface, "PPA", msg, level=0, duration=7)
         self.accept()
 
@@ -1636,7 +1635,7 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
         try:
             pt_layer = QgsVectorLayer(f"Point?crs={crs_authid}", "PPA_points_tmp", "memory")
             pr = pt_layer.dataProvider()
-            pr.addAttributes([QgsField("idx", QVariant.Int)])
+            pr.addAttributes([QgsField("idx", FT_INT)])
             pt_layer.updateFields()
 
             feats = []
@@ -1648,7 +1647,7 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
             pr.addFeatures(feats)
             pt_layer.updateExtents()
         except Exception as e:
-            log_message(f"PPA: failed to build temp point layer for Delaunay: {e}", level=Qgis.Warning)
+            log_message(f"PPA: failed to build temp point layer for Delaunay: {e}", level=Qgis.MessageLevel.Warning)
             return set()
 
         tri_layer = None
@@ -1668,7 +1667,7 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                 tri_layer = None
 
         if tri_layer is None or (not tri_layer.isValid()):
-            log_message(f"PPA: Delaunay algorithm not available/failed: {last_err}", level=Qgis.Warning)
+            log_message(f"PPA: Delaunay algorithm not available/failed: {last_err}", level=Qgis.MessageLevel.Warning)
             return set()
 
         # Map vertex coordinates back to node indices (rounded)
@@ -1686,7 +1685,7 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
             log_message(
                 f"PPA: {n_dup} node(s) share a coordinate (within 1 mm) at {len(dup_groups)} location(s); "
                 "co-located nodes share the same Delaunay/Gabriel/RNG edges.",
-                level=Qgis.Warning,
+                level=Qgis.MessageLevel.Warning,
             )
             try:
                 push_message(
@@ -1844,7 +1843,7 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
         if n > 500 and (compute_closeness or compute_betweenness):
             log_message(
                 f"SNA: advanced metrics skipped (n={n} too large). Use smaller selection or disable advanced metrics.",
-                level=Qgis.Warning,
+                level=Qgis.MessageLevel.Warning,
             )
             # The user explicitly checked these boxes — tell them visibly, not
             # just in the message log, that the fields will be missing.
@@ -1872,17 +1871,17 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
         layer = QgsVectorLayer(f"Point?crs={crs_authid}", title, "memory")
         pr = layer.dataProvider()
         fields = [
-            QgsField("fid", QVariant.String),
-            QgsField("name", QVariant.String),
-            QgsField("degree", QVariant.Int),
-            QgsField("component", QVariant.Int),
-            QgsField("comp_size", QVariant.Int),
+            QgsField("fid", FT_STRING),
+            QgsField("name", FT_STRING),
+            QgsField("degree", FT_INT),
+            QgsField("component", FT_INT),
+            QgsField("comp_size", FT_INT),
         ]
         if compute_closeness:
-            fields.append(QgsField("closeness", QVariant.Double))
+            fields.append(QgsField("closeness", FT_DOUBLE))
         if compute_betweenness:
-            fields.append(QgsField("betweenness", QVariant.Double))
-            fields.append(QgsField("betw_norm", QVariant.Double))
+            fields.append(QgsField("betweenness", FT_DOUBLE))
+            fields.append(QgsField("betw_norm", FT_DOUBLE))
         if extra_node_fields:
             fields.extend(extra_node_fields)
         pr.addAttributes(fields)
@@ -2067,7 +2066,7 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
             log_message(
                 f"가시선 샘플 간격: 요청 {step:.1f} m, 장거리 상한(5000점)으로 실제 {eff_step:.1f} m 적용 "
                 f"(총거리 {total_dist:.0f} m). 이보다 긴 쌍은 모두 이 상한의 영향을 받습니다.",
-                level=Qgis.Warning,
+                level=Qgis.MessageLevel.Warning,
             )
 
         if provider is None:
@@ -2212,10 +2211,10 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                         self,
                         "경고",
                         f"반경 내 검사 쌍이 많습니다: {total_pairs:,}쌍{extra}\n계속 진행할까요?",
-                        QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
-                        QtWidgets.QMessageBox.No,
+                        QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+                        QtWidgets.QMessageBox.StandardButton.No,
                     )
-                    if res != QtWidgets.QMessageBox.Yes:
+                    if res != QtWidgets.QMessageBox.StandardButton.Yes:
                         restore_ui_focus(self)
                         return
             except Exception as _exc:
@@ -2232,7 +2231,7 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
             progress = QtWidgets.QProgressDialog(
                 "가시성 네트워크(LOS) 계산 중...", "취소", 0, n, self
             )
-        progress.setWindowModality(Qt.WindowModal)
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
         progress.show()
         QtWidgets.QApplication.processEvents()
 
@@ -2443,13 +2442,13 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                 QtWidgets.QApplication.processEvents()
 
         extra_fields = [
-            QgsField("status_ab", QVariant.String),
-            QgsField("status_ba", QVariant.String),
-            QgsField("vis_ab", QVariant.Int),
-            QgsField("vis_ba", QVariant.Int),
-            QgsField("vis_ratio_ab", QVariant.Double),
-            QgsField("vis_ratio_ba", QVariant.Double),
-            QgsField("mutual", QVariant.Int),
+            QgsField("status_ab", FT_STRING),
+            QgsField("status_ba", FT_STRING),
+            QgsField("vis_ab", FT_INT),
+            QgsField("vis_ba", FT_INT),
+            QgsField("vis_ratio_ab", FT_DOUBLE),
+            QgsField("vis_ratio_ba", FT_DOUBLE),
+            QgsField("mutual", FT_INT),
         ]
 
         # Layer names carry the result-determining settings (as the PPA branch
@@ -2565,10 +2564,10 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                     continue
 
             extra_node_fields = [
-                QgsField("out_deg", QVariant.Int),
-                QgsField("in_deg", QVariant.Int),
-                QgsField("vis_total", QVariant.Int),
-                QgsField("fail_deg", QVariant.Int),
+                QgsField("out_deg", FT_INT),
+                QgsField("in_deg", FT_INT),
+                QgsField("vis_total", FT_INT),
+                QgsField("fail_deg", FT_INT),
             ]
             extra_values_by_node: Dict[int, Dict[str, Any]] = {}
             for i0 in range(int(n)):
@@ -2613,7 +2612,7 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
             f"VisibilityNetwork: {msg} (all_pairs={all_pairs}, max_dist={max_dist}, poly_ratio={use_poly_boundary_ratio}, "
             f"rule={vis_edge_rule}, obs={obs_height}, tgt={tgt_height}, curvature_cc={cc:.2f}, "
             f"step_eff_max={float(getattr(self, '_los_eff_step_max_m', 0.0) or 0.0):.1f}m)",
-            level=Qgis.Info,
+            level=Qgis.MessageLevel.Info,
         )
         push_message(self.iface, "가시성 네트워크", msg, level=(1 if fail_edges > 0 else 0), duration=(12 if fail_edges > 0 else 8))
         self.accept()
@@ -2653,18 +2652,18 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
         )
         pr = layer.dataProvider()
         fields = [
-            QgsField("from_id", QVariant.String),
-            QgsField("to_id", QVariant.String),
-            QgsField("from_nm", QVariant.String),
-            QgsField("to_nm", QVariant.String),
+            QgsField("from_id", FT_STRING),
+            QgsField("to_id", FT_STRING),
+            QgsField("from_nm", FT_STRING),
+            QgsField("to_nm", FT_STRING),
         ]
         if status_by_edge is not None:
-            fields.append(QgsField("status", QVariant.String))
+            fields.append(QgsField("status", FT_STRING))
         if ratio_by_edge is not None:
-            fields.append(QgsField("vis_ratio", QVariant.Double))
+            fields.append(QgsField("vis_ratio", FT_DOUBLE))
         if add_dist:
-            fields.append(QgsField("dist_m", QVariant.Double))
-            fields.append(QgsField("dist_km", QVariant.Double))
+            fields.append(QgsField("dist_m", FT_DOUBLE))
+            fields.append(QgsField("dist_km", FT_DOUBLE))
         if extra_fields:
             fields.extend(extra_fields)
         pr.addAttributes(fields)
@@ -2716,7 +2715,7 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                 if dashed or dotted:
                     try:
                         ls = "dash" if dashed else "dot"
-                        sym.symbolLayer(0).setPenStyle(Qt.DashLine if ls == "dash" else Qt.DotLine)
+                        sym.symbolLayer(0).setPenStyle(Qt.PenStyle.DashLine if ls == "dash" else Qt.PenStyle.DotLine)
                     except Exception as _exc:
                         log_swallowed("tools/spatial_network_dialog.py:2348 (_mk_sym)", _exc)
                 return sym

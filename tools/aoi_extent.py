@@ -23,9 +23,9 @@ abandoning the whole AOI for one bad polygon, and reports how many it dropped.
 from __future__ import annotations
 
 from qgis.core import (
+    Qgis,
     QgsCoordinateTransform,
     QgsProject,
-    QgsWkbTypes,
 )
 from .utils import log_swallowed
 
@@ -109,7 +109,7 @@ def resolve_aoi_extent(aoi_layer, *, selected_only: bool, dst_crs) -> AoiExtentR
     if aoi_layer is None:
         return AoiExtentResult(status=STATUS_NO_LAYER)
     try:
-        if aoi_layer.geometryType() != QgsWkbTypes.PolygonGeometry:
+        if aoi_layer.geometryType() != Qgis.GeometryType.Polygon:
             return AoiExtentResult(status=STATUS_NOT_POLYGON)
     except Exception:
         return AoiExtentResult(status=STATUS_NOT_POLYGON)

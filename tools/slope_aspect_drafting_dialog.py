@@ -38,16 +38,15 @@ import uuid
 from osgeo import gdal
 
 from qgis.PyQt import QtWidgets, uic
-from qgis.PyQt.QtCore import QVariant
 from qgis.PyQt.QtGui import QColor
 from qgis.core import (
+    Qgis,
     QgsCategorizedSymbolRenderer,
     QgsFeature,
     QgsField,
     QgsFillSymbol,
     QgsGradientColorRamp,
     QgsGeometry,
-    QgsMapLayerProxyModel,
     QgsMarkerSymbol,
     QgsPalLayerSettings,
     QgsPointXY,
@@ -55,13 +54,12 @@ from qgis.core import (
     QgsProperty,
     QgsRendererCategory,
     QgsStyle,
-    QgsSymbolLayer,
     QgsTextBufferSettings,
     QgsTextFormat,
     QgsVectorLayer,
     QgsVectorLayerSimpleLabeling,
-    QgsWkbTypes,
 )
+from .qtcompat import FT_INT, FT_DOUBLE, FT_STRING, SYMBOL_PROPERTY_ANGLE
 
 import processing
 
@@ -89,8 +87,8 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
         self.setupUi(self)
         self.iface = iface
 
-        self.cmbDemLayer.setFilters(QgsMapLayerProxyModel.RasterLayer)
-        self.cmbMaskLayer.setFilters(QgsMapLayerProxyModel.VectorLayer)
+        self.cmbDemLayer.setFilters(Qgis.LayerFilter.RasterLayer)
+        self.cmbMaskLayer.setFilters(Qgis.LayerFilter.VectorLayer)
 
         self.btnCreateMask.clicked.connect(self.create_mask_layer)
         self.btnRun.clicked.connect(self.run_drafting)
@@ -154,7 +152,7 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
             f"MultiPolygon?crs={crs_authid}", "작업영역_AOI (AOI polygon)", "memory"
         )
         pr = layer.dataProvider()
-        pr.addAttributes([QgsField("name", QVariant.String)])
+        pr.addAttributes([QgsField("name", FT_STRING)])
         layer.updateFields()
         QgsProject.instance().addMapLayer(layer)
 
@@ -193,7 +191,7 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
             )
             restore_ui_focus(self)
             return
-        if mask_layer.geometryType() != QgsWkbTypes.PolygonGeometry:
+        if mask_layer.geometryType() != Qgis.GeometryType.Polygon:
             push_message(self.iface, "오류", "작업영역은 폴리곤 레이어여야 합니다.", level=2)
             restore_ui_focus(self)
             return
@@ -464,9 +462,9 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
         pr = layer.dataProvider()
         pr.addAttributes(
             [
-                QgsField("slope_class", QVariant.Int),
-                QgsField("slope_deg", QVariant.Int),
-                QgsField("slope", QVariant.Double),
+                QgsField("slope_class", FT_INT),
+                QgsField("slope_deg", FT_INT),
+                QgsField("slope", FT_DOUBLE),
             ]
         )
         layer.updateFields()
@@ -637,7 +635,7 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
 
             cls_idx = layer.fields().indexFromName("slope_class")
             if cls_idx < 0:
-                layer.dataProvider().addAttributes([QgsField("slope_class", QVariant.Int)])
+                layer.dataProvider().addAttributes([QgsField("slope_class", FT_INT)])
                 layer.updateFields()
                 cls_idx = layer.fields().indexFromName("slope_class")
 
@@ -654,7 +652,7 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
             # Populate a plain text label field to avoid expression compatibility issues.
             label_idx = layer.fields().indexFromName("label")
             if label_idx < 0:
-                layer.dataProvider().addAttributes([QgsField("label", QVariant.String)])
+                layer.dataProvider().addAttributes([QgsField("label", FT_STRING)])
                 layer.updateFields()
                 label_idx = layer.fields().indexFromName("label")
 
@@ -736,7 +734,7 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
             except Exception as _exc:
                 log_swallowed("tools/slope_aspect_drafting_dialog.py:675 (_apply_slope_grid_style)", _exc)
             try:
-                pal.placement = QgsPalLayerSettings.OverPoint
+                pal.placement = Qgis.LabelPlacement.OverPoint
                 pal.centroidInside = True
             except Exception as _exc:
                 log_swallowed("slope_aspect_drafting_dialog._apply_slope_grid_style", _exc)
@@ -791,10 +789,10 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
         pr = layer.dataProvider()
         pr.addAttributes(
             [
-                QgsField("aspect_deg", QVariant.Int),
-                QgsField("aspect_45", QVariant.Int),
-                QgsField("dir8", QVariant.String),
-                QgsField("slope", QVariant.Double),
+                QgsField("aspect_deg", FT_INT),
+                QgsField("aspect_45", FT_INT),
+                QgsField("dir8", FT_STRING),
+                QgsField("slope", FT_DOUBLE),
             ]
         )
         layer.updateFields()
@@ -868,7 +866,7 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
             sl = base_sym.symbolLayer(0)
             if sl is not None:
                 sl.setDataDefinedProperty(
-                    QgsSymbolLayer.PropertyAngle, QgsProperty.fromField("aspect_45")
+                    SYMBOL_PROPERTY_ANGLE, QgsProperty.fromField("aspect_45")
                 )
         except Exception as _exc:
             log_swallowed("tools/slope_aspect_drafting_dialog.py:808 (_build_aspect_arrow_layer)", _exc)

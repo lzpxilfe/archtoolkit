@@ -194,12 +194,12 @@ def make_dem(path: str, *, xmin=200000.0, ymax=500000.0, px=10.0, ncols=60, nrow
 
 
 def make_points(name: str, coords, *, crs_epsg=5186, fields=None, attrs=None):
-    """Memory point layer. fields: [(name, QVariant.Type)], attrs: list of lists."""
-    from qgis.PyQt.QtCore import QVariant
+    """Memory point layer. fields: [(name, field type from tools.qtcompat)], attrs: list of lists."""
+    from tools.qtcompat import FT_STRING
     from qgis.core import QgsFeature, QgsField, QgsGeometry, QgsPointXY, QgsProject, QgsVectorLayer
     lyr = QgsVectorLayer(f"Point?crs=EPSG:{crs_epsg}", name, "memory")
     pr = lyr.dataProvider()
-    flds = [QgsField("name", QVariant.String)] + [QgsField(n, t) for n, t in (fields or [])]
+    flds = [QgsField("name", FT_STRING)] + [QgsField(n, t) for n, t in (fields or [])]
     pr.addAttributes(flds)
     lyr.updateFields()
     feats = []
@@ -216,11 +216,11 @@ def make_points(name: str, coords, *, crs_epsg=5186, fields=None, attrs=None):
 
 
 def make_polygon(name: str, ring, *, crs_epsg=5186, fields=None, attrs=None):
-    from qgis.PyQt.QtCore import QVariant
+    from tools.qtcompat import FT_STRING
     from qgis.core import QgsFeature, QgsField, QgsGeometry, QgsPointXY, QgsProject, QgsVectorLayer
     lyr = QgsVectorLayer(f"Polygon?crs=EPSG:{crs_epsg}", name, "memory")
     pr = lyr.dataProvider()
-    flds = [QgsField("name", QVariant.String)] + [QgsField(n, t) for n, t in (fields or [])]
+    flds = [QgsField("name", FT_STRING)] + [QgsField(n, t) for n, t in (fields or [])]
     pr.addAttributes(flds)
     lyr.updateFields()
     f = QgsFeature(lyr.fields())

@@ -14,11 +14,11 @@ _live_log_dialog = None
 
 def _level_name(level) -> str:
     try:
-        if level == Qgis.Warning:
+        if level == Qgis.MessageLevel.Warning:
             return "WARN"
-        if level == Qgis.Critical:
+        if level == Qgis.MessageLevel.Critical:
             return "ERROR"
-        if level == Qgis.Success:
+        if level == Qgis.MessageLevel.Success:
             return "OK"
     except Exception as _exc:
         log_swallowed("live_log_dialog._level_name", _exc)
@@ -58,7 +58,7 @@ class ArchToolkitLiveLogDialog(QtWidgets.QDialog):
         super().__init__(parent)
         self.setWindowTitle("ArchToolkit 작업 로그")
         try:
-            self.setWindowFlag(Qt.Tool, True)
+            self.setWindowFlag(Qt.WindowType.Tool, True)
         except Exception as _exc:
             log_swallowed("tools/live_log_dialog.py:62 (__init__)", _exc)
         try:
@@ -70,13 +70,13 @@ class ArchToolkitLiveLogDialog(QtWidgets.QDialog):
 
         self._txt = QtWidgets.QPlainTextEdit(self)
         self._txt.setReadOnly(True)
-        self._txt.setLineWrapMode(QtWidgets.QPlainTextEdit.NoWrap)
+        self._txt.setLineWrapMode(QtWidgets.QPlainTextEdit.LineWrapMode.NoWrap)
         try:
             self._txt.document().setMaximumBlockCount(5000)
         except Exception as _exc:
             log_swallowed("tools/live_log_dialog.py:76 (__init__)", _exc)
         try:
-            fixed_font = QFontDatabase.systemFont(QFontDatabase.FixedFont)
+            fixed_font = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
             if fixed_font is not None:
                 self._txt.setFont(fixed_font)
         except Exception as _exc:
@@ -246,7 +246,7 @@ class ArchToolkitLiveLogDialog(QtWidgets.QDialog):
         try:
             if obj is self._owner and event is not None:
                 et = int(event.type())
-                if et in (QEvent.Move, QEvent.Resize, QEvent.Show, QEvent.WindowStateChange):
+                if et in (QEvent.Type.Move, QEvent.Type.Resize, QEvent.Type.Show, QEvent.Type.WindowStateChange):
                     if self.isVisible():
                         self._reposition_near_owner()
         except Exception as _exc:

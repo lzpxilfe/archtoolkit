@@ -21,7 +21,7 @@ import uuid
 from qgis.PyQt import uic
 from qgis.PyQt import QtWidgets
 from qgis.PyQt.QtCore import Qt
-from qgis.core import QgsProject, QgsVectorLayer, QgsMapLayerProxyModel
+from qgis.core import QgsProject, QgsVectorLayer, Qgis
 import processing
 from .utils import log_swallowed, push_message, set_archtoolkit_layer_metadata
 from .live_log_dialog import ensure_live_log_dialog
@@ -58,7 +58,7 @@ class ContourExtractorDialog(QtWidgets.QDialog, FORM_CLASS):
         self.original_filters = {}
         
         # Setup layer filters for DEM mode
-        self.cmbDemLayer.setFilters(QgsMapLayerProxyModel.RasterLayer)
+        self.cmbDemLayer.setFilters(Qgis.LayerFilter.RasterLayer)
         
         # Connect signals
         self.radioDxf.toggled.connect(self.on_mode_changed)
@@ -123,7 +123,7 @@ class ContourExtractorDialog(QtWidgets.QDialog, FORM_CLASS):
         for layer in QgsProject.instance().mapLayers().values():
             if isinstance(layer, QgsVectorLayer):
                 item = QtWidgets.QListWidgetItem(layer.name())
-                item.setData(Qt.UserRole, layer.id())
+                item.setData(Qt.ItemDataRole.UserRole, layer.id())
                 self.listDxfLayers.addItem(item)
     
     def on_mode_changed(self):
@@ -149,7 +149,7 @@ class ContourExtractorDialog(QtWidgets.QDialog, FORM_CLASS):
         """Get list of selected vector layers"""
         layers = []
         for item in self.listDxfLayers.selectedItems():
-            layer_id = item.data(Qt.UserRole)
+            layer_id = item.data(Qt.ItemDataRole.UserRole)
             layer = QgsProject.instance().mapLayer(layer_id)
             if layer:
                 layers.append(layer)

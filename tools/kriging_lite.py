@@ -34,13 +34,13 @@ from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 from qgis.core import (
+    Qgis,
     QgsFeature,
     QgsGeometry,
     QgsPointXY,
     QgsRectangle,
     QgsSpatialIndex,
     QgsVectorLayer,
-    QgsWkbTypes,
 )
 
 from .utils import log_swallowed, is_metric_crs, log_message
@@ -164,7 +164,7 @@ def _collect_point_samples(
     if layer is None or not layer.isValid():
         raise ValueError("Invalid layer")
 
-    if layer.geometryType() != QgsWkbTypes.PointGeometry:
+    if layer.geometryType() != Qgis.GeometryType.Point:
         raise ValueError("Kriging requires a point layer")
 
     # GEOM_Z_SENTINEL (from the DEM generator UI) means "use the geometry's Z

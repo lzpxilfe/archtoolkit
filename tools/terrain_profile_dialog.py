@@ -26,14 +26,25 @@ import math
 from typing import List, Optional, Sequence, Tuple
 from qgis.PyQt import uic
 from qgis.PyQt import QtWidgets
-from qgis.PyQt.QtCore import Qt, QPointF, QRectF, QVariant
+from qgis.PyQt.QtCore import Qt, QPointF, QRectF
 from qgis.PyQt.QtWidgets import QMessageBox, QFileDialog, QWidget
 from qgis.PyQt.QtGui import QColor, QPainter, QPen, QBrush, QPalette, QPainterPath, QImage
 from qgis.core import (
-    QgsProject, QgsMapLayerProxyModel, QgsPointXY, QgsRaster,
-    QgsVectorLayer, QgsField, QgsFeature, QgsFeatureRequest, QgsGeometry, QgsWkbTypes,
-    QgsLineSymbol, QgsSingleSymbolRenderer, QgsSymbolLayer, QgsProperty, Qgis, QgsDistanceArea, QgsCoordinateTransform
+    QgsProject,
+    QgsPointXY,
+    QgsVectorLayer,
+    QgsField,
+    QgsFeature,
+    QgsFeatureRequest,
+    QgsGeometry,
+    QgsLineSymbol,
+    QgsSingleSymbolRenderer,
+    QgsProperty,
+    Qgis,
+    QgsDistanceArea,
+    QgsCoordinateTransform,
 )
+from .qtcompat import FT_INT, FT_DOUBLE, FT_STRING, SYMBOL_PROPERTY_STROKE_COLOR, RUBBER_BAND_CIRCLE
 from qgis.gui import QgsMapLayerComboBox, QgsMapToolEmitPoint, QgsRubberBand
 from .utils import (
     log_swallowed,
@@ -94,7 +105,7 @@ class ProfileChartWidget(QWidget):
         self.max_e = 100
         self.total_d = 0
         self.setMinimumHeight(250)
-        self.setBackgroundRole(QPalette.Base)
+        self.setBackgroundRole(QPalette.ColorRole.Base)
         self.setAutoFillBackground(True)
         
         # Zoom and pan
@@ -205,25 +216,25 @@ class ProfileChartWidget(QWidget):
     
     def mousePressEvent(self, event):
         """Start dragging for pan"""
-        if event.button() == Qt.LeftButton and self.zoom_level > 1.0:
+        if event.button() == Qt.MouseButton.LeftButton and self.zoom_level > 1.0:
             self.is_dragging = True
-            self.drag_start_x = event.x()
+            self.drag_start_x = event.pos().x()
             self.drag_start_offset = self.pan_offset
-            self.setCursor(Qt.ClosedHandCursor)
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
     
     def mouseReleaseEvent(self, event):
         """End dragging"""
-        if event.button() == Qt.LeftButton:
+        if event.button() == Qt.MouseButton.LeftButton:
             self.is_dragging = False
-            self.setCursor(Qt.ArrowCursor)
+            self.setCursor(Qt.CursorShape.ArrowCursor)
     
     def mouseMoveEvent(self, event):
         """Track mouse position, handle drag panning, and sync with map"""
         if not self.data or not self.smooth_data:
             return
         
-        self.mouse_x = event.x()
-        self.mouse_y = event.y()
+        self.mouse_x = event.pos().x()
+        self.mouse_y = event.pos().y()
         
         # Calculate chart area
         w = self.width() - self.margin_left - self.margin_right
@@ -401,15 +412,15 @@ class ProfileChartWidget(QWidget):
 
     def draw_chart(self, painter, width, height):
         if not self.data:
-            painter.drawText(QRectF(0, 0, width, height), Qt.AlignCenter, "데이터가 없습니다.")
+            painter.drawText(QRectF(0, 0, width, height), Qt.AlignmentFlag.AlignCenter, "데이터가 없습니다.")
             return
         # Guard against a zero-length profile line (identical start/end): total_d==0
         # would make visible_range 0 and divide-by-zero in the sample loop below.
         if not self.total_d or self.total_d <= 0:
-            painter.drawText(QRectF(0, 0, width, height), Qt.AlignCenter, "단면 길이가 0입니다.")
+            painter.drawText(QRectF(0, 0, width, height), Qt.AlignmentFlag.AlignCenter, "단면 길이가 0입니다.")
             return
 
-        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         
         # Margins
         left, top, right, bottom = self.margin_left, self.margin_top, self.margin_right, self.margin_bottom
@@ -425,7 +436,7 @@ class ProfileChartWidget(QWidget):
         painter.fillRect(0, 0, width, height, QColor(255, 255, 255))
 
         # Draw background/grid
-        painter.setPen(QPen(QColor(220, 220, 220), 1, Qt.DashLine))
+        painter.setPen(QPen(QColor(220, 220, 220), 1, Qt.PenStyle.DashLine))
         num_grids_y = 5
         for i in range(num_grids_y + 1):
             y = top + h - (i / num_grids_y) * h
@@ -441,7 +452,7 @@ class ProfileChartWidget(QWidget):
             painter.drawText(int(x - 15), top + h + 20, f"{dist:.0f}m")
 
         # Draw axis
-        painter.setPen(QPen(Qt.black, 2))
+        painter.setPen(QPen(Qt.GlobalColor.black, 2))
         painter.drawLine(left, top, left, top + h)            # Y axis
         painter.drawLine(left, top + h, left + w, top + h)    # X axis
         
@@ -449,7 +460,7 @@ class ProfileChartWidget(QWidget):
         if self.highlight_ranges:
             try:
                 painter.save()
-                painter.setPen(Qt.NoPen)
+                painter.setPen(Qt.PenStyle.NoPen)
                 painter.setBrush(QBrush(self.highlight_color))
                 for d0, d1 in self.highlight_ranges:
                     if d1 <= view_start or d0 >= view_end:
@@ -475,7 +486,7 @@ class ProfileChartWidget(QWidget):
         if self.overlay_ranges:
             try:
                 painter.save()
-                painter.setPen(Qt.NoPen)
+                painter.setPen(Qt.PenStyle.NoPen)
                 painter.setBrush(QBrush(self.overlay_color))
                 for d0, d1 in self.overlay_ranges:
                     if d1 <= view_start or d0 >= view_end:
@@ -523,7 +534,7 @@ class ProfileChartWidget(QWidget):
         # Draw Fill (area below profile)
         painter.setOpacity(0.15)
         painter.setBrush(QBrush(self.profile_color))
-        painter.setPen(Qt.NoPen)
+        painter.setPen(Qt.PenStyle.NoPen)
         
         if not first_point:  # Only if we drew something
             fill_path = QPainterPath(path)
@@ -552,7 +563,7 @@ class ProfileChartWidget(QWidget):
                         painter.drawText(left + 6, top + 34, self.overlay_label)
                     except Exception as _exc:
                         log_swallowed("tools/terrain_profile_dialog.py:539 (draw_chart)", _exc)
-                painter.setPen(QPen(self.overlay_marker_color, 1, Qt.DashLine))
+                painter.setPen(QPen(self.overlay_marker_color, 1, Qt.PenStyle.DashLine))
                 for dist, lbl in self.overlay_markers:
                     if dist < view_start or dist > view_end:
                         continue
@@ -589,7 +600,7 @@ class ProfileChartWidget(QWidget):
             hover_y = top + h - ((self.hover_elevation - self.min_e) / (self.max_e - self.min_e)) * h
             
             # Vertical line
-            painter.setPen(QPen(QColor(255, 0, 0, 150), 1, Qt.DashLine))
+            painter.setPen(QPen(QColor(255, 0, 0, 150), 1, Qt.PenStyle.DashLine))
             painter.drawLine(int(hover_x), top, int(hover_x), top + h)
             
             # Point marker
@@ -598,20 +609,20 @@ class ProfileChartWidget(QWidget):
             painter.drawEllipse(QPointF(hover_x, hover_y), 5, 5)
             
             # Info label
-            painter.setPen(QPen(Qt.black))
+            painter.setPen(QPen(Qt.GlobalColor.black))
             info_text = f"{self.hover_distance:.1f}m / {self.hover_elevation:.1f}m"
             painter.drawText(int(hover_x) + 8, int(hover_y) - 5, info_text)
         
         # Zoom indicator
         if self.zoom_level > 1.0:
-            painter.setPen(QPen(Qt.darkGray))
+            painter.setPen(QPen(Qt.GlobalColor.darkGray))
             painter.drawText(width - 80, 20, f"확대: {self.zoom_level:.1f}x")
 
     def save_to_image(self, path):
         # Create image with higher resolution for better quality
         img_w, img_h = 1200, 800
-        image = QImage(img_w, img_h, QImage.Format_RGB32)
-        image.fill(Qt.white)
+        image = QImage(img_w, img_h, QImage.Format.Format_RGB32)
+        image.fill(Qt.GlobalColor.white)
         
         # Temporarily reset zoom for saving
         old_zoom = self.zoom_level
@@ -671,7 +682,7 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
         self._overlay_selection_handler = None
 
         # Setup
-        self.cmbDemLayer.setFilters(QgsMapLayerProxyModel.RasterLayer)
+        self.cmbDemLayer.setFilters(Qgis.LayerFilter.RasterLayer)
 
         # Extra options: fixed-length profile line + AOI highlight on chart
         self._last_profile_length_m: Optional[float] = None
@@ -702,7 +713,7 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
             self.btnUseLastLength.setToolTip("가장 최근에 만든 단면선 길이를 고정 길이에 적용합니다.")
 
             self.cmbAoiLayer = QgsMapLayerComboBox(self.grpExtra)
-            self.cmbAoiLayer.setFilters(QgsMapLayerProxyModel.VectorLayer)
+            self.cmbAoiLayer.setFilters(Qgis.LayerFilter.VectorLayer)
             self.cmbAoiLayer.setToolTip(
                 "조사대상지(AOI) 폴리곤 레이어를 선택하세요.\n"
                 "- 선택 피처가 있으면 선택 피처만 사용합니다.\n"
@@ -801,7 +812,7 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
             )
 
             self.cmbOverlayLayer = QgsMapLayerComboBox(self.grpOverlay)
-            self.cmbOverlayLayer.setFilters(QgsMapLayerProxyModel.VectorLayer)
+            self.cmbOverlayLayer.setFilters(Qgis.LayerFilter.VectorLayer)
             self.cmbOverlayLayer.setToolTip("단면에 표시할 벡터 레이어를 선택하세요.")
 
             self.chkOverlaySelectedOnly = QtWidgets.QCheckBox("선택 피처만 사용", self.grpOverlay)
@@ -897,15 +908,15 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
             self._layer_tree_view = None
         
         # Rubber band for drawing line
-        self.rubber_band = QgsRubberBand(self.canvas, QgsWkbTypes.LineGeometry)
+        self.rubber_band = QgsRubberBand(self.canvas, Qgis.GeometryType.Line)
         self.rubber_band.setColor(QColor(255, 0, 0))
         self.rubber_band.setWidth(2)
         
         # Hover marker for showing position on map
-        self.hover_marker = QgsRubberBand(self.canvas, QgsWkbTypes.PointGeometry)
+        self.hover_marker = QgsRubberBand(self.canvas, Qgis.GeometryType.Point)
         self.hover_marker.setColor(QColor(255, 0, 0))
         self.hover_marker.setWidth(10)
-        self.hover_marker.setIcon(QgsRubberBand.ICON_CIRCLE)
+        self.hover_marker.setIcon(RUBBER_BAND_CIRCLE)
         
         # Connect chart hover callback
         self.chart.on_hover_callback = self.show_position_on_map
@@ -980,13 +991,13 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
     def show_position_on_map(self, x, y):
         """Show hover position on map"""
         if x is None or y is None:
-            self.hover_marker.reset(QgsWkbTypes.PointGeometry)
+            self.hover_marker.reset(Qgis.GeometryType.Point)
             try:
                 self.hover_marker.hide()
             except Exception as _exc:
                 log_swallowed("tools/terrain_profile_dialog.py:960 (show_position_on_map)", _exc)
         else:
-            self.hover_marker.reset(QgsWkbTypes.PointGeometry)
+            self.hover_marker.reset(Qgis.GeometryType.Point)
             self.hover_marker.addPoint(QgsPointXY(x, y))
             try:
                 self.hover_marker.show()
@@ -998,7 +1009,7 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
         if start is None or end is None:
             return
         try:
-            self.rubber_band.reset(QgsWkbTypes.LineGeometry)
+            self.rubber_band.reset(Qgis.GeometryType.Line)
         except Exception:
             self.rubber_band.reset()
         try:
@@ -1176,7 +1187,7 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
             fixed = self._fixed_length_m()
             if fixed is not None:
                 end = self._end_point_fixed_length(start=start, direction_point=end, length_m=fixed)
-            self.rubber_band.reset(QgsWkbTypes.LineGeometry)
+            self.rubber_band.reset(Qgis.GeometryType.Line)
             self.rubber_band.addPoint(start)
             self.rubber_band.addPoint(end)
             self.rubber_band.show()
@@ -1202,7 +1213,7 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
         if aoi_layer is None or not isinstance(aoi_layer, QgsVectorLayer):
             return []
         try:
-            if aoi_layer.geometryType() != QgsWkbTypes.PolygonGeometry:
+            if aoi_layer.geometryType() != Qgis.GeometryType.Polygon:
                 return []
         except Exception:
             return []
@@ -1527,7 +1538,7 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
                     log_swallowed("terrain_profile_dialog._feature_label", _exc)
                 try:
                     for fld in layer.fields():
-                        if fld.type() == QVariant.String:
+                        if fld.type() == FT_STRING:
                             v = ft.attribute(fld.name())
                             if v is not None and str(v).strip():
                                 return str(v).strip()
@@ -1568,7 +1579,7 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
                     continue
 
                 # Polygon: inside-segments on the profile line
-                if geom_type == QgsWkbTypes.PolygonGeometry:
+                if geom_type == Qgis.GeometryType.Polygon:
                     try:
                         inter = g2.intersection(line_geom)
                     except Exception:
@@ -1579,7 +1590,7 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
                     # Segment ranges (line geometry)
                     _skip_1503 = False
                     try:
-                        if inter.type() == QgsWkbTypes.LineGeometry:
+                        if inter.type() == Qgis.GeometryType.Line:
                             segs = []
                             if inter.isMultipart():
                                 segs = inter.asMultiPolyline() or []
@@ -1607,7 +1618,7 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
                                 b = max(t_vals) * total_distance_m
                                 if math.isfinite(a) and math.isfinite(b) and b > a:
                                     ranges.append((a, b))
-                        elif inter.type() == QgsWkbTypes.PointGeometry:
+                        elif inter.type() == Qgis.GeometryType.Point:
                             pts = []
                             if inter.isMultipart():
                                 pts = inter.asMultiPoint() or []
@@ -1635,7 +1646,7 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
                     continue
 
                 # Lines: intersection points (or overlap segments)
-                if geom_type == QgsWkbTypes.LineGeometry:
+                if geom_type == Qgis.GeometryType.Line:
                     try:
                         inter = g2.intersection(line_geom)
                     except Exception:
@@ -1645,7 +1656,7 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
                     lbl = _feature_label(ft)
                     _skip_1557 = False
                     try:
-                        if inter.type() == QgsWkbTypes.PointGeometry:
+                        if inter.type() == Qgis.GeometryType.Point:
                             pts = []
                             if inter.isMultipart():
                                 pts = inter.asMultiPoint() or []
@@ -1664,7 +1675,7 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
                                     _skip_1565 = True
                                 if _skip_1565:
                                     continue
-                        elif inter.type() == QgsWkbTypes.LineGeometry:
+                        elif inter.type() == Qgis.GeometryType.Line:
                             segs = []
                             if inter.isMultipart():
                                 segs = inter.asMultiPolyline() or []
@@ -1699,7 +1710,7 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
                     continue
 
                 # Points: near the profile line (tolerance)
-                if geom_type == QgsWkbTypes.PointGeometry:
+                if geom_type == Qgis.GeometryType.Point:
                     lbl = _feature_label(ft)
                     _skip_1603 = False
                     try:
@@ -1827,7 +1838,7 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
         if len(self.points) == 0:
             self.points.append(QgsPointXY(point))
             try:
-                self.rubber_band.reset(QgsWkbTypes.LineGeometry)
+                self.rubber_band.reset(Qgis.GeometryType.Line)
             except Exception:
                 self.rubber_band.reset()
             self.rubber_band.addPoint(self.points[0])
@@ -1842,7 +1853,7 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
             end = self._end_point_fixed_length(start=start, direction_point=end, length_m=fixed)
 
         self.points = [start, end]
-        self.rubber_band.reset(QgsWkbTypes.LineGeometry)
+        self.rubber_band.reset(Qgis.GeometryType.Line)
         self.rubber_band.addPoint(start)
         self.rubber_band.addPoint(end)
         self.rubber_band.show()
@@ -1915,7 +1926,7 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
             log_message(
                 "TerrainProfile: 프로젝트에 타원체가 설정되지 않아 거리 단위가 미터인지 확인할 수 없어 "
                 "샘플 간격 점검을 건너뜁니다.",
-                level=Qgis.Info,
+                level=Qgis.MessageLevel.Info,
             )
             return spacing_m
 
@@ -1925,13 +1936,13 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
             log_message(
                 f"TerrainProfile: 샘플 간격 {spacing_m:.2f}m가 DEM 셀 크기 {cell_m:.2f}m보다 훨씬 촘촘합니다. "
                 "최근접 셀 추출이라 같은 값이 반복되는 계단만 늘어납니다. 샘플 수를 줄이세요.",
-                level=Qgis.Warning,
+                level=Qgis.MessageLevel.Warning,
             )
         elif spacing_m > cell_m * 2.0:
             log_message(
                 f"TerrainProfile: 샘플 간격 {spacing_m:.2f}m가 DEM 셀 크기 {cell_m:.2f}m보다 훨씬 성깁니다. "
                 "좁은 능선이나 구곡이 통째로 누락될 수 있습니다. 샘플 수를 늘리세요.",
-                level=Qgis.Warning,
+                level=Qgis.MessageLevel.Warning,
             )
         return spacing_m
 
@@ -2009,7 +2020,7 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
                 # method docstring - this mirrors QGIS's own profile tool.
                 result = dem_layer.dataProvider().identify(
                     sample_dem,
-                    QgsRaster.IdentifyFormatValue
+                    Qgis.RasterIdentifyFormat.Value
                 )
                 
                 if result.isValid():
@@ -2139,7 +2150,7 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
                 return
             self._open_profile_from_feature(layer, ft)
         except Exception as e:
-            log_message(f"TerrainProfile: open from layer click failed: {e}", level=Qgis.Warning)
+            log_message(f"TerrainProfile: open from layer click failed: {e}", level=Qgis.MessageLevel.Warning)
 
     def _on_profile_layer_selection_changed(self, *_args):
         if self._ignore_selection_changed:
@@ -2166,7 +2177,7 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
         try:
             self._open_profile_from_feature(layer, ft)
         except Exception as e:
-            log_message(f"TerrainProfile: open from selection failed: {e}", level=Qgis.Warning)
+            log_message(f"TerrainProfile: open from selection failed: {e}", level=Qgis.MessageLevel.Warning)
 
     def _open_profile_from_feature(self, layer: QgsVectorLayer, ft: QgsFeature):
         """Recompute and show profile when a saved profile line is selected."""
@@ -2292,7 +2303,7 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
 
             sample_dem = transform_point(sample_canvas, canvas_crs, dem_crs)
             # Nearest-cell, no interpolation (see the method docstring).
-            result = dem_layer.dataProvider().identify(sample_dem, QgsRaster.IdentifyFormatValue)
+            result = dem_layer.dataProvider().identify(sample_dem, Qgis.RasterIdentifyFormat.Value)
             if not result.isValid():
                 continue
             results_dict = result.results()
@@ -2346,16 +2357,16 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
 
         pr = layer.dataProvider()
         required = [
-            QgsField("no", QVariant.Int),
-            QgsField("distance", QVariant.Double, "m", 10, 2),
-            QgsField("min_elev", QVariant.Double, "m", 10, 2),
-            QgsField("max_elev", QVariant.Double, "m", 10, 2),
-            QgsField("date", QVariant.String),
-            QgsField("dem_id", QVariant.String),
-            QgsField("samples", QVariant.Int),
-            QgsField("r", QVariant.Int),
-            QgsField("g", QVariant.Int),
-            QgsField("b", QVariant.Int),
+            QgsField("no", FT_INT),
+            QgsField("distance", FT_DOUBLE, "m", 10, 2),
+            QgsField("min_elev", FT_DOUBLE, "m", 10, 2),
+            QgsField("max_elev", FT_DOUBLE, "m", 10, 2),
+            QgsField("date", FT_STRING),
+            QgsField("dem_id", FT_STRING),
+            QgsField("samples", FT_INT),
+            QgsField("r", FT_INT),
+            QgsField("g", FT_INT),
+            QgsField("b", FT_INT),
         ]
 
         missing = []
@@ -2424,7 +2435,7 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
                 sl = symbol.symbolLayer(0)
                 if sl is not None:
                     sl.setDataDefinedProperty(
-                        QgsSymbolLayer.PropertyStrokeColor,
+                        SYMBOL_PROPERTY_STROKE_COLOR,
                         QgsProperty.fromExpression('color_rgba("r","g","b",220)'),
                     )
                 layer.setRenderer(QgsSingleSymbolRenderer(symbol))
@@ -2474,16 +2485,16 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
         pr = layer.dataProvider()
         pr.addAttributes(
             [
-                QgsField("no", QVariant.Int),
-                QgsField("distance", QVariant.Double, "m", 10, 2),
-                QgsField("min_elev", QVariant.Double, "m", 10, 2),
-                QgsField("max_elev", QVariant.Double, "m", 10, 2),
-                QgsField("date", QVariant.String),
-                QgsField("dem_id", QVariant.String),
-                QgsField("samples", QVariant.Int),
-                QgsField("r", QVariant.Int),
-                QgsField("g", QVariant.Int),
-                QgsField("b", QVariant.Int),
+                QgsField("no", FT_INT),
+                QgsField("distance", FT_DOUBLE, "m", 10, 2),
+                QgsField("min_elev", FT_DOUBLE, "m", 10, 2),
+                QgsField("max_elev", FT_DOUBLE, "m", 10, 2),
+                QgsField("date", FT_STRING),
+                QgsField("dem_id", FT_STRING),
+                QgsField("samples", FT_INT),
+                QgsField("r", FT_INT),
+                QgsField("g", FT_INT),
+                QgsField("b", FT_INT),
             ]
         )
         layer.updateFields()
@@ -2592,16 +2603,16 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
         # Add fields
         pr = layer.dataProvider()
         pr.addAttributes([
-            QgsField("no", QVariant.Int),
-            QgsField("distance", QVariant.Double, "m", 10, 2),
-            QgsField("min_elev", QVariant.Double, "m", 10, 2),
-            QgsField("max_elev", QVariant.Double, "m", 10, 2),
-            QgsField("date", QVariant.String),
-            QgsField("dem_id", QVariant.String),
-            QgsField("samples", QVariant.Int),
-            QgsField("r", QVariant.Int),
-            QgsField("g", QVariant.Int),
-            QgsField("b", QVariant.Int),
+            QgsField("no", FT_INT),
+            QgsField("distance", FT_DOUBLE, "m", 10, 2),
+            QgsField("min_elev", FT_DOUBLE, "m", 10, 2),
+            QgsField("max_elev", FT_DOUBLE, "m", 10, 2),
+            QgsField("date", FT_STRING),
+            QgsField("dem_id", FT_STRING),
+            QgsField("samples", FT_INT),
+            QgsField("r", FT_INT),
+            QgsField("g", FT_INT),
+            QgsField("b", FT_INT),
         ])
         layer.updateFields()
 
@@ -2610,7 +2621,7 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
             sl = symbol.symbolLayer(0)
             if sl is not None:
                 sl.setDataDefinedProperty(
-                    QgsSymbolLayer.PropertyStrokeColor,
+                    SYMBOL_PROPERTY_STROKE_COLOR,
                     QgsProperty.fromExpression('color_rgba("r","g","b",220)'),
                 )
         except Exception as _exc:
@@ -3005,7 +3016,7 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
             self.rubber_band.hide()
         except Exception as _exc:
             log_swallowed("tools/terrain_profile_dialog.py:2755 (clear_profile)", _exc)
-        self.hover_marker.reset(QgsWkbTypes.PointGeometry)
+        self.hover_marker.reset(Qgis.GeometryType.Point)
         try:
             self.hover_marker.hide()
         except Exception as _exc:
@@ -3072,7 +3083,7 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
         try:
             # Clear rubber bands (reset+hide is enough between sessions)
             if hasattr(self, 'rubber_band') and self.rubber_band:
-                self.rubber_band.reset(QgsWkbTypes.LineGeometry)
+                self.rubber_band.reset(Qgis.GeometryType.Line)
                 self.rubber_band.hide()
                 if remove_from_scene and self.canvas and self.canvas.scene():
                     try:
@@ -3081,7 +3092,7 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
                         log_swallowed("tools/terrain_profile_dialog.py:2829 (_cleanup)", _exc)
 
             if hasattr(self, 'hover_marker') and self.hover_marker:
-                self.hover_marker.reset(QgsWkbTypes.PointGeometry)
+                self.hover_marker.reset(Qgis.GeometryType.Point)
                 self.hover_marker.hide()
                 if remove_from_scene and self.canvas and self.canvas.scene():
                     try:
@@ -3100,7 +3111,7 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
             if self.canvas:
                 self.canvas.refresh()
         except Exception as e:
-            log_message(f"Cleanup error: {e}", level=Qgis.Warning)
+            log_message(f"Cleanup error: {e}", level=Qgis.MessageLevel.Warning)
 
 
 class ProfileLineTool(QgsMapToolEmitPoint):

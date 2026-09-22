@@ -24,7 +24,7 @@ import uuid
 from typing import Iterable, List, Optional, Tuple
 
 from qgis.PyQt import QtWidgets
-from qgis.PyQt.QtCore import Qt, QVariant
+from qgis.PyQt.QtCore import Qt
 from qgis.core import (
     Qgis,
     QgsCoordinateTransform,
@@ -33,12 +33,10 @@ from qgis.core import (
     QgsFeatureRequest,
     QgsField,
     QgsGeometry,
-    QgsMapLayerProxyModel,
     QgsProject,
-    QgsUnitTypes,
     QgsVectorLayer,
-    QgsWkbTypes,
 )
+from .qtcompat import FT_DOUBLE
 from qgis.gui import QgsMapLayerComboBox
 
 from .live_log_dialog import ensure_live_log_dialog
@@ -171,11 +169,7 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
         form = QtWidgets.QFormLayout(grp)
 
         self.cmbCadastral = QgsMapLayerComboBox(grp)
-        # QGIS API compatibility: Filter may be scoped or unscoped depending on build.
-        try:
-            poly_filter = QgsMapLayerProxyModel.Filter.PolygonLayer
-        except Exception:
-            poly_filter = QgsMapLayerProxyModel.PolygonLayer
+        poly_filter = Qgis.LayerFilter.PolygonLayer
         self.cmbCadastral.setFilters(poly_filter)
         self.cmbSurvey = QgsMapLayerComboBox(grp)
         self.cmbSurvey.setFilters(poly_filter)
@@ -255,11 +249,11 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
             push_message(self.iface, "오류", f"{name} 레이어를 선택해주세요.", level=2)
             restore_ui_focus(self)
             return None
-        if layer.type() != layer.VectorLayer:
+        if layer.type() != Qgis.LayerType.Vector:
             push_message(self.iface, "오류", f"{name}는 벡터 레이어여야 합니다.", level=2)
             restore_ui_focus(self)
             return None
-        if layer.geometryType() != QgsWkbTypes.PolygonGeometry:
+        if layer.geometryType() != Qgis.GeometryType.Polygon:
             push_message(self.iface, "오류", f"{name}는 폴리곤 레이어여야 합니다.", level=2)
             restore_ui_focus(self)
             return None
@@ -286,7 +280,7 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
                 log_message(
                     "CadastralOverlap: 프로젝트 타원체가 비어 있거나 'NONE'이고 레이어가 지리좌표계여서 "
                     "면적 계산에 WGS84 타원체를 대신 사용합니다.",
-                    level=Qgis.Warning,
+                    level=Qgis.MessageLevel.Warning,
                 )
             # A blank ellipsoid on a PROJECTED CRS is deliberately left alone:
             # skipping setEllipsoid() keeps QgsDistanceArea on its planar
@@ -325,17 +319,17 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
         if not degrees_not_ellipsoidal:
             try:
                 a = float(da.measureArea(geom))
-                return float(da.convertAreaMeasurement(a, QgsUnitTypes.AreaSquareMeters))
+                return float(da.convertAreaMeasurement(a, Qgis.AreaUnit.SquareMeters))
             except Exception as _exc:
                 log_swallowed("cadastral_overlap_dialog._area_m2", _exc)
         try:
             if crs is not None and crs.isValid() and not crs.isGeographic():
-                if crs.mapUnits() == QgsUnitTypes.DistanceMeters:
+                if crs.mapUnits() == Qgis.DistanceUnit.Meters:
                     return float(geom.area())
             log_message(
                 "면적을 타원체 기준으로 계산하지 못했고 레이어 단위가 미터가 아니어서 "
                 "0으로 기록합니다(제곱도를 ㎡로 적지 않기 위함).",
-                level=Qgis.Warning,
+                level=Qgis.MessageLevel.Warning,
             )
         except Exception as _exc:
             log_swallowed("cadastral_overlap_dialog._area_m2", _exc)
@@ -412,7 +406,7 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
             try:
                 ct = QgsCoordinateTransform(survey.crs(), cad_crs, QgsProject.instance())
             except Exception as e:
-                log_message(f"CadastralOverlap: failed to build CRS transform (survey -> cad): {e}", level=Qgis.Warning)
+                log_message(f"CadastralOverlap: failed to build CRS transform (survey -> cad): {e}", level=Qgis.MessageLevel.Warning)
                 push_message(
                     self.iface,
                     "오류",
@@ -424,9 +418,9 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
 
         # Output fields: cadastral + computed
         base_fields = list(cad.fields())
-        base_fields.append(QgsField("parcel_m2", QVariant.Double))
-        base_fields.append(QgsField("in_aoi_m2", QVariant.Double))
-        base_fields.append(QgsField("in_aoi_pct", QVariant.Double))
+        base_fields.append(QgsField("parcel_m2", FT_DOUBLE))
+        base_fields.append(QgsField("in_aoi_m2", FT_DOUBLE))
+        base_fields.append(QgsField("in_aoi_pct", FT_DOUBLE))
 
         def create_output_layer(name: str) -> QgsVectorLayer:
             out = QgsVectorLayer(f"Polygon?crs={cad_crs.authid()}", name, "memory")
@@ -530,13 +524,13 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
 
             log_message(
                 f"CadastralOverlap: start split-by-feature (cad={cad.name()}, survey={survey.name()}, aoi_count={len(aoi_items)})",
-                level=Qgis.Info,
+                level=Qgis.MessageLevel.Info,
             )
 
             progress = QtWidgets.QProgressDialog(
                 "조사지역 피처별 지적도 중첩 면적 계산 중...", "취소", 0, len(aoi_items), self
             )
-            progress.setWindowModality(Qt.WindowModal)
+            progress.setWindowModality(Qt.WindowModality.WindowModal)
             progress.show()
             QtWidgets.QApplication.processEvents()
 
@@ -672,14 +666,14 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
 
                 if not out_feats:
                     empty_aois += 1
-                    log_message(f"CadastralOverlap: AOI fid={aoi_fid} -> overlaps=0", level=Qgis.Info)
+                    log_message(f"CadastralOverlap: AOI fid={aoi_fid} -> overlaps=0", level=Qgis.MessageLevel.Info)
                 else:
                     pr.addFeatures(out_feats)
                     out.updateExtents()
                     total_in_m2 += float(sum_in)
                     log_message(
                         f"CadastralOverlap: AOI fid={aoi_fid} done (parcels={kept}, in_m2={sum_in:.2f})",
-                        level=Qgis.Info,
+                        level=Qgis.MessageLevel.Info,
                     )
 
                 # Add the output layer even when empty so users can open a per-AOI attribute table.
@@ -694,7 +688,7 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
             if empty_aois > 0:
                 msg += f"  (겹침 없음 {empty_aois}개)"
             push_message(self.iface, "지적도 중첩 면적표", msg, level=0, duration=7)
-            log_message(f"CadastralOverlap: done split-by-feature ({msg})", level=Qgis.Info)
+            log_message(f"CadastralOverlap: done split-by-feature ({msg})", level=Qgis.MessageLevel.Info)
             self.accept()
             return
 
@@ -712,7 +706,7 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
                 aoi_t.transform(ct)
                 aoi = _safe_make_valid(aoi_t)
             except Exception as e:
-                log_message(f"CadastralOverlap: failed CRS transform AOI -> cad CRS: {e}", level=Qgis.Warning)
+                log_message(f"CadastralOverlap: failed CRS transform AOI -> cad CRS: {e}", level=Qgis.MessageLevel.Warning)
                 push_message(
                     self.iface,
                     "오류",
@@ -756,11 +750,11 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
         total = len(feats)
         log_message(
             f"CadastralOverlap: start (cad={cad.name()}, survey={survey.name()}, total={total}, aoi_m2={aoi_area_m2:.2f})",
-            level=Qgis.Info,
+            level=Qgis.MessageLevel.Info,
         )
 
         progress = QtWidgets.QProgressDialog("지적도 중첩 면적 계산 중...", "취소", 0, max(1, total), self)
-        progress.setWindowModality(Qt.WindowModal)
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
         progress.show()
         QtWidgets.QApplication.processEvents()
 
@@ -860,5 +854,5 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
         if aoi_area_m2 > 0.0:
             msg += f"  (AOI {aoi_area_m2:,.2f} ㎡ 대비 {sum_in / aoi_area_m2 * 100.0:.1f}%)"
         push_message(self.iface, "지적도 중첩 면적표", msg, level=0, duration=7)
-        log_message(f"CadastralOverlap: done ({msg})", level=Qgis.Info)
+        log_message(f"CadastralOverlap: done ({msg})", level=Qgis.MessageLevel.Info)
         self.accept()

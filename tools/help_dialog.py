@@ -73,11 +73,11 @@ class ArchToolkitHelpDialog(QtWidgets.QDialog):
         self.browser = QtWidgets.QTextBrowser(self)
         # Keep help self-contained: don't launch the user's browser from inside QGIS.
         self.browser.setOpenExternalLinks(False)
-        self.browser.setLineWrapMode(QtWidgets.QTextEdit.WidgetWidth)
-        self.browser.setWordWrapMode(QtGui.QTextOption.WrapAtWordBoundaryOrAnywhere)
+        self.browser.setLineWrapMode(QtWidgets.QTextEdit.LineWrapMode.WidgetWidth)
+        self.browser.setWordWrapMode(QtGui.QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
         # ScrollBarAsNeeded lives on Qt, not QAbstractScrollArea.
-        self.browser.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.browser.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.browser.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.browser.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         try:
             self.browser.setHtml(str(html or ""))
         except Exception:
@@ -114,15 +114,15 @@ class ArchToolkitHelpDialog(QtWidgets.QDialog):
         if not needle:
             self._clear_search()
             return
-        flags = QtGui.QTextDocument.FindFlags()
+        flags = QtGui.QTextDocument.FindFlag(0)
         if backward:
-            flags |= QtGui.QTextDocument.FindBackward
+            flags |= QtGui.QTextDocument.FindFlag.FindBackward
         found = self.browser.find(needle, flags)
         if not found:
             # Wrap around: retry from the start (or end for backward search).
             cursor = self.browser.textCursor()
             cursor.movePosition(
-                QtGui.QTextCursor.End if backward else QtGui.QTextCursor.Start
+                QtGui.QTextCursor.MoveOperation.End if backward else QtGui.QTextCursor.MoveOperation.Start
             )
             self.browser.setTextCursor(cursor)
             found = self.browser.find(needle, flags)
@@ -154,7 +154,7 @@ def show_help_dialog(*, parent, title: str, html: str, plugin_dir: Optional[str]
             log_swallowed("help_dialog.show_help_dialog (scholar_notes)", _exc)
     dlg = ArchToolkitHelpDialog(title=title, html=html, plugin_dir=plugin_dir, parent=parent)
     try:
-        dlg.exec_()
+        dlg.exec()
     except Exception:
         try:
             dlg.exec()

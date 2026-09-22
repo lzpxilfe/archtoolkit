@@ -385,7 +385,7 @@ def scenario_trench_suggestion(ctx):
 # ---------------------------------------------------------------------------
 
 def scenario_cadastral_overlap(ctx):
-    from qgis.PyQt.QtCore import QVariant
+    from tools.qtcompat import FT_DOUBLE, FT_STRING
     from tools.cadastral_overlap_dialog import CadastralOverlapDialog
     parcels = _make_polygons(
         "Parcels",
@@ -395,7 +395,7 @@ def scenario_cadastral_overlap(ctx):
             _square(200100, 499600, 100, 100),
             _square(200300, 499600, 100, 100),
         ],
-        fields=[("PNU", QVariant.String), ("JIBUN", QVariant.String), ("AREA_REG", QVariant.Double)],
+        fields=[("PNU", FT_STRING), ("JIBUN", FT_STRING), ("AREA_REG", FT_DOUBLE)],
         attrs=[
             ["4111010100100010000", "1", 10000.0],
             ["4111010100100020000", "2", 10000.0],
@@ -436,13 +436,13 @@ def scenario_cadastral_overlap(ctx):
 
 def scenario_covariate_report(ctx):
     from qgis.PyQt import QtWidgets
-    from qgis.PyQt.QtCore import QVariant
+    from tools.qtcompat import FT_DOUBLE
     from tools.covariate_report_dialog import CovariateReportDialog
     dem_p, slope_p, _dist_p = _make_criteria_rasters(ctx)
     ctx.iface.addRasterLayer(dem_p, "DEM")
     ctx.iface.addRasterLayer(slope_p, "Slope")
     pts = [(200050 + 70 * i, 499450 + 60 * i) for i in range(8)]
-    ctx.env.make_points("Sites", pts, fields=[("value", QVariant.Double)], attrs=[[float(i)] for i in range(8)])
+    ctx.env.make_points("Sites", pts, fields=[("value", FT_DOUBLE)], attrs=[[float(i)] for i in range(8)])
     d = CovariateReportDialog(ctx.iface)
     d._check_all(True)
     d.spinSamples.setValue(2000)
@@ -484,7 +484,7 @@ def scenario_covariate_report(ctx):
 # ---------------------------------------------------------------------------
 
 def scenario_ai_report_local(ctx):
-    from qgis.PyQt.QtCore import QVariant
+    from tools.qtcompat import FT_DOUBLE, FT_INT, FT_LONGLONG, FT_STRING
     from tools import ai_aoi_summary
     from tools import ai_local_summarizer
 
@@ -509,7 +509,7 @@ def scenario_ai_report_local(ctx):
     sites = ctx.env.make_points(
         "Sites",
         coords,
-        fields=[("B", QVariant.Int), ("PNU", QVariant.LongLong), ("value", QVariant.Double), ("period_type", QVariant.String)],
+        fields=[("B", FT_INT), ("PNU", FT_LONGLONG), ("value", FT_DOUBLE), ("period_type", FT_STRING)],
         attrs=attrs,
     )
     _make_polygons(
@@ -519,7 +519,7 @@ def scenario_ai_report_local(ctx):
             _square(200400, 499800, 150, 150),   # touches AOI corner
             _square(201500, 501000, 100, 100),   # far away (outside buffer)
         ],
-        fields=[("지목", QVariant.String), ("grade", QVariant.Int)],
+        fields=[("지목", FT_STRING), ("grade", FT_INT)],
         attrs=[["전", 1], ["임야", 2], ["대", 3]],
     )
 

@@ -211,7 +211,7 @@ def configure_api_key(parent: QtWidgets.QWidget, *, iface=None) -> Optional[str]
             parent,
             "Gemini API Key",
             "Gemini API 키를 입력하세요 (QGIS 인증 저장소에 저장됩니다):",
-            QtWidgets.QLineEdit.Password,
+            QtWidgets.QLineEdit.EchoMode.Password,
         )
     except Exception:
         return None
@@ -378,7 +378,7 @@ def generate_text(
         timer.timeout.connect(_on_timeout)
         reply.finished.connect(_on_finished)
         timer.start(int(timeout_ms))
-        loop.exec_()
+        loop.exec()
     except Exception as _exc:
         log_swallowed("ai_gemini.generate_text", _exc)
 

@@ -12,7 +12,6 @@ import tempfile
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from qgis.PyQt import QtWidgets
-from qgis.PyQt.QtCore import QVariant
 from qgis.core import (
     Qgis,
     QgsCoordinateTransform,
@@ -21,20 +20,17 @@ from qgis.core import (
     QgsField,
     QgsFillSymbol,
     QgsGeometry,
-    QgsMapLayerProxyModel,
     QgsMarkerSymbol,
     QgsPointXY,
     QgsProject,
     QgsProviderRegistry,
-    QgsRaster,
-    QgsRasterBandStats,
     QgsRasterLayer,
     QgsRectangle,
     QgsSingleSymbolRenderer,
     QgsSpatialIndex,
     QgsVectorLayer,
-    QgsWkbTypes,
 )
+from .qtcompat import FT_INT, FT_DOUBLE, FT_STRING, RBS_MIN, RBS_MAX
 from qgis.gui import QgsMapLayerComboBox
 
 import processing
@@ -423,10 +419,7 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
         grp_in = QtWidgets.QGroupBox("1. 기본 입력")
         form_in = QtWidgets.QFormLayout(grp_in)
         self.cmbAoi = QgsMapLayerComboBox(grp_in)
-        try:
-            poly_filter = QgsMapLayerProxyModel.Filter.PolygonLayer
-        except Exception:
-            poly_filter = QgsMapLayerProxyModel.PolygonLayer
+        poly_filter = Qgis.LayerFilter.PolygonLayer
         self.cmbAoi.setFilters(poly_filter)
         form_in.addRow("AOI 폴리곤:", self.cmbAoi)
 
@@ -435,10 +428,7 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
         form_in.addRow("", self.chkAoiSelectedOnly)
 
         self.cmbDem = QgsMapLayerComboBox(grp_in)
-        try:
-            ras_filter = QgsMapLayerProxyModel.Filter.RasterLayer
-        except Exception:
-            ras_filter = QgsMapLayerProxyModel.RasterLayer
+        ras_filter = Qgis.LayerFilter.RasterLayer
         self.cmbDem.setFilters(ras_filter)
         form_in.addRow("DEM:", self.cmbDem)
 
@@ -518,10 +508,7 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
         grp_ctx = QtWidgets.QGroupBox("3. 맥락/회피 설정")
         form_ctx = QtWidgets.QFormLayout(grp_ctx)
         self.cmbRefSites = QgsMapLayerComboBox(grp_ctx)
-        try:
-            vec_filter = QgsMapLayerProxyModel.Filter.VectorLayer
-        except Exception:
-            vec_filter = QgsMapLayerProxyModel.VectorLayer
+        vec_filter = Qgis.LayerFilter.VectorLayer
         self.cmbRefSites.setFilters(vec_filter)
         try:
             self.cmbRefSites.setAllowEmptyLayer(True)
@@ -827,7 +814,7 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
         if p is None:
             return None
         try:
-            res = raster.dataProvider().identify(p, QgsRaster.IdentifyFormatValue)
+            res = raster.dataProvider().identify(p, Qgis.RasterIdentifyFormat.Value)
             if not res.isValid():
                 return None
             vals = res.results() or {}
@@ -1063,7 +1050,7 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
                     if gb is not None and not gb.isNull() and not gb.isEmpty():
                         g = gb
                     else:
-                        log_message("무덤 회피: 버퍼 실패 피처는 원 지오메트리로 대체합니다.", level=Qgis.Warning)
+                        log_message("무덤 회피: 버퍼 실패 피처는 원 지오메트리로 대체합니다.", level=Qgis.MessageLevel.Warning)
             except Exception as _exc:
                 log_swallowed("trench_suggestion_dialog._build_grave_avoid_union", _exc)
             if g is None or g.isNull() or g.isEmpty():
@@ -1086,7 +1073,7 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
         # exception, and intersects() against a null is always False - so the
         # avoidance silently did nothing while the UI counted N graves avoided.
         if union is None or union.isNull() or union.isEmpty():
-            log_message("무덤 회피: 회피 마스크(union) 생성 실패 — 이번 실행에는 회피가 적용되지 않습니다.", level=Qgis.Warning)
+            log_message("무덤 회피: 회피 마스크(union) 생성 실패 — 이번 실행에는 회피가 적용되지 않습니다.", level=Qgis.MessageLevel.Warning)
             return None, 0
         return union, count
 
@@ -1268,7 +1255,7 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
             push_message(self.iface, "오류", "AOI 폴리곤 레이어를 선택하세요.", level=2, duration=7)
             restore_ui_focus(self)
             return
-        if aoi_layer.geometryType() != QgsWkbTypes.PolygonGeometry:
+        if aoi_layer.geometryType() != Qgis.GeometryType.Polygon:
             push_message(self.iface, "오류", "AOI는 폴리곤이어야 합니다.", level=2, duration=7)
             restore_ui_focus(self)
             return
@@ -1292,7 +1279,7 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
                 level=1,
                 duration=8,
             )
-            log_message(f"TrenchSuggestion: AOI selected-only requested but no selection; using all {aoi_n} features", level=Qgis.Warning)
+            log_message(f"TrenchSuggestion: AOI selected-only requested but no selection; using all {aoi_n} features", level=Qgis.MessageLevel.Warning)
 
         dem_layer = self.cmbDem.currentLayer()
         if dem_layer is None or not isinstance(dem_layer, QgsRasterLayer):
@@ -1417,15 +1404,15 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
             # Honest reporting of what avoidance actually did.
             if use_avoid:
                 if topo_layer is None:
-                    log_message("무덤 회피: 수치지형도 레이어 미지정 → 회피 미적용", level=Qgis.Warning)
+                    log_message("무덤 회피: 수치지형도 레이어 미지정 → 회피 미적용", level=Qgis.MessageLevel.Warning)
                 elif grave_count <= 0:
                     log_message(
                         "무덤 회피: 조건에 맞는 무덤/분묘 피처 0건 → 회피 대상 없음(제외된 후보 없음). "
                         f"검색어 {_GRAVE_SEARCH_TERM_COUNT}종 기준: " + ", ".join(_grave_search_terms()),
-                        level=Qgis.Info,
+                        level=Qgis.MessageLevel.Info,
                     )
                 else:
-                    log_message(f"무덤 회피: 무덤/분묘 피처 {grave_count}건을 회피 대상으로 반영", level=Qgis.Info)
+                    log_message(f"무덤 회피: 무덤/분묘 피처 {grave_count}건을 회피 대상으로 반영", level=Qgis.MessageLevel.Info)
 
             ahp_min = None
             ahp_max = None
@@ -1434,7 +1421,7 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
                     ext = self._aoi_extent_in_raster_crs(aoi_geom, aoi_crs=aoi_layer.crs(), raster=ahp_layer)
                     stats = ahp_layer.dataProvider().bandStatistics(
                         1,
-                        QgsRasterBandStats.Min | QgsRasterBandStats.Max,
+                        RBS_MIN | RBS_MAX,
                         ext if ext is not None else ahp_layer.extent(),
                         0,
                     )
@@ -1475,7 +1462,7 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
             if excluded:
                 log_message(
                     "입력 미지정으로 가중치에서 제외 후 재정규화: " + ", ".join(excluded),
-                    level=Qgis.Info,
+                    level=Qgis.MessageLevel.Info,
                 )
 
             default_bearing = self._default_bearing_from_aoi(aoi_geom)
@@ -1513,7 +1500,7 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
                 log_message(
                     f"AOI가 넓어 후보 격자를 {orig_step:.1f}m→{grid_step:.1f}m로 확대하여 "
                     "AOI 전체를 잘림 없이 커버합니다.",
-                    level=Qgis.Info,
+                    level=Qgis.MessageLevel.Info,
                 )
             hard_cap = int(max(bbox_points * 2, max_eval * 4))
 
@@ -1679,7 +1666,7 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
                 log_message(
                     f"안전 상한({hard_cap} 반복)에 도달하여 스캔을 종료했습니다. "
                     "격자 간격을 넓히거나 AOI를 줄이면 전체를 커버할 수 있습니다.",
-                    level=Qgis.Warning,
+                    level=Qgis.MessageLevel.Warning,
                 )
 
             if not candidates:
@@ -1757,18 +1744,18 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
             t_pr = trench_layer.dataProvider()
             c_pr = center_layer.dataProvider()
             fields = [
-                QgsField("rank", QVariant.Int),
-                QgsField("pick_order", QVariant.Int),
-                QgsField("score", QVariant.Double),
-                QgsField("mode", QVariant.String),
-                QgsField("bearing_deg", QVariant.Double),
-                QgsField("inside_pct", QVariant.Double),
-                QgsField("slope_deg", QVariant.Double),
-                QgsField("slope_max_deg", QVariant.Double),
-                QgsField("ahp_val", QVariant.Double),
-                QgsField("ahp_score", QVariant.Double),
-                QgsField("ref_dist_m", QVariant.Double),
-                QgsField("ref_score", QVariant.Double),
+                QgsField("rank", FT_INT),
+                QgsField("pick_order", FT_INT),
+                QgsField("score", FT_DOUBLE),
+                QgsField("mode", FT_STRING),
+                QgsField("bearing_deg", FT_DOUBLE),
+                QgsField("inside_pct", FT_DOUBLE),
+                QgsField("slope_deg", FT_DOUBLE),
+                QgsField("slope_max_deg", FT_DOUBLE),
+                QgsField("ahp_val", FT_DOUBLE),
+                QgsField("ahp_score", FT_DOUBLE),
+                QgsField("ref_dist_m", FT_DOUBLE),
+                QgsField("ref_score", FT_DOUBLE),
             ]
             t_pr.addAttributes(fields)
             c_pr.addAttributes(fields)
@@ -1923,7 +1910,7 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
             log_message(
                 f"TrenchSuggestion done: selected={len(selected)} scanned={scanned} kept={kept} "
                 f"grave_matched={grave_count} truncated={truncated} run_id={run_id}",
-                level=Qgis.Info,
+                level=Qgis.MessageLevel.Info,
             )
             self.accept()
         except Exception as e:

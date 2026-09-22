@@ -46,3 +46,6 @@ hidden/**
 
 # QGIS writes its style database into the working directory when run headless
 symbology-style.db
+
+# plugin archives built by scripts/build_plugin_zip.py
+dist/
