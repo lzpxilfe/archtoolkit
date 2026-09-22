@@ -25,7 +25,7 @@ import re
 from qgis.PyQt import QtWidgets, uic
 from qgis.PyQt.QtWidgets import QMessageBox
 from qgis.PyQt.QtCore import Qt, QVariant
-from qgis.PyQt.QtGui import QColor, QIcon, QPainter, QPen
+from qgis.PyQt.QtGui import QColor, QPainter, QPen
 from qgis.core import (
     Qgis,
     QgsApplication,
@@ -84,6 +84,7 @@ from .cost_models import (
 from .live_log_dialog import ensure_live_log_dialog
 from .help_dialog import show_help_dialog
 from . import dialog_memory
+from .icons import icon as plugin_icon
 from .i18n import is_english_ui
 from .utils import split_qgis_source_path
 from .raster_io import inv_geotransform
@@ -1805,10 +1806,7 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
 
         # Window icon (uses plugin root icon file)
         try:
-            plugin_dir = os.path.dirname(os.path.dirname(__file__))
-            icon_path = os.path.join(plugin_dir, "cost_icon.png")
-            if os.path.exists(icon_path):
-                self.setWindowIcon(QIcon(icon_path))
+            self.setWindowIcon(plugin_icon("cost.png"))
         except Exception as _exc:
             log_swallowed("tools/cost_surface_dialog.py:1809 (__init__)", _exc)
 

@@ -16,7 +16,6 @@ from typing import List, Optional
 
 from qgis.PyQt import QtWidgets
 from qgis.PyQt.QtCore import QSettings, Qt
-from qgis.PyQt.QtGui import QIcon
 
 from qgis.core import QgsLayerTreeGroup, QgsMapLayerProxyModel, QgsProject, QgsRasterLayer, QgsVectorLayer
 from qgis.gui import QgsMapLayerComboBox  # noqa: F401 (needed for custom widget)
@@ -27,6 +26,7 @@ from . import ai_local_summarizer
 from .live_log_dialog import ensure_live_log_dialog
 from .help_dialog import show_help_dialog
 from . import dialog_memory
+from .icons import icon as plugin_icon
 from .utils import log_swallowed, log_message, push_message, restore_ui_focus
 
 
@@ -252,12 +252,7 @@ class AiAoiReportDialog(QtWidgets.QDialog):
     def _setup_ui(self):
         self.setWindowTitle("AI 조사요약 (AOI Report) - ArchToolkit")
         try:
-            plugin_dir = os.path.dirname(os.path.dirname(__file__))
-            for icon_name in ("AI.png", "ai.png", "icon.png"):
-                icon_path = os.path.join(plugin_dir, icon_name)
-                if os.path.exists(icon_path):
-                    self.setWindowIcon(QIcon(icon_path))
-                    break
+            self.setWindowIcon(plugin_icon("ai_report.png"))
         except Exception as _exc:
             log_swallowed("ai_report_dialog._setup_ui", _exc)
 

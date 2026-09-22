@@ -28,7 +28,7 @@ except Exception:  # pragma: no cover
 import processing
 from qgis.PyQt import QtWidgets
 from qgis.PyQt.QtCore import Qt, QTimer
-from qgis.PyQt.QtGui import QColor, QIcon
+from qgis.PyQt.QtGui import QColor
 from qgis.core import (
     QgsColorRampShader,
     QgsCoordinateTransform,
@@ -47,6 +47,7 @@ from qgis.gui import QgsMapLayerComboBox
 from .live_log_dialog import ensure_live_log_dialog
 from .help_dialog import show_help_dialog
 from . import dialog_memory
+from .icons import icon as plugin_icon
 from .i18n import is_english_ui
 from .utils import (
     log_swallowed,
@@ -674,12 +675,7 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
     def _setup_ui(self):
         self.setWindowTitle("AHP 입지적합도 (Suitability) - ArchToolkit")
         try:
-            plugin_dir = os.path.dirname(os.path.dirname(__file__))
-            for icon_name in ("AHP.png", "ahp.png", "icon.png"):
-                icon_path = os.path.join(plugin_dir, icon_name)
-                if os.path.exists(icon_path):
-                    self.setWindowIcon(QIcon(icon_path))
-                    break
+            self.setWindowIcon(plugin_icon("ahp.png"))
         except Exception as _exc:
             log_swallowed("ahp_suitability_dialog._setup_ui", _exc)
 

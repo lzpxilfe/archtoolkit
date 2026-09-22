@@ -25,7 +25,7 @@ class UiAssetTests(unittest.TestCase):
         self.assertEqual(findings, [], "emoji pictographs found: " + ", ".join(findings))
 
     def test_align_export_icon_is_a_small_limited_palette_xpm(self):
-        path = ROOT / "align_export_icon.xpm"
+        path = ROOT / "icons" / "align_export.xpm"
         text = path.read_text(encoding="ascii")
         quoted = re.findall(r'^"(.*)"[,]?$', text, re.MULTILINE)
         self.assertGreaterEqual(len(quoted), 1)
@@ -104,8 +104,8 @@ class UiAssetTests(unittest.TestCase):
 
     def test_align_export_action_uses_its_dedicated_icon(self):
         source = (ROOT / "arch_toolkit.py").read_text(encoding="utf-8")
-        self.assertIn("align_export_icon.xpm", source)
-        self.assertIn("QIcon(align_export_icon)", source)
+        self.assertIn("align_export.xpm", source)
+        self.assertIn('icon("align_export.xpm")', source)
 
 
 if __name__ == "__main__":

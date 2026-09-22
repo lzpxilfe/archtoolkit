@@ -6,7 +6,7 @@
 
 대상 기준: `agent/release-safety-foundation` 작업 트리
 
-관련 문서: `README.md`, `DEVELOPMENT.md`, `STABILITY.md`, `SMOKE_TEST.md`
+관련 문서: `README.md`, `DEVELOPMENT.md`, `docs/STABILITY.md`, `docs/SMOKE_TEST.md`
 
 ## 1. 문서 목적
 

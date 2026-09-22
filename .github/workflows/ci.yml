@@ -15,27 +15,12 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Unit tests (stdlib-only foundation)
-        run: |
-          python -m unittest tests.test_atomic_output -v
-          python -m unittest tests.test_raster_io -v
-          python -m unittest tests.test_gdal_outcome -v
-          python -m unittest tests.test_raster_grid_contract -v
-          python -m unittest tests.test_predictor_naming -v
-          python -m unittest tests.test_categorical_meta -v
-          python -m unittest tests.test_cost_budget -v
-          python -m unittest tests.test_cost_models -v
-          python -m unittest tests.test_network_metrics -v
-          python -m unittest tests.test_align_export_qgis -v
-          python -m unittest tests.test_release_identity -v
-          python -m unittest tests.test_ui_assets -v
+      - name: Install numpy (analysis cores) and linters
+        run: python -m pip install --upgrade numpy flake8 pyflakes
 
-      - name: Unit tests (numpy-backed analysis cores)
-        run: |
-          python -m pip install --upgrade numpy
-          python -m unittest tests.test_ahp_core -v
-          python -m unittest tests.test_terrain_math -v
-          python -m unittest tests.test_geochem_legend -v
+      # Every tests/test_*.py is discovered; QGIS-gated modules skip themselves.
+      - name: Unit tests (QGIS-free)
+        run: python -m unittest discover -s tests -p "test_*.py" -v
 
       - name: Release identity
         shell: bash
@@ -52,11 +37,7 @@ jobs:
             python scripts/check_release_identity.py
           fi
 
-      - name: Install linters
-        run: python -m pip install --upgrade flake8 pyflakes
-
       # Blocking set: syntax errors (E9) and undefined names (F82).
-      # This is exactly what would have caught the missing helper module.
       - name: flake8 (blocking - syntax + undefined names)
         run: flake8 --select=E9,F63,F7,F82 --show-source .
 
@@ -67,3 +48,20 @@ jobs:
 
       - name: Static smoke test
         run: python tests/check_static.py
+
+  qgis-tests:
+    # The QGIS-gated tests (align/export warps, dialog memory, layer tree) run
+    # for real inside the official QGIS image, headless.
+    runs-on: ubuntu-latest
+    container:
+      image: qgis/qgis:release-3_34
+    env:
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Unit tests under the QGIS Python
+        run: |
+          python3 --version
+          python3 -c "from qgis.core import Qgis; print('QGIS', Qgis.QGIS_VERSION)"
+          python3 -m unittest discover -s tests -p "test_*.py" -v

@@ -57,6 +57,7 @@ from .utils import (
 from .live_log_dialog import ensure_live_log_dialog
 from .help_dialog import show_help_dialog
 from . import dialog_memory
+from .icons import icon as plugin_icon
 from .i18n import is_english_ui
 from .utils import split_qgis_source_path
 from .raster_io import inv_geotransform
@@ -80,6 +81,10 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         super(ViewshedDialog, self).__init__(parent)
         # Remember the last-used inputs between sessions (tools/dialog_memory.py).
         dialog_memory.attach(self, "viewshed")
+        try:
+            self.setWindowIcon(plugin_icon("viewshed.png"))
+        except Exception as _exc:
+            log_swallowed("viewshed_dialog.__init__ (icon)", _exc)
         self.setupUi(self)
         self.iface = iface
         self.canvas = iface.mapCanvas()

@@ -44,7 +44,6 @@ except Exception:  # pragma: no cover
 
 from qgis.PyQt import QtWidgets
 from qgis.PyQt.QtCore import Qt
-from qgis.PyQt.QtGui import QIcon
 from qgis.core import (
     QgsCoordinateTransform,
     QgsPointXY,
@@ -56,6 +55,7 @@ from qgis.core import (
 
 from .help_dialog import show_help_dialog
 from . import dialog_memory
+from .icons import icon as plugin_icon
 from .aoi_extent import resolve_aoi_extent
 from .utils import (
     log_swallowed,
@@ -138,12 +138,7 @@ class CovariateReportDialog(QtWidgets.QDialog):
     def _setup_ui(self):
         self.setWindowTitle("변수 상관/다중공선성 리포트 (Correlation & VIF)")
         try:
-            plugin_dir = os.path.dirname(os.path.dirname(__file__))
-            for name in ("terrain_icon.png", "icon.png"):
-                p = os.path.join(plugin_dir, name)
-                if os.path.exists(p):
-                    self.setWindowIcon(QIcon(p))
-                    break
+            self.setWindowIcon(plugin_icon("terrain.png"))
         except Exception as _exc:
             log_swallowed("covariate_report_dialog._setup_ui", _exc)
 

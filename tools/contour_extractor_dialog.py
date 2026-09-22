@@ -27,6 +27,7 @@ from .utils import log_swallowed, push_message, set_archtoolkit_layer_metadata
 from .live_log_dialog import ensure_live_log_dialog
 from .help_dialog import show_help_dialog
 from . import dialog_memory
+from .icons import icon as plugin_icon
 
 # Load the UI file
 FORM_CLASS, _ = uic.loadUiType(os.path.join(
@@ -46,6 +47,10 @@ class ContourExtractorDialog(QtWidgets.QDialog, FORM_CLASS):
         super(ContourExtractorDialog, self).__init__(parent)
         # Remember the last-used inputs between sessions (tools/dialog_memory.py).
         dialog_memory.attach(self, "contour_extractor")
+        try:
+            self.setWindowIcon(plugin_icon("contour.png"))
+        except Exception as _exc:
+            log_swallowed("contour_extractor_dialog.__init__ (icon)", _exc)
         self.setupUi(self)
         self.iface = iface
         

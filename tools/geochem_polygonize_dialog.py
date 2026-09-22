@@ -41,7 +41,7 @@ from osgeo import gdal, ogr, osr
 import processing
 from qgis.PyQt import QtWidgets
 from qgis.PyQt.QtCore import QVariant
-from qgis.PyQt.QtGui import QColor, QIcon, QImage
+from qgis.PyQt.QtGui import QColor, QImage
 from qgis.core import (
     Qgis,
     QgsCategorizedSymbolRenderer,
@@ -77,6 +77,7 @@ from .atomic_output import (
 from .live_log_dialog import ensure_live_log_dialog
 from .help_dialog import show_help_dialog
 from . import dialog_memory
+from .icons import icon as plugin_icon
 from .i18n import get_output_group_name
 from .geochem_legend import (
     LegendCsvError,
@@ -500,16 +501,7 @@ class GeoChemPolygonizeDialog(QtWidgets.QDialog):
         self.setWindowTitle("지구화학도 래스터 수치화 (GeoChem WMS → Raster) - ArchToolkit")
 
         try:
-            plugin_dir = os.path.dirname(os.path.dirname(__file__))
-            icon_candidates = [
-                os.path.join(plugin_dir, "tools", "geochem.png"),
-                os.path.join(plugin_dir, "geochem.png"),
-                os.path.join(plugin_dir, "terrain_icon.png"),
-            ]
-            for p in icon_candidates:
-                if os.path.exists(p):
-                    self.setWindowIcon(QIcon(p))
-                    break
+            self.setWindowIcon(plugin_icon("geochem.png"))
         except Exception as _exc:
             log_swallowed("geochem_polygonize_dialog.__init__", _exc)
 

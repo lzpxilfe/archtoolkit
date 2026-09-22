@@ -85,7 +85,37 @@ class FakeIface:
         return self._canvas
 
     def mainWindow(self):
-        return None
+        from qgis.PyQt import QtWidgets
+        if not hasattr(self, "_mw"):
+            self._mw = QtWidgets.QMainWindow()
+        return self._mw
+
+    # Menu / toolbar registration used by ArchToolkit.initGui and unload.
+    def addPluginToMenu(self, name, action):
+        self.menus = getattr(self, "menus", {})
+        self.menus.setdefault(name, []).append(action)
+
+    def removePluginMenu(self, name, action):
+        try:
+            self.menus.get(name, []).remove(action)
+        except (AttributeError, ValueError):
+            pass
+
+    def addToolBar(self, name):
+        from qgis.PyQt import QtWidgets
+        tb = QtWidgets.QToolBar(name, self.mainWindow())
+        self.mainWindow().addToolBar(tb)
+        return tb
+
+    def addToolBarIcon(self, action):
+        self.toolbar_actions = getattr(self, "toolbar_actions", [])
+        self.toolbar_actions.append(action)
+
+    def removeToolBarIcon(self, action):
+        try:
+            self.toolbar_actions.remove(action)
+        except (AttributeError, ValueError):
+            pass
 
     def layerTreeView(self):
         return None

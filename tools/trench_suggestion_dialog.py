@@ -13,7 +13,6 @@ from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from qgis.PyQt import QtWidgets
 from qgis.PyQt.QtCore import QVariant
-from qgis.PyQt.QtGui import QIcon
 from qgis.core import (
     Qgis,
     QgsCoordinateTransform,
@@ -42,6 +41,7 @@ import processing
 
 from .help_dialog import show_help_dialog
 from . import dialog_memory
+from .icons import icon as plugin_icon
 from .live_log_dialog import ensure_live_log_dialog
 from .utils import (
     is_null_value,
@@ -404,15 +404,7 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
     def _setup_ui(self):
         self.setWindowTitle("트렌치 후보 제안 (Trench Suggestion) - ArchToolkit")
         try:
-            plugin_dir = os.path.dirname(os.path.dirname(__file__))
-            icon_path = None
-            for icon_name in ("trench.png", "terrain_icon.png", "icon.png"):
-                p = os.path.join(plugin_dir, icon_name)
-                if os.path.exists(p):
-                    icon_path = p
-                    break
-            if icon_path:
-                self.setWindowIcon(QIcon(icon_path))
+            self.setWindowIcon(plugin_icon("trench.png", "terrain.png"))
         except Exception as _exc:
             log_swallowed("trench_suggestion_dialog._setup_ui", _exc)
 

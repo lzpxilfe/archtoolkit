@@ -25,7 +25,6 @@ from typing import Iterable, List, Optional, Tuple
 
 from qgis.PyQt import QtWidgets
 from qgis.PyQt.QtCore import Qt, QVariant
-from qgis.PyQt.QtGui import QIcon
 from qgis.core import (
     Qgis,
     QgsCoordinateTransform,
@@ -47,6 +46,7 @@ from .utils import log_swallowed, log_message, push_message, restore_ui_focus
 from .utils import set_archtoolkit_layer_metadata
 from .help_dialog import show_help_dialog
 from . import dialog_memory
+from .icons import icon as plugin_icon
 from .i18n import is_english_ui
 
 
@@ -143,15 +143,7 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
     def _setup_ui(self):
         self.setWindowTitle("지적도 중첩 면적표 (Cadastral Overlap) - ArchToolkit")
         try:
-            plugin_dir = os.path.dirname(os.path.dirname(__file__))
-            icon_path = None
-            for icon_name in ("jijuk.png", "jijuk.jpg", "jijuk.jpeg", "icon.png"):
-                p = os.path.join(plugin_dir, icon_name)
-                if os.path.exists(p):
-                    icon_path = p
-                    break
-            if icon_path and os.path.exists(icon_path):
-                self.setWindowIcon(QIcon(icon_path))
+            self.setWindowIcon(plugin_icon("cadastral.png"))
         except Exception as _exc:
             log_swallowed("cadastral_overlap_dialog._setup_ui", _exc)
 

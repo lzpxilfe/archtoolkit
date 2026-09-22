@@ -51,6 +51,7 @@ from . import cost_budget
 from .live_log_dialog import ensure_live_log_dialog
 from .help_dialog import show_help_dialog
 from . import dialog_memory
+from .icons import icon as plugin_icon
 
 # This tool uses QGIS built-in GDAL processing algorithms. The curvature
 # analysis additionally uses NumPy + GDAL (both ship with QGIS - no extra
@@ -156,6 +157,10 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
         super(TerrainAnalysisDialog, self).__init__(parent)
         # Remember the last-used inputs between sessions (tools/dialog_memory.py).
         dialog_memory.attach(self, "terrain_analysis")
+        try:
+            self.setWindowIcon(plugin_icon("terrain.png"))
+        except Exception as _exc:
+            log_swallowed("terrain_analysis_dialog.__init__ (icon)", _exc)
         self.setupUi(self)
         self.iface = iface
         

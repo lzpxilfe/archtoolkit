@@ -49,6 +49,7 @@ from .utils import (
 )
 from .help_dialog import show_help_dialog
 from . import dialog_memory
+from .icons import icon as plugin_icon
 
 FORM_CLASS, _ = uic.loadUiType(os.path.join(
     os.path.dirname(__file__), 'map_styling_dialog_base.ui'))
@@ -94,6 +95,10 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
         super(MapStylingDialog, self).__init__(parent)
         # Remember the last-used inputs between sessions (tools/dialog_memory.py).
         dialog_memory.attach(self, "map_styling")
+        try:
+            self.setWindowIcon(plugin_icon("styling.png"))
+        except Exception as _exc:
+            log_swallowed("map_styling_dialog.__init__ (icon)", _exc)
         self.setupUi(self)
         self.iface = iface
         self._style_run_id = None

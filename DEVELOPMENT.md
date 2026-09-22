@@ -5,19 +5,19 @@
 ArchToolkit은 **기본 QGIS 설치만으로 완전히 동작**해야 합니다.
 
 ### 사용 가능한 도구
-- ✅ **GDAL 알고리즘** (`gdal:slope`, `gdal:aspect`, `gdal:rastercalculator` 등)
-- ✅ **QGIS Native 알고리즘** (`native:mergevectorlayers`, `native:buffer` 등)
-- ✅ **PyQt/Qt 기본 라이브러리**
-- ✅ **Python 표준 라이브러리** (os, tempfile, json 등)
-- ✅ **QGIS Core/GUI 라이브러리**
+- **GDAL 알고리즘** (`gdal:slope`, `gdal:aspect`, `gdal:rastercalculator` 등)
+- **QGIS Native 알고리즘** (`native:mergevectorlayers`, `native:buffer` 등)
+- **PyQt/Qt 기본 라이브러리**
+- **Python 표준 라이브러리** (os, tempfile, json 등)
+- **QGIS Core/GUI 라이브러리**
 
 ### 사용 금지
-- ❌ GRASS GIS 알고리즘 (`grass7:*`)
-- ❌ SAGA GIS 알고리즘 (`saga:*`)
-- ❌ WhiteboxTools
-- ❌ 별도 설치가 필요한 외부 Python 패키지 (예: pandas, matplotlib 등)
-- ✅ 단, QGIS 배포판에 기본 포함된 패키지(예: numpy)는 허용(추가 설치 불필요) — 사용 시 README/metadata에 의존성 명시
-- ❌ 별도 설치가 필요한 모든 의존성
+- (금지) GRASS GIS 알고리즘 (`grass7:*`)
+- (금지) SAGA GIS 알고리즘 (`saga:*`)
+- (금지) WhiteboxTools
+- (금지) 별도 설치가 필요한 외부 Python 패키지 (예: pandas, matplotlib 등)
+- 단, QGIS 배포판에 기본 포함된 패키지(예: numpy)는 허용(추가 설치 불필요) — 사용 시 README/metadata에 의존성 명시
+- (금지) 별도 설치가 필요한 모든 의존성
 
 ### 복잡한 분석 구현 방법
 외부 도구가 필요한 기능은 다음 방법으로 대체:
@@ -64,53 +64,63 @@ ArchToolkit은 **기본 QGIS 설치만으로 완전히 동작**해야 합니다.
 ### 실행
 
 ```bash
-# 개별 스위트
-python -m unittest tests.test_ahp_core -v
-# numpy가 필요한 스위트(ahp_core, terrain_math)는 numpy만 있으면 됩니다.
-# 정적 스모크 검사(상대 import 해석 + 구문)
+# QGIS 없이: 순수 코어 테스트 전체(QGIS 의존 테스트는 자동 스킵) + 정적 검사
+python -m unittest discover -s tests -p "test_*.py"
 python tests/check_static.py
+
+# QGIS Python으로: QGIS 의존 테스트까지 전부 (Ubuntu 24.04 기준 /usr/bin/python3, 화면 없이)
+QT_QPA_PLATFORM=offscreen /usr/bin/python3 -m unittest discover -s tests -p "test_*.py"
+
+# 릴리스 정합성(버전 배지·CITATION·태그), flake8 차단 규칙
+python scripts/check_release_identity.py
+flake8 --select=E9,F63,F7,F82 .
 ```
 
-CI(`.github/workflows/ci.yml`)가 위 스위트 전체와 정적 검사, blocking flake8
-(`E9,F63,F7,F82`), 릴리스 정합성을 매 push마다 실행합니다.
+CI(`.github/workflows/ci.yml`)는 push마다 위 순수 테스트·정적 검사·flake8 차단 규칙·릴리스 정합성을 돌리고,
+`qgis/qgis` 컨테이너에서 QGIS 의존 테스트를 실행합니다. 새 테스트 파일은 `tests/test_*.py`로 두면 자동 수집됩니다.
+
+### 수정 전후 회귀 비교
+
+동작을 바꾸는 수정을 했다면 `tests/regression/`의 하네스로 이전 커밋과 결과를 비교하십시오
+(실제 QGIS를 화면 없이 띄워 19개 도구를 합성 데이터로 실행, 시나리오 27개, 체크아웃당 약 20초).
+사용법은 `tests/regression/README.md`, 2026-09 라운드의 결과는 `docs/REGRESSION_REPORT.md`에 있습니다.
+달라진 수치가 전부 의도한 것인지 설명할 수 있어야 합니다.
+
+### 게이트 (테스트가 강제하는 규칙)
+
+| 규칙 | 검사 |
+| --- | --- |
+| `tools/*.py`, `*.ui`, README에 이모지 금지 | `tests/test_ui_assets.py` |
+| 맨 `except: pass` / `except: continue` 금지 (log_swallowed 사용) | `tests/test_ui_assets.py` |
+| 버전 삼중(metadata.txt · README 배지 · CITATION.cff) 일치 | `tests/test_release_identity.py` |
+| 도움말의 학술 근거 노트가 REFERENCES.md와 일치 | `tests/test_scholar_notes.py` |
+| 상대 import·구문 오류 없음 | `tests/check_static.py` |
 
 ### 기여 규칙
 - 예외를 삼키고 계속 진행할 때는 `except Exception as _exc: log_swallowed("module.func", _exc)`를 쓰세요. **맨 `pass`와 `continue`는 금지입니다** — QGIS 플러그인 디렉터리의 Bandit 보안 스캔(B110/B112)이 맨 형태를 발견하면 플러그인 자체를 차단하고, 계산·레이어·파일 작업이 조용히 실패하면 틀린 결과가 보고서까지 흔적 없이 흘러갑니다. `[swallowed]` 접두어로 로그에서 걸러볼 수 있어야 합니다. 순수 모듈(`qgis` import 없음)은 `tools/swallow_log.py`를, 그 외는 `tools/utils.py`의 `log_swallowed`를 쓰세요. 로깅 싱크(`utils._write_log_line`·`_queue_ui_log`·`log_swallowed`)의 예외 처리는 `return` 터미널로 두어 재귀를 막습니다. `tests/test_ui_assets.py`가 이 규칙을 회귀 검사합니다.
 - 같은 헬퍼를 두 모듈에 복사하지 마세요. 본문이 같아도 한쪽만 고쳐지는 순간 버그가 됩니다(`is_categorical_raster_meta`가 그렇게 몇 년을 틀려 있었습니다). `utils.py`/`raster_io.py`에 두고 import하세요.
 - 새 수치 로직은 **먼저 QGIS 비의존 함수로** 작성하고 단위 테스트를 추가한 뒤,
   대화상자에서 호출하세요(가능하면 별칭 import로 호출부를 유지).
-- 새 테스트 파일을 만들면 **`ci.yml`의 unittest 목록에 반드시 추가**하세요
-  (CI는 자동 검색이 아니라 명시 나열 방식입니다).
+- 새 테스트 파일은 `tests/test_*.py`로 두면 CI가 자동 수집합니다. QGIS가 필요한 테스트는 import 실패 시 `skipTest`로 건너뛰게 작성하세요(`tests/test_align_export_qgis.py` 참고).
 
 ---
 
 ## 학술적 출처 표시 원칙
 
-ArchToolkit은 **도구 모음집**입니다. 우리는 톱과 망치, 가위를 정리해두는 도구상자를 만드는 것이지, 톱과 망치를 발명한 사람이 아닙니다.
+ArchToolkit은 **도구 모음집**입니다. 톱과 망치를 정리해 두는 도구상자를 만드는 것이지, 톱과 망치를 발명한 사람이 아닙니다.
 
 ### 반드시 지켜야 할 것
-- ✅ 알고리즘 원저자 인용 (예: `Weiss 2001`, `Riley 1999`, `Tobler 1993`)
-- ✅ 분류 체계의 출처 명시 (한국표준, 학술 논문 등)
-- ✅ UI에 저자명 표시 (체크박스, 레이어 이름 등)
-- ✅ 코드 주석에 참고문헌 기재
+- 알고리즘·수식의 원저자를 인용합니다. 서지는 `REFERENCES.md`에 (A) 호출 알고리즘 / (B) 직접 구현 / (C) 맥락 참고로 구분해 적습니다.
+- 새 인용은 **Crossref 등 1차 출처로 실재를 확인한 뒤** 추가합니다. 제목·연도·권호를 기억에 의존해 적지 마십시오(2026-09 감사에서 실재 문헌에 저자가 출판하지 않은 주장을 붙인 사례 9건을 정정했습니다).
+- 플러그인이 정한 것(등급 구간, 기본값, 휴리스틱)은 **"플러그인 정의"라고 명시**합니다. 저자 이름을 붙이지 마십시오.
+- 도구의 도움말은 `tools/scholar_notes.py`의 노트로 끝납니다. 새 도구를 추가하면 노트를 함께 추가하고, 노트의 서지 키는 `REFERENCES.md`에 있어야 합니다(`tests/test_scholar_notes.py`).
+- 결과 레이어에는 `set_archtoolkit_layer_metadata`로 실행 파라미터를 기록합니다.
+- 입력이 조용히 버려지거나 결과가 비는 경로에는 경고나 로그를 둡니다. 실패를 "완료"로 보고하지 않습니다.
 
 ### 왜 중요한가?
-1. **학술적 정당성**: 연구자들의 노력을 존중
-2. **신뢰성**: 사용자가 방법론의 근거를 알 수 있음
-3. **지식 공유**: "지식은 전유물이 아니다"
-4. **재현가능성**: 동일한 방법론을 다른 도구로도 구현 가능
-
-### 예시
-```python
-# TPI (Topographic Position Index)
-# Weiss, A. D. (2001). Topographic Position and Landforms Analysis.
-# ESRI International User Conference, San Diego, CA.
-```
-
-```
-☑ 경사도 분류 - Tobler(1993) 보행속도 기반
-```
+1. 연구자의 노력을 존중하고, 사용자가 방법의 근거와 한계를 알 수 있어야 합니다.
+2. 같은 방법을 다른 도구로도 재현할 수 있어야 합니다.
+3. "지식은 전유물이 아닙니다."
 
 ---
 *"지식은 전유물이 아닙니다"*
-

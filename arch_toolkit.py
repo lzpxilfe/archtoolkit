@@ -15,10 +15,10 @@
 #
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
-from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import QAction, QMenu, QToolButton, QMessageBox
 
 from .tools.utils import log_exception, log_swallowed, start_ui_log_pump, stop_ui_log_pump
+from .tools.icons import MAIN_ICON, icon
 import os.path
 
 class ArchToolkit:
@@ -43,203 +43,68 @@ class ArchToolkit:
             except Exception as _exc:
                 log_swallowed("arch_toolkit.py:43 (initGui)", _exc)
 
-            plugin_dir = os.path.dirname(__file__)
-            
-            # 1. Create Actions for all tools
-            
-            # DEM Generation
-            dem_icon = os.path.join(plugin_dir, 'dem_icon.png')
-            self.dem_action = QAction(QIcon(dem_icon), u"DEM 생성 (Generate DEM)", self.iface.mainWindow())
+            # 1. Create Actions for all tools (icons: tools/icons.py -> icons/)
+            mw = self.iface.mainWindow()
+
+            self.dem_action = QAction(icon("dem.png"), u"DEM 생성 (Generate DEM)", mw)
             self.dem_action.triggered.connect(self.run_dem_tool)
-            
-            # Contour Extraction
-            contour_icon = os.path.join(plugin_dir, 'contour_icon.png')
-            self.contour_action = QAction(QIcon(contour_icon), u"등고선 추출 (Extract Contours)", self.iface.mainWindow())
+
+            self.contour_action = QAction(icon("contour.png"), u"등고선 추출 (Extract Contours)", mw)
             self.contour_action.triggered.connect(self.run_contour_tool)
 
-            # Cadastral overlap table (Survey area vs Parcels)
-            cad_icon = None
-            for icon_name in ("jijuk.png", "jijuk.jpg", "jijuk.jpeg", "style_icon.png"):
-                icon_path = os.path.join(plugin_dir, icon_name)
-                if os.path.exists(icon_path):
-                    cad_icon = icon_path
-                    break
-            self.cad_overlap_action = QAction(
-                QIcon(cad_icon or ""),
-                u"지적도 중첩 면적표 (Cadastral Overlap)",
-                self.iface.mainWindow(),
-            )
+            self.cad_overlap_action = QAction(icon("cadastral.png"), u"지적도 중첩 면적표 (Cadastral Overlap)", mw)
             self.cad_overlap_action.triggered.connect(self.run_cadastral_overlap_tool)
-            
-            # Terrain Analysis
-            terrain_icon = os.path.join(plugin_dir, 'terrain_icon.png')
-            self.terrain_action = QAction(QIcon(terrain_icon), u"지형 분석 (Terrain Analysis)", self.iface.mainWindow())
+
+            self.terrain_action = QAction(icon("terrain.png"), u"지형 분석 (Terrain Analysis)", mw)
             self.terrain_action.triggered.connect(self.run_terrain_tool)
 
-            # Align & Export Analysis Stack (compose existing analysis outputs for modelling)
-            align_export_icon = os.path.join(plugin_dir, 'align_export_icon.xpm')
-            self.align_export_action = QAction(
-                QIcon(align_export_icon),
-                u"분석 결과 정렬/내보내기 (Align & Export Stack)",
-                self.iface.mainWindow(),
-            )
+            self.align_export_action = QAction(icon("align_export.xpm"), u"분석 결과 정렬/내보내기 (Align & Export Stack)", mw)
             self.align_export_action.triggered.connect(self.run_align_export_tool)
 
-            # Covariate correlation / VIF report (multicollinearity check)
-            self.cov_report_action = QAction(
-                QIcon(terrain_icon),
-                u"변수 상관/VIF 리포트 (Correlation & VIF)",
-                self.iface.mainWindow(),
-            )
+            self.cov_report_action = QAction(icon("terrain.png"), u"변수 상관/VIF 리포트 (Correlation & VIF)", mw)
             self.cov_report_action.triggered.connect(self.run_cov_report_tool)
 
-            # Distance to features (distance to water / sites / roads).
-            # The most widely used predictor family in archaeological modelling,
-            # and the one thing this toolkit could not produce.
-            dist_icon = None
-            for icon_name in ("cost_icon.png", "terrain_icon.png", "icon.png"):
-                icon_path = os.path.join(plugin_dir, icon_name)
-                if os.path.exists(icon_path):
-                    dist_icon = icon_path
-                    break
-            self.distance_action = QAction(
-                QIcon(dist_icon or ""),
-                u"거리 래스터 (Distance to Features)",
-                self.iface.mainWindow(),
-            )
+            # Distance to features: the most widely used predictor family in
+            # archaeological modelling.
+            self.distance_action = QAction(icon("cost.png"), u"거리 래스터 (Distance to Features)", mw)
             self.distance_action.triggered.connect(self.run_distance_raster_tool)
 
-            # AHP Suitability (Multi-criteria)
-            ahp_icon = None
-            for icon_name in ("AHP.png", "ahp.png", "terrain_icon.png"):
-                icon_path = os.path.join(plugin_dir, icon_name)
-                if os.path.exists(icon_path):
-                    ahp_icon = icon_path
-                    break
-            self.ahp_action = QAction(
-                QIcon(ahp_icon or terrain_icon),
-                u"AHP 입지적합도 (AHP Suitability)",
-                self.iface.mainWindow(),
-            )
+            self.ahp_action = QAction(icon("ahp.png"), u"AHP 입지적합도 (AHP Suitability)", mw)
             self.ahp_action.triggered.connect(self.run_ahp_tool)
 
-            # GeoChem (WMS RGB -> value/class rasters, optional polygons)
-            geochem_icon = None
-            for icon_path in (
-                os.path.join(plugin_dir, "tools", "geochem.png"),
-                os.path.join(plugin_dir, "geochem.png"),
-                os.path.join(plugin_dir, "terrain_icon.png"),
-            ):
-                if os.path.exists(icon_path):
-                    geochem_icon = icon_path
-                    break
-            self.geochem_action = QAction(
-                QIcon(geochem_icon or ""),
-                u"지구화학도 래스터 수치화 (GeoChem WMS → Raster)",
-                self.iface.mainWindow(),
-            )
+            self.geochem_action = QAction(icon("geochem.png"), u"지구화학도 래스터 수치화 (GeoChem WMS → Raster)", mw)
             self.geochem_action.triggered.connect(self.run_geochem_tool)
 
-            # KIGAM 1:50,000 geology map ZIP loader + rasterize
-            self.geology_zip_action = QAction(
-                QIcon(geochem_icon or ""),
-                u"지질도 도엽 ZIP 불러오기/래스터 변환 (KIGAM)",
-                self.iface.mainWindow(),
-            )
+            self.geology_zip_action = QAction(icon("geochem.png"), u"지질도 도엽 ZIP 불러오기/래스터 변환 (KIGAM)", mw)
             self.geology_zip_action.triggered.connect(self.run_geology_zip_tool)
 
-            # AI AOI Report (Local/Gemini)
-            ai_icon = None
-            for icon_name in ("AI.png", "ai.png", "icon.png", "terrain_icon.png", "style_icon.png"):
-                icon_path = os.path.join(plugin_dir, icon_name)
-                if os.path.exists(icon_path):
-                    ai_icon = icon_path
-                    break
-            self.ai_report_action = QAction(
-                QIcon(ai_icon or ""),
-                u"AI 조사요약 (AOI Report)",
-                self.iface.mainWindow(),
-            )
+            self.ai_report_action = QAction(icon("ai_report.png"), u"AI 조사요약 (AOI Report)", mw)
             self.ai_report_action.triggered.connect(self.run_ai_report_tool)
-             
-            # Terrain Profile
-            profile_icon = os.path.join(plugin_dir, 'profile_icon.png')
-            self.profile_action = QAction(QIcon(profile_icon), u"지형 단면 (Terrain Profile)", self.iface.mainWindow())
+
+            self.profile_action = QAction(icon("profile.png"), u"지형 단면 (Terrain Profile)", mw)
             self.profile_action.triggered.connect(self.run_profile_tool)
 
-            # 비용표면/최소비용경로 (Cost Surface / LCP)
-            cost_icon = os.path.join(plugin_dir, 'cost_icon.png')
-            self.cost_action = QAction(QIcon(cost_icon), u"비용표면/최소비용경로 (Cost Surface / LCP)", self.iface.mainWindow())
+            self.cost_action = QAction(icon("cost.png"), u"비용표면/최소비용경로 (Cost Surface / LCP)", mw)
             self.cost_action.triggered.connect(self.run_cost_tool)
 
-            # 최소비용 네트워크 (Least-cost Network)
-            network_icon = None
-            for icon_name in ("network_icon.png", "network_icon.jpg", "network_icon.jpeg"):
-                icon_path = os.path.join(plugin_dir, icon_name)
-                if os.path.exists(icon_path):
-                    network_icon = icon_path
-                    break
-            self.network_action = QAction(
-                QIcon(network_icon or cost_icon),
-                u"최소비용 네트워크 (Least-cost Network)",
-                self.iface.mainWindow(),
-            )
+            self.network_action = QAction(icon("network.png", "cost.png"), u"최소비용 네트워크 (Least-cost Network)", mw)
             self.network_action.triggered.connect(self.run_network_tool)
 
-            # Spatial / Visibility Network (PPA / LOS)
-            spatial_network_icon = None
-            for icon_name in (
-                "spatial_network.png",
-                "spatial_network.jpg",
-                "spatial_network.jpeg",
-                "network_visibility.png",
-                "network_visibility.jpg",
-                "network_visibility.jpeg",
-            ):
-                icon_path = os.path.join(plugin_dir, icon_name)
-                if os.path.exists(icon_path):
-                    spatial_network_icon = icon_path
-                    break
             self.spatial_network_action = QAction(
-                QIcon(spatial_network_icon or network_icon or cost_icon),
-                u"근접/가시성 네트워크 (PPA / Visibility)",
-                self.iface.mainWindow(),
+                icon("spatial_network.png", "network.png"), u"근접/가시성 네트워크 (PPA / Visibility)", mw
             )
             self.spatial_network_action.triggered.connect(self.run_spatial_network_tool)
 
-            # Map Styling
-            style_icon = os.path.join(plugin_dir, 'style_icon.png')
-            self.style_action = QAction(QIcon(style_icon), u"도면 시각화 (Map Styling)", self.iface.mainWindow())
+            self.style_action = QAction(icon("styling.png"), u"도면 시각화 (Map Styling)", mw)
             self.style_action.triggered.connect(self.run_styling_tool)
 
-            # Slope/Aspect Drafting (Cartographic)
-            drafting_icon = None
-            for icon_name in ("slope_aspect.png",):
-                icon_path = os.path.join(plugin_dir, icon_name)
-                if os.path.exists(icon_path):
-                    drafting_icon = icon_path
-                    break
-            self.drafting_action = QAction(
-                QIcon(drafting_icon or style_icon),
-                u"경사도/사면방향 도면화 (Slope/Aspect Drafting)",
-                self.iface.mainWindow(),
-            )
+            self.drafting_action = QAction(icon("slope_aspect.png", "styling.png"), u"경사도/사면방향 도면화 (Slope/Aspect Drafting)", mw)
             self.drafting_action.triggered.connect(self.run_drafting_tool)
 
-            # Trench suggestion (survey planning assistant)
-            trench_icon = os.path.join(plugin_dir, "trench.png")
-            if not os.path.exists(trench_icon):
-                trench_icon = os.path.join(plugin_dir, "icon.png")
-            self.trench_action = QAction(
-                QIcon(trench_icon),
-                u"트렌치 후보 제안 (Trench Suggestion)",
-                self.iface.mainWindow(),
-            )
+            self.trench_action = QAction(icon("trench.png"), u"트렌치 후보 제안 (Trench Suggestion)", mw)
             self.trench_action.triggered.connect(self.run_trench_tool)
 
-            # Viewshed Analysis
-            viewshed_icon = os.path.join(plugin_dir, 'viewshed_icon.png')
-            self.viewshed_action = QAction(QIcon(viewshed_icon), u"가시권 분석 (Viewshed Analysis)", self.iface.mainWindow())
+            self.viewshed_action = QAction(icon("viewshed.png"), u"가시권 분석 (Viewshed Analysis)", mw)
             self.viewshed_action.triggered.connect(self.run_viewshed_tool)
 
             # Track actions BEFORE any menu/toolbar registration: if a later
@@ -283,14 +148,14 @@ class ArchToolkit:
             self.toolbar.setObjectName("ArchToolkit")
 
             # 4. Create Unified Toolkit Button
-            main_icon_path = os.path.join(plugin_dir, 'icon.png')
-            self.main_action = QAction(QIcon(main_icon_path), u"ArchToolkit", self.iface.mainWindow())
+            main_icon = icon(MAIN_ICON)
+            self.main_action = QAction(main_icon, u"ArchToolkit", self.iface.mainWindow())
             
             # Create Dropdown Menu
             self.tool_menu = QMenu(self.iface.mainWindow())
             # Title header so the dropdown clearly reads "ArchToolkit" at the top
             # (a disabled action renders as a non-clickable heading on all styles).
-            self.menu_title_action = self.tool_menu.addAction(QIcon(main_icon_path), u"ArchToolkit")
+            self.menu_title_action = self.tool_menu.addAction(main_icon, u"ArchToolkit")
             self.menu_title_action.setEnabled(False)
             try:
                 title_font = self.menu_title_action.font()

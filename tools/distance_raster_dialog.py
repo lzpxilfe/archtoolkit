@@ -44,7 +44,6 @@ import os
 import tempfile
 
 from qgis.PyQt import QtWidgets
-from qgis.PyQt.QtGui import QIcon
 from qgis.core import (
     Qgis,
     QgsCoordinateReferenceSystem,
@@ -61,6 +60,7 @@ import processing
 
 from .help_dialog import show_help_dialog
 from . import dialog_memory
+from .icons import icon as plugin_icon
 from .live_log_dialog import ensure_live_log_dialog
 from .predictor_naming import distance_variable_key, sanitize_key
 from .utils import (
@@ -92,12 +92,7 @@ class DistanceRasterDialog(QtWidgets.QDialog):
     def _setup_ui(self):
         self.setWindowTitle("거리 래스터 (Distance to Features)")
         try:
-            plugin_dir = os.path.dirname(os.path.dirname(__file__))
-            for name in ("cost_icon.png", "terrain_icon.png", "icon.png"):
-                path = os.path.join(plugin_dir, name)
-                if os.path.exists(path):
-                    self.setWindowIcon(QIcon(path))
-                    break
+            self.setWindowIcon(plugin_icon("cost.png"))
         except Exception as _exc:
             log_swallowed("distance_raster_dialog._setup_ui", _exc)
 

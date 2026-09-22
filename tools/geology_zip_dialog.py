@@ -42,6 +42,7 @@ from qgis.core import (
 
 from .help_dialog import show_help_dialog
 from . import dialog_memory
+from .icons import icon as plugin_icon
 from .i18n import get_output_group_name, get_plugin_config_value
 from .live_log_dialog import ensure_live_log_dialog
 from .utils import (
@@ -704,6 +705,10 @@ class GeologyZipDialog(QtWidgets.QDialog):
         super().__init__(parent)
         # Remember the last-used inputs between sessions (tools/dialog_memory.py).
         dialog_memory.attach(self, "geology_zip")
+        try:
+            self.setWindowIcon(plugin_icon("geochem.png"))
+        except Exception as _exc:
+            log_swallowed("geology_zip_dialog.__init__ (icon)", _exc)
         self.iface = iface
         self.setWindowTitle("지질도 도엽 ZIP 불러오기 / MaxEnt 래스터 변환 - ArchToolkit")
         try:

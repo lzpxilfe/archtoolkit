@@ -7,7 +7,7 @@ import unittest
 QGIS_AVAILABLE = False
 try:
     from qgis.PyQt import QtWidgets
-    from qgis.core import QgsApplication, QgsProject, QgsRasterLayer
+    from qgis.core import QgsApplication
     from qgis.gui import QgsMapLayerComboBox
     from tools import dialog_memory
     QGIS_AVAILABLE = True

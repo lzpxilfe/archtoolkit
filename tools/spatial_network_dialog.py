@@ -25,7 +25,7 @@ import processing
 
 from qgis.PyQt import QtWidgets, uic
 from qgis.PyQt.QtCore import Qt, QVariant
-from qgis.PyQt.QtGui import QColor, QIcon, QTextOption
+from qgis.PyQt.QtGui import QColor, QTextOption
 from qgis.core import (
     Qgis,
     QgsCategorizedSymbolRenderer,
@@ -63,6 +63,7 @@ from .utils import (
 from .live_log_dialog import ensure_live_log_dialog
 from .help_dialog import show_help_dialog
 from . import dialog_memory
+from .icons import icon as plugin_icon
 from .i18n import is_english_ui
 from .network_metrics import (
     betweenness_centrality_unweighted,
@@ -116,21 +117,7 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
         self.canvas = iface.mapCanvas()
 
         try:
-            plugin_dir = os.path.dirname(os.path.dirname(__file__))
-            icon_candidates = [
-                "spatial_network.png",
-                "spatial_network.jpg",
-                "spatial_network.jpeg",
-                "network_icon.png",
-                "network_icon.jpg",
-                "network_icon.jpeg",
-                "cost_icon.png",
-            ]
-            for icon_name in icon_candidates:
-                icon_path = os.path.join(plugin_dir, icon_name)
-                if os.path.exists(icon_path):
-                    self.setWindowIcon(QIcon(icon_path))
-                    break
+            self.setWindowIcon(plugin_icon("spatial_network.png", "network.png", "cost.png"))
         except Exception as _exc:
             log_swallowed("spatial_network_dialog.__init__", _exc)
 

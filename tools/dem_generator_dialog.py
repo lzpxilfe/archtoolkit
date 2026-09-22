@@ -23,7 +23,6 @@ from qgis.PyQt import QtWidgets
 from qgis.PyQt.QtWidgets import QTableWidgetItem, QCheckBox, QWidget, QHBoxLayout, QFileDialog, QListWidgetItem
 from qgis.PyQt.QtCore import Qt, QSize
 from qgis.core import QgsProject, QgsRectangle, QgsVectorLayer, QgsWkbTypes
-from qgis.PyQt.QtGui import QIcon
 import processing
 import tempfile
 from .utils import log_swallowed, new_run_id, push_message, restore_ui_focus, set_archtoolkit_layer_metadata
@@ -36,6 +35,7 @@ from .atomic_output import (
 from .live_log_dialog import ensure_live_log_dialog
 from .help_dialog import show_help_dialog
 from . import dialog_memory
+from .icons import icon as plugin_icon
 from .kriging_lite import GEOM_Z_SENTINEL, auto_elevation_field
 
 # Load the UI file
@@ -173,6 +173,10 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
         super(DemGeneratorDialog, self).__init__(parent)
         # Remember the last-used inputs between sessions (tools/dialog_memory.py).
         dialog_memory.attach(self, "dem_generator")
+        try:
+            self.setWindowIcon(plugin_icon("dem.png"))
+        except Exception as _exc:
+            log_swallowed("dem_generator_dialog.__init__ (icon)", _exc)
         self.setupUi(self)
         self.iface = iface
         self.loaded_dxf_layers = []
@@ -198,10 +202,8 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
         self.btnClose.clicked.connect(self.reject)
         
         # Set button icon
-        icon_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'dem_icon.png')
-        if os.path.exists(icon_path):
-            self.btnRun.setIcon(QIcon(icon_path))
-            self.btnRun.setIconSize(QSize(32, 32))
+        self.btnRun.setIcon(plugin_icon("dem.png"))
+        self.btnRun.setIconSize(QSize(32, 32))
 
     def _setup_help_button(self):
         """Add a Help button without editing the .ui file."""

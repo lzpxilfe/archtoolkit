@@ -54,7 +54,6 @@ from typing import List, Optional
 
 from qgis.PyQt import QtWidgets
 from qgis.PyQt.QtCore import QEventLoop, Qt
-from qgis.PyQt.QtGui import QIcon
 from qgis.core import (
     Qgis,
     QgsApplication,
@@ -77,6 +76,7 @@ from .atomic_output import cleanup_staging_dir, create_staging_dir, publish_stag
 from .gdal_outcome import GdalOutcomeTracker
 from .help_dialog import show_help_dialog
 from . import dialog_memory
+from .icons import icon as plugin_icon
 from .live_log_dialog import ensure_live_log_dialog
 from .predictor_naming import assign_variable_keys
 from .raster_grid_contract import (
@@ -493,12 +493,7 @@ class AlignExportDialog(QtWidgets.QDialog):
     def _setup_ui(self):
         self.setWindowTitle("분석 결과 정렬/내보내기 (Align & Export Stack)")
         try:
-            plugin_dir = os.path.dirname(os.path.dirname(__file__))
-            for name in ("align_export_icon.xpm", "terrain_icon.png", "icon.png"):
-                p = os.path.join(plugin_dir, name)
-                if os.path.exists(p):
-                    self.setWindowIcon(QIcon(p))
-                    break
+            self.setWindowIcon(plugin_icon("align_export.xpm", "terrain.png"))
         except Exception as _exc:
             log_swallowed("align_export_dialog._setup_ui", _exc)
 

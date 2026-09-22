@@ -1,8 +1,8 @@
 cff-version: 1.2.0
 message: "If you use this repository in research, teaching, or applied work, please cite it using the metadata below."
 type: software
-title: "archtoolkit: 고고학 도구함"
-version: "0.1.4"
+title: "ArchToolkit: Archaeology Toolkit for QGIS"
+version: "0.2.0"
 authors:
   - family-names: Hwang
     given-names: Jinseo
@@ -10,8 +10,14 @@ repository-code: "https://github.com/lzpxilfe/archtoolkit"
 url: "https://github.com/lzpxilfe/archtoolkit"
 license: GPL-3.0-or-later
 abstract: >
-  고고학 도구함
+  한국 고고학·문화유산 조사를 위한 QGIS 종합 분석 플러그인. DEM 생성, 지형·가시권·이동비용·네트워크 분석,
+  AHP 입지적합도, 트렌치 후보 제안, 지질도·지구화학도·지적도 보조 처리, 도면화, AOI 보고서를 제공하며,
+  모든 도구가 구현한 방법의 학술 출처와 권장 사용법을 도움말에 명시한다.
+date-released: "2026-09-22"
 keywords:
   - archaeology
   - digital archaeology
+  - cultural heritage
+  - QGIS
+  - GIS
   - research software

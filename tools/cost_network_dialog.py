@@ -24,7 +24,7 @@ from osgeo import gdal
 
 from qgis.PyQt import QtWidgets, uic
 from qgis.PyQt.QtCore import Qt, QVariant
-from qgis.PyQt.QtGui import QColor, QIcon, QTextOption
+from qgis.PyQt.QtGui import QColor, QTextOption
 from qgis.core import (
     Qgis,
     QgsApplication,
@@ -78,6 +78,7 @@ from . import cost_budget
 from .live_log_dialog import ensure_live_log_dialog
 from .help_dialog import show_help_dialog
 from . import dialog_memory
+from .icons import icon as plugin_icon
 from .i18n import get_output_group_name
 from .network_metrics import (
     betweenness_centrality_weighted as _sna_betweenness_centrality_weighted,
@@ -1130,16 +1131,7 @@ class CostNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
             log_swallowed("tools/cost_network_dialog.py:1105 (__init__)", _exc)
 
         try:
-            plugin_dir = os.path.dirname(os.path.dirname(__file__))
-            network_icon = None
-            for icon_name in ("network_icon.png", "network_icon.jpg", "network_icon.jpeg"):
-                p = os.path.join(plugin_dir, icon_name)
-                if os.path.exists(p):
-                    network_icon = p
-                    break
-            fallback_icon = os.path.join(plugin_dir, "cost_icon.png")
-            if os.path.exists(network_icon or fallback_icon):
-                self.setWindowIcon(QIcon(network_icon or fallback_icon))
+            self.setWindowIcon(plugin_icon("network.png", "cost.png"))
         except Exception as _exc:
             log_swallowed("cost_network_dialog.__init__", _exc)
 
