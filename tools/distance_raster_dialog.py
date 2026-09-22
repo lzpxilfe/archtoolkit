@@ -43,13 +43,17 @@ from __future__ import annotations
 import os
 import tempfile
 
+from osgeo import gdal
+
 from qgis.PyQt import QtWidgets
+from qgis.PyQt.QtCore import Qt
 from qgis.core import (
     Qgis,
     QgsCoordinateReferenceSystem,
     QgsProject,
     QgsRasterLayer,
     QgsRectangle,
+    QgsUnitTypes,
     QgsVectorLayer,
 )
 from .qtcompat import RBS_ALL
@@ -206,6 +210,9 @@ class DistanceRasterDialog(QtWidgets.QDialog):
                          "정사각 픽셀로 리샘플링하세요")
             if crs.isValid() and crs.isGeographic():
                 text += "  [주의] 지리좌표계(도) — 투영 CRS를 쓰세요"
+            elif crs.isValid() and not self._is_metre_crs(crs):
+                text += (f"  [주의] 단위가 미터가 아님({self._unit_label(crs)}) — "
+                         "미터 단위 투영 CRS를 쓰세요")
             self.lblGridInfo.setText(text)
         except Exception as _exc:
             log_swallowed("distance_raster_dialog._on_ref_changed", _exc)
@@ -261,6 +268,18 @@ class DistanceRasterDialog(QtWidgets.QDialog):
                 self.iface, "오류",
                 "기준 래스터가 지리좌표계(도)입니다. 거리 단위가 미터가 되도록 "
                 "투영 CRS(예: EPSG:5179) 래스터를 기준으로 쓰세요.",
+                level=2, duration=10,
+            )
+            return
+        # A projected CRS in feet (or any non-metre unit) passes the geographic
+        # check, and the output would then be named "(거리, m)", stamped
+        # units="m" and max_distance_m while every value is in feet.
+        if not self._is_metre_crs(ref_crs):
+            push_message(
+                self.iface, "오류",
+                f"기준 래스터 CRS({ref_crs.authid() or ref_crs.description()})의 단위가 "
+                f"미터가 아닙니다({self._unit_label(ref_crs)}). 거리 단위가 미터가 되도록 "
+                "미터 단위 투영 CRS(예: EPSG:5179) 래스터를 기준으로 쓰세요.",
                 level=2, duration=10,
             )
             return
@@ -328,7 +347,7 @@ class DistanceRasterDialog(QtWidgets.QDialog):
         temp_files = []
         self.btnRun.setEnabled(False)
         progress = QtWidgets.QProgressDialog("거리 계산 중…", None, 0, 3, self)
-        progress.setWindowModality(2)  # Qt.WindowModality.WindowModal
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
         progress.setMinimumDuration(0)
         progress.setValue(0)
         progress.show()
@@ -384,9 +403,12 @@ class DistanceRasterDialog(QtWidgets.QDialog):
             # a word, and every "distance to water" would then point at some
             # minor tributary instead - or, with nothing inside at all, the
             # output would be all NoData and still report success. Check the
-            # overlap before burning so the user hears about it.
+            # overlap before burning so the user hears about it. isNull(), not
+            # isEmpty(): a single point or a purely east-west line has a
+            # zero-width or zero-height extent that isEmpty() calls empty,
+            # and the check would silently skip exactly those layers.
             prepared_extent = self._layer_extent(prepared)
-            if prepared_extent is not None and not prepared_extent.isEmpty():
+            if prepared_extent is not None and not prepared_extent.isNull():
                 if not prepared_extent.intersects(extent):
                     raise RuntimeError(
                         "대상 레이어가 기준 래스터 범위와 전혀 겹치지 않습니다. "
@@ -492,6 +514,17 @@ class DistanceRasterDialog(QtWidgets.QDialog):
             if not os.path.exists(output):
                 raise RuntimeError("거리 래스터가 생성되지 않았습니다.")
 
+            # gdal_proximity writes DISTANCE_NODATA into every cell beyond the
+            # maximum distance but never declares it on the band, so the layer
+            # showed -9999 as a distance, a predictor stack would have trained
+            # on it, and the all-NoData check below could not see a single
+            # NoData cell. A raster that cannot take the flag is not a result.
+            try:
+                self._stamp_nodata(output, DISTANCE_NODATA)
+            except Exception:
+                temp_files.append(output)
+                raise
+
             # Same rule on the way out: a layer that is 100% NoData would be
             # added, stamped with units="m" and reported as done, and then
             # silently drop every training point from a predictor stack.
@@ -579,6 +612,45 @@ class DistanceRasterDialog(QtWidgets.QDialog):
         return abs(px_x - px_y) <= rel_tol * max(px_x, px_y)
 
     @staticmethod
+    def _is_metre_crs(crs) -> bool:
+        """True when ``crs`` measures in metres; feet, degrees or unknown units are refused."""
+        try:
+            return crs.mapUnits() == Qgis.DistanceUnit.Meters
+        except Exception as _exc:
+            log_swallowed("distance_raster_dialog._is_metre_crs", _exc)
+            return False
+
+    @staticmethod
+    def _unit_label(crs) -> str:
+        """Readable map unit of ``crs`` ('feet', 'meters', ...), or '?' when unknown."""
+        try:
+            return str(QgsUnitTypes.toString(crs.mapUnits()))
+        except Exception as _exc:
+            log_swallowed("distance_raster_dialog._unit_label", _exc)
+            return "?"
+
+    @staticmethod
+    def _stamp_nodata(path, value) -> None:
+        """Declare ``value`` as the band-1 NoData of the raster at ``path``, in place.
+
+        Raises RuntimeError when the flag cannot be written: without it every
+        NoData cell reads as a distance of ``value`` metres, which is the
+        very error this exists to prevent, so it must not pass as a warning.
+        """
+        dataset = gdal.Open(str(path), gdal.GA_Update)
+        if dataset is None:
+            raise RuntimeError("거리 래스터를 열어 NoData를 기록하지 못했습니다.")
+        band = None
+        try:
+            band = dataset.GetRasterBand(1)
+            if band is None or band.SetNoDataValue(float(value)) != 0:
+                raise RuntimeError(f"거리 래스터에 NoData({float(value):g})를 기록하지 못했습니다.")
+            band.FlushCache()
+        finally:
+            band = None
+            dataset = None
+
+    @staticmethod
     def _burn_rule(layer) -> str:
         """'cell_centre' for point sources, 'all_touched' for lines and polygons.
 
@@ -662,15 +734,15 @@ class DistanceRasterDialog(QtWidgets.QDialog):
             "<code>predictor_2</code> 같은 이름으로 나옵니다. 그래서 여기서 미리 막습니다.</p>"
             "<h4>주의</h4>"
             "<ul>"
-            "<li>기준 래스터가 <b>투영 CRS</b>여야 거리 단위가 미터가 됩니다. "
-            "지리좌표계(도)는 거부합니다.</li>"
+            "<li>기준 래스터가 <b>미터 단위 투영 CRS</b>여야 거리 단위가 미터가 됩니다. "
+            "지리좌표계(도)와 피트 등 미터가 아닌 단위의 CRS는 거부합니다.</li>"
             "<li>대상 레이어 CRS가 다르면 자동으로 변환한 뒤 계산합니다.</li>"
             "<li>기준 래스터 픽셀은 <b>정사각</b>이어야 합니다. 비정사각 픽셀은 GDAL이 "
             "X 픽셀 크기로만 거리를 환산해 남북 거리가 틀어지므로 거부합니다.</li>"
             "<li>대상이 격자 어느 셀에도 구워지지 않거나 결과가 전부 NoData이면 "
             "레이어를 추가하지 않고 오류를 표시합니다.</li>"
-            "<li><b>최대 거리</b>를 두면 그보다 먼 셀은 NoData가 되고, 모델 학습에서 "
-            "그 셀들이 빠집니다. 보통은 제한 없이 두세요.</li>"
+            "<li><b>최대 거리</b>를 두면 그보다 먼 셀은 NoData(-9999, 밴드에 기록)가 되고, "
+            "모델 학습에서 그 셀들이 빠집니다. 보통은 제한 없이 두세요.</li>"
             "</ul>"
             "<p style='color:#455a64'>QGIS 기본 구성(GDAL)만 사용합니다.</p>"
         )
