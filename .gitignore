@@ -19,26 +19,16 @@ ENV/
 *.shx
 *.prj
 *.qpj
+# Images live in three tracked folders: icons/ (what the plugin loads),
+# docs/images/ (README and gallery screenshots) and docs/art/ (original
+# 1024 px icon artwork). Any other image is a local by-product and stays out.
 *.jpg
 *.png
-!icon.png
-!cost_icon.png
-!dem_icon.png
-!contour_icon.png
-!terrain_icon.png
-!profile_icon.png
-!style_icon.png
-!viewshed_icon.png
-!network_icon.png
-!jijuk.png
-!network_icon.jpg
-!spatial_network.png
-!slope_aspect.png
-!AHP.png
-!AI.png
-!tools/geochem.png
+!icons/*.png
+!docs/images/*.png
+!docs/art/*.png
+!docs/art/*.jpg
 temp_*/
-C:\Users\nuri9\.gemini\antigravity\scratch\fix_viewshed.py
 
 # Local private references (must never be committed)
 hidden/

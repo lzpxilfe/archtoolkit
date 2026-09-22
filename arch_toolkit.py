@@ -102,7 +102,9 @@ class ArchToolkit:
             self.drafting_action = QAction(icon("slope_aspect.png", "styling.png"), u"경사도/사면방향 도면화 (Slope/Aspect Drafting)", mw)
             self.drafting_action.triggered.connect(self.run_drafting_tool)
 
-            self.trench_action = QAction(icon("trench.png"), u"트렌치 후보 제안 (Trench Suggestion)", mw)
+            # No dedicated trench artwork exists yet; the menu entry shows the plugin icon
+            # (as it did before 0.1.4) and the dialog falls back to the terrain icon.
+            self.trench_action = QAction(icon("trench.png", "archtoolkit.png"), u"트렌치 후보 제안 (Trench Suggestion)", mw)
             self.trench_action.triggered.connect(self.run_trench_tool)
 
             self.viewshed_action = QAction(icon("viewshed.png"), u"가시권 분석 (Viewshed Analysis)", mw)
