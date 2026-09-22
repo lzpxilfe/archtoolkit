@@ -155,6 +155,47 @@ def _qgs_rectangle_to_extent(rect: QgsRectangle) -> Extent:
     )
 
 
+def snap_extent_outward_to_lattice(extent: Extent, origin_x: float, origin_y: float, step: float) -> Extent:
+    """Widen ``extent`` to whole cells of the lattice anchored at (origin_x, origin_y).
+
+    The reference raster's upper-left corner and the target pixel size define
+    the lattice. An AOI bounding box lands anywhere; anchoring the target grid
+    on it put every output cell a fraction of a pixel off the reference cells,
+    so the reference DEM itself came back resampled and a class raster shifted
+    by up to half a cell. Rounding the west/south edges down and the east/north
+    edges up, in lattice units, keeps the whole AOI covered and makes every
+    output cell coincide with a reference cell. An edge already within 1e-6
+    cell of a lattice line snaps to it, so the float noise a CRS transform
+    leaves behind does not add a spurious row or column.
+    """
+    if not isinstance(extent, Extent):
+        raise GridContractError("extent must be an Extent")
+    try:
+        step = float(step)
+        origin_x = float(origin_x)
+        origin_y = float(origin_y)
+    except (TypeError, ValueError) as exc:
+        raise GridContractError("lattice origin and step must be finite numbers") from exc
+    if not (math.isfinite(step) and step > 0.0 and math.isfinite(origin_x) and math.isfinite(origin_y)):
+        raise GridContractError("lattice origin and step must be finite, step greater than zero")
+    tol = 1e-6
+    col_min = math.floor((extent.xmin - origin_x) / step + tol)
+    col_max = math.ceil((extent.xmax - origin_x) / step - tol)
+    # Rows count downward from the origin's y.
+    row_min = math.floor((origin_y - extent.ymax) / step + tol)
+    row_max = math.ceil((origin_y - extent.ymin) / step - tol)
+    if col_max <= col_min:
+        col_max = col_min + 1
+    if row_max <= row_min:
+        row_max = row_min + 1
+    return Extent(
+        xmin=origin_x + col_min * step,
+        xmax=origin_x + col_max * step,
+        ymin=origin_y - row_max * step,
+        ymax=origin_y - row_min * step,
+    )
+
+
 def _raster_grid_from_layer(layer: QgsRasterLayer) -> RasterGrid:
     return RasterGrid(
         width=int(layer.width()),
@@ -255,9 +296,26 @@ def _categorical_output_nodata(layer: QgsRasterLayer):
         return None, "no_statistics"
 
     sentinel = choose_nodata_sentinel(type_name, data_min, data_max)
+    if sentinel is None and type_name in ("Float32", "Float64"):
+        # raster_semantics leaves float bands to the caller. A float band can
+        # hold the continuous sentinel whatever its codes are; with no NoData
+        # at all the warp pads with 0, which then reads as class 0.
+        sentinel = _float_class_sentinel(data_min, data_max)
     if sentinel is None:
         return None, "no_safe_value"
     return float(sentinel), "sentinel"
+
+
+def _float_class_sentinel(data_min, data_max):
+    """First of -9999 / -99999 / -999999 outside the observed codes, or None."""
+    for candidate in (CONTINUOUS_NODATA, -99999.0, -999999.0):
+        try:
+            inside = float(data_min) <= candidate <= float(data_max)
+        except (TypeError, ValueError):
+            return None
+        if not inside:
+            return candidate
+    return None
 
 
 def _source_nodata_per_band(layer: QgsRasterLayer):
@@ -287,6 +345,88 @@ def _expected_nodata_values(layer: QgsRasterLayer, nodata):
     if nodata is None:
         return _source_nodata_per_band(layer)
     return tuple([nodata] * band_count)
+
+
+def _effective_source_nodata(layer: QgsRasterLayer, source_path: str):
+    """Per-band NoData gdalwarp must be told about explicitly, or None.
+
+    A NoData value set in Layer Properties (``userNoDataValues``), or stamped
+    on the open layer by a tool through ``setNoDataValue`` (which this QGIS
+    does not write back to the file), lives only in the project. gdalwarp
+    reads the file, so those cells were warped as data: a -32768 hole came
+    out bilinear-blended into its neighbours while the manifest called every
+    cell valid. This returns one value per band when at least one band's
+    effective NoData is missing from the file, for ``-srcnodata``; None when
+    the file already says everything (an explicit ``-srcnodata`` also switches
+    on GDAL's unified multi-band masking, so it is not sent needlessly).
+
+    Raises RuntimeError, in Korean, when the layer NoData cannot be expressed
+    as one value per band: a range, several values, or values on some bands
+    only. Refusing is the honest answer; the old behaviour was silent.
+    """
+    provider = layer.dataProvider()
+    if provider is None:
+        raise RuntimeError(f"입력 래스터 데이터 공급자를 열 수 없습니다: {layer.name()}")
+    band_count = int(layer.bandCount())
+    # What the file itself declares: a fresh provider on the path, untouched
+    # by anything set on the project layer.
+    file_values = [None] * band_count
+    probe = QgsRasterLayer(str(source_path), "ArchToolkit nodata probe", "gdal")
+    if probe.isValid() and probe.dataProvider() is not None:
+        probed = _source_nodata_per_band(probe)
+        file_values = list(probed) + [None] * max(0, band_count - len(probed))
+
+    effective = []
+    for band in range(1, band_count + 1):
+        values = []
+        try:
+            if provider.sourceHasNoDataValue(band) and provider.useSourceNoDataValue(band):
+                values.append(float(provider.sourceNoDataValue(band)))
+        except Exception as exc:
+            log_swallowed("align_export_dialog._effective_source_nodata", exc)
+        try:
+            ranges = list(provider.userNoDataValues(band) or [])
+        except Exception as exc:
+            log_swallowed("align_export_dialog._effective_source_nodata", exc)
+            ranges = []
+        for value_range in ranges:
+            low, high = float(value_range.min()), float(value_range.max())
+            if not _nodata_equal(low, high):
+                raise RuntimeError(
+                    f"레이어에 지정된 NoData가 범위({low:g} - {high:g})입니다: {layer.name()} band {band}. "
+                    "GDAL 정렬은 밴드당 하나의 NoData 값만 받으므로, 레이어 속성에서 단일 값으로 바꾸거나 "
+                    "파일에 NoData를 기록한 뒤 다시 실행하세요."
+                )
+            if not any(_nodata_equal(low, v) for v in values):
+                values.append(low)
+        if len(values) > 1:
+            raise RuntimeError(
+                f"레이어에 NoData 값이 여러 개({', '.join(f'{v:g}' for v in values)})입니다: "
+                f"{layer.name()} band {band}. GDAL 정렬은 밴드당 하나의 NoData 값만 받으므로 하나만 남기세요."
+            )
+        effective.append(values[0] if values else None)
+
+    missing_from_file = [
+        index for index, value in enumerate(effective)
+        if value is not None and not _nodata_equal(value, file_values[index])
+    ]
+    if not missing_from_file:
+        return None
+    if any(value is None for value in effective):
+        raise RuntimeError(
+            f"일부 밴드에만 레이어 NoData가 지정되어 있습니다: {layer.name()}. "
+            "GDAL 정렬은 모든 밴드에 NoData를 주거나 아예 주지 않아야 하므로, 레이어 속성에서 "
+            "모든 밴드에 NoData를 지정하거나 파일에 NoData를 기록하세요."
+        )
+    return tuple(effective)
+
+
+def _srcnodata_argument(values) -> str:
+    """gdalwarp ``-srcnodata`` text for one value per band, or "" when there is none."""
+    if not values:
+        return ""
+    text = " ".join(repr(float(value)) for value in values)
+    return f'-srcnodata "{text}"' if len(values) > 1 else f"-srcnodata {text}"
 
 
 def _band_valid_count(provider, band: int) -> Optional[int]:
@@ -464,6 +604,8 @@ class _Item:
             return "  [범주형: 최근접]"
         if self.circular:
             return "  [방향(원형): 최근접]"
+        if self.nearest_by_sample:
+            return "  [메타데이터 없음: 클래스 코드로 추정, 최근접]"
         if not self.has_metadata:
             return "  [메타데이터 없음: 연속형으로 처리]"
         return ""
@@ -676,8 +818,13 @@ class AlignExportDialog(QtWidgets.QDialog):
             # averages 355 and 5 to 180. Nearest only, like categorical.
             circular = (not categorical) and is_circular_meta(meta)
             has_metadata = bool(tool_id or kind)
-            out.append(_Item(lid, lyr.name(), "", kind, units, categorical, tool_id,
-                             circular=circular, has_metadata=has_metadata))
+            item = _Item(lid, lyr.name(), "", kind, units, categorical, tool_id,
+                         circular=circular, has_metadata=has_metadata)
+            if not has_metadata:
+                # Decided here, before the run logs the variable-name mapping,
+                # so that log states the resampling actually used.
+                item.nearest_by_sample = _sample_looks_like_class_codes(lyr)
+            out.append(item)
 
         # The exported base name becomes the model's variable name downstream,
         # and consumers reduce it to ASCII - which deletes Hangul rather than
@@ -748,12 +895,13 @@ class AlignExportDialog(QtWidgets.QDialog):
 
         ref_crs = ref.crs()
         requested_extent = None
+        aoi_extent = None
         aoi = self.cmbAoi.currentLayer()
         if isinstance(aoi, QgsVectorLayer):
             aoi_result = resolve_aoi_extent(
                 aoi, selected_only=self.chkAoiSelected.isChecked(), dst_crs=ref.crs())
             if aoi_result.ok:
-                requested_extent = _qgs_rectangle_to_extent(aoi_result.extent)
+                aoi_extent = _qgs_rectangle_to_extent(aoi_result.extent)
                 if aoi_result.skipped:
                     push_message(self.iface, "주의", aoi_result.message(), level=1, duration=8)
             elif aoi_result.requested_but_failed:
@@ -765,6 +913,25 @@ class AlignExportDialog(QtWidgets.QDialog):
                     level=2, duration=10,
                 )
                 return
+        if aoi_extent is not None:
+            # The AOI box is widened to whole reference cells (lattice anchored
+            # on the reference's upper-left corner, also under a pixel-size
+            # override) so every output cell coincides with a reference cell;
+            # see snap_extent_outward_to_lattice.
+            try:
+                ref_extent = ref.extent()
+                requested_extent = snap_extent_outward_to_lattice(
+                    aoi_extent, ref_extent.xMinimum(), ref_extent.yMaximum(), px)
+            except GridContractError as e:
+                push_message(self.iface, "오류", f"AOI 범위를 기준 격자에 맞출 수 없습니다: {e}", level=2, duration=8)
+                return
+            log_message(
+                "AOI 범위를 기준 격자의 셀 경계로 넓혔습니다: "
+                f"{aoi_extent.xmin:.6f},{aoi_extent.xmax:.6f},{aoi_extent.ymin:.6f},{aoi_extent.ymax:.6f} → "
+                f"{requested_extent.xmin:.6f},{requested_extent.xmax:.6f},"
+                f"{requested_extent.ymin:.6f},{requested_extent.ymax:.6f}",
+                level=Qgis.MessageLevel.Info,
+            )
         if requested_extent is None:
             e = ref.extent()
             requested_extent = _qgs_rectangle_to_extent(e)
@@ -777,6 +944,21 @@ class AlignExportDialog(QtWidgets.QDialog):
             f"{requested_extent.xmin},{requested_extent.xmax},"
             f"{requested_extent.ymin},{requested_extent.ymax}"
         )
+
+        # A source with no CRS in the file and none assigned on the layer would
+        # be warped as if it already sat in the reference CRS - a silent guess,
+        # and usually a wrong one. Refuse before anything is written.
+        for item in items:
+            layer = QgsProject.instance().mapLayer(item.layer_id)
+            crs = layer.crs() if isinstance(layer, QgsRasterLayer) else None
+            if crs is None or not crs.isValid():
+                push_message(
+                    self.iface, "오류",
+                    f"입력 래스터의 좌표계(CRS)를 확인할 수 없습니다: {item.name} "
+                    "(파일에도 레이어에도 CRS가 없습니다. 레이어 속성에서 CRS를 지정한 뒤 다시 실행하세요.)",
+                    level=2, duration=12,
+                )
+                return
 
         run_id = new_run_id("align")
         try:
@@ -843,10 +1025,10 @@ class AlignExportDialog(QtWidgets.QDialog):
                 if not src:
                     raise RuntimeError(f"입력 경로를 확인할 수 없습니다: {item.name}")
                 if not item.has_metadata:
-                    # No metadata means no semantic claim can be made. Default
-                    # to the continuous path but say so, and switch to nearest
-                    # only when the pixels themselves read as class codes.
-                    item.nearest_by_sample = _sample_looks_like_class_codes(src_layer)
+                    # No metadata means no semantic claim can be made. The
+                    # pixel-sample heuristic was decided in _selected_items so
+                    # the variable-name log above already named the resampling;
+                    # here it is explained.
                     if item.nearest_by_sample:
                         log_message(
                             f"메타데이터 없는 래스터가 정수형이고 표본의 서로 다른 값이 "
@@ -877,8 +1059,23 @@ class AlignExportDialog(QtWidgets.QDialog):
                         )
                 except Exception as exc:
                     log_swallowed("align_export_dialog._on_run", exc)
+                # NoData set in Layer Properties, or stamped on the open layer
+                # by a tool, never reaches the file that gdalwarp reads. Hand
+                # it over, or refuse when it cannot be expressed.
+                source_nodata = _effective_source_nodata(src_layer, src)
+                if source_nodata is not None:
+                    log_message(
+                        f"레이어에 지정된 NoData가 파일에 없어 원본 NoData로 전달합니다 ({item.name}): "
+                        + ", ".join(f"band {index + 1}={value:g}" for index, value in enumerate(source_nodata)),
+                        level=Qgis.MessageLevel.Info,
+                    )
                 if item.categorical:
                     item.nodata, item.nodata_reason = _categorical_output_nodata(src_layer)
+                    if (item.nodata is None and source_nodata is not None
+                            and all(_nodata_equal(v, source_nodata[0]) for v in source_nodata)):
+                        # With -srcnodata and no -dstnodata gdalwarp copies the
+                        # source value to the output anyway; record it as such.
+                        item.nodata, item.nodata_reason = source_nodata[0], "layer"
                     if item.nodata is None:
                         # Say it out loud rather than shipping a class raster
                         # whose NoData nothing downstream can check.
@@ -893,7 +1090,10 @@ class AlignExportDialog(QtWidgets.QDialog):
                     crs=ref_crs,
                     grid=target_grid,
                     band_count=int(src_layer.bandCount()),
-                    nodata_values=_expected_nodata_values(src_layer, item.nodata),
+                    nodata_values=(
+                        source_nodata if item.nodata is None and source_nodata is not None
+                        else _expected_nodata_values(src_layer, item.nodata)
+                    ),
                     categorical=item.categorical,
                 )
                 out_path = os.path.join(staging_dir, f"{item.key}.tif")
@@ -911,6 +1111,7 @@ class AlignExportDialog(QtWidgets.QDialog):
                     # continuous -9999 NoData, which needs Float32.
                     force_float32=not item.categorical,
                     source_crs=src_crs,
+                    source_nodata=source_nodata,
                 )
                 QtWidgets.QApplication.processEvents()
                 if progress.wasCanceled():
@@ -995,6 +1196,15 @@ class AlignExportDialog(QtWidgets.QDialog):
             ),
             "run_id": run_id,
         }
+        if aoi_extent is not None:
+            # The AOI's own bounding box; requested_extent is that box widened
+            # to whole reference cells.
+            grid["aoi_extent"] = {
+                "xmin": aoi_extent.xmin,
+                "xmax": aoi_extent.xmax,
+                "ymin": aoi_extent.ymin,
+                "ymax": aoi_extent.ymax,
+            }
         try:
             self._write_manifest(
                 staging_dir,
@@ -1037,7 +1247,7 @@ class AlignExportDialog(QtWidgets.QDialog):
         restore_ui_focus(self)
 
     def _warp(self, src, out, px, extent_str, ref_crs, *, nearest: bool, nodata, progress,
-              force_float32: Optional[bool] = None, source_crs=None):
+              force_float32: Optional[bool] = None, source_crs=None, source_nodata=None):
         if progress.wasCanceled():
             raise _Cancelled()
         if force_float32 is None:
@@ -1054,6 +1264,9 @@ class AlignExportDialog(QtWidgets.QDialog):
         # None, gdalwarp reads the file's own tag and that override is lost.
         # The algorithm emits -s_srs only for a valid CRS, so None stays a
         # no-op for callers that have nothing better.
+        # source_nodata (one value per band, from _effective_source_nodata) is
+        # the same story for NoData: -srcnodata is sent only when the layer
+        # carries a value the file does not.
         params = {
             "INPUT": src,
             "SOURCE_CRS": source_crs,
@@ -1066,7 +1279,7 @@ class AlignExportDialog(QtWidgets.QDialog):
             "TARGET_EXTENT": extent_str,
             "TARGET_EXTENT_CRS": ref_crs,
             "MULTITHREADING": False,
-            "EXTRA": "",
+            "EXTRA": _srcnodata_argument(source_nodata),
             "OUTPUT": out,
         }
         algorithm = QgsApplication.processingRegistry().algorithmById("gdal:warpreproject")
@@ -1341,15 +1554,19 @@ class AlignExportDialog(QtWidgets.QDialog):
             "당신의 분석을 모델 입력으로 정리하는 하위 유틸리티입니다.</p>"
             "<h4>사용</h4>"
             "<ol>"
-            "<li><b>기준 래스터</b>를 고릅니다(그 격자에 모두 맞춰집니다). 필요하면 픽셀 크기/AOI로 조정.</li>"
+            "<li><b>기준 래스터</b>를 고릅니다(그 격자에 모두 맞춰집니다). 필요하면 픽셀 크기/AOI로 조정. "
+            "AOI를 주면 그 경계 상자를 기준 격자의 셀 경계로 바깥쪽으로 넓혀 자르므로 출력 셀은 항상 기준 래스터의 "
+            "셀과 일치합니다(픽셀 크기를 바꿔도 기준 래스터의 왼쪽 위 모서리에 맞춥니다).</li>"
             "<li><b>정렬할 래스터</b>를 체크합니다. ArchToolkit 분석 결과는 자동 체크됩니다.</li>"
             "<li><b>내보내기 폴더</b>를 지정합니다. 결과는 실행별 "
             "<code>aligned_stack_&lt;run_id&gt;</code> 폴더에 GeoTIFF와 manifest로 함께 게시됩니다.</li>"
             "</ol>"
             "<h4>NoData</h4>"
             "<p>NoData는 기준 격자의 일부가 <b>아니라 래스터별</b>로 정해집니다. 연속형은 -9999, "
-            "범주형은 원본의 값 또는 코드 범위 밖의 값을 쓰며, 안전한 값이 없으면 NoData 없이 내보내고 "
-            "로그에 사유를 남깁니다. 실제 값은 manifest의 <code>nodata</code> 열을 보세요.</p>"
+            "범주형은 원본의 값 또는 코드 범위 밖의 값(실수형 범주 래스터는 -9999)을 쓰며, 안전한 값이 없으면 "
+            "NoData 없이 내보내고 로그에 사유를 남깁니다. 실제 값은 manifest의 <code>nodata</code> 열을 보세요. "
+            "레이어 속성에서 지정한 NoData(파일에는 없는 값)도 원본 NoData로 전달합니다. 다만 범위나 여러 값으로 "
+            "지정된 NoData는 밴드당 하나의 값만 받는 GDAL 정렬로 표현할 수 없어 실행을 거부합니다.</p>"
             "<h4>리샘플</h4>"
             "<p>래스터의 의미에 따라 세 갈래로 나뉘며 manifest의 <code>categorical</code>·"
             "<code>resampling</code> 열에 기록됩니다.</p>"
@@ -1369,7 +1586,8 @@ class AlignExportDialog(QtWidgets.QDialog):
             "<h4>검증</h4>"
             "<p>결과마다 CRS·격자·band 수·NoData를 확인하고, 표본의 유효 픽셀 비율을 <code>valid_pct</code> 열에 "
             "기록합니다. 유효 픽셀이 하나도 없으면(입력이 기준 격자와 겹치지 않을 때) 실행을 중단합니다. "
-            "입력의 CRS는 <code>source_crs</code> 열에 기록되며, 레이어 속성에서 지정한 CRS가 파일의 CRS보다 우선합니다.</p>"
+            "입력의 CRS는 <code>source_crs</code> 열에 기록되며, 레이어 속성에서 지정한 CRS가 파일의 CRS보다 우선합니다. "
+            "파일에도 레이어에도 CRS가 없는 입력은 기준 좌표계로 넘겨짚지 않고 실행 전에 거부합니다.</p>"
             "<p style='color:#455a64'>QGIS 기본 구성(GDAL)만 사용합니다.</p>"
         )
         try:
