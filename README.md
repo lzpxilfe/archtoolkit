@@ -44,25 +44,25 @@ ArchToolkit은 한국의 고고학·문화유산 조사와 연구에서 반복�
 
 | | 도구 | 하는 일 | 학술 근거 |
 | :---: | --- | --- | --- |
-| <img src="icons/dem.png" width="36" alt="DEM 생성 아이콘"> | DEM 생성 | 등고선·표고점에서 TIN(선형·곡면)·IDW·Ordinary Kriging(Lite) DEM | Delaunay 1934; Clough & Tocher 1965; Shepard 1968; Matheron 1963 |
-| <img src="icons/contour.png" width="36" alt="등고선 추출 아이콘"> | 등고선 추출 | DEM에서 일정 간격 등고선 | GDAL contour |
-| <img src="icons/terrain.png" width="36" alt="지형 분석 아이콘"> | 지형 분석 | 경사·사면방향·TPI·지형 위치 분류·TRI·거칠기·곡률·사면 파생(TRASP) | Horn 1981; Weiss 2001; Riley et al. 1999; Wilson et al. 2007; Zevenbergen & Thorne 1987; Roberts & Cooper 1989 |
-| <img src="icons/slope_aspect.png" width="36" alt="경사도/사면방향 도면화 아이콘"> | 경사도/사면방향 도면화 | 인쇄용 경사 래스터와 사면방향 화살표 | Horn 1981 |
-| <img src="icons/viewshed.png" width="36" alt="가시권 분석 아이콘"> | 가시권 분석 | 단일·누적·역·선형 가시권, LOS 단면, 히구치 거리대, 곡률·굴절 보정 | Wang et al. 2000; Higuchi 1975/1983; Wheatley 1995 |
-| <img src="icons/cost.png" width="36" alt="비용표면/최소비용경로 아이콘"> | 비용표면/최소비용경로 | 시간·에너지 비용표면, 최소비용경로, 회랑, 등시선 | Tobler 1993; Naismith 1892; Pandolf et al. 1977; Minetti et al. 2002 / Herzog 2013; Dijkstra 1959; Hart et al. 1968 |
-| <img src="icons/network.png" width="36" alt="최소비용 네트워크 아이콘"> | 최소비용 네트워크 | 유적 간 최소비용경로 기반 MST·k-NN·허브 네트워크와 중심성 | Kruskal 1956; Freeman 1979; Brandes 2001; Wasserman & Faust 1994 |
-| <img src="icons/spatial_network.png" width="36" alt="근접/가시성 네트워크 아이콘"> | 근접/가시성 네트워크 | PPA(k-NN·Delaunay·Gabriel·RNG)와 유적 간 상호가시성 네트워크 | Terrell 1977; Gabriel & Sokal 1969; Toussaint 1980; Van Dyke et al. 2016 |
-| <img src="icons/cost.png" width="36" alt="거리 래스터 아이콘"> | 거리 래스터 | 하천·유적·도로까지의 거리 예측변수 | GDAL proximity; Phillips et al. 2006 (후속) |
-| <img src="icons/align_export.png" width="36" alt="분석 결과 정렬/내보내기 아이콘"> | 분석 결과 정렬/내보내기 | 예측변수 스택을 한 격자로 정렬하고 manifest와 함께 내보내기 | Phillips et al. 2006; Elith et al. 2011 (후속) |
-| <img src="icons/terrain.png" width="36" alt="변수 상관/VIF 리포트 아이콘"> | 변수 상관/VIF 리포트 | 상관행렬과 분산팽창지수 | O'Brien 2007 (임계값 경고) |
-| <img src="icons/ahp.png" width="36" alt="AHP 입지적합도 아이콘"> | AHP 입지적합도 | 쌍대비교 가중 적합도, 계층형 AHP, 일관성비율 | Saaty 1980; Alonso & Lamata 2006; Malczewski 2004 |
-| <img src="icons/archtoolkit.png" width="36" alt="트렌치 후보 제안 아이콘"> | 트렌치 후보 제안 | AOI 안에서 조건에 맞는 트렌치 배치 제안 | 플러그인 휴리스틱 (학술 방법 아님) |
-| <img src="icons/geochem.png" width="36" alt="지질도 도엽 ZIP 아이콘"> | 지질도 도엽 ZIP | KIGAM 1:50,000 지질도 로드·스타일·범주형 래스터 | KIGAM 자료 |
-| <img src="icons/geochem.png" width="36" alt="지구화학도 래스터 수치화 아이콘"> | 지구화학도 래스터 수치화 | WMS 렌더링 색상을 범례로 값 역추정 | KIGAM WMS 범례 (추정값) |
-| <img src="icons/cadastral.png" width="36" alt="지적도 중첩 면적표 아이콘"> | 지적도 중첩 면적표 | 조사구역과 필지의 중첩 면적표 | 지적 자료 |
-| <img src="icons/profile.png" width="36" alt="지형 단면 아이콘"> | 지형 단면 | 단면선 작성, 다중 프로파일, 차트·CSV 내보내기 | 실무 기법 |
-| <img src="icons/styling.png" width="36" alt="도면 시각화 아이콘"> | 도면 시각화 | 수치지형도 DXF 분류 스타일, DEM 배경, 프리셋 내보내기 | 실무 기법 |
-| <img src="icons/ai_report.png" width="36" alt="AI 조사요약 아이콘"> | AI 조사요약 | AOI 주변 레이어 통계 요약, 선택 시 Gemini 초안 | 실무 기법 (외부 전송 고지) |
+| <img src="icons/dem.png" width="72" alt="DEM 생성 아이콘"> | DEM 생성 | 등고선·표고점에서 TIN(선형·곡면)·IDW·Ordinary Kriging(Lite) DEM | Delaunay 1934; Clough & Tocher 1965; Shepard 1968; Matheron 1963 |
+| <img src="icons/contour.png" width="72" alt="등고선 추출 아이콘"> | 등고선 추출 | DEM에서 일정 간격 등고선 | GDAL contour |
+| <img src="icons/terrain.png" width="72" alt="지형 분석 아이콘"> | 지형 분석 | 경사·사면방향·TPI·지형 위치 분류·TRI·거칠기·곡률·사면 파생(TRASP) | Horn 1981; Weiss 2001; Riley et al. 1999; Wilson et al. 2007; Zevenbergen & Thorne 1987; Roberts & Cooper 1989 |
+| <img src="icons/slope_aspect.png" width="72" alt="경사도/사면방향 도면화 아이콘"> | 경사도/사면방향 도면화 | 인쇄용 경사 래스터와 사면방향 화살표 | Horn 1981 |
+| <img src="icons/viewshed.png" width="72" alt="가시권 분석 아이콘"> | 가시권 분석 | 단일·누적·역·선형 가시권, LOS 단면, 히구치 거리대, 곡률·굴절 보정 | Wang et al. 2000; Higuchi 1975/1983; Wheatley 1995 |
+| <img src="icons/cost.png" width="72" alt="비용표면/최소비용경로 아이콘"> | 비용표면/최소비용경로 | 시간·에너지 비용표면, 최소비용경로, 회랑, 등시선 | Tobler 1993; Naismith 1892; Pandolf et al. 1977; Minetti et al. 2002 / Herzog 2013; Dijkstra 1959; Hart et al. 1968 |
+| <img src="icons/network.png" width="72" alt="최소비용 네트워크 아이콘"> | 최소비용 네트워크 | 유적 간 최소비용경로 기반 MST·k-NN·허브 네트워크와 중심성 | Kruskal 1956; Freeman 1979; Brandes 2001; Wasserman & Faust 1994 |
+| <img src="icons/spatial_network.png" width="72" alt="근접/가시성 네트워크 아이콘"> | 근접/가시성 네트워크 | PPA(k-NN·Delaunay·Gabriel·RNG)와 유적 간 상호가시성 네트워크 | Terrell 1977; Gabriel & Sokal 1969; Toussaint 1980; Van Dyke et al. 2016 |
+| <img src="icons/cost.png" width="72" alt="거리 래스터 아이콘"> | 거리 래스터 | 하천·유적·도로까지의 거리 예측변수 | GDAL proximity; Phillips et al. 2006 (후속) |
+| <img src="icons/align_export.png" width="72" alt="분석 결과 정렬/내보내기 아이콘"> | 분석 결과 정렬/내보내기 | 예측변수 스택을 한 격자로 정렬하고 manifest와 함께 내보내기 | Phillips et al. 2006; Elith et al. 2011 (후속) |
+| <img src="icons/terrain.png" width="72" alt="변수 상관/VIF 리포트 아이콘"> | 변수 상관/VIF 리포트 | 상관행렬과 분산팽창지수 | O'Brien 2007 (임계값 경고) |
+| <img src="icons/ahp.png" width="72" alt="AHP 입지적합도 아이콘"> | AHP 입지적합도 | 쌍대비교 가중 적합도, 계층형 AHP, 일관성비율 | Saaty 1980; Alonso & Lamata 2006; Malczewski 2004 |
+| <img src="icons/archtoolkit.png" width="72" alt="트렌치 후보 제안 아이콘"> | 트렌치 후보 제안 | AOI 안에서 조건에 맞는 트렌치 배치 제안 | 플러그인 휴리스틱 (학술 방법 아님) |
+| <img src="icons/geochem.png" width="72" alt="지질도 도엽 ZIP 아이콘"> | 지질도 도엽 ZIP | KIGAM 1:50,000 지질도 로드·스타일·범주형 래스터 | KIGAM 자료 |
+| <img src="icons/geochem.png" width="72" alt="지구화학도 래스터 수치화 아이콘"> | 지구화학도 래스터 수치화 | WMS 렌더링 색상을 범례로 값 역추정 | KIGAM WMS 범례 (추정값) |
+| <img src="icons/cadastral.png" width="72" alt="지적도 중첩 면적표 아이콘"> | 지적도 중첩 면적표 | 조사구역과 필지의 중첩 면적표 | 지적 자료 |
+| <img src="icons/profile.png" width="72" alt="지형 단면 아이콘"> | 지형 단면 | 단면선 작성, 다중 프로파일, 차트·CSV 내보내기 | 실무 기법 |
+| <img src="icons/styling.png" width="72" alt="도면 시각화 아이콘"> | 도면 시각화 | 수치지형도 DXF 분류 스타일, DEM 배경, 프리셋 내보내기 | 실무 기법 |
+| <img src="icons/ai_report.png" width="72" alt="AI 조사요약 아이콘"> | AI 조사요약 | AOI 주변 레이어 통계 요약, 선택 시 Gemini 초안 | 실무 기법 (외부 전송 고지) |
 
 도구별 자세한 기능과 해석 시 유의점은 [docs/TOOLS.md](docs/TOOLS.md)에, 모든 화면은 [docs/GALLERY.md](docs/GALLERY.md)에 있습니다.
 
