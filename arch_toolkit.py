@@ -62,7 +62,7 @@ class ArchToolkit:
             self.align_export_action = QAction(icon("align_export.xpm"), u"분석 결과 정렬/내보내기 (Align & Export Stack)", mw)
             self.align_export_action.triggered.connect(self.run_align_export_tool)
 
-            self.cov_report_action = QAction(icon("terrain.png"), u"변수 상관/VIF 리포트 (Correlation & VIF)", mw)
+            self.cov_report_action = QAction(icon("covariate.png", "terrain.png"), u"변수 상관/VIF 리포트 (Correlation & VIF)", mw)
             self.cov_report_action.triggered.connect(self.run_cov_report_tool)
 
             # Distance to features: the most widely used predictor family in
@@ -102,8 +102,7 @@ class ArchToolkit:
             self.drafting_action = QAction(icon("slope_aspect.png", "styling.png"), u"경사도/사면방향 도면화 (Slope/Aspect Drafting)", mw)
             self.drafting_action.triggered.connect(self.run_drafting_tool)
 
-            # No dedicated trench artwork exists yet; the menu entry shows the plugin icon
-            # (as it did before 0.1.4) and the dialog falls back to the terrain icon.
+            # icons/trench.png is drawn by scripts/make_tool_icons.py; the plugin icon is the fallback.
             self.trench_action = QAction(icon("trench.png", "archtoolkit.png"), u"트렌치 후보 제안 (Trench Suggestion)", mw)
             self.trench_action.triggered.connect(self.run_trench_tool)
 

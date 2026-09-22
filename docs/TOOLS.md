@@ -51,7 +51,7 @@
 - 결과 래스터를 하나의 기준 격자(CRS·범위·픽셀)로 정렬해 실행별 스택과 manifest로 내보냅니다. 범주형과 방향(사면방향) 변수는 최근접, 연속형은 이중선형. NoData는 래스터별로 manifest `nodata` 열에 기록됩니다.
 - 메타데이터가 없는 래스터는 `categorical=unknown`으로 표시되며, 정수형에 값 종류가 적으면 최근접으로 처리합니다. 유효 픽셀 비율(`valid_pct`)이 함께 기록됩니다.
 
-### <img src="../icons/terrain.png" width="48" alt="" align="absmiddle"> 변수 상관/VIF 리포트 (Correlation & VIF)
+### <img src="../icons/covariate.png" width="48" alt="" align="absmiddle"> 변수 상관/VIF 리포트 (Correlation & VIF)
 - 상관행렬과 VIF를 계산합니다. 임계값 5·10은 참고선입니다(O'Brien 2007).
 
 ### <img src="../icons/ahp.png" width="48" alt="" align="absmiddle"> AHP 입지적합도 (AHP Suitability)
@@ -68,7 +68,7 @@
 
 ## 조사 설계·도면화·보고
 
-### <img src="../icons/archtoolkit.png" width="48" alt="" align="absmiddle"> 트렌치 후보 제안 (Trench Suggestion)
+### <img src="../icons/trench.png" width="48" alt="" align="absmiddle"> 트렌치 후보 제안 (Trench Suggestion)
 - AOI 안에서 폭·길이·개수·간격·내부 포함비율 조건으로 후보를 만들고 AOI 전체에 분산 배치합니다. `rank`는 점수순, `pick_order`는 배치 순서입니다. 무덤 회피는 수치지형도 속성과 범례 어휘에 의존하므로 "대상 0건"이 무덤이 없다는 뜻은 아닙니다. 학술 방법이 아닌 조사 보조 규칙입니다.
 
 ### <img src="../icons/styling.png" width="48" alt="" align="absmiddle"> 도면 시각화 (Map Styling)

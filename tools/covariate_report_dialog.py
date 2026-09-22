@@ -139,7 +139,7 @@ class CovariateReportDialog(QtWidgets.QDialog):
     def _setup_ui(self):
         self.setWindowTitle("변수 상관/다중공선성 리포트 (Correlation & VIF)")
         try:
-            self.setWindowIcon(plugin_icon("terrain.png"))
+            self.setWindowIcon(plugin_icon("covariate.png", "terrain.png"))
         except Exception as _exc:
             log_swallowed("covariate_report_dialog._setup_ui", _exc)
 
