@@ -16,6 +16,8 @@
 - **QGIS 4(Qt6/PyQt6) 대비**: `qgisMaximumVersion`을 4.99로 올렸습니다. PyQt6가 없앤 표기(스코프 없는 열거형, `QVariant.Type`, `exec_()`)와 QGIS 4가 지운 3.x 열거형(`QgsWkbTypes.PointGeometry`, `QgsMapLayerProxyModel.Filter`, `QgsRasterBandStats.Stats`, `QgsUnitTypes.Distance*` 등)을 소스 전체에서 양쪽에 통하는 표기로 바꿨고, 버전에 따라 이름이 다른 몇 가지는 `tools/qtcompat.py`가 실행 중인 QGIS를 조사해 고릅니다. QGIS 3.34에서는 결과가 수치까지 같고(회귀 27건), PyQt6 6.11에서 소스가 쓰는 모든 Qt 이름의 존재를 확인했습니다. **QGIS 4 빌드에서 실제로 실행해 보지는 못했습니다**(`docs/PUBLISHING.md` 6절).
 - 플러그인 저장소 업로드용 ZIP 빌드(`scripts/build_plugin_zip.py --check`), 태그 푸시 시 ZIP을 첨부하는 릴리스 워크플로, 업로드 절차 문서(`docs/PUBLISHING.md`).
 - 원본 1024 px 아이콘은 `docs/art/`에 보존합니다.
+- 아이콘 원본 15장 중 12장의 우측 하단에 이미지 생성기가 남긴 네 꼭짓점 별 마크가 있었습니다. `scripts/strip_corner_mark.py`(OpenCV 쉬프트맵 인페인팅, 평면 영역은 색 채우기)로 지우고 256 px 아이콘을 다시 만들었습니다. 바뀐 픽셀은 우측 하단 모서리뿐이며, 마크가 없던 3장(등고선·경사도·도면 시각화)은 그대로입니다.
+- README의 도구 표와 `docs/TOOLS.md`의 도구 제목에 QGIS 메뉴에 보이는 아이콘을 붙였습니다. 거리 래스터·변수 상관/VIF·트렌치·지질도 ZIP은 전용 아이콘이 없어 각각 비용표면·지형 분석·플러그인·지구화학도 아이콘을 함께 씁니다.
 
 ### 결과가 달라지는 수정
 - 지형 분석: 사용자 반경 TPI의 창을 (2r+1)셀로 교정. 작은 DEM에서는 3x3으로 대체하고 알림.
