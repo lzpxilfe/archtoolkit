@@ -112,20 +112,37 @@ def _as_positive_float(value: Any) -> Optional[float]:
     return v if (math.isfinite(v) and v > 0) else None
 
 
+def _as_finite_float(value: Any) -> Optional[float]:
+    """`value` as a finite float (any sign), or None when it is not usable."""
+    try:
+        v = float(value)
+    except Exception:
+        return None
+    return v if math.isfinite(v) else None
+
+
 def _nearest_scale_index(value: Any) -> int:
     """Index in `_SCALE_OPTIONS` closest to `value` (defaults to "1").
 
     A synthesized ratio is a continuous number (0.37, 4.6, ...) while the UI
     only offers the Saaty steps, so the combo has to snap to the nearest step
-    rather than silently falling back to 1.
+    rather than silently falling back to 1.  Snapping happens on the
+    reciprocal scale (ratios >= 1 to round(v), ratios < 1 to 1/round(1/v)) so
+    a ratio and its inverse land on reciprocal steps: 1.4 -> "1" and 1/1.4 ->
+    "1", not "1/2" -- otherwise the seeded table would depend on which of the
+    two criteria happens to come first.
     """
     default = 8  # "1"
     v = _as_positive_float(value)
     if v is None:
         return default
+    if v >= 1.0:
+        step = float(max(1, min(9, int(round(v)))))
+    else:
+        step = 1.0 / float(max(1, min(9, int(round(1.0 / v)))))
     best_k, best_d = default, None
     for k, (_label, val) in enumerate(_SCALE_OPTIONS):
-        d = abs(float(val) - v)
+        d = abs(float(val) - step)
         if best_d is None or d < best_d:
             best_k, best_d = k, d
     return int(best_k)
@@ -154,6 +171,9 @@ class _Criterion:
     prefer_min: Optional[float] = None
     prefer_max: Optional[float] = None
     score_ranges: Optional[List[Dict[str, float]]] = None
+    # Scope the min/max were measured over ("full" or an AOI key), so a run
+    # can tell when the stored statistics no longer match the AOI setting.
+    stats_scope: Optional[str] = None
 
 
 class _CriterionPreferenceDialog(QtWidgets.QDialog):
@@ -604,6 +624,8 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
         self._hierarchy_config: Dict[str, Any] = {}
         self._weight_input_mode: str = "flat"
         self._weight_input_note: str = ""
+        self._constant_criteria: List[Dict[str, Any]] = []
+        self._last_stats_stale: List[str] = []
         self._setup_ui()
         self._rebuild_pairwise_table()
 
@@ -905,8 +927,11 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
 <h4>주의/팁</h4>
 <ul>
   <li>기준 래스터의 <b>CRS/해상도/NoData</b>가 다르면 결과가 왜곡될 수 있습니다.</li>
-  <li><b>min/max 통계</b>가 결과를 크게 바꿉니다. AOI로 자를 거면 <b>AOI를 켠 상태에서</b>
-      통계를 계산하세요. 서로 다른 AOI에서 만든 두 적합도 지도는 직접 비교할 수 없습니다.</li>
+  <li><b>min/max 통계</b>가 결과를 크게 바꿉니다. 통계는 AOI/자르기 설정별로 기억되며, 설정을 바꾼 뒤
+      실행하면 자동으로 다시 계산해 알려줍니다. 서로 다른 AOI에서 만든 두 적합도 지도는 직접 비교할 수 없습니다.</li>
+  <li>Target/Range 값이 자료의 min-max 밖이면 범위 안으로 보정하고 알려줍니다. 값이 모두 같은 래스터는
+      benefit/cost로는 순위 정보가 없어 점수 0.5로 처리합니다(reclass/target/range는 그 값으로 평가).</li>
+  <li>계층형 AHP에서는 표의 CR 대신 <b>그룹 간 CR과 그룹 내 CR(최대)</b>을 표시/기록합니다.</li>
   <li>쌍대비교가 어려우면 먼저 3-5개 기준으로 시작해 점진적으로 늘리는 것을 권장합니다.</li>
   <li>적합도 값은 <b>확률이 아닙니다</b>. 0.8은 "유적 있을 확률 80%"가 아니라 상대 점수입니다.</li>
   <li><b>이 적합도를 예측모델(MaxEnt/GLM/RF)의 입력 변수로 넣지 마세요</b> — 순환 논증이 됩니다.
@@ -1091,6 +1116,10 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
         if note_prefix:
             note = f"{str(note_prefix).strip()} {note}".strip()
         self._set_weight_input_mode("hierarchy", note)
+        # The table rebuild above refreshed the label and weight column while
+        # still in flat mode; refresh again so they show the hierarchy's
+        # global weights and its own consistency ratios.
+        self._update_consistency_and_weights()
         # Seeding the flat table from clamped ratios silently would let the
         # user re-derive weights that disagree with the hierarchy they just
         # built, so say so up front as well as in the note.
@@ -1131,6 +1160,26 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
         except Exception as _exc:
             log_swallowed("ahp_suitability_dialog._hierarchy_global_weight_vector", _exc)
             return None
+
+    def _hierarchy_consistency_ratios(self) -> Optional[Tuple[Optional[float], Optional[float]]]:
+        """(group-level CR, largest within-group CR) of the applied hierarchy.
+
+        None outside hierarchy mode.  These are the consistency ratios of the
+        judgements the user actually made; the flat table's CR in hierarchy
+        mode belongs to a snapped, clamped seed and says nothing about them.
+        """
+        if not str(self._weight_input_mode or "").startswith("hierarchy"):
+            return None
+        try:
+            config = self._sanitize_hierarchy_config(self._hierarchy_config)
+            summary = dict((config or {}).get("computed") or {})
+        except Exception as _exc:
+            log_swallowed("ahp_suitability_dialog._hierarchy_consistency_ratios", _exc)
+            return None
+        group_cr = _as_finite_float(summary.get("group_consistency_ratio"))
+        local = [_as_finite_float(v) for v in dict(summary.get("local_consistency_ratio") or {}).values()]
+        local = [v for v in local if v is not None]
+        return (group_cr, (max(local) if local else None))
 
     def _on_pairwise_hand_edited(self) -> None:
         """A user edit to the flat table ends hierarchy mode: the table is now the source."""
@@ -1237,12 +1286,11 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
     def _hierarchy_metadata_params(self) -> Dict[str, Any]:
         """Weight provenance to attach to the output raster's metadata.
 
-        The consistency ratio stored next to the result is recomputed from the
-        flat table, which is only an approximation of the hierarchy once a
-        ratio has been clamped.  Publishing the raster without saying so would
-        present that approximation's CR as the hierarchy's, so the clamp flag,
-        the count and the caveat travel with the layer instead of living only
-        in a dialog the reader no longer has open.
+        In hierarchy mode the flat table is only an approximation of the
+        hierarchy once a ratio has been clamped (the run stores the
+        hierarchy's own group/local CRs instead of the table's), so the clamp
+        flag, the count and the caveat travel with the layer instead of living
+        only in a dialog the reader no longer has open.
         """
         out: Dict[str, Any] = {
             "weight_input_mode": str(self._weight_input_mode or "flat"),
@@ -1263,51 +1311,68 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
         out["global_pairwise_note"] = str(hierarchy.get("global_pairwise_note") or "")
         return out
 
-    def _ensure_criterion_preference_defaults(self, crit: _Criterion) -> None:
+    def _ensure_criterion_preference_defaults(self, crit: _Criterion) -> List[str]:
+        """Fill or clamp a criterion's target/range parameters against its min/max.
+
+        Returns the adjustments made (one Korean note each; empty when nothing
+        changed) so the caller can tell the user.  A value outside the data
+        range is clamped into it rather than replaced: "prefer 50-120 m" on
+        data 60-300 m becomes 60-120 m and keeps the user's intent, whereas
+        the former quartile/midpoint fallback silently inverted it over part
+        of the range.  Defaults are used only when a value is missing,
+        non-finite, or the interval is empty after clamping.  On a constant
+        raster (min == max) the values are left alone: there is no range to
+        scale to, and the run evaluates the single value against them.
+        """
+        notes: List[str] = []
         try:
             mn = float(crit.min_v) if crit.min_v is not None else None
             mx = float(crit.max_v) if crit.max_v is not None else None
         except Exception:
             mn, mx = None, None
         if mn is None or mx is None or (not math.isfinite(mn)) or (not math.isfinite(mx)):
-            return
+            return notes
         if mx < mn:
             mn, mx = mx, mn
         span = float(mx - mn)
+        rng = f"{_fmt_float(mn)}-{_fmt_float(mx)}"
         mode = str(crit.direction or "benefit")
         if mode == "target":
-            target_v = crit.target_v
-            try:
-                target0 = float(target_v) if target_v is not None else None
-            except Exception:
-                target0 = None
-            if target0 is None or (not math.isfinite(target0)) or target0 < mn or target0 > mx:
+            target0 = _as_finite_float(crit.target_v)
+            if target0 is None:
                 crit.target_v = mn + (span / 2.0 if span > 0 else 0.0)
+            elif span > 0 and (target0 < mn or target0 > mx):
+                crit.target_v = max(mn, min(mx, target0))
+                notes.append(f"Target 값 {_fmt_float(target0)} -> {_fmt_float(crit.target_v)} (자료 범위 {rng} 안으로 보정)")
         elif mode == "range":
-            pmin = crit.prefer_min
-            pmax = crit.prefer_max
-            try:
-                pmin0 = float(pmin) if pmin is not None else None
-                pmax0 = float(pmax) if pmax is not None else None
-            except Exception:
-                pmin0, pmax0 = None, None
-            # `or` short-circuits so isfinite() never sees None.
-            invalid_range = (
-                pmin0 is None
-                or pmax0 is None
-                or not math.isfinite(pmin0)
-                or not math.isfinite(pmax0)
-                or pmin0 >= pmax0
-                or pmin0 < mn
-                or pmax0 > mx
-            )
-            if invalid_range:
-                if span > 0:
-                    crit.prefer_min = mn + (span * 0.25)
-                    crit.prefer_max = mn + (span * 0.75)
-                else:
-                    crit.prefer_min = mn
-                    crit.prefer_max = mx
+            pmin0 = _as_finite_float(crit.prefer_min)
+            pmax0 = _as_finite_float(crit.prefer_max)
+            if pmin0 is not None and pmax0 is not None and span > 0 and pmin0 < pmax0:
+                pmin1 = max(mn, min(mx, pmin0))
+                pmax1 = max(mn, min(mx, pmax0))
+                if pmin1 < pmax1:
+                    if pmin1 != pmin0 or pmax1 != pmax0:
+                        notes.append(
+                            f"선호 구간 {_fmt_float(pmin0)}-{_fmt_float(pmax0)} -> "
+                            f"{_fmt_float(pmin1)}-{_fmt_float(pmax1)} (자료 범위 {rng} 안으로 보정)"
+                        )
+                    crit.prefer_min, crit.prefer_max = pmin1, pmax1
+                    return notes
+            elif pmin0 is not None and pmax0 is not None and pmin0 < pmax0:
+                return notes  # constant raster: keep the user's interval as is
+            # Missing, empty (min >= max) or entirely outside the data: there
+            # is nothing to clamp to, so use the default interval and say so.
+            if span > 0:
+                crit.prefer_min = mn + (span * 0.25)
+                crit.prefer_max = mn + (span * 0.75)
+            else:
+                crit.prefer_min = mn
+                crit.prefer_max = mx
+            if pmin0 is not None or pmax0 is not None:
+                notes.append(
+                    f"선호 구간 {_fmt_float(pmin0)}-{_fmt_float(pmax0)}이(가) 자료 범위 {rng}와 겹치지 않아 "
+                    f"기본값 {_fmt_float(crit.prefer_min)}-{_fmt_float(crit.prefer_max)}으로 대체"
+                )
         elif mode == "reclass":
             rows = crit.score_ranges or []
             if not rows:
@@ -1318,6 +1383,40 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
                         "score": 1.0,
                     }
                 ]
+        return notes
+
+    def _notify_preference_adjustments(self, crit: _Criterion, notes: List[str]) -> None:
+        """Tell the user which target/range values were clamped or defaulted."""
+        if not notes:
+            return
+        lyr = self._criterion_layer(crit)
+        name = str(lyr.name() if lyr is not None else "(레이어 없음)")
+        push_message(
+            self.iface, "주의",
+            f"기준 '{name}'의 선호 설정을 보정했습니다: " + " / ".join(notes),
+            level=1, duration=10,
+        )
+
+    @staticmethod
+    def _constant_criterion_score(crit: _Criterion, value: float) -> float:
+        """Score of a criterion whose raster holds a single value (min == max).
+
+        A min-max ramp would divide by zero.  reclass is handled by its table
+        before this is reached; target/range are evaluated on that one value;
+        benefit/cost carry no ranking information and get the neutral 0.5.
+        """
+        mode = str(crit.direction or "benefit")
+        v = float(value)
+        if mode == "target":
+            t = _as_finite_float(crit.target_v)
+            return 1.0 if (t is None or math.isclose(t, v, rel_tol=1e-9, abs_tol=1e-9)) else 0.0
+        if mode == "range":
+            pmin = _as_finite_float(crit.prefer_min)
+            pmax = _as_finite_float(crit.prefer_max)
+            if pmin is None or pmax is None or pmin > pmax:
+                return 1.0
+            return 1.0 if pmin <= v <= pmax else 0.0
+        return 0.5
 
     def _on_edit_selected_preference(self):
         row = self._selected_criterion_row()
@@ -1330,7 +1429,8 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
             mn, mx = self._compute_minmax_for_layer(lyr)
             crit.min_v = mn
             crit.max_v = mx
-        self._ensure_criterion_preference_defaults(crit)
+            crit.stats_scope = self._stats_scope_key() if mn is not None else None
+        self._notify_preference_adjustments(crit, self._ensure_criterion_preference_defaults(crit))
 
         if str(crit.direction or "benefit") == "reclass":
             dlg = _CriterionReclassDialog(
@@ -1359,7 +1459,7 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
         crit.target_v = float(values.get("target_v")) if values.get("target_v") is not None else None
         crit.prefer_min = float(values.get("prefer_min")) if values.get("prefer_min") is not None else None
         crit.prefer_max = float(values.get("prefer_max")) if values.get("prefer_max") is not None else None
-        self._ensure_criterion_preference_defaults(crit)
+        self._notify_preference_adjustments(crit, self._ensure_criterion_preference_defaults(crit))
         self._refresh_criteria_table()
 
     def _on_add_criterion(self):
@@ -1445,7 +1545,8 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
                             else:
                                 crit_row.min_v = mn_r
                                 crit_row.max_v = mx_r
-                        self._ensure_criterion_preference_defaults(crit_row)
+                                crit_row.stats_scope = self._stats_scope_key() if mn_r is not None else None
+                        self._notify_preference_adjustments(crit_row, self._ensure_criterion_preference_defaults(crit_row))
                         try:
                             self.tblCriteria.selectRow(int(row))
                         except Exception as _exc:
@@ -1530,12 +1631,7 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
                     # Select the scale option nearest to the (possibly seeded) value.
                     try:
                         v_saved = float(self._pairwise.get((i, j), 1.0))
-                        best_k, best_d = 8, None
-                        for k in range(cmb.count()):
-                            d = abs(float(cmb.itemData(k)) - v_saved)
-                            if best_d is None or d < best_d:
-                                best_k, best_d = k, d
-                        cmb.setCurrentIndex(int(best_k))
+                        cmb.setCurrentIndex(_nearest_scale_index(v_saved))
                         self._pairwise[(i, j)] = float(cmb.currentData() or 1.0)
                     except Exception:
                         cmb.setCurrentIndex(8)  # "1"
@@ -1668,6 +1764,18 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
             except Exception:
                 c.weight = None
 
+        if hier_w is not None:
+            # The table is a snapped, clamped seed here; its CR would flag the
+            # user's perfectly consistent judgements as inconsistent.
+            group_cr, local_cr = self._hierarchy_consistency_ratios() or (None, None)
+            note = " (주의: 0.10 초과)" if any(v is not None and v > 0.10 for v in (group_cr, local_cr)) else ""
+            self.lblConsistency.setText(
+                f"계층형: CR(그룹 간)={_fmt_float(group_cr, digits=3)}, CR(그룹 내 최대)={_fmt_float(local_cr, digits=3)}"
+                f"{note} | 가중치: 계층 전역가중치 사용(표는 근사 seed)"
+            )
+            self._update_criteria_weight_column()
+            return
+
         cr_txt = _fmt_float(cr, digits=3) if math.isfinite(float(cr)) else "-"
         lam_txt = _fmt_float(lam, digits=3) if math.isfinite(float(lam)) else "-"
         note = ""
@@ -1676,8 +1784,6 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
                 note = " (주의: 0.10 초과)"
         except Exception:
             note = ""
-        if hier_w is not None:
-            note += " | 가중치: 계층 전역가중치 사용(표는 근사 seed)"
         self.lblConsistency.setText(f"λmax={lam_txt}, CR={cr_txt}{note}")
         self._update_criteria_weight_column()
 
@@ -1726,6 +1832,31 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
             self._aoi_failure = result.message()
         return None
 
+    def _stats_scope_key(self) -> str:
+        """Key of the area the statistics are measured over: "full" or the AOI extent.
+
+        Stored on each criterion next to its min/max so a run can recompute
+        the statistics when the AOI or the clip option changed since they
+        were taken; reusing whole-raster numbers against an AOI-clipped map
+        stretches every ramp and was a silent wrong-everywhere result.
+        """
+        try:
+            aoi = self.cmbAoi.currentLayer()
+            if aoi is None or not isinstance(aoi, QgsVectorLayer) or not self.chkClipToAoiExtent.isChecked():
+                return "full"
+            selected = bool(self.chkAoiSelectedOnly.isChecked())
+            result = resolve_aoi_extent(aoi, selected_only=selected, dst_crs=aoi.crs())
+            if result.ok:
+                e = result.extent
+                return (
+                    f"aoi:{aoi.id()}:{int(selected)}:"
+                    f"{e.xMinimum():.3f},{e.xMaximum():.3f},{e.yMinimum():.3f},{e.yMaximum():.3f}"
+                )
+            return f"aoi:{aoi.id()}:{int(selected)}:{result.status}"
+        except Exception as _exc:
+            log_swallowed("ahp_suitability_dialog._stats_scope_key", _exc)
+            return "aoi:unknown"
+
     def _compute_minmax_for_layer(self, raster: QgsRasterLayer) -> Tuple[Optional[float], Optional[float]]:
         if raster is None or not isinstance(raster, QgsRasterLayer):
             return None, None
@@ -1736,6 +1867,11 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
             mn = float(stats.minimumValue) if stats is not None else None
             mx = float(stats.maximumValue) if stats is not None else None
             if mn is not None and mx is not None and math.isfinite(mn) and math.isfinite(mx):
+                # An extent with no pixels (AOI outside the raster) comes back
+                # as min=+DBL_MAX / max=-DBL_MAX, which is finite but not a
+                # statistic; treat it as "no statistics".
+                if mn > mx or abs(mn) >= 1e300 or abs(mx) >= 1e300:
+                    return None, None
                 return mn, mx
             return None, None
         except Exception:
@@ -1753,7 +1889,7 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
             # wrong everywhere. The stats were NOT stored; say so now.
             push_message(
                 self.iface, "오류",
-                "AOI 범위를 적용하지 못해 통계를 저장하지 않았습니다: " + " ".join(failures),
+                "통계(min/max)를 계산하지 못해 저장하지 않았습니다: " + " ".join(failures),
                 level=2, duration=12,
             )
             return
@@ -1775,23 +1911,39 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
         output, which is the wrong-everywhere map this guard exists to stop.
         """
         failures, warnings = [], []
+        self._last_stats_stale = []
+        scope = self._stats_scope_key()
         for c in self._criteria:
-            if not force and c.min_v is not None and c.max_v is not None:
+            has_stats = c.min_v is not None and c.max_v is not None
+            if not force and has_stats and c.stats_scope == scope:
                 continue
             lyr = self._criterion_layer(c)
             if lyr is None:
                 continue
+            if has_stats and c.stats_scope != scope:
+                # Statistics taken for another AOI/clip setting: recompute
+                # rather than silently reuse them (reported by the caller).
+                self._last_stats_stale.append(str(lyr.name() or ""))
             mn, mx = self._compute_minmax_for_layer(lyr)
             if self._aoi_failure:
                 if self._aoi_failure not in failures:
                     failures.append(self._aoi_failure)
                 c.min_v = None
                 c.max_v = None
+                c.stats_scope = None
+                continue
+            if mn is None or mx is None:
+                reason = "AOI가 래스터와 겹치지 않습니다" if self._stats_used_aoi else "유효한 픽셀이 없어 통계를 계산할 수 없습니다"
+                failures.append(f"{reason}: {lyr.name()}")
+                c.min_v = None
+                c.max_v = None
+                c.stats_scope = None
                 continue
             if self._aoi_warning and self._aoi_warning not in warnings:
                 warnings.append(self._aoi_warning)
             c.min_v = mn
             c.max_v = mx
+            c.stats_scope = scope
         return failures, warnings
 
     def _on_browse_out(self):
@@ -1982,6 +2134,35 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
             score_ranges=crit.score_ranges,
         )
 
+    @staticmethod
+    def _snap_extent_to_lattice(ext: QgsRectangle, ref_layer: QgsRasterLayer) -> QgsRectangle:
+        """Grow `ext` outward to the pixel lattice of `ref_layer`.
+
+        gdalwarp -te anchors the output grid at the extent's corner, so an AOI
+        drawn off the lattice would shift every criterion (the reference
+        included) by a fraction of a pixel; snapping keeps "align to the first
+        criterion" exact.  Returns `ext` unchanged when the lattice is unknown.
+        """
+        try:
+            re0 = ref_layer.extent()
+            px = float(ref_layer.rasterUnitsPerPixelX())
+            py = float(ref_layer.rasterUnitsPerPixelY())
+            if not (math.isfinite(px) and math.isfinite(py)) or px <= 0 or py <= 0 or re0 is None or re0.isEmpty():
+                return ext
+            x0 = float(re0.xMinimum())
+            y0 = float(re0.yMaximum())
+            eps = 1e-6
+            xmin = x0 + math.floor((float(ext.xMinimum()) - x0) / px + eps) * px
+            xmax = x0 + math.ceil((float(ext.xMaximum()) - x0) / px - eps) * px
+            ymax = y0 - math.floor((y0 - float(ext.yMaximum())) / py + eps) * py
+            ymin = y0 - math.ceil((y0 - float(ext.yMinimum())) / py - eps) * py
+            if xmax <= xmin or ymax <= ymin:
+                return ext
+            return QgsRectangle(xmin, ymin, xmax, ymax)
+        except Exception as _exc:
+            log_swallowed("ahp_suitability_dialog._snap_extent_to_lattice", _exc)
+            return ext
+
     def _processing_warp_to_reference(
         self,
         *,
@@ -2049,17 +2230,19 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
         processing.run("gdal:rastercalculator", params)
         return str(out_path)
 
-    def _apply_suitability_style(self, layer: QgsRasterLayer):
+    def _apply_suitability_style(self, layer: QgsRasterLayer, *, scale: float = 1.0):
+        """Red-yellow-green ramp over 0..`scale` (1 for 0-1 output, 100 for 0-100)."""
         if layer is None or not isinstance(layer, QgsRasterLayer) or (not layer.isValid()):
             return
         try:
+            s = float(scale) if (scale is not None and math.isfinite(float(scale)) and float(scale) > 0) else 1.0
             shader = QgsRasterShader()
             ramp = QgsColorRampShader()
             ramp.setColorRampType(SHADER_INTERPOLATED)
             items = [
                 QgsColorRampShader.ColorRampItem(0.0, QColor("#d73027"), "Low"),
-                QgsColorRampShader.ColorRampItem(0.5, QColor("#fee08b"), "Mid"),
-                QgsColorRampShader.ColorRampItem(1.0, QColor("#1a9850"), "High"),
+                QgsColorRampShader.ColorRampItem(0.5 * s, QColor("#fee08b"), "Mid"),
+                QgsColorRampShader.ColorRampItem(1.0 * s, QColor("#1a9850"), "High"),
             ]
             ramp.setColorRampItemList(items)
             shader.setRasterShaderFunction(ramp)
@@ -2069,12 +2252,40 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
         except Exception as _exc:
             log_swallowed("ahp_suitability_dialog._apply_suitability_style", _exc)
 
-    def _add_output_to_project(self, out_path: str, *, run_id: str, cr: Optional[float]) -> Optional[QgsRasterLayer]:
+    def _serialized_flat_pairwise(self) -> List[Dict[str, Any]]:
+        """The flat table's judgements, so a run can be reproduced from its metadata."""
+        rows = self._criterion_rows()
+        out: List[Dict[str, Any]] = []
+        for (i, j), v in sorted((self._pairwise or {}).items()):
+            v0 = _as_positive_float(v)
+            if v0 is None or not (0 <= int(i) < len(rows)) or not (0 <= int(j) < len(rows)):
+                continue
+            out.append({
+                "left_layer_id": rows[int(i)][0],
+                "left_layer_name": rows[int(i)][1],
+                "right_layer_id": rows[int(j)][0],
+                "right_layer_name": rows[int(j)][1],
+                "value": v0,
+            })
+        return out
+
+    def _add_output_to_project(
+        self,
+        out_path: str,
+        *,
+        run_id: str,
+        cr: Optional[float],
+        cr_group: Optional[float] = None,
+        cr_local_max: Optional[float] = None,
+        aoi_applied: bool = False,
+        aoi_extent: Optional[str] = None,
+    ) -> Optional[QgsRasterLayer]:
         try:
             layer_name = "AHP Suitability"
             try:
                 aoi = self.cmbAoi.currentLayer()
-                if aoi is not None:
+                # Only say "(AOI)" when the AOI really shaped the output.
+                if aoi is not None and aoi_applied:
                     layer_name = f"AHP Suitability ({aoi.name()})"
             except Exception as _exc:
                 log_swallowed("tools/ahp_suitability_dialog.py:1487 (_add_output_to_project)", _exc)
@@ -2102,17 +2313,34 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
                         "direction": c.direction,
                         "min": c.min_v,
                         "max": c.max_v,
+                        "stats_scope": c.stats_scope,
                         "weight": c.weight,
+                        # Scoring parameters, so a target/range/reclass run
+                        # can be reproduced from the layer alone.
+                        "target_v": c.target_v,
+                        "prefer_min": c.prefer_min,
+                        "prefer_max": c.prefer_max,
+                        "score_ranges": list(c.score_ranges or []) if str(c.direction or "") == "reclass" else None,
                         "archtoolkit_meta": (get_archtoolkit_layer_metadata(self._criterion_layer(c)) if self._criterion_layer(c) is not None else {}),
                     }
                     for c in self._criteria
                 ],
+                # Flat mode: CR of the pairwise table.  Hierarchy mode: the
+                # group-level CR and the largest within-group CR instead (the
+                # table is only a seed there), with consistency_ratio None.
                 "consistency_ratio": cr,
+                "consistency_ratio_group": cr_group,
+                "consistency_ratio_local_max": cr_local_max,
+                "constant_criteria": list(self._constant_criteria or []),
                 "clip_to_aoi_extent": bool(self.chkClipToAoiExtent.isChecked()),
+                "aoi_applied": bool(aoi_applied),
+                "aoi_extent": aoi_extent,
                 "align_to_first": bool(self.chkAlignToFirst.isChecked()),
                 "scale_0_100": bool(self.chkScale100.isChecked()),
                 **self._hierarchy_metadata_params(),
             }
+            if str(getattr(self, "_last_weights_source", "") or "") == "pairwise_matrix":
+                params["pairwise"] = self._serialized_flat_pairwise()
             set_archtoolkit_layer_metadata(
                 layer,
                 tool_id="ahp_suitability",
@@ -2154,7 +2382,7 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
             except Exception as _exc:
                 log_swallowed("ahp_suitability_dialog._add_output_to_project", _exc)
 
-        self._apply_suitability_style(layer)
+        self._apply_suitability_style(layer, scale=100.0 if self.chkScale100.isChecked() else 1.0)
         return layer
 
     def _on_run(self):
@@ -2174,6 +2402,9 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
         # 1) Weights
         n = int(len(self._criteria))
         cr = None
+        cr_group = None
+        cr_local_max = None
+        self._constant_criteria = []
         self._last_weights_source = "pairwise_matrix"
         if n == 1:
             self._criteria[0].weight = 1.0
@@ -2200,27 +2431,47 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
                         c.weight = float(w[i])
                     except Exception:
                         c.weight = None
-                cr = float(cr0) if math.isfinite(float(cr0)) else None
+                if hier_w is not None:
+                    # The table's CR belongs to a snapped, clamped seed and
+                    # would flag consistent judgements as inconsistent; report
+                    # the hierarchy's own ratios instead.
+                    cr_group, cr_local_max = self._hierarchy_consistency_ratios() or (None, None)
+                else:
+                    cr = float(cr0) if math.isfinite(float(cr0)) else None
         self._refresh_criteria_table()
 
         try:
-            if cr is not None and cr > 0.10:
-                push_message(self.iface, "주의", f"AHP 일관성비율(CR)이 높습니다: {cr:.3f} (권장 ≤ 0.10)", level=1, duration=8)
+            high = [
+                f"{label} {float(v):.3f}"
+                for label, v in (("CR", cr), ("그룹 간 CR", cr_group), ("그룹 내 CR", cr_local_max))
+                if v is not None and float(v) > 0.10
+            ]
+            if high:
+                push_message(self.iface, "주의", f"AHP 일관성비율(CR)이 높습니다: {', '.join(high)} (권장 ≤ 0.10)", level=1, duration=8)
         except Exception as _exc:
             log_swallowed("tools/ahp_suitability_dialog.py:1606 (_on_run)", _exc)
 
         # 2) Stats - through the guarded path, so a failed AOI never leaves
-        #    whole-raster min/max stored on a criterion for a later run.
+        #    whole-raster min/max stored on a criterion for a later run, and
+        #    statistics taken for another AOI/clip setting are recomputed.
         failures, warnings = self._compute_all_stats(force=False)
         self._refresh_criteria_table()
         if failures:
             push_message(self.iface, "오류",
-                         "AOI를 사용할 수 없어 실행을 중단했습니다: " + " ".join(failures),
+                         "통계(min/max)를 계산할 수 없어 실행을 중단했습니다: " + " ".join(failures),
                          level=2, duration=12)
             restore_ui_focus(self)
             return
+        if self._last_stats_stale:
+            push_message(self.iface, "AHP",
+                         "AOI/자르기 설정이 바뀌어 통계(min/max)를 다시 계산했습니다: " + ", ".join(self._last_stats_stale),
+                         level=0, duration=8)
         if warnings:
             push_message(self.iface, "주의", " ".join(warnings), level=1, duration=8)
+        # Target/range values are checked against the statistics now known.
+        for c in self._criteria:
+            if str(c.direction or "") in ("target", "range"):
+                self._notify_preference_adjustments(c, self._ensure_criterion_preference_defaults(c))
 
         # 3) Reference raster
         ref_layer = self._criterion_layer(self._criteria[0])
@@ -2240,6 +2491,8 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
 
         extent_str = None
         extent_crs = None
+        aoi_applied = False
+        aoi_extent_str = None
         if self.chkClipToAoiExtent.isChecked() and aoi_layer is not None and isinstance(aoi_layer, QgsVectorLayer):
             aoi_result = resolve_aoi_extent(
                 aoi_layer,
@@ -2247,9 +2500,13 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
                 dst_crs=ref_layer.crs(),
             )
             if aoi_result.ok:
-                ext = aoi_result.extent
+                # Snap outward to the reference lattice so the output grid is
+                # the first criterion's grid, not one shifted to the AOI corner.
+                ext = self._snap_extent_to_lattice(aoi_result.extent, ref_layer)
                 extent_str = f"{ext.xMinimum()},{ext.xMaximum()},{ext.yMinimum()},{ext.yMaximum()}"
                 extent_crs = str(ref_layer.crs().authid() or "")
+                aoi_applied = True
+                aoi_extent_str = f"{extent_str} [{extent_crs}]"
                 if aoi_result.skipped:
                     push_message(self.iface, "주의", aoi_result.message(), level=1, duration=8)
             elif aoi_result.requested_but_failed:
@@ -2371,7 +2628,27 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
 
                 denom = float(mx - mn)
                 if (not math.isfinite(denom)) or denom == 0:
-                    score_formula = "(A*0)"
+                    # A single-valued raster: the min-max ramp is undefined,
+                    # but the criterion's mode still says what the value means.
+                    if is_reclass:
+                        score_formula = f"({self._criterion_score_formula(c, mn=mn, mx=mx)})"
+                    else:
+                        const_score = self._constant_criterion_score(c, mn)
+                        score_formula = f"(A*0 + {const_score})"
+                        self._constant_criteria.append({
+                            "layer_id": str(c.layer_id or ""),
+                            "layer_name": str(lyr.name() or ""),
+                            "direction": str(c.direction or "benefit"),
+                            "value": float(mn),
+                            "score": float(const_score),
+                        })
+                        if str(c.direction or "benefit") in ("benefit", "cost"):
+                            push_message(
+                                self.iface, "주의",
+                                f"기준 '{lyr.name()}'의 값이 모두 {_fmt_float(mn)}(으)로 같아 순위 정보가 없습니다. "
+                                "점수 0.5로 처리했습니다.",
+                                level=1, duration=10,
+                            )
                 else:
                     # Honour the criterion's scoring mode (benefit/cost/target/range/reclass).
                     score_formula = f"({self._criterion_score_formula(c, mn=mn, mx=mx)})"
@@ -2431,8 +2708,15 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
                     if os.path.exists(clipped):
                         _safe_rm(acc_path)
                         acc_path = clipped
+                    else:
+                        aoi_applied = False
                 except Exception as _e:
                     log_exception("AHP AOI clip (non-align) failed", _e)
+                    aoi_applied = False
+                if not aoi_applied:
+                    # The output keeps the full grid; do not label it as AOI-clipped.
+                    aoi_extent_str = None
+                    push_message(self.iface, "주의", "AOI 범위로 자르지 못해 전체 범위로 저장했습니다.", level=1, duration=8)
 
             self._suitability_nodata = nodata_sentinel
 
@@ -2459,7 +2743,11 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
             push_message(self.iface, "AHP", f"완료: {final_path}", level=0, duration=6)
 
             if self.chkAddToProject.isChecked():
-                lyr_out = self._add_output_to_project(final_path, run_id=str(run_id), cr=cr)
+                lyr_out = self._add_output_to_project(
+                    final_path, run_id=str(run_id), cr=cr,
+                    cr_group=cr_group, cr_local_max=cr_local_max,
+                    aoi_applied=aoi_applied, aoi_extent=aoi_extent_str,
+                )
                 if lyr_out is None:
                     push_message(self.iface, "경고", "결과 레이어를 프로젝트에 추가하지 못했습니다.", level=1, duration=6)
 
