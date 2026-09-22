@@ -43,7 +43,15 @@ from qgis.core import (
 from .qtcompat import FT_INT, FT_UINT, FT_LONGLONG, FT_ULONGLONG, FT_DOUBLE, FT_STRING
 
 from .utils import is_null_value, log_swallowed, get_archtoolkit_layer_metadata, is_metric_crs, log_message
-from .utils import split_qgis_source_path
+from .utils import split_qgis_source_path, is_categorical_raster_meta
+
+# Every per-layer figure in `layers[].stats` is computed over the AOI + radius
+# buffer, not the AOI polygon; the string travels in context.json, the CSV and
+# the Gemini prompt so no reader has to infer that from the radius alone.
+STATS_SCOPE = "aoi_plus_radius_buffer"
+STATS_SCOPE_NOTE_KO = "layers[].stats(피처 수/총 길이/총 면적/래스터 통계)는 AOI 폴리곤이 아니라 AOI + 반경(radius_m) 버퍼 범위 기준"
+# Distinct classes kept per categorical raster (most frequent first).
+_MAX_RASTER_CLASSES = 20
 
 
 _NUMERIC_FIELD_CANDIDATES = (
@@ -503,6 +511,30 @@ def _transform_geom(geom: QgsGeometry, src_crs, dst_crs) -> Optional[QgsGeometry
     return out
 
 
+def _repaired_geometry(geom: QgsGeometry) -> Tuple[QgsGeometry, bool]:
+    """Return (geometry to measure, still_invalid).
+
+    An invalid ring (self-intersection, bow-tie) makes GEOS throw inside
+    intersection(): the feature was then counted in `features` while its
+    area/length silently dropped out of the totals. Repair with makeValid()
+    first; a geometry that cannot be repaired is returned as-is with the flag
+    set so the caller can count it instead of hiding it.
+    """
+    try:
+        if geom.isGeosValid():
+            return geom, False
+    except Exception as _exc:
+        log_swallowed("ai_aoi_summary._repaired_geometry", _exc)
+        return geom, False
+    try:
+        fixed = geom.makeValid()
+        if fixed is not None and (not fixed.isEmpty()) and fixed.isGeosValid():
+            return fixed, False
+    except Exception as _exc:
+        log_swallowed("ai_aoi_summary._repaired_geometry", _exc)
+    return geom, True
+
+
 def _vector_layer_stats_in_geom(
     layer: QgsVectorLayer,
     geom: QgsGeometry,
@@ -560,6 +592,8 @@ def _vector_layer_stats_in_geom(
 
     scan_cap = int(max_features_scan)
     truncated = False
+    invalid_geoms = 0
+    repaired_geoms = 0
     for feat in layer.getFeatures(req):
         # Test the cap BEFORE counting so `scanned` reports the number actually
         # examined (it used to read cap+1 when the cap fired).
@@ -578,6 +612,10 @@ def _vector_layer_stats_in_geom(
             continue
         if not g or g.isEmpty():
             continue
+        g_fixed, geom_invalid = _repaired_geometry(g)
+        if (not geom_invalid) and (g_fixed is not g):
+            repaired_geoms += 1
+        g = g_fixed
         _skip_398 = False
         try:
             if not g.intersects(geom):
@@ -587,10 +625,16 @@ def _vector_layer_stats_in_geom(
             log_swallowed("tools/ai_aoi_summary.py:401 (_vector_layer_stats_in_geom)", _exc)
             _skip_398 = True
         if _skip_398:
+            if geom_invalid:
+                invalid_geoms += 1
             continue
 
         n += 1
-        if geom_type == Qgis.GeometryType.Line:
+        if geom_invalid:
+            # Counted in `features` but its intersection cannot be measured
+            # reliably, so it is kept out of the totals and reported instead.
+            invalid_geoms += 1
+        elif geom_type == Qgis.GeometryType.Line:
             try:
                 _len = _length_m(da, g.intersection(geom), layer_crs)
                 if _len is not None:
@@ -658,6 +702,21 @@ def _vector_layer_stats_in_geom(
     # can tell "complete" from "flag never written".
     out["truncated"] = bool(truncated)
     out["numeric_fields_truncated"] = int(num_dropped)
+    # Features whose geometry stayed invalid after makeValid(): included in
+    # `features`, excluded from total_length_m/total_area_m2. Written always
+    # so a CSV reader can tell "0" from "not tracked".
+    out["invalid_geometries"] = int(invalid_geoms)
+    if repaired_geoms > 0:
+        out["repaired_geometries"] = int(repaired_geoms)
+    if invalid_geoms > 0:
+        try:
+            log_message(
+                f"AI 요약: 레이어 '{layer.name()}'의 지오메트리 {invalid_geoms}개가 복구되지 않아 "
+                "총 길이/총 면적에서 제외했습니다(피처 수에는 포함).",
+                level=Qgis.MessageLevel.Warning,
+            )
+        except Exception as _exc:
+            log_swallowed("ai_aoi_summary._vector_layer_stats_in_geom", _exc)
     if truncated:
         # Everything below is a partial figure over the first `scan_cap`
         # features in provider order. Name the cap and, when the provider can
@@ -779,7 +838,9 @@ def _feature_ref_name(feature, *, name_field: str) -> str:
     try:
         if name_field:
             v = feature[name_field]
-            if v is not None:
+            # PyQGIS hands back NULL (not None) for a null cell, and str(NULL)
+            # is the literal "NULL" - which was then printed as the site name.
+            if not is_null_value(v):
                 s = str(v).strip()
                 if s:
                     return s
@@ -895,6 +956,10 @@ def _reference_sites_summary(
     # provider (FID) order and sorted afterwards, so the "nearest site" and the
     # classification counts came from an arbitrary subset of the sites in range.
     heap: List[Tuple[float, int, Dict[str, Any]]] = []
+    # Compass tally over EVERY classified site (not only the display-capped
+    # items), split so sites inside/overlapping the AOI are not reported as
+    # the radius distribution: {"aoi": {...}, "buffer": {...}}.
+    direction_counts: Dict[str, Dict[str, int]] = {"aoi": {}, "buffer": {}}
 
     for ft in features:
         if scanned >= max_scan:
@@ -964,6 +1029,19 @@ def _reference_sites_summary(
             relation = "outside_buffer"
             counts["outside_buffer"] += 1
         classified += 1
+
+        if aoi_centroid_pt is not None and relation != "outside_buffer":
+            try:
+                rp0 = _extract_representative_point(g)
+                if rp0 is not None:
+                    dx0 = float(rp0.x()) - float(aoi_centroid_pt.x())
+                    dy0 = float(rp0.y()) - float(aoi_centroid_pt.y())
+                    if abs(dx0) > 1e-9 or abs(dy0) > 1e-9:
+                        comp0 = _compass8_ko(math.degrees(math.atan2(dx0, dy0)) % 360.0)
+                        bucket = direction_counts["aoi" if intersects_aoi else "buffer"]
+                        bucket[comp0] = int(bucket.get(comp0, 0)) + 1
+            except Exception as _exc:
+                log_swallowed("ai_aoi_summary._reference_sites_summary", _exc)
 
         try:
             dist_to_aoi = 0.0 if intersects_aoi else float(g.distance(aoi_geom))
@@ -1212,10 +1290,44 @@ def _reference_sites_summary(
         # item list is cut (counts remain complete over everything scanned).
         "scan_truncated": bool(scan_truncated),
         "counts": counts,
+        # 8-point compass counts (from the AOI centroid) over all classified
+        # sites: "aoi" = inside/overlapping the AOI, "buffer" = outside the AOI
+        # but inside/overlapping the radius buffer.
+        "direction_counts": direction_counts,
         "items": items,
         "max_features": int(max_items),
         "truncated": bool(classified > kept),
     }
+
+
+def _class_value(v) -> Any:
+    """JSON-friendly class code: an int when the value is integral."""
+    x = float(v)
+    if math.isfinite(x) and x.is_integer():
+        return int(x)
+    return x
+
+
+def _categorical_raster_stats(out: Dict[str, Any], vals) -> Dict[str, Any]:
+    """Swap min/mean/max for a class histogram (mean of class codes is noise)."""
+    try:
+        uniq, cnt = np.unique(vals, return_counts=True)
+        total = float(max(1, int(vals.size)))
+        order = np.argsort(-cnt, kind="stable")
+        classes = []
+        for i in order[:_MAX_RASTER_CLASSES]:
+            c = int(cnt[i])
+            classes.append({"value": _class_value(uniq[i]), "count": c, "pct": float(c) / total * 100.0})
+    except Exception as _exc:
+        log_swallowed("ai_aoi_summary._categorical_raster_stats", _exc)
+        return out
+    for k in ("min", "max", "mean"):
+        out.pop(k, None)
+    out["categorical"] = True
+    out["class_count"] = int(uniq.size)
+    out["classes"] = classes
+    out["classes_truncated"] = int(max(0, int(uniq.size) - len(classes)))
+    return out
 
 
 def _raster_stats_in_geom(
@@ -1223,7 +1335,14 @@ def _raster_stats_in_geom(
     geom: QgsGeometry,
     *,
     max_pixels: int = 4_000_000,  # cap for memory safety
+    categorical: bool = False,
 ) -> Optional[Dict[str, Any]]:
+    """Statistics of band 1 inside `geom`.
+
+    `categorical=True` (class codes, see tools.raster_semantics) replaces
+    min/mean/max - meaningless on nominal codes - with a class histogram:
+    `class_count` and the most frequent `classes` with their cell counts.
+    """
     if np is None or gdal is None or ogr is None:
         return None
     if not raster_path or not os.path.exists(str(raster_path)):
@@ -1424,6 +1543,8 @@ def _raster_stats_in_geom(
                     out["gt_0_5_pct"] = float(pct)
         except Exception as _exc:
             log_swallowed("ai_aoi_summary._raster_stats_in_geom", _exc)
+        if categorical:
+            out = _categorical_raster_stats(out, vals)
         return out
     except Exception:
         return None
@@ -1543,6 +1664,11 @@ def build_aoi_context(
         aoi_centroid_pt = None
 
     group_prefix = str(group_path_prefix or "").strip().strip("/")
+    # Layers the user picked by hand win over the automatic filters (ArchToolkit
+    # only / Style exclusion); any picked layer that still cannot be summarised
+    # is listed in `skipped_selected_layers` so the report can name it.
+    explicit_layers = bool(layer_ids)
+    skipped_selected: List[Dict[str, str]] = []
     if layer_ids:
         map_layers = QgsProject.instance().mapLayers()
         ordered = []
@@ -1553,6 +1679,7 @@ def build_aoi_context(
                 continue
             lyr = map_layers.get(lid0)
             if lyr is None:
+                skipped_selected.append({"id": lid0, "name": lid0, "reason": "not_in_project"})
                 continue
             if lyr.id() in seen:
                 continue
@@ -1595,7 +1722,7 @@ def build_aoi_context(
 
         meta = _layer_archtoolkit_meta(lyr)
 
-        if exclude_styling_layers:
+        if exclude_styling_layers and (not explicit_layers):
             try:
                 if str(lyr.name() or "").startswith("Style:"):
                     continue
@@ -1607,7 +1734,7 @@ def build_aoi_context(
             except Exception as _exc:
                 log_swallowed("tools/ai_aoi_summary.py:1208 (build_aoi_context)", _exc)
 
-        if only_archtoolkit_layers and (not meta) and (not is_archtoolkit_layer(lyr)):
+        if only_archtoolkit_layers and (not explicit_layers) and (not meta) and (not is_archtoolkit_layer(lyr)):
             continue
 
         # Transform buffer geometry to layer CRS to do intersection tests.
@@ -1616,13 +1743,19 @@ def build_aoi_context(
         except Exception:
             g_layer = None
         if g_layer is None or g_layer.isEmpty():
+            if explicit_layers:
+                skipped_selected.append({"id": str(lyr.id()), "name": str(lyr.name()), "reason": "crs_transform_failed"})
             continue
 
+        out_of_range = False
         try:
-            if not lyr.extent().intersects(g_layer.boundingBox()):
-                continue
+            out_of_range = not lyr.extent().intersects(g_layer.boundingBox())
         except Exception as _exc:
             log_swallowed("ai_aoi_summary.build_aoi_context", _exc)
+        if out_of_range:
+            if explicit_layers:
+                skipped_selected.append({"id": str(lyr.id()), "name": str(lyr.name()), "reason": "out_of_range"})
+            continue
 
         # Past the cap: keep counting candidates (so the context can say how
         # many were skipped) but do not compute their stats.
@@ -1670,9 +1803,14 @@ def build_aoi_context(
                 log_swallowed("tools/ai_aoi_summary.py:1262 (build_aoi_context)", _exc)
             src_path = _split_qgis_source_path(lyr.source())
             item["source"] = os.path.basename(src_path) if src_path else ""
+            try:
+                raster_categorical = bool(is_categorical_raster_meta(meta or {}))
+            except Exception as _exc:
+                log_swallowed("ai_aoi_summary.build_aoi_context", _exc)
+                raster_categorical = False
             if src_path and os.path.exists(src_path):
                 try:
-                    item["stats"] = _raster_stats_in_geom(src_path, g_layer)
+                    item["stats"] = _raster_stats_in_geom(src_path, g_layer, categorical=raster_categorical)
                 except Exception:
                     item["stats"] = None
             else:
@@ -1685,6 +1823,15 @@ def build_aoi_context(
             log_message(
                 f"AI 요약: 레이어 한도({effective_max_layers}개)에 도달해 후보 {layers_candidates}개 중 "
                 f"{len(summaries)}개만 요약했습니다.",
+                level=Qgis.MessageLevel.Warning,
+            )
+        except Exception as _exc:
+            log_swallowed("ai_aoi_summary.build_aoi_context", _exc)
+    if skipped_selected:
+        try:
+            log_message(
+                "AI 요약: 선택한 레이어 중 요약하지 못한 레이어: "
+                + ", ".join(f"{d.get('name')}({d.get('reason')})" for d in skipped_selected[:20]),
                 level=Qgis.MessageLevel.Warning,
             )
         except Exception as _exc:
@@ -1715,9 +1862,15 @@ def build_aoi_context(
         },
         "radius_m": float(r),
         "buffer_area_m2": buf_area,
+        # What `layers[].stats` were measured over (AOI + radius buffer).
+        "stats_scope": STATS_SCOPE,
+        "stats_scope_note": STATS_SCOPE_NOTE_KO,
         "layers": summaries,
         "layers_truncated": bool(layers_truncated),
         "layers_candidates": int(layers_candidates),
+        # Explicitly picked layers that were not summarised (reason:
+        # out_of_range / crs_transform_failed / not_in_project).
+        "skipped_selected_layers": skipped_selected,
         "options": {
             # Effective mode (False when the empty-selection fallback was taken).
             "selected_only": bool(selected_only),
@@ -1821,6 +1974,7 @@ def export_aoi_context_csv(
             "truncated",
             "layer_feature_count",
             "numeric_fields_truncated",
+            "invalid_geometries",
             "total_length_m",
             "total_area_m2",
             "top_field",
@@ -1840,9 +1994,16 @@ def export_aoi_context_csv(
             "gt_0_5_pct",
             "high_value_pct",
             "high_value_threshold",
+            # Categorical rasters: class histogram instead of min/mean/max
+            "raster_categorical",
+            "raster_class_count",
+            "raster_classes_preview",
             # Context-level layer cap (repeated per row so the file is self-describing)
             "layers_truncated",
             "layers_candidates",
+            # Every stat above is over the AOI + radius buffer (repeated per row)
+            "stats_scope",
+            "buffer_radius_m",
             # Raw JSON
             "stats_json",
         ]
@@ -1871,6 +2032,15 @@ def export_aoi_context_csv(
                 if not isinstance(dist, dict):
                     dist = {}
 
+                classes_preview = ""
+                try:
+                    cl = stats.get("classes") or []
+                    if isinstance(cl, list) and cl:
+                        classes_preview = ";".join([f"{d.get('value')}={d.get('count')}" for d in cl[:10] if isinstance(d, dict)])
+                except Exception as _exc:
+                    log_swallowed("ai_aoi_summary.export_aoi_context_csv", _exc)
+                    classes_preview = ""
+
                 row = {
                     "layer_id": _as_text(lyr.get("id")),
                     "layer_name": _as_text(lyr.get("name")),
@@ -1893,6 +2063,7 @@ def export_aoi_context_csv(
                     "truncated": _as_text(stats.get("truncated")),
                     "layer_feature_count": _as_text(stats.get("layer_feature_count")),
                     "numeric_fields_truncated": _as_text(stats.get("numeric_fields_truncated")),
+                    "invalid_geometries": _as_text(stats.get("invalid_geometries")),
                     "total_length_m": _as_text(stats.get("total_length_m")),
                     "total_area_m2": _as_text(stats.get("total_area_m2")),
                     "top_field": _as_text(stats.get("top_field")),
@@ -1912,9 +2083,14 @@ def export_aoi_context_csv(
                     "gt_0_5_pct": _as_text(stats.get("gt_0_5_pct")),
                     "high_value_pct": _as_text(stats.get("high_value_pct")),
                     "high_value_threshold": _as_text(stats.get("high_value_threshold")),
+                    "raster_categorical": _as_text(stats.get("categorical")),
+                    "raster_class_count": _as_text(stats.get("class_count")),
+                    "raster_classes_preview": _as_text(classes_preview),
                     # context-level
                     "layers_truncated": _as_text(ctx.get("layers_truncated")),
                     "layers_candidates": _as_text(ctx.get("layers_candidates")),
+                    "stats_scope": _as_text(ctx.get("stats_scope") or STATS_SCOPE),
+                    "buffer_radius_m": _as_text(ctx.get("radius_m")),
                     # raw
                     "stats_json": _as_text(lyr.get("stats")),
                 }
@@ -1938,6 +2114,8 @@ def export_aoi_context_csv(
             "min",
             "mean",
             "max",
+            "stats_scope",
+            "buffer_radius_m",
         ]
         with open(str(numeric_fields_csv_path), "w", encoding="utf-8", newline="") as f:
             w = csv.DictWriter(f, fieldnames=fieldnames)
@@ -1974,6 +2152,8 @@ def export_aoi_context_csv(
                             "min": _as_text(d.get("min")),
                             "mean": _as_text(d.get("mean")),
                             "max": _as_text(d.get("max")),
+                            "stats_scope": _as_text(ctx.get("stats_scope") or STATS_SCOPE),
+                            "buffer_radius_m": _as_text(ctx.get("radius_m")),
                         }
                     )
     except Exception as e:

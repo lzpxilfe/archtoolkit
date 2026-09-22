@@ -27,7 +27,7 @@ from .live_log_dialog import ensure_live_log_dialog
 from .help_dialog import show_help_dialog
 from . import dialog_memory
 from .icons import icon as plugin_icon
-from .utils import log_swallowed, log_message, push_message, restore_ui_focus
+from .utils import log_swallowed, log_message, push_message, restore_ui_focus, split_qgis_source_path
 
 
 _SETTINGS_PREFIX = "ArchToolkit/ai/report"
@@ -159,12 +159,88 @@ class AiAoiReportDialog(QtWidgets.QDialog):
         self._last_provider: str = ""
         self._last_model: str = ""
         self._last_generated_at: str = ""
+        self._watched_layers: dict = {}
+        self._project_signals_connected = False
         self._setup_ui()
         self._update_provider_ui()
         self._refresh_key_status()
         self._refresh_group_list()
         self._update_layer_scope_ui()
         self._update_reference_ui()
+        # Drop the cached context when the project changes under it (layers
+        # added/removed, an edit committed); the per-layer signature in
+        # _project_layers_signature catches the rest at lookup time.
+        self._connect_cache_invalidation()
+        try:
+            self.finished.connect(self._disconnect_cache_invalidation)
+        except Exception as _exc:
+            log_swallowed("ai_report_dialog.__init__", _exc)
+
+    def _invalidate_ctx_cache(self, *_args) -> None:
+        """Forget the cached context so the next generate/export re-scans."""
+        self._last_ctx = None
+        self._last_ctx_key = None
+
+    def _watch_vector_layer(self, lyr) -> None:
+        if not isinstance(lyr, QgsVectorLayer):
+            return
+        try:
+            lid = str(lyr.id() or "")
+        except Exception as _exc:
+            log_swallowed("ai_report_dialog._watch_vector_layer", _exc)
+            return
+        if not lid or lid in self._watched_layers:
+            return
+        try:
+            lyr.afterCommitChanges.connect(self._invalidate_ctx_cache)
+            self._watched_layers[lid] = lyr
+        except Exception as _exc:
+            log_swallowed("ai_report_dialog._watch_vector_layer", _exc)
+
+    def _on_project_layers_added(self, layers) -> None:
+        self._invalidate_ctx_cache()
+        for lyr in list(layers or []):
+            self._watch_vector_layer(lyr)
+
+    def _on_project_layers_removed(self, layer_ids) -> None:
+        self._invalidate_ctx_cache()
+        # The layer objects are gone (their connections with them): only drop
+        # our references, never disconnect a deleted sender.
+        for lid in list(layer_ids or []):
+            self._watched_layers.pop(str(lid), None)
+
+    def _connect_cache_invalidation(self) -> None:
+        prj = QgsProject.instance()
+        try:
+            prj.layersAdded.connect(self._on_project_layers_added)
+            prj.layersRemoved.connect(self._on_project_layers_removed)
+            self._project_signals_connected = True
+        except Exception as _exc:
+            log_swallowed("ai_report_dialog._connect_cache_invalidation", _exc)
+        try:
+            for lyr in list(prj.mapLayers().values()):
+                self._watch_vector_layer(lyr)
+        except Exception as _exc:
+            log_swallowed("ai_report_dialog._connect_cache_invalidation", _exc)
+
+    def _disconnect_cache_invalidation(self, *_args) -> None:
+        if self._project_signals_connected:
+            prj = QgsProject.instance()
+            try:
+                prj.layersAdded.disconnect(self._on_project_layers_added)
+            except Exception as _exc:
+                log_swallowed("ai_report_dialog._disconnect_cache_invalidation", _exc)
+            try:
+                prj.layersRemoved.disconnect(self._on_project_layers_removed)
+            except Exception as _exc:
+                log_swallowed("ai_report_dialog._disconnect_cache_invalidation", _exc)
+            self._project_signals_connected = False
+        for lyr in list(self._watched_layers.values()):
+            try:
+                lyr.afterCommitChanges.disconnect(self._invalidate_ctx_cache)
+            except Exception as _exc:
+                log_swallowed("ai_report_dialog._disconnect_cache_invalidation", _exc)
+        self._watched_layers = {}
 
     def _settings_get(self, key: str, default=None):
         try:
@@ -373,6 +449,13 @@ class AiAoiReportDialog(QtWidgets.QDialog):
             self.spinReferenceMax.setValue(120)
         self.spinReferenceMax.valueChanged.connect(self._on_reference_option_changed)
         form.addRow("추가 유적 최대 개수:", self.spinReferenceMax)
+
+        self.chkForceRecompute = QtWidgets.QCheckBox("매번 새로 계산(이전 통계 재사용 안 함)")
+        self.chkForceRecompute.setToolTip(
+            "끄면 같은 입력으로 다시 실행할 때 이전 통계를 재사용합니다. 레이어 추가/삭제, 편집 저장, "
+            "피처 수나 원본 파일이 바뀌면 자동으로 다시 계산합니다."
+        )
+        form.addRow("", self.chkForceRecompute)
 
         layout.addWidget(grp_in)
 
@@ -725,6 +808,8 @@ class AiAoiReportDialog(QtWidgets.QDialog):
                 )
             trunc = []
             sampled = []
+            categorical = []
+            invalid = []
             for lyr in layers:
                 st = lyr.get("stats") or {}
                 if not isinstance(st, dict):
@@ -734,6 +819,10 @@ class AiAoiReportDialog(QtWidgets.QDialog):
                     trunc.append(f"{nm}(스캔 한도 {st.get('scan_cap')}개)")
                 if bool(st.get("sampled")):
                     sampled.append(f"{nm}(표본 step {st.get('sample_step')})")
+                if bool(st.get("categorical")):
+                    categorical.append(f"{nm}(클래스 {st.get('class_count')}개)")
+                if int(st.get("invalid_geometries") or 0) > 0:
+                    invalid.append(f"{nm}({st.get('invalid_geometries')}개)")
             if trunc:
                 lines.append(
                     "- 주의: 다음 레이어는 피처 스캔 한도에 도달해 `features`/`total_length_m`/`total_area_m2`/"
@@ -745,6 +834,23 @@ class AiAoiReportDialog(QtWidgets.QDialog):
                 lines.append(
                     "- 주의: 다음 래스터는 표본 추출되어(`stats.sampled=true`) `count`는 표본 수, "
                     "`min`/`max`는 표본 극값입니다: " + ", ".join(sampled[:20])
+                )
+            if categorical:
+                lines.append(
+                    "- 주의: 다음 래스터는 범주형(클래스 코드)입니다(`stats.categorical=true`). `classes`(클래스별 셀 수)와 "
+                    "`class_count`만 사용하고 평균/최솟값/최댓값을 계산하거나 서술하지 마세요: " + ", ".join(categorical[:20])
+                )
+            if invalid:
+                lines.append(
+                    "- 주의: 다음 레이어는 복구되지 않은 지오메트리가 있어 `features`에는 포함되지만 "
+                    "`total_length_m`/`total_area_m2`에서는 제외되었습니다(`stats.invalid_geometries`): " + ", ".join(invalid[:20])
+                )
+            skipped = [d for d in (ctx.get("skipped_selected_layers") or []) if isinstance(d, dict)]
+            if skipped:
+                lines.append(
+                    "- 참고: 사용자가 선택했지만 요약되지 않은 레이어(`skipped_selected_layers`, 버퍼 범위 밖 등): "
+                    + ", ".join(str(d.get("name") or "") for d in skipped[:20])
+                    + ". 이 레이어들에 대해 단정하지 마세요."
                 )
             ref = ctx.get("reference_sites") or {}
             if isinstance(ref, dict) and bool(ref.get("scan_truncated")):
@@ -780,6 +886,9 @@ class AiAoiReportDialog(QtWidgets.QDialog):
             "- 동일 `run_id`는 같은 도구 실행(run)에서 나온 결과이므로 묶어서 설명해도 됩니다.\n"
             "- JSON에 `reference_sites`가 있으면, AOI와 특정 유적 간 관계(내부/버퍼 내/거리/중첩)를 별도 소제목으로 설명하세요.\n"
             "- 대형 폴리곤/선형 유적은 `inside/outside` 면적·길이 필드를 사용해 AOI 내부/외부를 분리해서 설명하세요.\n"
+            f"- 집계 범위: `layers[].stats`의 피처 수/총 길이/총 면적/래스터 통계는 AOI 폴리곤이 아니라 AOI + 반경 {radius_m} m "
+            "버퍼(`buffer_area_m2`) 범위 기준입니다(`stats_scope`). 이 값을 'AOI 내부' 값으로 쓰지 마세요. "
+            "AOI 내부/버퍼 구분은 `reference_sites`에만 있습니다.\n"
             f"{caveats}"
             "\n"
             "요청:\n"
@@ -809,14 +918,35 @@ class AiAoiReportDialog(QtWidgets.QDialog):
         s = " ".join(s.split())
         return (s or fallback)[:80]
 
-    def _project_layers_signature(self):
-        """Sorted tuple of all project layer ids. Invalidates the context cache
-        when layers are added/removed (e.g. after running a new analysis) so the
-        summary never silently reflects a stale project state."""
+    @staticmethod
+    def _layer_content_signature(lyr):
+        """(feature count for a vector layer, source file mtime for a file-backed
+        layer): changes when a layer's content changes under the same id."""
+        count = -1
+        if isinstance(lyr, QgsVectorLayer):
+            try:
+                count = int(lyr.featureCount())
+            except Exception as _exc:
+                log_swallowed("ai_report_dialog._layer_content_signature", _exc)
+        mtime = None
         try:
-            return tuple(sorted(str(k) for k in QgsProject.instance().mapLayers().keys()))
+            path = split_qgis_source_path(lyr.source())
+            if path and os.path.isfile(path):
+                mtime = float(os.path.getmtime(path))
+        except Exception as _exc:
+            log_swallowed("ai_report_dialog._layer_content_signature", _exc)
+        return (count, mtime)
+
+    def _project_layers_signature(self):
+        """Sorted (layer id, content signature) of all project layers. Invalidates
+        the context cache when layers are added/removed (e.g. after running a new
+        analysis) and when a layer's features or source file change under the
+        same id, so the summary never silently reflects a stale project state."""
+        try:
+            items = list(QgsProject.instance().mapLayers().items())
         except Exception:
             return ()
+        return tuple(sorted((str(k), self._layer_content_signature(v)) for k, v in items))
 
     def _aoi_signature(self, aoi_layer):
         """Feature count + rounded extent of the AOI layer. Invalidates the cache
@@ -970,7 +1100,12 @@ class AiAoiReportDialog(QtWidgets.QDialog):
             reference_max_features=reference_max_features,
             max_layers=max_layers,
         )
-        if self._last_ctx is not None and self._last_ctx_key == key:
+        force = False
+        try:
+            force = bool(self.chkForceRecompute.isChecked())
+        except Exception as _exc:
+            log_swallowed("ai_report_dialog._get_or_build_ctx", _exc)
+        if (not force) and self._last_ctx is not None and self._last_ctx_key == key:
             return self._last_ctx, None
 
         def _build(arch_flag):

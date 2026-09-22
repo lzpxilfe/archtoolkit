@@ -54,6 +54,10 @@ FORBIDDEN = [
     (r"\bQRegExp\b|\bQTextCodec\b|\bQDesktopWidget\b|\.toTime_t\(|setTabStopWidth|HighQualityAntialiasing|\.setMargin\(",
      "a Qt 6 API (these were removed)"),
     (r"fontMetrics\(\)\.width\(|QFontMetrics\([^)]*\)\.width\(", "horizontalAdvance()"),
+    # PyQt6 rejects a raw int where an enum is expected (progress.setWindowModality(2) raised TypeError).
+    (r"\.set(WindowModality|EchoMode|TextAlignment|Alignment|FrameShape|FrameShadow|FrameStyle|CheckState|SelectionMode|"
+     r"SelectionBehavior|EditTriggers|LineWrapMode|PopupMode|WindowFlags|ContextMenuPolicy|FocusPolicy|Orientation|"
+     r"TextInteractionFlags|SizeAdjustPolicy|InsertPolicy|ToolButtonStyle)\(\s*-?[0-9]", "a scoped Qt enum member, never a raw int"),
 ]
 
 

@@ -54,7 +54,7 @@ ArchToolkit은 한국의 고고학·문화유산 조사와 연구에서 반복�
 | <img src="icons/spatial_network.png" width="72" alt="근접/가시성 네트워크 아이콘"> | 근접/가시성 네트워크 | PPA(k-NN·Delaunay·Gabriel·RNG)와 유적 간 상호가시성 네트워크 | Terrell 1977; Gabriel & Sokal 1969; Toussaint 1980; Van Dyke et al. 2016 |
 | <img src="icons/cost.png" width="72" alt="거리 래스터 아이콘"> | 거리 래스터 | 하천·유적·도로까지의 거리 예측변수 | GDAL proximity; Phillips et al. 2006 (후속) |
 | <img src="icons/align_export.png" width="72" alt="분석 결과 정렬/내보내기 아이콘"> | 분석 결과 정렬/내보내기 | 예측변수 스택을 한 격자로 정렬하고 manifest와 함께 내보내기 | Phillips et al. 2006; Elith et al. 2011 (후속) |
-| <img src="icons/covariate.png" width="72" alt="변수 상관/VIF 리포트 아이콘"> | 변수 상관/VIF 리포트 | 상관행렬과 분산팽창지수 | O'Brien 2007 (임계값 경고) |
+| <img src="icons/covariate.png" width="72" alt="변수 상관/VIF 리포트 아이콘"> | 변수 상관/VIF 리포트 | 상관행렬과 분산팽창지수 (AOI 폴리곤 내부 표본) | O'Brien 2007 (임계값은 참고선) |
 | <img src="icons/ahp.png" width="72" alt="AHP 입지적합도 아이콘"> | AHP 입지적합도 | 쌍대비교 가중 적합도, 계층형 AHP, 일관성비율 | Saaty 1980; Alonso & Lamata 2006; Malczewski 2004 |
 | <img src="icons/trench.png" width="72" alt="트렌치 후보 제안 아이콘"> | 트렌치 후보 제안 | AOI 안에서 조건에 맞는 트렌치 배치 제안 | 플러그인 휴리스틱 (학술 방법 아님) |
 | <img src="icons/geochem.png" width="72" alt="지질도 도엽 ZIP 아이콘"> | 지질도 도엽 ZIP | KIGAM 1:50,000 지질도 로드·스타일·범주형 래스터 | KIGAM 자료 |

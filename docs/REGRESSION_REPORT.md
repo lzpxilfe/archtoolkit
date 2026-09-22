@@ -59,3 +59,18 @@ RGB 래스터 등)로 19개 도구를 수정 전 체크아웃(d1ecf88)과 수정
 QGIS 4(PyQt6) 대비 표기 이관(스코프 열거형, `QMetaType` 필드 타입, `Qgis.*` 열거형, `tools/qtcompat.py`) 뒤 같은 27개 시나리오를
 이관 전 커밋과 다시 비교했습니다. 27건 모두 실행, 25건 수치 지문 동일, 나머지 2건(trench_suggestion, geochem_polygonize)은
 실행마다 달라지는 run id·시각이 든 레이어 이름만 다르고 수치는 같습니다. 대화상자 19개 생성과 initGui/unload도 확인했습니다.
+
+## 도구 6개 리뷰 라운드 (2026-09-22)
+
+거리 래스터, 정렬/내보내기, 변수 상관/VIF, AHP, 트렌치 후보 제안, AI 조사요약을 리뷰해 결함마다 합성 데이터로
+재현한 뒤 고쳤습니다(재현은 `tests/test_*_review.py`). 같은 27개 시나리오를 리뷰 전 커밋과 비교한 결과입니다.
+
+| 시나리오 | 결과 | 달라진 값 |
+| --- | --- | --- |
+| 20개 | 수치 지문 동일 | 없음 |
+| distance_raster | 거리값 동일 | 출력 밴드의 nodata가 None에서 -9999로 (최대 거리 밖 셀이 이제 NoData) |
+| trench_suggestion | 같은 트렌치·순위·점수 | slope_max_deg 합 42.36에서 32.26으로 (반경 원 대신 실제 사각형 안 셀) |
+| ahp_flat, ahp_hierarchy | 래스터·가중치 동일 | 재현용 메타데이터 추가, 계층 모드 CR이 근사 표의 0.483 대신 그룹·하위 행렬의 0.000 |
+| covariate_report | n·r·VIF 동일 | CSV 머리에 범위 블록 추가 |
+| ai_report_local | 면적·개수·거리·통계 동일 | 버퍼 기준 표기, 내부 유적 서술, 방향 분포가 전체 유적 기준으로 |
+| geochem_polygonize | 동일 | 실행 ID만 다름 |

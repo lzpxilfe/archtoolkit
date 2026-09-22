@@ -16,7 +16,7 @@ from typing import Optional, Tuple
 
 from qgis.PyQt import QtWidgets
 from qgis.PyQt.QtCore import QEventLoop, QSettings, QTimer, QUrl
-from qgis.PyQt.QtNetwork import QNetworkRequest
+from qgis.PyQt.QtNetwork import QNetworkReply, QNetworkRequest
 
 from .utils import log_message, log_swallowed, push_message
 
@@ -346,7 +346,7 @@ def generate_text(
         return None, "Network manager is unavailable"
 
     req = QNetworkRequest(url)
-    req.setHeader(QNetworkRequest.ContentTypeHeader, "application/json; charset=utf-8")
+    req.setHeader(QNetworkRequest.KnownHeaders.ContentTypeHeader, "application/json; charset=utf-8")
     req.setRawHeader(b"x-goog-api-key", api_key.encode("utf-8"))
 
     try:
@@ -389,7 +389,10 @@ def generate_text(
         log_swallowed("tools/ai_gemini.py:334 (generate_text)", _exc)
 
     try:
-        if reply.error():
+        # Compare with NoError explicitly: PyQt6 makes NetworkError a plain Enum
+        # whose members are all truthy, so `if reply.error():` flagged every
+        # successful reply as a failure there.
+        if reply.error() != QNetworkReply.NetworkError.NoError:
             err = reply.errorString()
             try:
                 body = bytes(reply.readAll()).decode("utf-8", "ignore")

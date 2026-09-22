@@ -82,6 +82,15 @@ def _layer_stats_lines(layer: Dict[str, Any]) -> List[str]:
             if stats.get("layer_feature_count") is not None:
                 total_txt = f", 레이어 전체 {_fmt_int(stats.get('layer_feature_count'))}개"
             lines.append(f"- (스캔 한도 {cap_txt}개 도달 - 아래 합계는 부분값{total_txt})")
+        try:
+            n_invalid = int(stats.get("invalid_geometries") or 0)
+        except Exception as _exc:
+            log_swallowed("ai_local_summarizer._layer_stats_lines", _exc)
+            n_invalid = 0
+        if n_invalid > 0:
+            lines.append(
+                f"- (지오메트리 오류 {_fmt_int(n_invalid)}개: 복구되지 않아 피처 수에는 포함, 총 길이/총 면적에서는 제외)"
+            )
 
         if "total_length_m" in stats:
             lines.append(f"- 총 길이: { _fmt_float(stats.get('total_length_m'), digits=1) } m")
@@ -157,10 +166,31 @@ def _layer_stats_lines(layer: Dict[str, Any]) -> List[str]:
                 f"(메모리 보호를 위해 약 1/{ratio:.1f}로 표본 추출 - count는 표본 수, min/max는 표본 극값)"
             )
         lines.append(f"- 픽셀(표본) 수: {_fmt_int(stats.get('count'))}{sampled_txt}")
-        mn = _fmt_float(stats.get('min'), digits=3)
-        me = _fmt_float(stats.get('mean'), digits=3)
-        mx = _fmt_float(stats.get('max'), digits=3)
-        lines.append(f"- min/mean/max{sampled_txt}: {mn} / {me} / {mx}")
+        if bool(stats.get("categorical")):
+            # Class codes: a mean of lithology 5 and 12 is not a class, so the
+            # histogram replaces min/mean/max.
+            lines.append(
+                f"- 범주형 래스터: 클래스 {_fmt_int(stats.get('class_count'))}개 "
+                "(클래스 코드이므로 min/mean/max는 표시하지 않음)"
+            )
+            classes = [d for d in (stats.get("classes") or []) if isinstance(d, dict)]
+            if classes:
+                preview = ", ".join(
+                    f"{d.get('value')}={_fmt_int(d.get('count'))}({_fmt_float(d.get('pct'), digits=1)}%)" for d in classes[:8]
+                )
+                lines.append(f"- 상위 클래스(셀 수{sampled_txt}): {preview}")
+            try:
+                more = int(stats.get("classes_truncated") or 0) + max(0, len(classes) - 8)
+            except Exception as _exc:
+                log_swallowed("ai_local_summarizer._layer_stats_lines", _exc)
+                more = 0
+            if more > 0:
+                lines.append(f"- 외 {_fmt_int(more)}개 클래스 생략")
+        else:
+            mn = _fmt_float(stats.get('min'), digits=3)
+            me = _fmt_float(stats.get('mean'), digits=3)
+            mx = _fmt_float(stats.get('max'), digits=3)
+            lines.append(f"- min/mean/max{sampled_txt}: {mn} / {me} / {mx}")
         if "high_value_pct" in stats or "gt_0_5_pct" in stats:
             pct = stats.get("high_value_pct", stats.get("gt_0_5_pct"))
             thr = stats.get("high_value_threshold")
@@ -301,6 +331,29 @@ _RELATION_KO = {
 }
 
 
+def _direction_tallies(ref: Dict[str, Any], items: List[Dict[str, Any]]):
+    """(AOI tally, buffer-ring tally) of 8-point compass labels.
+
+    Uses `reference_sites.direction_counts` (all classified sites) when the
+    context has it; older contexts fall back to the displayed items.
+    """
+    dc = ref.get("direction_counts")
+    if isinstance(dc, dict) and isinstance(dc.get("aoi"), dict) and isinstance(dc.get("buffer"), dict):
+        aoi_t = {str(k): int(v) for k, v in dc["aoi"].items() if int(v or 0) > 0}
+        buf_t = {str(k): int(v) for k, v in dc["buffer"].items() if int(v or 0) > 0}
+        return aoi_t, buf_t
+    aoi_t: Dict[str, int] = {}
+    buf_t: Dict[str, int] = {}
+    for d in items:
+        c = str(d.get("compass_from_aoi") or "").strip()
+        rel = str(d.get("relation") or "")
+        if (not c) or rel == "outside_buffer":
+            continue
+        tgt = aoi_t if rel in ("inside_aoi", "crosses_aoi_boundary") else buf_t
+        tgt[c] = tgt.get(c, 0) + 1
+    return aoi_t, buf_t
+
+
 def _narrative_lines(ctx: Dict[str, Any]) -> List[str]:
     """Rule-based Korean prose using direction/distance/relation - a readable
     executive summary, not a bullet dump."""
@@ -326,9 +379,9 @@ def _narrative_lines(ctx: Dict[str, Any]) -> List[str]:
         f"이번 요약은 조사지역 `{aoi_name}`"
         + (f"(면적 약 {area_txt} ㎡)" if area_txt != "-" else "")
         + f"을(를) 중심으로 반경 {rad_txt} m 범위를 대상으로 합니다. "
-        + f"해당 범위와 겹치는 레이어는 총 {_fmt_int(len(layers))}개"
+        + f"해당 범위(AOI + 반경 버퍼)와 겹치는 레이어는 총 {_fmt_int(len(layers))}개"
         + f"(벡터 {n_vec}, 래스터 {n_ras})이며, "
-        + f"벡터 피처는 대략 {_fmt_int(total_feats)}개가 확인됩니다."
+        + f"버퍼 범위 안의 벡터 피처는 대략 {_fmt_int(total_feats)}개가 확인됩니다."
     )
     lines.append(s1)
 
@@ -376,29 +429,35 @@ def _narrative_lines(ctx: Dict[str, Any]) -> List[str]:
                 bits = [f"가장 가까운 유적은 `{nm}`"]
             if comp:
                 bits.append(f"AOI 중심 기준 {comp}쪽")
-            if dphrase == "AOI에 접함":
+            rel_key = str(nearest.get("relation") or "")
+            # distance_to_aoi_m is 0 for every site intersecting the AOI, so
+            # the relation (not the distance) decides inside vs touching.
+            if rel_key == "inside_aoi":
+                bits.append("AOI 내부")
+            elif rel_key == "crosses_aoi_boundary":
+                bits.append("AOI 경계에 걸침")
+            elif dphrase == "AOI에 접함":
                 bits.append("AOI 경계에 접함")
             elif dphrase:
                 bits.append(f"AOI 경계에서 {dphrase} 거리")
-            if rel:
+            if rel and rel_key not in ("inside_aoi", "crosses_aoi_boundary"):
                 bits.append(f"관계: {rel}")
             lines.append(", ".join(bits) + "에 위치합니다.")
             if scan_truncated:
                 lines.append("(스캔 한도로 일부 유적이 검토되지 않아 더 가까운 유적이 있을 수 있습니다.)")
 
-            # Direction distribution among buffered sites.
-            dir_tally: Dict[str, int] = {}
-            for d in ranked:
-                c = str(d.get("compass_from_aoi") or "").strip()
-                if not c:
-                    continue
-                if str(d.get("relation") or "") == "outside_buffer":
-                    continue
-                dir_tally[c] = dir_tally.get(c, 0) + 1
-            if dir_tally:
-                top_dirs = sorted(dir_tally.items(), key=lambda kv: kv[1], reverse=True)[:2]
+            # Direction distribution: tallied in the summary over EVERY
+            # classified site (the items list is display-capped); sites
+            # inside/overlapping the AOI are reported separately from the ring.
+            aoi_tally, buf_tally = _direction_tallies(ref, ranked)
+            if buf_tally:
+                top_dirs = sorted(buf_tally.items(), key=lambda kv: kv[1], reverse=True)[:2]
                 dirs_txt = "·".join([f"{k}({v})" for k, v in top_dirs])
-                lines.append(f"반경 내 유적은 주로 {dirs_txt} 방향에 분포합니다.")
+                lines.append(f"AOI 밖 반경(버퍼) 내 유적은 주로 {dirs_txt} 방향에 분포합니다.")
+            if aoi_tally:
+                top_aoi = sorted(aoi_tally.items(), key=lambda kv: kv[1], reverse=True)[:2]
+                aoi_txt = "·".join([f"{k}({v})" for k, v in top_aoi])
+                lines.append(f"AOI 내부/중첩 유적은 AOI 중심 기준 주로 {aoi_txt} 쪽에 있습니다.")
     else:
         lines.append("추가 유적(관계 분석) 레이어는 사용되지 않았습니다.")
 
@@ -421,8 +480,13 @@ def generate_report(ctx: Dict[str, Any]) -> str:
     selected_only = bool(options.get("selected_only")) if "selected_only" in options else None
     arch_only = bool(options.get("archtoolkit_only")) if "archtoolkit_only" in options else None
 
+    layer_scope = str(options.get("layer_scope") or "").strip()
+    group_prefix = str(options.get("group_path_prefix") or "").strip()
     mode_note = _first_nonempty(
         [
+            # Explicit picks / a group are neither "ArchToolkit only" nor the whole project.
+            "선택 레이어 요약" if layer_scope == "layers" else None,
+            f"그룹 `{group_prefix}` 요약" if layer_scope == "group" and group_prefix else None,
             "ArchToolkit 결과 중심 요약" if arch_only else None,
             "프로젝트 전체 요약" if arch_only is False else None,
         ]
@@ -464,7 +528,22 @@ def generate_report(ctx: Dict[str, Any]) -> str:
     out.append(f"- AOI 면적: {_fmt_float(aoi_area, digits=1)} ㎡")
     out.append(f"- 반경: {_fmt_float(radius_m, digits=0)} m")
     out.append(f"- 버퍼 면적(반경 내): {_fmt_float(buf_area, digits=1)} ㎡")
+    out.append(
+        f"- 집계 범위: 레이어별 피처 수/총 길이/총 면적/래스터 통계는 AOI 폴리곤이 아니라 "
+        f"AOI + 반경 {_fmt_float(radius_m, digits=0)} m 버퍼 범위 기준입니다."
+    )
     out.append(f"- 요약 레이어 수: {_fmt_int(len(layers))} {header_notes}".rstrip())
+    skipped = [d for d in (ctx.get("skipped_selected_layers") or []) if isinstance(d, dict)]
+    out_of_range = [str(d.get("name") or "") for d in skipped if str(d.get("reason") or "") == "out_of_range"]
+    other_skips = [d for d in skipped if str(d.get("reason") or "") != "out_of_range"]
+    if out_of_range:
+        out.append(f"- 선택 레이어 중 범위 밖이라 제외: {', '.join(out_of_range)}")
+    if other_skips:
+        reason_ko = {"crs_transform_failed": "좌표 변환 실패", "not_in_project": "프로젝트에 없음"}
+        txt = ", ".join(
+            f"{d.get('name')}({reason_ko.get(str(d.get('reason') or ''), str(d.get('reason') or ''))})" for d in other_skips
+        )
+        out.append(f"- 선택 레이어 중 요약하지 못함: {txt}")
     if "layers_truncated" in ctx:
         if bool(ctx.get("layers_truncated")):
             out.append(
@@ -476,7 +555,7 @@ def generate_report(ctx: Dict[str, Any]) -> str:
     out.append("")
 
     # 2) Layer summaries
-    out.append("## 2) 레이어/분석 요약")
+    out.append("## 2) 레이어/분석 요약 (AOI + 반경 버퍼 기준)")
     if not layers:
         out.append("- (요약할 레이어가 없습니다)")
     else:

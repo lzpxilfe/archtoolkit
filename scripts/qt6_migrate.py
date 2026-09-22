@@ -31,7 +31,7 @@ SOURCES = [ROOT / "arch_toolkit.py"] + sorted(
 )
 TOKEN_RE = re.compile(r"\b(Qt|Q[A-Z][A-Za-z0-9]+)\.([A-Za-z][A-Za-z0-9_]+)\b")  # members may be lower-case (Qt.black)
 # Only members whose class we can import from the binding's core modules.
-MODULES = ("QtCore", "QtGui", "QtWidgets", "QtSvg", "QtPrintSupport")
+MODULES = ("QtCore", "QtGui", "QtWidgets", "QtSvg", "QtPrintSupport", "QtNetwork", "QtXml")
 
 
 def _binding(name: str):
