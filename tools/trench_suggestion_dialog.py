@@ -614,6 +614,8 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
             "<ul>"
             "<li><b>방향 기본값</b>: 등고선 직교</li>"
             "<li><b>평행 옵션</b>: 선형 유구/가마 등 사례 대응</li>"
+            "<li><b>경사 상한</b>: 트렌치 사각형(폭 x 길이) 아래 모든 경사 셀의 최대값으로 판정합니다. "
+            "DEM 밖/결손 셀이 걸리는 후보와 AHP 결손 후보는 제외하고 그 개수를 보고합니다</li>"
             "<li><b>무덤 회피</b>: 수치지형도 속성과 hidden 범례(XLS/XLSX) 기반 코드·키워드 회피 "
             f"(검색어 {_GRAVE_SEARCH_TERM_COUNT}종: 무덤·분묘·고분·지석묘·석실묘·토광묘·옹관묘 등, "
             "총/릉 접미 규칙, tomb/grave/dolmen 등)</li>"
@@ -1124,11 +1126,13 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
         src_crs,
         radius_m: float,
     ) -> Tuple[Optional[float], float, Optional[float]]:
-        """Slope-weighted circular mean of aspect over the trench footprint.
+        """Slope-weighted circular mean of aspect on a rosette around ``pt``.
 
-        Also returns the MAXIMUM slope seen over the same rosette, so the
-        slope limit can be applied to the whole footprint rather than the
-        single centre cell a 500 m trench was previously judged by.
+        The third value is the maximum slope seen on the rosette and is
+        informational only. The slope limit is applied by
+        _footprint_slope_max() over the cells of the actual L x W rectangle:
+        the rosette is a circle of radius max(L/2, 2 px) that reaches well
+        outside a narrow trench and skips the cells between its nine samples.
 
         A single-cell aspect sample is noisy; averaging aspect across the footprint
         (weighted by slope, so near-flat cells barely contribute) yields a stable
@@ -1176,6 +1180,165 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
             return None, float(coherence), slope_max_seen
         bearing = math.degrees(math.atan2(sum_e, sum_n)) % 360.0
         return float(bearing), float(coherence), slope_max_seen
+
+    def _read_slope_window(self, slope_layer: QgsRasterLayer, extent: QgsRectangle) -> Optional[dict]:
+        """Slope cells covering ``extent`` (slope-raster CRS) as one numpy array.
+
+        Read once per run so _footprint_slope_max() is index math instead of an
+        identify() call per cell. Returns {"arr": float array with NaN for
+        NoData, "gt": GDAL-style geotransform of the window} or None when
+        nothing could be read.
+        """
+        try:
+            import numpy as np
+        except Exception as _exc:
+            log_swallowed("trench_suggestion_dialog._read_slope_window (numpy)", _exc)
+            return None
+        try:
+            full = slope_layer.extent()
+            px = float(slope_layer.rasterUnitsPerPixelX())
+            py = float(slope_layer.rasterUnitsPerPixelY())
+            ncols = int(slope_layer.width())
+            nrows = int(slope_layer.height())
+            x0 = max(float(extent.xMinimum()), float(full.xMinimum()))
+            x1 = min(float(extent.xMaximum()), float(full.xMaximum()))
+            y0 = max(float(extent.yMinimum()), float(full.yMinimum()))
+            y1 = min(float(extent.yMaximum()), float(full.yMaximum()))
+            if px <= 0 or py <= 0 or not (x1 > x0 and y1 > y0):
+                return None
+            c0 = max(0, int(math.floor((x0 - float(full.xMinimum())) / px)))
+            c1 = min(ncols, int(math.ceil((x1 - float(full.xMinimum())) / px)))
+            r0 = max(0, int(math.floor((float(full.yMaximum()) - y1) / py)))
+            r1 = min(nrows, int(math.ceil((float(full.yMaximum()) - y0) / py)))
+            if c1 <= c0 or r1 <= r0:
+                return None
+        except Exception as _exc:
+            log_swallowed("trench_suggestion_dialog._read_slope_window", _exc)
+            return None
+        gt = (float(full.xMinimum()) + c0 * px, px, 0.0, float(full.yMaximum()) - r0 * py, 0.0, -py)
+        arr = None
+        nodata = None
+        try:
+            from osgeo import gdal  # type: ignore
+
+            ds = gdal.Open(str(slope_layer.source()))
+            if ds is not None:
+                band = ds.GetRasterBand(1)
+                arr = band.ReadAsArray(c0, r0, c1 - c0, r1 - r0)
+                nodata = band.GetNoDataValue()
+                ds = None
+        except Exception as _exc:
+            log_swallowed("trench_suggestion_dialog._read_slope_window (gdal)", _exc)
+            arr = None
+        if arr is None:
+            # Provider fallback: one block() read, values copied cell by cell.
+            try:
+                win = QgsRectangle(gt[0], gt[3] - (r1 - r0) * py, gt[0] + (c1 - c0) * px, gt[3])
+                block = slope_layer.dataProvider().block(1, win, c1 - c0, r1 - r0)
+                arr = np.full((r1 - r0, c1 - c0), float("nan"), dtype=float)
+                for r in range(r1 - r0):
+                    for c in range(c1 - c0):
+                        if not block.isNoData(r, c):
+                            arr[r, c] = float(block.value(r, c))
+                nodata = None
+            except Exception as _exc:
+                log_swallowed("trench_suggestion_dialog._read_slope_window (block)", _exc)
+                return None
+        arr = np.asarray(arr, dtype=float)
+        if nodata is not None:
+            arr = np.where(arr == float(nodata), float("nan"), arr)
+        # gdal:slope writes -9999 for NoData; anything outside [0, 90] is not a slope.
+        arr = np.where((arr < 0.0) | (arr > 90.0), float("nan"), arr)
+        return {"arr": arr, "gt": gt}
+
+    def _footprint_slope_max(
+        self,
+        win: dict,
+        trench_geom: QgsGeometry,
+        center: QgsPointXY,
+        *,
+        src_crs,
+        dst_crs,
+    ) -> Tuple[Optional[float], bool]:
+        """(max slope under the L x W rectangle, some_footprint_cell_is_missing).
+
+        Every slope cell whose centre lies inside the rectangle counts, plus the
+        cell(s) under the trench centre (all a trench narrower than a cell
+        has; every cell sharing the point when it lies on a cell edge). A NoData
+        cell or a cell outside the raster window sets the flag so the caller
+        rejects the candidate and counts it as 'DEM missing' instead of scoring
+        it on the cells that happen to exist.
+        """
+        try:
+            import numpy as np
+        except Exception as _exc:
+            log_swallowed("trench_suggestion_dialog._footprint_slope_max (numpy)", _exc)
+            return None, True
+        arr = win["arr"]
+        gt = win["gt"]
+        px = float(gt[1])
+        py = -float(gt[5])
+        nrows, ncols = arr.shape
+        g = _transform_geom(trench_geom, src_crs, dst_crs)
+        c = _transform_point(center, src_crs, dst_crs)
+        ring: List[QgsPointXY] = []
+        try:
+            if g is not None and (not g.isEmpty()):
+                ring = list(g.asPolygon()[0])
+        except Exception as _exc:
+            log_swallowed("trench_suggestion_dialog._footprint_slope_max", _exc)
+            ring = []
+        if c is None or len(ring) < 5:
+            return None, True
+        bb = g.boundingBox()
+        c0 = int(math.floor((bb.xMinimum() - gt[0]) / px))
+        c1 = int(math.floor((bb.xMaximum() - gt[0]) / px))
+        r0 = int(math.floor((gt[3] - bb.yMaximum()) / py))
+        r1 = int(math.floor((gt[3] - bb.yMinimum()) / py))
+        cols, rows_ = np.meshgrid(np.arange(c0, c1 + 1), np.arange(r0, r1 + 1))
+        xs = gt[0] + (cols + 0.5) * px
+        ys = gt[3] - (rows_ + 0.5) * py
+        # Convex-quad test: a cell centre is inside when it lies on the inner side
+        # of all four edges (orientation taken from the ring's signed area).
+        area2 = 0.0
+        for i in range(4):
+            area2 += ring[i].x() * ring[i + 1].y() - ring[i + 1].x() * ring[i].y()
+        sgn = 1.0 if area2 >= 0.0 else -1.0
+        inside = np.ones(xs.shape, dtype=bool)
+        tol = -1e-9 * px * px
+        for i in range(4):
+            p, q = ring[i], ring[i + 1]
+            cross = (q.x() - p.x()) * (ys - p.y()) - (q.y() - p.y()) * (xs - p.x())
+            inside &= (sgn * cross) >= tol
+        in_rng = (cols >= 0) & (cols < ncols) & (rows_ >= 0) & (rows_ < nrows)
+        missing = bool((inside & (~in_rng)).any())
+        sel = inside & in_rng
+        vals = [float(v) for v in arr[rows_[sel], cols[sel]]]
+        # The cell(s) under the trench centre always count: they are all a trench
+        # narrower than a cell has, and they keep slope_max_deg >= slope_deg. A
+        # centre on a cell edge or corner (a candidate grid aligned with the DEM)
+        # takes every cell sharing that point instead of one picked by rounding.
+        fx = (float(c.x()) - gt[0]) / px
+        fy = (gt[3] - float(c.y())) / py
+        ccols = {int(math.floor(fx))}
+        crows = {int(math.floor(fy))}
+        if abs(fx - round(fx)) < 1e-6:
+            ccols.update((int(round(fx)) - 1, int(round(fx))))
+        if abs(fy - round(fy)) < 1e-6:
+            crows.update((int(round(fy)) - 1, int(round(fy))))
+        for rr in crows:
+            for cc in ccols:
+                if cc < 0 or rr < 0 or cc >= ncols or rr >= nrows:
+                    missing = True
+                else:
+                    vals.append(float(arr[rr, cc]))
+        vals = np.asarray(vals, dtype=float)
+        finite = vals[np.isfinite(vals)]
+        if finite.size < vals.size:
+            missing = True
+        if finite.size == 0:
+            return None, True
+        return float(finite.max()), missing
 
     def _clip_dem_to_aoi(
         self,
@@ -1347,7 +1510,9 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
             # >= trench_length also covers a trench protruding past the AOI: its
             # centre is inside the AOI, so no footprint sample (rosette radius
             # max(length/2, 2 px)) can lie farther out than length/2 + 2 px.
-            clip_buffer = max(float(trench_length), float(grid_step)) + 4.0 * float(pixel)
+            # The footprint slope test reads every cell under the rectangle, whose
+            # corners lie up to hypot(L/2, W/2) <= max(L, W) from the centre.
+            clip_buffer = max(float(trench_length), float(trench_width), float(grid_step)) + 4.0 * float(pixel)
             self._set_busy("DEM를 AOI 범위로 클립 중…")
             dem_src = self._clip_dem_to_aoi(
                 dem_layer=dem_layer,
@@ -1388,6 +1553,15 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
             slope_layer = QgsRasterLayer(tmp_slope, f"tmp_slope_{run_id}")
             if (not aspect_layer.isValid()) or (not slope_layer.isValid()):
                 raise Exception("aspect/slope raster build failed")
+            # One block read of the slope raster around the AOI: the footprint
+            # test in the scan is index math on this array, not identify() per cell.
+            slope_ext = self._aoi_extent_in_raster_crs(aoi_geom, aoi_crs=aoi_layer.crs(), raster=slope_layer)
+            if slope_ext is None:
+                raise Exception("AOI extent could not be expressed in the DEM CRS")
+            slope_ext.grow(float(clip_buffer))
+            slope_win = self._read_slope_window(slope_layer, slope_ext)
+            if slope_win is None:
+                raise Exception("slope raster read failed")
 
             self._set_busy("주변 유적 인덱스/무덤 회피 마스크 준비 중…")
             ref_idx, ref_geoms = self._build_reference_index(
@@ -1454,14 +1628,23 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
             we_slope = w_slope
             if (we_ahp + we_ref + we_slope) <= 0:
                 we_slope = 1.0
+            we_sum = we_ahp + we_ref + we_slope
             excluded = []
             if not ahp_available and w_ahp > 0:
                 excluded.append("AHP")
-            if not ref_available and w_ref > 0:
+            # A reference layer that was given but has no site within the AOI
+            # bbox + radius is not an "unspecified input": say what happened.
+            ref_none_in_range = bool(ref_layer is not None and (not ref_available) and w_ref > 0)
+            if ref_layer is None and w_ref > 0:
                 excluded.append("유적근접")
             if excluded:
                 log_message(
                     "입력 미지정으로 가중치에서 제외 후 재정규화: " + ", ".join(excluded),
+                    level=Qgis.MessageLevel.Info,
+                )
+            if ref_none_in_range:
+                log_message(
+                    f"반경 내 참조 유적 없음(AOI 범위 + {ref_radius_m:.0f} m): 유적근접 가중치를 제외하고 재정규화합니다.",
                     level=Qgis.MessageLevel.Info,
                 )
 
@@ -1514,6 +1697,8 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
             kept = 0
             iters = 0
             truncated = False
+            skipped_no_dem = 0  # centre or footprint outside the DEM / NoData
+            skipped_ahp_nodata = 0  # AHP layer given but NoData at the candidate
 
             # Prepared geometry engine: containment over hundreds of thousands
             # of grid points is ~10-100x faster than QgsGeometry.contains, and
@@ -1554,6 +1739,8 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
                     scanned += 1
                     slope = self._sample_raster_value(slope_layer, pt, aoi_layer.crs())
                     if slope is None or slope < 0.0 or slope > 90.0:
+                        # Outside the DEM or a NoData cell: counted, not silent.
+                        skipped_no_dem += 1
                         y += grid_step
                         continue
                     if slope > slope_max:
@@ -1562,18 +1749,13 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
 
                     # Stable orientation from footprint-averaged aspect, with a
                     # flat-terrain fallback to the AOI long axis.
-                    asp_bear, coherence, foot_slope_max = self._footprint_downslope_bearing(
+                    asp_bear, coherence, _rosette_slope_max = self._footprint_downslope_bearing(
                         aspect_layer=aspect_layer,
                         slope_layer=slope_layer,
                         pt=pt,
                         src_crs=aoi_layer.crs(),
                         radius_m=foot_radius,
                     )
-                    # The limit applies to the whole footprint, not just the centre
-                    # cell: a long trench can cross ground far steeper than its middle.
-                    if foot_slope_max is not None and foot_slope_max > slope_max:
-                        y += grid_step
-                        continue
                     is_flat = (asp_bear is None) or (coherence < 0.25) or (slope < flat_slope_thresh)
                     if is_flat:
                         bearing = float(default_bearing) % 180.0
@@ -1608,7 +1790,30 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
                         except Exception as _exc:
                             log_swallowed("trench_suggestion_dialog._run", _exc)
 
+                    # The limit applies to every slope cell under the actual L x W
+                    # rectangle, not to the centre cell or to a sampling circle: a
+                    # long trench can cross ground far steeper than its middle. A
+                    # footprint with NoData or off-DEM cells is rejected and counted
+                    # (after the AOI-fit and grave tests, so the count only holds
+                    # candidates that missing DEM data alone ruled out).
+                    foot_slope_max, foot_missing = self._footprint_slope_max(
+                        slope_win, trench_geom, pt, src_crs=aoi_layer.crs(), dst_crs=slope_layer.crs()
+                    )
+                    if foot_missing or foot_slope_max is None:
+                        skipped_no_dem += 1
+                        y += grid_step
+                        continue
+                    if foot_slope_max > slope_max:
+                        y += grid_step
+                        continue
+
                     ahp_val = self._sample_raster_value(ahp_layer, pt, aoi_layer.crs()) if ahp_available else None
+                    if ahp_available and ahp_val is None:
+                        # AHP supplied but NoData (or off its extent) here: the cell has
+                        # no suitability information and cannot be ranked against cells that have.
+                        skipped_ahp_nodata += 1
+                        y += grid_step
+                        continue
                     if ahp_val is not None and ahp_min is not None and ahp_max is not None and ahp_max > ahp_min:
                         ahp_score = max(0.0, min(1.0, (ahp_val - ahp_min) / (ahp_max - ahp_min)))
                     elif ahp_val is not None:
@@ -1631,16 +1836,9 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
 
                     slope_score = max(0.0, min(1.0, 1.0 - (float(slope) / max(1.0, slope_max))))
 
-                    # Per-cell renormalization: skip the AHP term where this cell is
-                    # NoData so a valid cell is never penalized by a missing value.
-                    cw_ahp = we_ahp if ahp_val is not None else 0.0
-                    cw_ref = we_ref
-                    cw_slope = we_slope
-                    cw_sum = cw_ahp + cw_ref + cw_slope
-                    if cw_sum <= 0:
-                        cw_slope = 1.0
-                        cw_sum = 1.0
-                    total = (cw_ahp * ahp_score + cw_ref * ref_score + cw_slope * slope_score) / cw_sum
+                    # One formula for every candidate (AHP NoData cells were excluded
+                    # above), so scores - and therefore rank - are comparable.
+                    total = (we_ahp * ahp_score + we_ref * ref_score + we_slope * slope_score) / we_sum
 
                     candidates.append(
                         {
@@ -1669,11 +1867,25 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
                     level=Qgis.MessageLevel.Warning,
                 )
 
+            # Candidates dropped for missing data are reported, not silent: a
+            # shortfall that is really "half the AOI has no DEM" must read so.
+            skip_note = ""
+            if skipped_no_dem > 0:
+                skip_note += f" DEM 밖/결손으로 제외된 후보 {skipped_no_dem}개."
+            if skipped_ahp_nodata > 0:
+                skip_note += f" AHP 값 없음(NoData/범위 밖)으로 제외된 후보 {skipped_ahp_nodata}개."
+            if ref_none_in_range:
+                skip_note += " 반경 내 참조 유적 없음(유적근접 가중치 제외)."
+            if skipped_no_dem > 0 or skipped_ahp_nodata > 0:
+                log_message(
+                    f"TrenchSuggestion: skipped_no_dem={skipped_no_dem} skipped_ahp_nodata={skipped_ahp_nodata}",
+                    level=Qgis.MessageLevel.Info,
+                )
             if not candidates:
                 push_message(
                     self.iface,
                     "정보",
-                    "조건을 만족하는 트렌치 후보가 없습니다. 간격/경사/내부비율 조건을 완화해보세요.",
+                    "조건을 만족하는 트렌치 후보가 없습니다. 간격/경사/내부비율 조건을 완화해보세요." + skip_note,
                     level=1,
                     duration=8,
                 )
@@ -1842,7 +2054,10 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
                     # k=32 bbox-ranked nearest-neighbour best effort (score is 0 there).
                     "ref_dist_method": "exact_within_ref_radius_else_k32_bbox_nn",
                     "max_slope_deg": slope_max,
-                    "slope_test": "footprint_max_and_centre",
+                    # Max over every slope cell whose centre lies under the L x W
+                    # rectangle plus the cell(s) under the trench centre; a
+                    # footprint with NoData/off-DEM cells is rejected.
+                    "slope_test": "footprint_cells_max",
                     "selection_strategy": "coverage_round_robin",
                     "coverage_cell_m": float(cov_cell),
                     "rank_field": "score_desc",
@@ -1861,6 +2076,9 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
                     "candidates_scanned": int(scanned),
                     "candidates_kept": int(kept),
                     "scan_truncated": bool(truncated),
+                    "skipped_no_dem": int(skipped_no_dem),
+                    "skipped_ahp_nodata": int(skipped_ahp_nodata),
+                    "ref_layer_given": bool(ref_layer is not None),
                     "hidden_xls_loaded": bool(len(self._load_grave_codes_from_hidden()) > 0),
                 },
             )
@@ -1900,7 +2118,7 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
                 self.iface,
                 "완료",
                 (
-                    f"트렌치 후보 {len(selected)}개를 생성했습니다.{shortfall}{avoid_note} "
+                    f"트렌치 후보 {len(selected)}개를 생성했습니다.{shortfall}{skip_note}{avoid_note} "
                     "선별은 AOI 전체에 분산하는 커버리지 우선 방식이며 rank=점수순, pick_order=선별순입니다. "
                     "결과는 조사 보조용 제안이며, 최종 판단은 현장 조사자가 수행해야 합니다."
                 ),
@@ -1909,6 +2127,7 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
             )
             log_message(
                 f"TrenchSuggestion done: selected={len(selected)} scanned={scanned} kept={kept} "
+                f"skipped_no_dem={skipped_no_dem} skipped_ahp_nodata={skipped_ahp_nodata} "
                 f"grave_matched={grave_count} truncated={truncated} run_id={run_id}",
                 level=Qgis.MessageLevel.Info,
             )
