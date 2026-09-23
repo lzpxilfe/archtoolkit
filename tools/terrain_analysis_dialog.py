@@ -51,7 +51,9 @@ from .utils import (
     cleanup_files, log_message, push_message, restore_ui_focus, set_archtoolkit_layer_metadata,
 )
 from .raster_io import write_single_band_geotiff
-from .terrain_math import tri_radius, zt_curvature
+from .terrain_math import (
+    ASPECT_FLAT_VALUE, focal_tpi_strips, mark_flat_aspect, tri_radius, zt_curvature,
+)
 from . import cost_budget
 from .live_log_dialog import ensure_live_log_dialog
 from .help_dialog import show_help_dialog
@@ -66,6 +68,20 @@ from .icons import icon as plugin_icon
 # grid, the centre/shifted/difference arrays, the squared-sum and count
 # accumulators and both validity masks. Measured with tracemalloc; rounded up.
 TRI_RADIUS_BYTES_PER_PIXEL = 80
+
+# Exact radius TPI is computed in horizontal strips (terrain_math.focal_tpi_strips)
+# so a large DEM never has to fit in memory at once. Rows per strip are chosen
+# so one strip's float64 working arrays stay near this many bytes.
+TPI_STRIP_TARGET_BYTES = 256 * 1024 ** 2
+TPI_NODATA = -9999.0
+ASPECT_NODATA = -9999.0
+
+
+def _fmt_break(value):
+    """A class break for a legend: up to 2 decimals, no trailing zeros."""
+    text = f"{float(value):.2f}".rstrip("0").rstrip(".")
+    return text if text not in ("", "-0") else "0"
+
 
 FORM_CLASS, _ = uic.loadUiType(os.path.join(
     os.path.dirname(__file__), 'terrain_analysis_dialog_base.ui'))
@@ -117,30 +133,39 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
         }
     }
     
-    # Aspect 8-direction with flat area
+    # Aspect: 8 compass directions CENTRED on N, NE, E, ... (N = 337.5-22.5),
+    # which is what the checkbox tooltip promises ("8방위(N, NE, E, ...)").
+    # The old 0-45 / 45-90 sectors had no N class at all: a slope facing 350
+    # and one facing 10 degrees fell into different classes. N needs two
+    # entries (0-22.5 and 337.5-360) because the Discrete shader is linear.
+    # Flat cells carry ASPECT_FLAT_VALUE (-1), outside 0-360, so they no longer
+    # share the value 0 with due north; DEM NoData stays NoData (-9999).
     ASPECT_CLASSES = [
-        {'max': 0, 'label': '평탄 | 0° | 평지/수면', 'color': '#808080'},
-        {'max': 45, 'label': 'N-NE | 0~45° | 북~북동', 'color': '#ff0000'},
-        {'max': 90, 'label': 'NE-E | 45~90° | 북동~동', 'color': '#ff7f00'},
-        {'max': 135, 'label': 'E-SE | 90~135° | 동~남동', 'color': '#ffff00'},
-        {'max': 180, 'label': 'SE-S | 135~180° | 남동~남', 'color': '#7fff00'},
-        {'max': 225, 'label': 'S-SW | 180~225° | 남~남서', 'color': '#00ffff'},
-        {'max': 270, 'label': 'SW-W | 225~270° | 남서~서', 'color': '#007fff'},
-        {'max': 315, 'label': 'W-NW | 270~315° | 서~북서', 'color': '#0000ff'},
-        {'max': 360, 'label': 'NW-N | 315~360° | 북서~북', 'color': '#7f00ff'},
+        {'max': ASPECT_FLAT_VALUE, 'label': '평탄 | 경사 0° (값 -1) | 방향 없음', 'color': '#808080'},
+        {'max': 22.5, 'label': 'N | 0-22.5° | 북', 'color': '#ff0000'},
+        {'max': 67.5, 'label': 'NE | 22.5-67.5° | 북동', 'color': '#ff7f00'},
+        {'max': 112.5, 'label': 'E | 67.5-112.5° | 동', 'color': '#ffff00'},
+        {'max': 157.5, 'label': 'SE | 112.5-157.5° | 남동', 'color': '#7fff00'},
+        {'max': 202.5, 'label': 'S | 157.5-202.5° | 남', 'color': '#00ffff'},
+        {'max': 247.5, 'label': 'SW | 202.5-247.5° | 남서', 'color': '#007fff'},
+        {'max': 292.5, 'label': 'W | 247.5-292.5° | 서', 'color': '#0000ff'},
+        {'max': 337.5, 'label': 'NW | 292.5-337.5° | 북서', 'color': '#7f00ff'},
+        {'max': 360, 'label': 'N | 337.5-360° | 북', 'color': '#ff0000'},
     ]
-    
+
     # Weiss (2001) 6-class Slope Position Classification.
     # Labels follow Weiss's own class names: classes 2/5 are Lower/Upper Slope
     # (no flatness test applies to them) — calling them "valley floor"/"upland
-    # flat" previously invited wrong archaeological readings.
+    # flat" previously invited wrong archaeological readings. Classes 1/6 are
+    # Weiss's Valley/Ridge: no incision or steepness test is applied, so the
+    # former "Incised Valley"/"Steep Ridge" names claimed a rule that is not run.
     SLOPE_POSITION_CLASSES = [
-        {'max': 1, 'label': '1 | 깊은 곡저 (Incised Valley)', 'color': '#08306b'},
+        {'max': 1, 'label': '1 | 곡저 (Valley)', 'color': '#08306b'},
         {'max': 2, 'label': '2 | 하부 사면 (Lower Slope)', 'color': '#2171b5'},
         {'max': 3, 'label': '3 | 평지/단구 (Flat or Terrace)', 'color': '#f7f7f7'},
         {'max': 4, 'label': '4 | 중간 사면 (Mid Slope)', 'color': '#fee391'},
         {'max': 5, 'label': '5 | 상부 사면 (Upper Slope)', 'color': '#ec7014'},
-        {'max': 6, 'label': '6 | 급경사 능선 (Steep Ridge)', 'color': '#8c2d04'},
+        {'max': 6, 'label': '6 | 능선 (Ridge)', 'color': '#8c2d04'},
     ]
 
     # Roughness - gdaldem's roughness, i.e. Wilson et al. (2007) - Greens
@@ -231,10 +256,21 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                 "<li><b>TRASP</b>(Roberts &amp; Cooper 1989): 0=북동(서늘/습) ~ 1=남서(따뜻/건조) 일사 프록시.</li>"
                 "<li>실행 후 TRASP/북향 우세 등 <b>해석 요약</b>을 표시합니다.</li>"
                 "</ul>"
+                "<h3>TPI (Weiss 2001)</h3>"
+                "<ul>"
+                "<li>반경 1셀은 GDAL 3x3 TPI, 반경 2셀 이상은 <b>(2r+1)x(2r+1) 창의 정확한 초점평균</b>으로 "
+                "계산합니다(중심 셀 제외, 3x3과 같은 정의). DEM NoData는 합과 개수에서 모두 빠지며, "
+                "DEM 가장자리 r셀은 창이 격자를 벗어나므로 NoData입니다.</li>"
+                "<li>DEM 한 변이 2r셀 이하라 온전한 창이 하나도 없으면 3x3 TPI로 대체하고 알립니다.</li>"
+                "<li>자동 SD가 켜져 있으면 TPI 레이어와 지형분류 모두 TPI의 1 표준편차를 임계값으로 쓰며, "
+                "레이어 이름에 실제 적용값이 표시됩니다.</li>"
+                "</ul>"
                 "<h3>출력</h3>"
                 "<ul>"
                 "<li>선택한 지표별 래스터 레이어</li>"
                 "<li>(옵션) 분류/색상표 적용</li>"
+                "<li>사면방향: 8방위(N=337.5-22.5°, NE, E, ... 중심 구간). 평탄 셀(경사 0)은 -1, "
+                "DEM NoData와 가장자리 1셀은 NoData입니다(0은 정북).</li>"
                 "</ul>"
                 "<h3>팁</h3>"
                 "<ul>"
@@ -313,12 +349,15 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
         t2 = max_rugged * 0.25  # ~25% = nearly flat  
         t3 = max_rugged * 0.5   # ~50% = slightly rugged
         t4 = max_rugged         # 100% = moderately rugged
+        # Up to two decimals, trailing zeros dropped: '.0f' printed a threshold
+        # of 1-3 as '0-0', '0-0', '0-1' (0.1/0.25/0.5 all rounded to 0).
+        f1, f2, f3, f4 = (_fmt_break(t) for t in (t1, t2, t3, t4))
         return [
-            {'max': t1, 'label': f'I | 0~{t1:.0f} | 평탄', 'color': '#2166ac'},
-            {'max': t2, 'label': f'II | {t1:.0f}~{t2:.0f} | 거의평탄', 'color': '#67a9cf'},
-            {'max': t3, 'label': f'III | {t2:.0f}~{t3:.0f} | 약간거침', 'color': '#f7f7f7'},
-            {'max': t4, 'label': f'IV | {t3:.0f}~{t4:.0f} | 중간', 'color': '#ef8a62'},
-            {'max': float('inf'), 'label': f'V | {t4:.0f}+ | 험준', 'color': '#b2182b'},
+            {'max': t1, 'label': f'I | 0-{f1} | 평탄', 'color': '#2166ac'},
+            {'max': t2, 'label': f'II | {f1}-{f2} | 거의평탄', 'color': '#67a9cf'},
+            {'max': t3, 'label': f'III | {f2}-{f3} | 약간거침', 'color': '#f7f7f7'},
+            {'max': t4, 'label': f'IV | {f3}-{f4} | 중간', 'color': '#ef8a62'},
+            {'max': float('inf'), 'label': f'V | {f4}+ | 험준', 'color': '#b2182b'},
         ]
     
     def apply_style(self, layer, classes, max_val):
@@ -434,16 +473,28 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
             # Aspect
             if self.chkAspect.isChecked():
                 output = os.path.join(tempfile.gettempdir(), f'archtoolkit_aspect_{run_id}.tif')
-                # ZERO_FLAT=True overrides the QGIS toolbox default (False):
-                # ASPECT_CLASSES pins its 평탄 legend class at 0, which only
-                # exists if flats are written as 0 rather than -9999.
-                # COMPUTE_EDGES stays at the toolbox default (False) so the
-                # 1-px border is NoData instead of a half-window guess.
-                # Both choices are recorded in the layer metadata below.
+                raw_aspect = os.path.join(tempfile.gettempdir(), f'archtoolkit_aspect_raw_{run_id}.tif')
+                # ZERO_FLAT stays False: gdaldem's -zero_for_flat writes 0 for
+                # flats (0 is also due north) AND for the border and every
+                # NoData cell, and drops the band's NoData value, so a clipped
+                # DEM's collar rendered as a "flat" class. Flats come back as
+                # NoData here and are re-marked with ASPECT_FLAT_VALUE (-1) by
+                # _write_flat_marked_aspect; DEM NoData stays NoData.
+                # COMPUTE_EDGES stays False so the 1-px border is NoData instead
+                # of a half-window guess. Both are recorded in the metadata.
                 processing.run("gdal:aspect", {
-                    'INPUT': dem_source, 'BAND': 1, 'TRIG_ANGLE': False, 'ZERO_FLAT': True, 'OUTPUT': output
+                    'INPUT': dem_source, 'BAND': 1, 'TRIG_ANGLE': False, 'ZERO_FLAT': False,
+                    'COMPUTE_EDGES': False, 'ZEVENBERGEN': False, 'OUTPUT': raw_aspect,
                 })
-                layer = QgsRasterLayer(output, "사면방향_8방위 (평탄=0)")
+                flat_marked = self._write_flat_marked_aspect(dem_source, raw_aspect, output)
+                if flat_marked:
+                    cleanup_files([raw_aspect])
+                else:
+                    output = raw_aspect
+                layer = QgsRasterLayer(
+                    output,
+                    "사면방향_8방위 (평탄=-1)" if flat_marked else "사면방향_8방위 (평탄=NoData)",
+                )
                 if layer.isValid():
                     try:
                         set_archtoolkit_layer_metadata(
@@ -452,7 +503,13 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                             run_id=str(run_id),
                             kind="aspect",
                             units="deg",
-                            params={"zero_flat": True, "compute_edges": False},
+                            params={
+                                "zero_flat": False,
+                                "compute_edges": False,
+                                "flat_value": (float(ASPECT_FLAT_VALUE) if flat_marked else None),
+                                "nodata": float(ASPECT_NODATA),
+                                "classes": "8 directions centred on N (337.5-22.5), NE, E, SE, S, SW, W, NW",
+                            },
                         )
                     except Exception as _exc:
                         log_swallowed("terrain_analysis_dialog.run_analysis", _exc)
@@ -489,7 +546,7 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                                 tool_id="terrain_analysis",
                                 run_id=str(run_id),
                                 kind="tri",
-                                units="index",
+                                units="m",
                                 params={
                                     "tri_max": float(tri_max),
                                     "radius": 1,
@@ -528,7 +585,7 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                             tool_id="terrain_analysis",
                             run_id=str(run_id),
                             kind="roughness",
-                            units="index",
+                            units="m",
                             params={
                                 "classification": "plugin_defined_5class",
                                 "classification_note": (
@@ -582,16 +639,17 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
         is shared rather than duplicated: the standalone TPI output honoured the
         dialog's radius while the landform classification quietly did not.
 
-        For radius > 1 the neighbourhood mean is approximated by block-averaging
-        down and resampling back up, which is the pure-GDAL route this plugin is
-        limited to (DEVELOPMENT.md). The coarse block is (2*radius+1) cells wide,
-        i.e. the same span a true (2r+1)^2 focal mean covers: a block of `radius`
-        cells would have delivered only about half the radius the label claims.
-        It is still a block average plus bilinear resampling, not an exact focal
-        mean, and the caller labels it as such.
-        ``effective_radius`` is 1 when the approximation could not be built and
-        the 3x3 result was used instead, so the caller never claims a radius it
-        did not get.
+        For radius > 1 the (2r+1)x(2r+1) focal mean is computed EXACTLY
+        (terrain_math.focal_tpi: cumulative-sum window sums, centre excluded as
+        in gdaldem's 3x3 TPI, DEM NoData left out of both sum and count, the
+        outer r rows/columns NoData). It replaced a block-average + bilinear
+        resample that was exact only at block centres and averaged 3x the true
+        TPI on curved terrain. The DEM is processed in row strips, so memory is
+        bounded by the strip, not the DEM.
+        ``effective_radius`` is 1 when the exact window cannot fit the DEM (a
+        side of 2r cells or fewer, so no cell has a full window) and the 3x3
+        result was used instead, so the caller never claims a radius it did not
+        get.
 
         ``scratch`` is the CALLER's list: intermediate files are appended to it
         as they are created, so if a later processing step raises, the caller's
@@ -600,106 +658,117 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
         """
         output = os.path.join(tempfile.gettempdir(), f'archtoolkit_tpi_{tag}_{run_id}.tif')
 
+        def _fallback_3x3():
+            processing.run("gdal:tpitopographicpositionindex", {
+                'INPUT': dem_source, 'BAND': 1, 'OUTPUT': output
+            })
+            return output, scratch, 1
+
         if radius <= 1:
-            processing.run("gdal:tpitopographicpositionindex", {
-                'INPUT': dem_source, 'BAND': 1, 'OUTPUT': output
-            })
-            return output, scratch, 1
+            return _fallback_3x3()
 
-        pixel_size_x = dem_layer.rasterUnitsPerPixelX()
-        pixel_size_y = dem_layer.rasterUnitsPerPixelY()
-        # (2r+1), not r: a focal mean of radius r spans (2r+1) cells across, so
-        # averaging blocks of r cells approximated a window of only ~radius/2
-        # while the layer name promised `radius`.
-        new_res = max(pixel_size_x, pixel_size_y) * (2 * radius + 1)
+        if np is None or gdal is None:
+            push_message(self.iface, "알림", "NumPy/GDAL을 쓸 수 없어 3x3 TPI로 대체했습니다.",
+                         level=0, duration=8)
+            return _fallback_3x3()
 
-        # Step 1: block average = approximate focal mean over a (2r+1)-cell window.
-        downsampled = os.path.join(
-            tempfile.gettempdir(), f'archtoolkit_tpi_down_{tag}_{run_id}.tif')
-        scratch.append(downsampled)
-        processing.run("gdal:warpreproject", {
-            'INPUT': dem_source, 'SOURCE_CRS': None, 'TARGET_CRS': None,
-            'RESAMPLING': 5,  # Average
-            'NODATA': None, 'TARGET_RESOLUTION': new_res, 'OPTIONS': '',
-            'DATA_TYPE': 6,  # Float32: keep the focal mean fractional (Int16 DEMs truncate)
-            'TARGET_EXTENT': None, 'TARGET_EXTENT_CRS': None,
-            'MULTITHREADING': False, 'EXTRA': '', 'OUTPUT': downsampled,
-        })
+        src = str(dem_source or "").split("|", 1)[0].strip()
+        ds = gdal.Open(src, gdal.GA_ReadOnly)
+        if ds is None:
+            push_message(self.iface, "알림", "DEM을 GDAL로 열 수 없어 3x3 TPI로 대체했습니다.",
+                         level=0, duration=8)
+            return _fallback_3x3()
+        rows, cols = int(ds.RasterYSize), int(ds.RasterXSize)
+        # Still needed: with a side of 2r cells or fewer no cell has a full
+        # (2r+1)-cell window, so the exact result would be all NoData.
+        if rows <= 2 * int(radius) or cols <= 2 * int(radius):
+            ds = None
+            push_message(
+                self.iface,
+                "알림",
+                f"DEM({cols}x{rows}셀)이 반경 {int(radius)}셀({2 * int(radius) + 1}셀 창)보다 작아 "
+                f"3x3 TPI로 대체했습니다.",
+                level=0,
+                duration=8,
+            )
+            return _fallback_3x3()
 
-        # A small DEM (or a large radius - the spinbox allows 100, i.e. a 1005 m
-        # block on a 5 m DEM) can collapse step 1 to a couple of cells. Resampling
-        # that back up yields a near-constant "mean", so step 3 would return
-        # TPI = z - const and still look like a valid broad-scale index. The
-        # os.path.exists() guard below only catches a missing file, so inspect the
-        # grid itself and fall back to the honest 3x3 index when the block window
-        # has nothing left to average over.
-        if gdal is not None:
-            down_ds = gdal.Open(downsampled, gdal.GA_ReadOnly)
-            down_usable = (down_ds is not None
-                           and int(down_ds.RasterXSize) >= 3
-                           and int(down_ds.RasterYSize) >= 3)
-            down_ds = None
-            if not down_usable:
-                push_message(
-                    self.iface,
-                    "알림",
-                    f"DEM이 반경 {int(radius)}셀({2 * int(radius) + 1}셀 창) 근사에 비해 작아 "
-                    f"3x3 TPI로 대체했습니다.",
-                    level=0,
-                    duration=8,
-                )
-                processing.run("gdal:tpitopographicpositionindex", {
-                    'INPUT': dem_source, 'BAND': 1, 'OUTPUT': output
-                })
-                return output, scratch, 1
+        band = ds.GetRasterBand(1)
+        nodata = band.GetNoDataValue()
+        gt = ds.GetGeoTransform()
+        proj = ds.GetProjection()
+        driver = gdal.GetDriverByName("GTiff")
+        out_ds = driver.Create(output, cols, rows, 1, gdal.GDT_Float32, ["TILED=YES", "COMPRESS=LZW"])
+        if out_ds is None:
+            ds = None
+            raise RuntimeError("TPI 출력 파일을 만들 수 없습니다.")
+        ok = False
+        try:
+            out_ds.SetGeoTransform(gt)
+            if proj:
+                out_ds.SetProjection(proj)
+            out_band = out_ds.GetRasterBand(1)
+            out_band.SetNoDataValue(TPI_NODATA)
 
-        # Step 2: back to the original grid.
-        mean_approx = os.path.join(
-            tempfile.gettempdir(), f'archtoolkit_tpi_mean_{tag}_{run_id}.tif')
-        scratch.append(mean_approx)
-        extent = dem_layer.extent()
-        extent_str = (f"{extent.xMinimum()},{extent.xMaximum()},"
-                      f"{extent.yMinimum()},{extent.yMaximum()}")
-        # TARGET_RESOLUTION is a single value gdalwarp applies to BOTH axes, so
-        # on a non-square-pixel DEM it would rebuild the grid at x-by-x and the
-        # row count would no longer match the DEM - step 3's gdal:rastercalculator
-        # A-B then aborts on mismatched grids. Hand gdalwarp both pixel sizes via
-        # -tr in that case, and keep the plain single-value path for square pixels.
-        if abs(pixel_size_x - pixel_size_y) > 1e-6 * max(abs(pixel_size_x), abs(pixel_size_y)):
-            target_res = None
-            extra_res = f'-tr {pixel_size_x} {pixel_size_y}'
-        else:
-            target_res = pixel_size_x
-            extra_res = ''
-        processing.run("gdal:warpreproject", {
-            'INPUT': downsampled, 'SOURCE_CRS': None, 'TARGET_CRS': None,
-            'RESAMPLING': 1,  # Bilinear
-            'NODATA': None, 'TARGET_RESOLUTION': target_res, 'OPTIONS': '',
-            'DATA_TYPE': 6,
-            'TARGET_EXTENT': extent_str,
-            'TARGET_EXTENT_CRS': dem_layer.crs().authid(),
-            'MULTITHREADING': False, 'EXTRA': extra_res, 'OUTPUT': mean_approx,
-        })
+            def _read(first, stop):
+                return band.ReadAsArray(0, int(first), cols, int(stop - first))
 
-        if not os.path.exists(mean_approx):
-            # Fall back to the 3x3 index and say so, rather than reporting a
-            # broad-scale radius the output does not actually have.
-            processing.run("gdal:tpitopographicpositionindex", {
-                'INPUT': dem_source, 'BAND': 1, 'OUTPUT': output
-            })
-            return output, scratch, 1
+            def _write(first, block):
+                out = np.where(np.isfinite(block), block, TPI_NODATA).astype("float32")
+                out_band.WriteArray(out, 0, int(first))
 
-        # Step 3: TPI = DEM - neighbourhood mean.
-        # NO_DATA makes gdal_calc propagate DEM NoData into the output instead
-        # of computing (-9999)-(-9999)=0 and classifying the collar outside a
-        # clipped DEM as "flat terrain".
-        processing.run("gdal:rastercalculator", {
-            'INPUT_A': dem_source, 'BAND_A': 1,
-            'INPUT_B': mean_approx, 'BAND_B': 1,
-            'FORMULA': 'A - B', 'NO_DATA': -9999.0,
-            'OUTPUT': output, 'RTYPE': 5,  # Float32
-        })
+            def _progress(_done, _total):
+                QtWidgets.QApplication.processEvents()
+
+            block_rows = max(64, int(TPI_STRIP_TARGET_BYTES // max(1, cols * 64)))
+            log_message(
+                f"TPI 반경 {int(radius)}셀: {2 * int(radius) + 1}x{2 * int(radius) + 1} 창 정확 초점평균"
+                f" ({cols}x{rows}셀, {block_rows}행 단위)"
+            )
+            focal_tpi_strips(rows, cols, int(radius), _read, _write, nodata=nodata,
+                             block_rows=block_rows, progress_cb=_progress)
+            out_band.FlushCache()
+            out_ds.FlushCache()
+            ok = True
+        finally:
+            out_ds = None
+            ds = None
+            if not ok and os.path.exists(output):
+                cleanup_files([output])
         return output, scratch, int(radius)
+
+    @staticmethod
+    def _tpi_window_meta(radius):
+        """Metadata describing the TPI neighbourhood actually used."""
+        radius = int(radius)
+        if radius <= 1:
+            return {
+                "tpi_window": "3x3",
+                "tpi_method": "gdaldem_tpi_3x3",
+                "tpi_window_note": "exact 3x3 focal index (gdaldem); centre excluded",
+            }
+        side = 2 * radius + 1
+        return {
+            "tpi_window": f"{side}x{side}",
+            "tpi_method": "exact_focal_mean",
+            "tpi_window_note": (
+                f"z minus the exact mean of the {side}x{side} window, centre cell excluded "
+                "(same definition as the 3x3 gdaldem TPI); DEM NoData excluded from sum and "
+                "count; outer radius rows/columns NoData"
+            ),
+        }
+
+    def _tpi_auto_sd(self, tpi_path):
+        """(mean, sd) of a TPI raster over its valid cells, or None."""
+        try:
+            tpi_layer = QgsRasterLayer(tpi_path, "TPI_temp")
+            if not tpi_layer.isValid():
+                return None
+            stats = tpi_layer.dataProvider().bandStatistics(1)
+            return float(stats.mean), float(stats.stdDev)
+        except Exception as _exc:
+            log_swallowed("terrain_analysis_dialog._tpi_auto_sd", _exc)
+            return None
 
     def run_tpi_analysis(self, dem_layer, dem_source, radius, threshold, results, run_id):
         """Topographic Position Index at the radius the user chose.
@@ -713,39 +782,51 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
             output, _scratch, radius = self._compute_tpi_raster(
                 dem_layer, dem_source, radius, run_id, "single", scratch)
 
-            # Apply classification with user threshold
+            # The threshold actually applied: with 자동 SD on (the default) the
+            # manual spinbox is disabled, so the layer must be classified with
+            # 1 SD of THIS TPI raster - it used to keep the greyed-out value.
+            threshold_mode = "manual"
+            use_auto_sd = hasattr(self, 'chkAutoSD') and self.chkAutoSD.isChecked()
+            if use_auto_sd:
+                sd_stats = self._tpi_auto_sd(output)
+                if sd_stats is not None and np is not None and np.isfinite(sd_stats[1]) and sd_stats[1] > 0:
+                    threshold = float(sd_stats[1])
+                    threshold_mode = "auto_sd"
+                else:
+                    push_message(
+                        self.iface, "알림",
+                        f"TPI 표준편차를 구할 수 없어 수동 임계값 ±{threshold:.2f}를 사용했습니다.",
+                        level=1, duration=8,
+                    )
+            threshold_label = (f"±{threshold:.2f} (자동 1 SD)" if threshold_mode == "auto_sd"
+                               else f"±{threshold:.2f}")
             tpi_classes = self.get_tpi_classes(threshold)
             if radius > 1:
-                # Honest label: the custom radius is a block-average + bilinear
-                # approximation of the (2r+1)² focal mean, not an exact one.
-                layer_name = f"TPI (근사 반경≈{radius}셀, 임계값:±{threshold:.2f})"
+                side = 2 * int(radius) + 1
+                layer_name = f"TPI (반경 {radius}셀, {side}x{side} 창, 임계값:{threshold_label})"
             else:
                 # radius 1 (or a radius that fell back) is gdaldem's fixed 3x3.
-                layer_name = f"TPI (창:3x3, 임계값:±{threshold:.2f})"
+                layer_name = f"TPI (창:3x3, 임계값:{threshold_label})"
             layer = QgsRasterLayer(output, layer_name)
-            
+
             if layer.isValid():
                 try:
+                    params = {
+                        "radius": int(radius),
+                        "threshold": float(threshold),
+                        "threshold_mode": threshold_mode,
+                    }
+                    # The layer name advertises a radius, so the metadata has to
+                    # state the window and method actually used - the same
+                    # disclosure the landform layer carries.
+                    params.update(self._tpi_window_meta(radius))
                     set_archtoolkit_layer_metadata(
                         layer,
                         tool_id="terrain_analysis",
                         run_id=str(run_id),
                         kind="tpi",
-                        units="index",
-                        params={
-                            "radius": int(radius),
-                            "threshold": float(threshold),
-                            # The layer name advertises a radius, so the metadata
-                            # has to state the span actually averaged - the same
-                            # disclosure the landform layer already carries.
-                            "tpi_window": ("3x3" if radius <= 1 else
-                                           f"block_average_approx_{2 * int(radius) + 1}"
-                                           f"x{2 * int(radius) + 1}"),
-                            "tpi_window_note": (
-                                "exact 3x3 focal index (gdaldem)" if radius <= 1 else
-                                "block average + bilinear resample approximating the "
-                                "(2r+1)^2 focal mean; not an exact focal mean"),
-                        },
+                        units="m",
+                        params=params,
                     )
                 except Exception as _exc:
                     log_swallowed("terrain_analysis_dialog.run_tpi_analysis", _exc)
@@ -772,12 +853,12 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
         - tpi_high: TPI threshold for ridge classification (e.g., 1.0)
         
         Classification Logic:
-        1. 깊은 곡저 (Incised Valley): TPI < tpi_low
+        1. 곡저 (Valley): TPI < tpi_low
         2. 하부 사면 (Lower Slope): tpi_low <= TPI < tpi_low/2
         3. 평지/단구 (Flat or Terrace): |TPI| <= |tpi_low/2| and Slope <= slope_thresh
         4. 중간 사면 (Mid Slope): |TPI| <= |tpi_high/2| and Slope > slope_thresh
         5. 상부 사면 (Upper Slope): tpi_high/2 < TPI <= tpi_high
-        6. 급경사 능선 (Steep Ridge): TPI > tpi_high
+        6. 능선 (Ridge): TPI > tpi_high
         """
         # Assigned inside try; predefine so the finally-cleanup never hits
         # an unbound name (which would mask the original error).
@@ -804,13 +885,12 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
             # 3.5 AUTO-SD CALCULATION (Weiss 2001 standard approach)
             # Calculate TPI statistics to use 1 SD as threshold
             use_auto_sd = hasattr(self, 'chkAutoSD') and self.chkAutoSD.isChecked()
+            threshold_mode = "manual"
             if use_auto_sd:
-                tpi_layer = QgsRasterLayer(tpi_path, "TPI_temp")
-                if tpi_layer.isValid():
-                    provider = tpi_layer.dataProvider()
-                    stats = provider.bandStatistics(1)
-                    tpi_sd = stats.stdDev
-                    tpi_mean = stats.mean
+                sd_stats = self._tpi_auto_sd(tpi_path)
+                if sd_stats is not None:
+                    tpi_mean, tpi_sd = sd_stats
+                    threshold_mode = "auto_sd"
                     # Weiss (2001): use 1 SD as threshold
                     tpi_low = -tpi_sd
                     tpi_high = tpi_sd
@@ -869,7 +949,8 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
             })
             
             if result and os.path.exists(output_path):
-                radius_label = ("3x3" if tpi_radius <= 1 else f"근사 반경≈{tpi_radius}셀")
+                radius_label = ("3x3" if tpi_radius <= 1 else
+                                f"반경 {tpi_radius}셀 {2 * int(tpi_radius) + 1}x{2 * int(tpi_radius) + 1} 창")
                 layer_name = (f"지형분류 (TPI {radius_label}, 경사:{slope_thresh}°, "
                               f"TPI:{tpi_low:.1f}-{tpi_high:.1f})")
                 layer = QgsRasterLayer(output_path, layer_name)
@@ -883,11 +964,9 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                             units="class",
                             params={
                                 "tpi_radius_cells": int(tpi_radius),
-                                # State the real averaged window, not the radius:
-                                # the block is (2r+1) cells wide.
-                                "tpi_window": ("3x3" if tpi_radius <= 1 else
-                                               f"block_average_approx_{2 * int(tpi_radius) + 1}"
-                                               f"x{2 * int(tpi_radius) + 1}"),
+                                # State the real window and method, not only the radius.
+                                **self._tpi_window_meta(tpi_radius),
+                                "threshold_mode": threshold_mode,
                                 "slope_thresh_deg": float(slope_thresh),
                                 "tpi_low": float(tpi_low),
                                 "tpi_high": float(tpi_high),
@@ -1112,8 +1191,11 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                 return
             z = z.astype("float32")
 
-            cell = (abs(float(gt[1])) + abs(float(gt[5]))) / 2.0
-            if cell <= 0:
+            # Separate x/y spacing: one mean size scaled the second
+            # derivatives wrongly on non-square pixels (10 x 5 m: ~1.9x).
+            cell_x = abs(float(gt[1]))
+            cell_y = abs(float(gt[5]))
+            if cell_x <= 0 or cell_y <= 0:
                 push_message(self.iface, "경고", "DEM 픽셀 크기를 확인할 수 없습니다(곡률).", level=1)
                 return
 
@@ -1135,7 +1217,7 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
             except Exception as _exc:
                 log_swallowed("terrain_analysis_dialog.run_curvature_analysis", _exc)
 
-            profile, plan = self._zt_curvature(z, cell)
+            profile, plan = self._zt_curvature(z, cell_x, cell_y)
 
             # NoData where any 3x3 neighbour is invalid, plus the 1-px border.
             inv = ~valid
@@ -1177,7 +1259,8 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                         kind=kind, units="1/m",
                         params={
                             "method": "Zevenbergen & Thorne 1987",
-                            "cell_size": float(cell),
+                            "cell_size": float(cell_x),
+                            "cell_size_y": float(cell_y),
                             "sign_convention": (
                                 "negative = convex (profile) / convergent (plan); this is the "
                                 "NEGATION of the Z&T formula as printed by ESRI and most "
@@ -1195,10 +1278,60 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
         except Exception as e:
             push_message(self.iface, "경고", f"곡률 분석 오류: {str(e)}", level=1)
 
-    def _zt_curvature(self, z, cell):
+    def _zt_curvature(self, z, cell, cell_y=None):
         """Zevenbergen & Thorne (1987) profile/plan curvature. See run_curvature_analysis
-        for the (verified) sign convention."""
-        return zt_curvature(z, cell)
+        for the (verified) sign convention. ``cell_y`` defaults to ``cell``."""
+        return zt_curvature(z, cell, cell_y)
+
+    def _write_flat_marked_aspect(self, dem_source, raw_path, out_path):
+        """Write the aspect raster with flats as ASPECT_FLAT_VALUE and NoData flagged.
+
+        ``raw_path`` is gdaldem aspect run without -zero_for_flat, where flats
+        and uncomputable cells share the NoData value. A cell whose whole 3x3
+        DEM window is valid can only be NoData there because it is flat
+        (terrain_math.mark_flat_aspect). Returns False - and the caller keeps
+        the raw raster, flats left as NoData - when the arrays cannot be read
+        or the DEM is beyond the same 1.2e8-pixel cap as the other array paths.
+        """
+        if np is None or gdal is None:
+            return False
+        try:
+            ads = gdal.Open(raw_path, gdal.GA_ReadOnly)
+            if ads is None:
+                return False
+            npx = int(ads.RasterXSize) * int(ads.RasterYSize)
+            if npx > 120_000_000:
+                log_message(
+                    f"사면방향: DEM이 커서({npx:,} 픽셀) 평탄 셀을 따로 표시하지 않고 NoData로 둡니다."
+                )
+                ads = None
+                return False
+            aband = ads.GetRasterBand(1)
+            aspect = aband.ReadAsArray()
+            a_nd = aband.GetNoDataValue()
+            gt = ads.GetGeoTransform()
+            proj = ads.GetProjection()
+            ads = None
+            src = str(dem_source or "").split("|", 1)[0].strip()
+            dds = gdal.Open(src, gdal.GA_ReadOnly)
+            if dds is None or aspect is None:
+                return False
+            dband = dds.GetRasterBand(1)
+            zarr = dband.ReadAsArray()
+            d_nd = dband.GetNoDataValue()
+            dds = None
+            if zarr is None or zarr.shape != aspect.shape:
+                return False
+            dem_valid = np.isfinite(zarr)
+            if d_nd is not None:
+                dem_valid &= (zarr != d_nd)
+            del zarr
+            marked = mark_flat_aspect(aspect, dem_valid, a_nd, out_nodata=ASPECT_NODATA)
+            self._write_geotiff(out_path, marked.astype("float32"), gt, proj, ASPECT_NODATA)
+            return os.path.exists(out_path)
+        except Exception as _exc:
+            log_swallowed("terrain_analysis_dialog._write_flat_marked_aspect", _exc)
+            return False
 
     def _write_geotiff(self, out_path, arr, gt, proj, nodata):
         write_single_band_geotiff(

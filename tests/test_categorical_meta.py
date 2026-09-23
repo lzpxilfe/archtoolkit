@@ -69,10 +69,10 @@ EXPECTED = {
     # --- rasters: measurements --------------------------------------------
     ("terrain_analysis", "slope", "deg"): False,
     ("terrain_analysis", "aspect", "deg"): False,
-    ("terrain_analysis", "tri", "index"): False,
+    ("terrain_analysis", "tri", "m"): False,
     ("terrain_analysis", "tri_radius", "m"): False,
-    ("terrain_analysis", "tpi", "index"): False,
-    ("terrain_analysis", "roughness", "index"): False,
+    ("terrain_analysis", "tpi", "m"): False,
+    ("terrain_analysis", "roughness", "m"): False,
     ("dem_generate", "dem", "m"): False,
     ("dem_generate", "kriging_variance", "m^2"): False,
     ("slope_aspect_drafting", "slope_grid", "deg"): False,

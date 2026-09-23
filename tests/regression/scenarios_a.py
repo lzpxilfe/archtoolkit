@@ -573,12 +573,12 @@ def scenario_viewshed_higuchi_custom(ctx):
 
 
 def scenario_terrain_tpi_fallback(ctx):
-    """TPI only, radius 15 on the 60x60 DEM. NEW's (2r+1)=31-cell block collapses the
-    coarse grid to 2x2 and must fall back to the 3x3 index with a message; OLD's
-    r=15-cell block still yields a 4x4 grid and reports a 'radius 15' TPI."""
+    """TPI only, radius 30 on the 60x60 DEM: a side of 60 cells is <= 2r, so no cell
+    has a full (2r+1)-cell window and the tool must fall back to the 3x3 index with a
+    message and report radius 1. (Radius 15 now gets the exact focal TPI.)"""
     return _terrain_common(
         ctx,
         checks={"chkTPI"},
-        spins={"spinTPIRadius": 15, "spinTPIThreshold": 1.0},
+        spins={"spinTPIRadius": 30, "spinTPIThreshold": 1.0},
         radio="radioKorean",
     )

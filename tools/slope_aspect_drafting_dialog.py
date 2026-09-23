@@ -26,7 +26,7 @@ Inputs:
 - AOI polygon (clip/mask)
 
 Outputs (optional):
-- Slope raster (red ramp, 0°→90°)
+- Slope zones (polygons merged per slope class of the chosen step, red ramp)
 - Aspect arrow points (rotated by azimuth)
 """
 
@@ -63,7 +63,10 @@ from .qtcompat import FT_INT, FT_DOUBLE, FT_STRING, SYMBOL_PROPERTY_ANGLE
 
 import processing
 
-from .utils import log_swallowed, cleanup_files, push_message, restore_ui_focus, set_archtoolkit_layer_metadata
+from .utils import (
+    log_swallowed, cleanup_files, move_group_to_top, push_message, restore_ui_focus,
+    set_archtoolkit_layer_metadata,
+)
 from .live_log_dialog import ensure_live_log_dialog
 from .help_dialog import show_help_dialog
 from . import dialog_memory
@@ -73,6 +76,42 @@ from .icons import icon as plugin_icon
 FORM_CLASS, _ = uic.loadUiType(
     os.path.join(os.path.dirname(__file__), "slope_aspect_drafting_dialog_base.ui")
 )
+
+
+def _memory_layer(geometry, name, crs):
+    """Memory vector layer carrying ``crs`` itself, not its authid.
+
+    A ``"Polygon?crs=<authid>"`` URI drops a CRS that has no authority code
+    (a custom or WKT-only projection): the layer came out with no CRS, the
+    AOI cutline lost its SRS and the drawing layers lost their georeference.
+    """
+    layer = QgsVectorLayer(geometry, name, "memory")
+    if crs is not None and crs.isValid():
+        layer.setCrs(crs)
+    return layer
+
+
+def slope_class_for(slope_deg_value, step):
+    """Slope class (lower bound, deg) of a slope for a class width ``step``.
+
+    The class is taken from the UNROUNDED slope: rounding first put 9.6 deg
+    into the 10-15 class. A step of 1 keeps the historical 1-degree zones,
+    which are the rounded value (the zone labelled "10°" holds 9.5-10.5 deg).
+    """
+    value = min(max(float(slope_deg_value), 0.0), 90.0)
+    step = max(1, int(step))
+    if step == 1:
+        return int(round(value))
+    return int(min(90, math.floor(value / step) * step))
+
+
+def slope_class_label(slope_class, step):
+    """Legend/label text of a slope class: "10°" for a 1-degree step, else "5-10°"."""
+    v0 = int(slope_class)
+    step = max(1, int(step))
+    if step == 1 or v0 >= 90:
+        return f"{v0}°"
+    return f"{v0}-{min(v0 + step, 90)}°"
 
 
 class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
@@ -122,7 +161,13 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
             plugin_dir = os.path.dirname(os.path.dirname(__file__))
             html = (
                 "<h2>경사도/사면방향 도면화 (Slope/Aspect Drafting)</h2>"
-                "<p>AOI(작업영역)를 기준으로 인쇄용 경사 래스터와 사면방향(방위각) 화살표 레이어를 생성합니다.</p>"
+                "<p>AOI(작업영역)를 기준으로 인쇄용 경사 구역(벡터)과 사면방향(방위각) 화살표 레이어를 생성합니다.</p>"
+                "<h3>경사도 단계</h3>"
+                "<ul>"
+                "<li>경사를 단계 폭(예: 5° → 0-5°, 5-10°…)의 구간으로 나눈 뒤 같은 구간끼리 병합하고 구간으로 라벨을 붙입니다. "
+                "구간은 반올림 전 경사값으로 나눕니다(9.6°는 5-10°).</li>"
+                "<li>1°이면 반올림한 1° 단위 구역과 숫자 라벨(예: 10°)입니다.</li>"
+                "</ul>"
                 "<h3>입력</h3>"
                 "<ul>"
                 "<li>DEM 래스터</li>"
@@ -142,15 +187,9 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
 
     def create_mask_layer(self):
         dem_layer = self.cmbDemLayer.currentLayer()
-        crs_authid = (
-            dem_layer.crs().authid()
-            if dem_layer is not None
-            else QgsProject.instance().crs().authid()
-        )
+        crs = dem_layer.crs() if dem_layer is not None else QgsProject.instance().crs()
 
-        layer = QgsVectorLayer(
-            f"MultiPolygon?crs={crs_authid}", "작업영역_AOI (AOI polygon)", "memory"
-        )
+        layer = _memory_layer("MultiPolygon", "작업영역_AOI (AOI polygon)", crs)
         pr = layer.dataProvider()
         pr.addAttributes([QgsField("name", FT_STRING)])
         layer.updateFields()
@@ -323,7 +362,7 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
             if want_slope:
                 out_grid = self._build_slope_grid_layer(
                     slope_tif=slope_clip_tif,
-                    dem_authid=dem_layer.crs().authid(),
+                    dem_crs=dem_layer.crs(),
                     step_cells=step_cells,
                     label_size_pt=label_size_pt,
                     slope_class_step=slope_class_step,
@@ -339,6 +378,9 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
                             "step_cells": int(step_cells),
                             "label_size_pt": float(label_size_pt),
                             "slope_class_step": int(slope_class_step),
+                            "dissolve_field": "slope_class",
+                            "class_binning": ("1-degree zones of the rounded slope" if int(slope_class_step) <= 1
+                                              else "floor(slope / step) * step of the unrounded slope"),
                             "scale": 1,
                             "compute_edges": False,
                         },
@@ -378,7 +420,7 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
                 out_pts = self._build_aspect_arrow_layer(
                     slope_tif=slope_clip_tif,
                     aspect_tif=aspect_clip_tif,
-                    dem_authid=dem_layer.crs().authid(),
+                    dem_crs=dem_layer.crs(),
                     step_cells=step_cells,
                     flat_thresh_deg=flat_thresh,
                     arrow_size_mm=arrow_size_mm,
@@ -405,11 +447,11 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
 
             try:
                 # Keep results visible even when rasters are added later.
-                if parent_group.parent() == root:
-                    idx = root.children().index(parent_group)
-                    if idx != 0:
-                        root.removeChildNode(parent_group)
-                        root.insertChildNode(0, parent_group)
+                # removeChildNode() DELETES the node: the old remove-then-insert
+                # dropped this group - every earlier drafting result and this
+                # run's - whenever anything sat above it. move_group_to_top
+                # clones first and returns the node to keep using.
+                parent_group = move_group_to_top(root, parent_group)
             except Exception as _exc:
                 log_swallowed("slope_aspect_drafting_dialog.run_drafting", _exc)
 
@@ -431,7 +473,7 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
     def _build_slope_grid_layer(
         self,
         slope_tif: str,
-        dem_authid: str,
+        dem_crs,
         step_cells: int,
         label_size_pt: float,
         slope_class_step: int,
@@ -456,9 +498,7 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
                 "표시 간격(셀)을 늘려주세요."
             )
 
-        layer = QgsVectorLayer(
-            f"Polygon?crs={dem_authid}", "경사도_격자 (Slope grid)", "memory"
-        )
+        layer = _memory_layer("Polygon", "경사도_격자 (Slope grid)", dem_crs)
         pr = layer.dataProvider()
         pr.addAttributes(
             [
@@ -515,12 +555,7 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
                         slope_deg = 0
                     if slope_deg > 90:
                         slope_deg = 90
-                    cls_step = max(1, int(slope_class_step))
-                    slope_class = int((slope_deg // cls_step) * cls_step)
-                    if slope_class < 0:
-                        slope_class = 0
-                    if slope_class > 90:
-                        slope_class = 90
+                    slope_class = slope_class_for(slope, slope_class_step)
 
                     x1, y1 = corner_xy(col, row)
                     x2, y2 = corner_xy(col2, row)
@@ -555,10 +590,12 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
 
         out_layer = layer
         try:
-            # Merge adjacent cells with the same 1-degree value to reduce label clutter.
+            # Merge adjacent cells of the same slope CLASS - the "경사도 단계"
+            # the tooltip promises ("값이 클수록 구역 수/라벨이 줄어듭니다").
+            # Dissolving on the 1-degree value made the step change colours only.
             dissolve_params = {
                 "INPUT": layer,
-                "FIELD": ["slope_deg"],
+                "FIELD": ["slope_class"],
                 "OUTPUT": "memory:",
             }
             try:
@@ -575,7 +612,7 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
                 log_swallowed("slope_aspect_drafting_dialog._build_slope_grid_layer", _exc)
 
             if hasattr(out_layer, "setName"):
-                out_layer.setName("경사도_구역(1°) (Slope zones)")
+                out_layer.setName(f"경사도_구역({max(1, int(slope_class_step))}°) (Slope zones)")
         except Exception:
             out_layer = layer
 
@@ -593,9 +630,7 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
 
     def _selected_polygons_as_mask_layer(self, layer: QgsVectorLayer) -> QgsVectorLayer:
         """Create a temporary memory polygon layer from selected features."""
-        tmp = QgsVectorLayer(
-            f"MultiPolygon?crs={layer.crs().authid()}", "tmp_mask_selected", "memory"
-        )
+        tmp = _memory_layer("MultiPolygon", "tmp_mask_selected", layer.crs())
         pr = tmp.dataProvider()
         feats = []
         for ft in layer.selectedFeatures():
@@ -656,28 +691,27 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
                 layer.updateFields()
                 label_idx = layer.fields().indexFromName("label")
 
+            slope_idx = layer.fields().indexFromName("slope")
             changes = {}
             for ft in layer.getFeatures():
                 _skip_606 = False
                 try:
-                    slope_deg = int(ft["slope_deg"])
+                    slope_class = int(ft["slope_class"])
                 except Exception as _exc:
                     log_swallowed("slope_aspect_drafting_dialog._apply_slope_grid_style", _exc)
-                    log_swallowed("tools/slope_aspect_drafting_dialog.py:608 (_apply_slope_grid_style)", _exc)
                     _skip_606 = True
                 if _skip_606:
                     continue
-                if slope_deg < 0:
-                    slope_deg = 0
-                if slope_deg > 90:
-                    slope_deg = 90
-                slope_class = int((slope_deg // cls_step) * cls_step)
-                if slope_class < 0:
-                    slope_class = 0
-                if slope_class > 90:
-                    slope_class = 90
-
-                changes[ft.id()] = {label_idx: f"{slope_deg}°", cls_idx: slope_class}
+                slope_class = min(max(slope_class, 0), 90)
+                change = {label_idx: slope_class_label(slope_class, cls_step), cls_idx: slope_class}
+                if cls_step > 1:
+                    # A merged zone spans a whole class: the 1-degree value and
+                    # raw slope of whichever cell the dissolve kept would
+                    # misdescribe it, so they are left empty.
+                    change[deg_idx] = None
+                    if slope_idx >= 0:
+                        change[slope_idx] = None
+                changes[ft.id()] = change
             if changes:
                 try:
                     layer.dataProvider().changeAttributeValues(changes)
@@ -699,11 +733,7 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
             cats = []
             for v in vals:
                 v0 = int(v)
-                v1 = min(int(v0 + cls_step), 90)
-                if v0 >= 90:
-                    label = "90°"
-                else:
-                    label = f"{v0}~{v1}°"
+                label = slope_class_label(v0, cls_step)
 
                 pos = min(max(v0 / 90.0, 0.0), 1.0)
                 c = ramp.color(pos)
@@ -757,7 +787,7 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
         self,
         slope_tif: str,
         aspect_tif: str,
-        dem_authid: str,
+        dem_crs,
         step_cells: int,
         flat_thresh_deg: float,
         arrow_size_mm: float,
@@ -783,9 +813,7 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
                 "표시 간격(셀)을 늘려주세요."
             )
 
-        layer = QgsVectorLayer(
-            f"Point?crs={dem_authid}", "사면방향_화살표 (Aspect arrows)", "memory"
-        )
+        layer = _memory_layer("Point", "사면방향_화살표 (Aspect arrows)", dem_crs)
         pr = layer.dataProvider()
         pr.addAttributes(
             [

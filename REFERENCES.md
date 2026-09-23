@@ -222,10 +222,10 @@
 **(A) 지수(index)의 원 출처 — 반경 1셀(3x3)일 때만 이 알고리즘을 호출** — `gdal:tpitopographicpositionindex`(중심 셀과 주변 셀 평균의 차):
 > Wilson, M.F.J., O'Connell, B., Brown, C., Guinan, J.C., & Grehan, A.J. (2007). "Multiscale terrain analysis of multibeam bathymetry data for habitat mapping on the continental slope." *Marine Geodesy*, 30(1-2), pp. 3-35. DOI: 10.1080/01490410701295962
 
-주(중요): gdaldem TPI는 3x3 고정입니다. 따라서 **반경을 2셀 이상으로 지정하면 이 알고리즘을 호출하지 않으며**, 아래 (B)의 근사 계산으로 대체됩니다. 위 인용은 반경 1셀 경로에만 해당합니다.
+주(중요): gdaldem TPI는 3x3 고정입니다. 따라서 **반경을 2셀 이상으로 지정하면 이 알고리즘을 호출하지 않으며**, 아래 (B)의 직접 계산으로 대체됩니다. 위 인용은 반경 1셀 경로에만 해당합니다.
 
-**(B) 반경 확장 TPI (다운샘플 근사)** — `tools/terrain_analysis_dialog.py`의 `_compute_tpi_raster`가 반경 2셀 이상에서 직접 구현:
-> DEM을 `(2r+1)`셀 블록 평균으로 축소해 이웃 평균을 근사하고, 원래 격자로 되돌린 뒤 `DEM - 이웃평균`으로 계산합니다. Weiss의 분류가 전제하는 **광역(broad-scale) TPI**를 3x3 고정 알고리즘으로는 낼 수 없기 때문입니다. 블록 평균 + 리샘플링이므로 **엄밀한 focal mean이 아니고** gdaldem TPI도 아니며, 레이어 이름에 "근사 반경"으로 표기됩니다. DEM이 블록 축소를 감당하지 못할 만큼 작으면 (A)의 3x3 경로로 되돌아가며, 이때는 실제 적용된 반경 1이 그대로 보고됩니다.
+**(B) 반경 확장 TPI (정확한 초점평균)** — `tools/terrain_analysis_dialog.py`의 `_compute_tpi_raster`가 반경 2셀 이상에서 직접 구현:
+> 반경 2셀 이상에서 `(2r+1)x(2r+1)` 창의 이웃 평균을 누적합(summed-area)으로 정확히 계산해 `DEM - 이웃평균`을 구합니다(중심 셀 제외 — gdaldem 3x3 TPI와 같은 정의, `tools/terrain_math.py`의 `focal_tpi`). Weiss의 분류가 전제하는 **광역(broad-scale) TPI**를 3x3 고정 알고리즘으로는 낼 수 없기 때문입니다. DEM NoData는 합과 개수에서 모두 제외하고, 창이 격자를 벗어나는 가장자리 r셀은 NoData입니다. DEM 한 변이 2r셀 이하이면 (A)의 3x3 경로로 되돌아가며 실제 적용된 반경 1이 보고됩니다. 0.1.4 이전에는 블록 평균 후 이중선형으로 되돌리는 근사였고, 곡면 지형에서 TPI를 약 3배 부풀렸습니다.
 
 **(B) 지형 위치 6등급 분류(Landform Classification)** — `run_slope_position_analysis`가 TPI와 경사 임계값을 조합해 직접 구현:
 > Weiss, A. (2001). "Topographic Position and Landforms Analysis." *Poster presentation, ESRI User Conference*, San Diego, CA.

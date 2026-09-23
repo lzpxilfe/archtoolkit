@@ -60,7 +60,8 @@ def is_categorical_meta(meta) -> bool:
 # are ten degrees apart, and their linear average (180) points the opposite
 # way, so bilinear resampling manufactures directions no source cell had.
 # Only nearest neighbour leaves them alone. terrain_analysis writes flat cells
-# as 0 (due north), which makes every flat/slope boundary such a case.
+# as -1 (outside 0-360) and NoData as -9999; averaging across a direction
+# boundary is still wrong.
 # "northness", "eastness" and "trasp" are deliberately absent: those are the
 # linearised forms terrain_analysis emits precisely so they can be averaged.
 CIRCULAR_KIND_HINTS = ("aspect", "bearing", "azimuth")

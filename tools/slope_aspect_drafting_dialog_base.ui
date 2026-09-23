@@ -23,7 +23,7 @@
       <item>
        <widget class="QLabel" name="lblDescription">
          <property name="text">
-           <string>&lt;html&gt;&lt;b&gt;도면화(경사도/사면방향)&lt;/b&gt;는 입력 DEM을 경사도/사면방향으로 변환한 뒤, 선택한 폴리곤 작업영역(AOI)만 도면화 레이어로 생성합니다.&lt;br/&gt;- 경사도: 단계(예: 0~5°, 5~10°…)로 구간화 → 같은 구간 병합 + 라벨&lt;br/&gt;- 사면방향: 8방향(45°) 화살표 + 색상 구분&lt;br/&gt;&lt;br/&gt;※ “표시 간격(셀)”을 크게 잡으면 성능이 좋아집니다.&lt;/html&gt;</string>
+           <string>&lt;html&gt;&lt;b&gt;도면화(경사도/사면방향)&lt;/b&gt;는 입력 DEM을 경사도/사면방향으로 변환한 뒤, 선택한 폴리곤 작업영역(AOI)만 도면화 레이어로 생성합니다.&lt;br/&gt;- 경사도: 단계(예: 0-5°, 5-10°…)로 구간화 → 같은 구간 병합 + 구간 라벨&lt;br/&gt;- 사면방향: 8방향(45°) 화살표 + 색상 구분&lt;br/&gt;&lt;br/&gt;※ “표시 간격(셀)”을 크게 잡으면 성능이 좋아집니다.&lt;/html&gt;</string>
          </property>
         <property name="wordWrap">
          <bool>true</bool>
@@ -93,7 +93,7 @@
       <item>
        <widget class="QCheckBox" name="chkSlopeRaster">
         <property name="text">
-         <string>경사도 벡터(1° 병합) + 숫자 라벨</string>
+         <string>경사도 벡터(단계별 병합) + 라벨</string>
         </property>
         <property name="checked">
          <bool>true</bool>
@@ -167,7 +167,7 @@
           <string>°</string>
          </property>
          <property name="toolTip">
-          <string>&lt;html&gt;&lt;b&gt;경사도 단계(°)&lt;/b&gt;&lt;hr/&gt;같은 구간(예: 0~5°, 5~10°…)끼리 병합해 ‘구역’으로 만듭니다.&lt;br/&gt;값이 클수록 구역 수/라벨이 줄어들어 더 깔끔해집니다.&lt;/html&gt;</string>
+          <string>&lt;html&gt;&lt;b&gt;경사도 단계(°)&lt;/b&gt;&lt;hr/&gt;같은 구간(예: 0-5°, 5-10°…)끼리 병합해 ‘구역’으로 만들고 구간(예: 5-10°)으로 라벨을 붙입니다.&lt;br/&gt;구간은 반올림 전 경사값으로 나눕니다(예: 9.6°는 5-10°).&lt;br/&gt;1°이면 반올림한 1° 단위 구역과 숫자 라벨(예: 10°)입니다.&lt;br/&gt;값이 클수록 구역 수/라벨이 줄어들어 더 깔끔해집니다.&lt;/html&gt;</string>
          </property>
         </widget>
        </item>
