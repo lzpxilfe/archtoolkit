@@ -21,6 +21,7 @@ Applies professional cartographic styles to South Korean Digital Topographic Map
 """
 import copy
 import json
+import math
 import os
 from datetime import datetime
 
@@ -50,9 +51,14 @@ from qgis.core import (
     QgsHillshadeRenderer,
     QgsLayerTreeLayer,
     QgsCoordinateTransform,
+    QgsContrastEnhancement,
+    QgsPointXY,
+    QgsUnitTypes,
 )
 from .qtcompat import FT_STRING, RBS_ALL, SHADER_DISCRETE
 from .utils import (
+    is_null_value,
+    log_message,
     log_swallowed,
     get_archtoolkit_layer_metadata,
     new_run_id,
@@ -67,6 +73,12 @@ from .icons import icon as plugin_icon
 FORM_CLASS, _ = uic.loadUiType(os.path.join(
     os.path.dirname(__file__), 'map_styling_dialog_base.ui'))
 
+# Layer codes and names follow the official NGII (국토지리정보원) code tables:
+#   - 국토지리정보원, "전국 연속수치지형도 코드 및 레이어 설명서" Ver 5.1.1
+#     (ngii.go.kr file_down.do?sq=58476): p.15 도로중심선 A0023210-A0023217,
+#     p.44 건물 B0014110-B0014119, p.119 하천 E0022110/E0022112/E0022113/E0022115;
+#   - "수치지도 지형지물 표준코드" attachment on law.go.kr (flDownload.do?flSeq=42285173).
+# Both list the same names. Line widths are this tool's cartographic choice.
 DEFAULT_CODE_CONFIG = {
     "roads": {
         "name": "Style: 도로",
@@ -75,32 +87,52 @@ DEFAULT_CODE_CONFIG = {
             {"code": "A0023211", "width_mm": 1.2, "label": "고속국도"},
             {"code": "A0023212", "width_mm": 1.0, "label": "일반국도"},
             {"code": "A0023213", "width_mm": 0.8, "label": "지방도"},
-            {"code": "A0023214", "width_mm": 0.7, "label": "시/군도"},
-            {"code": "A0023215", "width_mm": 0.5, "label": "면도"},
-            {"code": "A0023216", "width_mm": 0.4, "label": "소로"},
-            {"code": "A0023217", "width_mm": 0.3, "label": "도보/길"},
-            {"code": "A0023210", "width_mm": 0.4, "label": "기타도로"},
+            {"code": "A0023214", "width_mm": 0.7, "label": "특별시도ㆍ광역시도"},
+            {"code": "A0023215", "width_mm": 0.5, "label": "시도"},
+            {"code": "A0023216", "width_mm": 0.4, "label": "군도"},
+            {"code": "A0023217", "width_mm": 0.3, "label": "면리간도로"},
+            {"code": "A0023210", "width_mm": 0.4, "label": "(도로중심선)미분류"},
         ],
     },
     "rivers": {
         "name": "Style: 하천",
         "color": "#1ea1ff",
         "rules": [
-            {"code": "E0022110", "width_mm": 1.0, "label": "하천"},
-            {"code": "E0022115", "width_mm": 0.4, "label": "수로"},
-            {"code": "E0022112", "width_mm": 0.7, "label": "소하천"},
-            {"code": "E0022113", "width_mm": 0.3, "label": "세천"},
+            {"code": "E0022110", "width_mm": 1.0, "label": "(하천)미분류"},
+            {"code": "E0022115", "width_mm": 0.4, "label": "하천중심선"},
+            {"code": "E0022112", "width_mm": 0.7, "label": "세류"},
+            {"code": "E0022113", "width_mm": 0.3, "label": "건천"},
         ],
     },
     "buildings": {
         "name": "Style: 건물",
-        "codes": ["B0014110", "B0014111", "B0014112", "B0014113", "B0014115"],
+        "codes": [
+            "B0014110", "B0014111", "B0014112", "B0014113", "B0014114",
+            "B0014115", "B0014116", "B0014117", "B0014118", "B0014119",
+        ],
+        "labels": {
+            "B0014110": "(건물경계)미분류",
+            "B0014111": "주택외건물",
+            "B0014112": "주택",
+            "B0014113": "연립주택",
+            "B0014114": "공사중건물",
+            "B0014115": "아파트",
+            "B0014116": "무벽건물",
+            "B0014117": "온실",
+            "B0014118": "가건물",
+            "B0014119": "집단가옥경계",
+        },
         "fill_color": "#ffffff",
         "outline_color": "#666666",
         "outline_width_mm": 0.1,
         "shadow_alpha": 100,
     },
 }
+
+# Degenerate building outlines (a part that cannot close into a ring, e.g. a
+# two-point wall) are buffered by this many METRES to stay visible - only in a
+# CRS whose units convert to metres; never in a geographic CRS.
+BUILDING_LINE_BUFFER_M = 0.05
 
 class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
     
@@ -163,6 +195,19 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
             html = (
                 "<h2>도면 시각화 (Map Styling)</h2>"
                 "<p>한국 수치지형도(DXF) 레이어를 분류/집계하고, 도로·하천·건물 등 카토그래피 스타일을 적용합니다.</p>"
+                "<h3>코드와 동작</h3>"
+                "<ul>"
+                "<li>코드 이름은 국토지리정보원 '전국 연속수치지형도 코드 및 레이어 설명서'(Ver 5.1.1)와"
+                " '수치지도 지형지물 표준코드'를 따릅니다: 도로중심선 A0023210-A0023217,"
+                " 하천 E0022110/E0022112/E0022113/E0022115, 건물 B0014110-B0014119. 선폭은 이 도구의 표현 선택입니다.</li>"
+                "<li>원본 레이어는 '원본 레이어 (숨김)' 그룹으로 옮겨 숨깁니다. 스타일 대상 코드가 아닌 피처 수는"
+                " 완료 메시지에, 코드별 목록은 로그에 남깁니다.</li>"
+                "<li>건물: 선은 부분(part)마다 닫아 면으로 만들고, 면은 그대로 씁니다. 같은 코드의 점(주기/텍스트)은"
+                f" 제외합니다. 닫을 수 없는 선은 투영 좌표계에서만 {BUILDING_LINE_BUFFER_M}m 버퍼로 표시하고,"
+                " 지리 좌표계에서는 제외합니다.</li>"
+                "<li>배경 지형: 음영기복 + 그레이(DEM 최소-최대로 늘인 명암, 곱하기 40%) + 고도 색상(4분위 구간,"
+                " 범례에 구간값 표시).</li>"
+                "</ul>"
                 "<h3>커스터마이즈</h3>"
                 "<ul>"
                 "<li>DXF 코드 매핑은 <code>tools/map_styling_codes.json</code>에서 수정할 수 있습니다.</li>"
@@ -241,6 +286,8 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
                     config[key]["fill_color"] = cat["fill_color"]
                 if isinstance(cat.get("outline_color"), str):
                     config[key]["outline_color"] = cat["outline_color"]
+                if isinstance(cat.get("labels"), dict):
+                    config[key]["labels"] = {str(k): str(v) for k, v in cat["labels"].items()}
                 if cat.get("outline_width_mm") is not None:
                     try:
                         config[key]["outline_width_mm"] = float(cat["outline_width_mm"])
@@ -331,6 +378,7 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
         try:
             self._style_run_id = new_run_id("map_styling")
             results = []
+            notes = []
             
             # 1. Raster Background Styling
             if self.chkDemStyling.isChecked() and isinstance(dem_layer, QgsRasterLayer):
@@ -386,6 +434,12 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
                         task['style_func'](aggregated_layer, 'Layer')
                         results.append(task['name'].replace("Style: ", ""))
                         created_any = True
+                    if task.get("dest_geom") == "polygon":
+                        bs = getattr(self, "_last_building_stats", None) or {}
+                        if bs.get("points_skipped"):
+                            notes.append(f"건물 코드의 점/주기 피처 {bs['points_skipped']}개는 건물이 아니어서 제외")
+                        if bs.get("degenerate_skipped"):
+                            notes.append(f"면을 만들 수 없는 건물 선 {bs['degenerate_skipped']}개 제외")
 
                 if created_any:
                     # Now it's safe to retire the previous run's group.
@@ -411,6 +465,25 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
                                 parent.removeChildNode(sl_node)
 
                     source_sub_group.setItemVisibilityChecked(False)
+
+                    # The hidden sources still hold every feature this run did
+                    # not style (unmapped codes, unchecked categories, layers
+                    # without a code field). Say so instead of letting them
+                    # vanish from the map silently.
+                    styled_codes = [c for t in tasks for c in (t.get('codes') or [])]
+                    unstyled = self._unstyled_feature_counts(source_layers, styled_codes)
+                    if unstyled:
+                        n_unstyled = sum(unstyled.values())
+                        top = sorted(unstyled.items(), key=lambda kv: -kv[1])
+                        listing = ", ".join(f"{k or '(빈 코드)'}: {v}" for k, v in top[:20])
+                        log_message(
+                            f"MapStyling: 스타일되지 않은 원본 피처 {n_unstyled}개 ({len(unstyled)}개 코드) - {listing}",
+                            level=Qgis.MessageLevel.Info,
+                        )
+                        notes.append(
+                            f"스타일 대상이 아닌 원본 피처 {n_unstyled}개({len(unstyled)}개 코드)는 "
+                            f"'{source_group_name}' 그룹에 숨겨져 있습니다(목록은 로그)"
+                        )
                 else:
                     # Nothing created: drop the temp group; leave old outputs intact.
                     try:
@@ -420,7 +493,10 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
 
             # Final message
             if results:
-                push_message(self.iface, "시각화 완료", f"통합 레이어가 생성되었습니다: {', '.join(results)}", level=0)
+                msg = f"통합 레이어가 생성되었습니다: {', '.join(results)}"
+                if notes:
+                    msg += " | " + " | ".join(notes)
+                push_message(self.iface, "시각화 완료", msg, level=0, duration=10 if notes else 3)
                 self.accept()
             else:
                 push_message(self.iface, "정보", "선택한 레이어들에서 해당하는 데이터를 찾을 수 없습니다.", level=1)
@@ -473,6 +549,54 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
         except Exception as _exc:
             log_swallowed("map_styling_dialog._teardown_style_group", _exc)
 
+    @staticmethod
+    def _dem_min_max(raster_layer):
+        """Exact band-1 min/max over all valid cells (NoData excluded)."""
+        stats = raster_layer.dataProvider().bandStatistics(1, RBS_ALL)
+        mn = float(stats.minimumValue)
+        mx = float(stats.maximumValue)
+        if not (math.isfinite(mn) and math.isfinite(mx)):
+            mn, mx = 0.0, 1.0
+        if mx <= mn:
+            mx = mn + 1.0
+        return mn, mx
+
+    @staticmethod
+    def _gray_renderer(provider, dem_min, dem_max):
+        """Grey renderer stretched to the DEM's min/max.
+
+        Without a contrast enhancement QGIS writes the raw elevation as the grey
+        level, so anything above 255 wraps (a hard black edge at 256 m) and the
+        tone follows absolute height instead of the DEM's own range.
+        """
+        renderer = QgsSingleBandGrayRenderer(provider, 1)
+        ce = QgsContrastEnhancement(provider.dataType(1))
+        ce.setContrastEnhancementAlgorithm(QgsContrastEnhancement.ContrastEnhancementAlgorithm.StretchToMinimumMaximum)
+        ce.setMinimumValue(float(dem_min))
+        ce.setMaximumValue(float(dem_max))
+        renderer.setContrastEnhancement(ce)
+        return renderer
+
+    @staticmethod
+    def _color_renderer(provider, dem_min, dem_max):
+        """Discrete 5-item colour ramp (quartiles); legend labels carry the class values."""
+        breaks = [dem_min + (dem_max - dem_min) * f for f in (0.0, 0.25, 0.5, 0.75)] + [dem_max]
+        nd = 1 if (dem_max - dem_min) >= 10 else 2
+
+        def _fmt(v):
+            return f"{v:.{nd}f}"
+
+        labels = [f"<= {_fmt(breaks[0])}"] + [f"{_fmt(breaks[i - 1])} - {_fmt(breaks[i])}" for i in range(1, 5)]
+        colors = ["#ffffcc", "#c2e699", "#78c679", "#31a354", "#006837"]
+        shader = QgsRasterShader()
+        color_ramp = QgsColorRampShader(breaks[0], breaks[-1])
+        color_ramp.setColorRampType(SHADER_DISCRETE)
+        color_ramp.setColorRampItemList(
+            [QgsColorRampShader.ColorRampItem(v, QColor(c), lbl) for v, c, lbl in zip(breaks, colors, labels)]
+        )
+        shader.setRasterShaderFunction(color_ramp)
+        return QgsSingleBandPseudoColorRenderer(provider, 1, shader), breaks
+
     def style_dem_background(self, source_raster):
         """Create a 3-layer styled background group from a single DEM"""
         run_id = str(getattr(self, "_style_run_id", "") or "").strip() or new_run_id("map_styling")
@@ -487,7 +611,11 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
             self._teardown_style_group(existing_group, root)
         
         group = root.addGroup(group_name)
-        
+
+        # Full-band statistics (NoData excluded) drive BOTH the grey stretch and
+        # the colour classes.
+        dem_min, dem_max = self._dem_min_max(source_raster)
+
         # We want: Color (Top), Gray (Mid), Hillshade (Bottom)
         # Strategy: Add all with addLayer (appends at bottom), then reorder manually.
         # Or: Add in reverse order. Let's add in reverse order so last added is at top.
@@ -513,9 +641,9 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
         # 2. Gray Layer (should be in middle, add second - will be on top of hillshade)
         gray_layer = source_raster.clone()
         gray_layer.setName(f"{source_raster.name()}_그레이")
-        gray_layer.setRenderer(QgsSingleBandGrayRenderer(gray_layer.dataProvider(), 1))
+        gray_layer.setRenderer(self._gray_renderer(gray_layer.dataProvider(), dem_min, dem_max))
         gray_layer.setOpacity(0.4)
-        gray_layer.setBlendMode(QPainter.CompositionMode.CompositionMode_Multiply) 
+        gray_layer.setBlendMode(QPainter.CompositionMode.CompositionMode_Multiply)
         try:
             set_archtoolkit_layer_metadata(
                 gray_layer,
@@ -523,7 +651,12 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
                 run_id=run_id,
                 kind="dem_gray",
                 units="m",
-                params={"source": str(source_raster.name() or "")},
+                params={
+                    "source": str(source_raster.name() or ""),
+                    "contrast": "stretch_to_min_max",
+                    "stretch_min": float(dem_min),
+                    "stretch_max": float(dem_max),
+                },
             )
         except Exception as _exc:
             log_swallowed("map_styling_dialog.style_dem_background", _exc)
@@ -534,22 +667,9 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
         # 3. Color Layer (should be at top, add last)
         color_layer = source_raster.clone()
         color_layer.setName(f"{source_raster.name()}_고도색상")
-        
-        stats = color_layer.dataProvider().bandStatistics(1, RBS_ALL)
-        min_val, max_val = stats.minimumValue, stats.maximumValue
-        shader = QgsRasterShader()
-        color_ramp = QgsColorRampShader(min_val, max_val)
-        color_ramp.setColorRampType(SHADER_DISCRETE)
-        items = [
-            QgsColorRampShader.ColorRampItem(min_val + (max_val - min_val) * 0.0, QColor("#ffffcc"), "<= Min"),
-            QgsColorRampShader.ColorRampItem(min_val + (max_val - min_val) * 0.25, QColor("#c2e699"), "Low"),
-            QgsColorRampShader.ColorRampItem(min_val + (max_val - min_val) * 0.5, QColor("#78c679"), "Mid"),
-            QgsColorRampShader.ColorRampItem(min_val + (max_val - min_val) * 0.75, QColor("#31a354"), "High"),
-            QgsColorRampShader.ColorRampItem(max_val, QColor("#006837"), "Max")
-        ]
-        color_ramp.setColorRampItemList(items)
-        shader.setRasterShaderFunction(color_ramp)
-        color_layer.setRenderer(QgsSingleBandPseudoColorRenderer(color_layer.dataProvider(), 1, shader))
+
+        color_renderer, breaks = self._color_renderer(color_layer.dataProvider(), dem_min, dem_max)
+        color_layer.setRenderer(color_renderer)
         color_layer.setOpacity(0.7)
         try:
             set_archtoolkit_layer_metadata(
@@ -558,7 +678,7 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
                 run_id=run_id,
                 kind="dem_color",
                 units="m",
-                params={"source": str(source_raster.name() or "")},
+                params={"source": str(source_raster.name() or ""), "class_breaks": [float(v) for v in breaks]},
             )
         except Exception as _exc:
             log_swallowed("map_styling_dialog.style_dem_background", _exc)
@@ -576,21 +696,119 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
                 return name
         return None
 
+    @staticmethod
+    def _metres_to_layer_units(metres, crs):
+        """metres expressed in the CRS's map units; None for geographic/unknown units."""
+        try:
+            if crs is None or not crs.isValid() or crs.isGeographic():
+                return None
+            unit = crs.mapUnits()
+            if unit == Qgis.DistanceUnit.Unknown:
+                return None
+            factor = float(QgsUnitTypes.fromUnitToUnitFactor(Qgis.DistanceUnit.Meters, unit))
+        except Exception as _exc:
+            log_swallowed("map_styling_dialog._metres_to_layer_units", _exc)
+            return None
+        if not math.isfinite(factor) or factor <= 0:
+            return None
+        return float(metres) * factor
+
+    @staticmethod
+    def _polygonal_parts(geom):
+        """Polygon parts of a geometry (a makeValid() result may be a collection)."""
+        if geom is None or geom.isNull() or geom.isEmpty():
+            return []
+        if geom.type() == Qgis.GeometryType.Polygon:
+            return [geom]
+        out = []
+        if geom.isMultipart():
+            for part in geom.asGeometryCollection():
+                if part.type() == Qgis.GeometryType.Polygon and not part.isEmpty():
+                    out.append(part)
+        return out
+
+    def _building_polygon(self, geom, crs):
+        """Turn one building feature into a (Multi)Polygon, or None.
+
+        - points (DXF text/labels on a building layer) are not buildings: skipped;
+        - polygons are kept as they are (invalid ones repaired with makeValid);
+        - lines are closed PART BY PART (a multipart outline of two houses is two
+          polygons, not one ring zig-zagging between them); a part that cannot
+          form a ring is buffered by BUILDING_LINE_BUFFER_M metres, or skipped
+          when the CRS has no metre conversion (geographic / unknown units).
+        Returns (geometry or None, counters).
+        """
+        info = {"points_skipped": 0, "degenerate_buffered": 0, "degenerate_skipped": 0, "invalid_repaired": 0}
+        if geom is None or geom.isNull() or geom.isEmpty():
+            return None, info
+        gtype = geom.type()
+        if gtype == Qgis.GeometryType.Point:
+            info["points_skipped"] = 1
+            return None, info
+        if gtype == Qgis.GeometryType.Polygon:
+            if geom.isGeosValid():
+                return QgsGeometry(geom), info
+            parts = self._polygonal_parts(geom.makeValid())
+            if parts:
+                info["invalid_repaired"] = 1
+                return QgsGeometry.collectGeometry(parts), info
+            info["degenerate_skipped"] = 1
+            return None, info
+        if gtype != Qgis.GeometryType.Line:
+            info["degenerate_skipped"] = 1
+            return None, info
+
+        lines = geom.asMultiPolyline() if geom.isMultipart() else [geom.asPolyline()]
+        buf = None
+        buf_checked = False
+        polys = []
+        for line in lines:
+            pts = [QgsPointXY(p) for p in line]
+            distinct = {(round(p.x(), 9), round(p.y(), 9)) for p in pts}
+            part_polys = []
+            if len(distinct) >= 3:
+                cand = QgsGeometry.fromPolygonXY([pts])
+                if cand.isGeosValid() and cand.area() > 0:
+                    part_polys = [cand]
+                else:
+                    part_polys = [pp for pp in self._polygonal_parts(cand.makeValid()) if pp.area() > 0]
+                    if part_polys:
+                        info["invalid_repaired"] += 1
+            if not part_polys:
+                if not buf_checked:
+                    buf = self._metres_to_layer_units(BUILDING_LINE_BUFFER_M, crs)
+                    buf_checked = True
+                if buf and len(distinct) >= 2:
+                    buffered = QgsGeometry.fromPolylineXY(pts).buffer(buf, 2)
+                    if buffered is not None and not buffered.isEmpty():
+                        part_polys = [buffered]
+                        info["degenerate_buffered"] += 1
+                if not part_polys:
+                    info["degenerate_skipped"] += 1
+            polys.extend(part_polys)
+        if not polys:
+            return None, info
+        return QgsGeometry.collectGeometry(polys), info
+
     def aggregate_features(self, source_layers, codes, name, dest_geom="line"):
         """Combine matching features from multiple layers into one memory layer"""
         run_id = str(getattr(self, "_style_run_id", "") or "").strip() or new_run_id("map_styling")
         if not codes:
             return None
         is_building = dest_geom == "polygon"
-        crs = source_layers[0].crs().authid()
-        
+        dest_crs = source_layers[0].crs()
+
         dest_geom_type = "MultiPolygon" if is_building else "LineString"
-        dest_layer = QgsVectorLayer(f"{dest_geom_type}?crs={crs}", name, "memory")
+        # setCrs rather than "?crs=<authid>": a custom CRS (no authid) would
+        # otherwise leave the output without any CRS.
+        dest_layer = QgsVectorLayer(dest_geom_type, name, "memory")
+        dest_layer.setCrs(dest_crs)
         pr = dest_layer.dataProvider()
         pr.addAttributes([QgsField("Layer", FT_STRING)])
         dest_layer.updateFields()
-        
+
         all_features = []
+        building_stats = {"points_skipped": 0, "degenerate_buffered": 0, "degenerate_skipped": 0, "invalid_repaired": 0}
 
         for sl in source_layers:
             field_name = self.detect_code_field(sl)
@@ -600,9 +818,9 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
             # layer's raw coordinates would land in the wrong place. Reproject.
             layer_ct = None
             try:
-                if sl.crs() != source_layers[0].crs():
+                if sl.crs() != dest_crs:
                     layer_ct = QgsCoordinateTransform(
-                        sl.crs(), source_layers[0].crs(), QgsProject.instance()
+                        sl.crs(), dest_crs, QgsProject.instance()
                     )
             except Exception:
                 layer_ct = None
@@ -629,42 +847,28 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
                     if _skip_592:
                         continue
                 if is_building:
-                    # Robust polygonization for buildings
-                    poly_geom = None
-                    if geom.type() == Qgis.GeometryType.Line:
-                        try:
-                            # Try to create polygon from points
-                            if geom.isMultipart():
-                                lines = geom.asMultiPolyline()
-                                ring = [p for line in lines for p in line]
-                                poly_geom = QgsGeometry.fromPolygonXY([ring])
-                            else:
-                                poly_geom = QgsGeometry.fromPolygonXY([geom.asPolyline()])
-                        except Exception as _exc:
-                            log_swallowed("map_styling_dialog.aggregate_features", _exc)
-                    
-                    if poly_geom and not poly_geom.isNull() and not poly_geom.isEmpty():
-                        new_feat.setGeometry(poly_geom)
-                    else:
-                        # Fallback: buffer line to make polygon
-                        try:
-                            buffered = geom.buffer(0.01, 2)
-                            if buffered and not buffered.isEmpty():
-                                new_feat.setGeometry(buffered)
-                            else:
-                                new_feat.setGeometry(geom)
-                        except Exception:
-                            new_feat.setGeometry(geom)
+                    poly_geom, info = self._building_polygon(geom, dest_crs)
+                    for k, v in info.items():
+                        building_stats[k] += v
+                    if poly_geom is None:
+                        continue
+                    new_feat.setGeometry(poly_geom)
                 else:
                     new_feat.setGeometry(geom)
 
-                
                 all_features.append(new_feat)
-        
+
+        if is_building:
+            self._last_building_stats = dict(building_stats)
+
         if not all_features:
             return None
-            
+
         pr.addFeatures(all_features)
+        params = {"name": str(name or ""), "dest_geom": str(dest_geom or "")}
+        if is_building:
+            params.update(building_stats)
+            params["degenerate_buffer_m"] = BUILDING_LINE_BUFFER_M
         try:
             set_archtoolkit_layer_metadata(
                 dest_layer,
@@ -672,12 +876,33 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
                 run_id=run_id,
                 kind="styled_vector",
                 units="",
-                params={"name": str(name or ""), "dest_geom": str(dest_geom or "")},
+                params=params,
             )
         except Exception as _exc:
             log_swallowed("map_styling_dialog.aggregate_features", _exc)
         QgsProject.instance().addMapLayer(dest_layer, False)  # Add to project but NOT to layer tree
         return dest_layer
+
+    def _unstyled_feature_counts(self, source_layers, styled_codes):
+        """{code: count} of source features this run did NOT style (they get hidden with the sources)."""
+        styled = {str(c) for c in styled_codes}
+        counts = {}
+        for sl in source_layers:
+            field_name = self.detect_code_field(sl)
+            try:
+                if field_name:
+                    req = QgsFeatureRequest().setSubsetOfAttributes([field_name], sl.fields())
+                    for ft in sl.getFeatures(req):
+                        v = ft.attribute(field_name)
+                        code = "" if is_null_value(v) else str(v)
+                        if code not in styled:
+                            counts[code] = counts.get(code, 0) + 1
+                else:
+                    key = f"({sl.name()}: 코드 필드 없음)"
+                    counts[key] = counts.get(key, 0) + int(sl.featureCount())
+            except Exception as _exc:
+                log_swallowed("map_styling_dialog._unstyled_feature_counts", _exc)
+        return counts
 
     def style_road_layer(self, layer, field_name):
         cfg = self.code_config.get("roads", {})
@@ -803,14 +1028,21 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
         except Exception:
             preset_dir = base_dir
 
-        project_crs = QgsProject.instance().crs().authid() or "EPSG:4326"
+        project_crs = QgsProject.instance().crs()
         exported = []
+
+        def _template(geom_type, layer_name):
+            # setCrs keeps a custom project CRS (no authid) instead of dropping it.
+            lyr = QgsVectorLayer(geom_type, layer_name, "memory")
+            if project_crs.isValid():
+                lyr.setCrs(project_crs)
+            lyr.dataProvider().addAttributes([QgsField("Layer", FT_STRING)])
+            lyr.updateFields()
+            return lyr
 
         # Vector styles (templates)
         try:
-            roads_layer = QgsVectorLayer(f"LineString?crs={project_crs}", "roads_style_template", "memory")
-            roads_layer.dataProvider().addAttributes([QgsField("Layer", FT_STRING)])
-            roads_layer.updateFields()
+            roads_layer = _template("LineString", "roads_style_template")
             self.style_road_layer(roads_layer, "Layer")
             if self._save_named_style(roads_layer, os.path.join(preset_dir, "roads.qml")):
                 exported.append("roads.qml")
@@ -818,9 +1050,7 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
             log_swallowed("map_styling_dialog.export_qml_preset", _exc)
 
         try:
-            rivers_layer = QgsVectorLayer(f"LineString?crs={project_crs}", "rivers_style_template", "memory")
-            rivers_layer.dataProvider().addAttributes([QgsField("Layer", FT_STRING)])
-            rivers_layer.updateFields()
+            rivers_layer = _template("LineString", "rivers_style_template")
             self.style_river_layer(rivers_layer, "Layer")
             if self._save_named_style(rivers_layer, os.path.join(preset_dir, "rivers.qml")):
                 exported.append("rivers.qml")
@@ -828,9 +1058,7 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
             log_swallowed("map_styling_dialog.export_qml_preset", _exc)
 
         try:
-            buildings_layer = QgsVectorLayer(f"MultiPolygon?crs={project_crs}", "buildings_style_template", "memory")
-            buildings_layer.dataProvider().addAttributes([QgsField("Layer", FT_STRING)])
-            buildings_layer.updateFields()
+            buildings_layer = _template("MultiPolygon", "buildings_style_template")
             self.style_building_layer(buildings_layer, "Layer")
             if self._save_named_style(buildings_layer, os.path.join(preset_dir, "buildings.qml")):
                 exported.append("buildings.qml")
@@ -849,8 +1077,14 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
                 log_swallowed("tools/map_styling_dialog.py:807 (export_qml_preset)", _exc)
 
             try:
+                dem_min, dem_max = self._dem_min_max(dem_layer)
+            except Exception as _exc:
+                log_swallowed("map_styling_dialog.export_qml_preset (stats)", _exc)
+                dem_min, dem_max = 0.0, 1.0
+
+            try:
                 gray_layer = dem_layer.clone()
-                gray_layer.setRenderer(QgsSingleBandGrayRenderer(gray_layer.dataProvider(), 1))
+                gray_layer.setRenderer(self._gray_renderer(gray_layer.dataProvider(), dem_min, dem_max))
                 gray_layer.setOpacity(0.4)
                 gray_layer.setBlendMode(QPainter.CompositionMode.CompositionMode_Multiply)
                 if self._save_named_style(gray_layer, os.path.join(preset_dir, "dem_gray.qml")):
@@ -860,21 +1094,8 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
 
             try:
                 color_layer = dem_layer.clone()
-                stats = color_layer.dataProvider().bandStatistics(1, RBS_ALL)
-                min_val, max_val = stats.minimumValue, stats.maximumValue
-                shader = QgsRasterShader()
-                color_ramp = QgsColorRampShader(min_val, max_val)
-                color_ramp.setColorRampType(SHADER_DISCRETE)
-                items = [
-                    QgsColorRampShader.ColorRampItem(min_val + (max_val - min_val) * 0.0, QColor("#ffffcc"), "<= Min"),
-                    QgsColorRampShader.ColorRampItem(min_val + (max_val - min_val) * 0.25, QColor("#c2e699"), "Low"),
-                    QgsColorRampShader.ColorRampItem(min_val + (max_val - min_val) * 0.5, QColor("#78c679"), "Mid"),
-                    QgsColorRampShader.ColorRampItem(min_val + (max_val - min_val) * 0.75, QColor("#31a354"), "High"),
-                    QgsColorRampShader.ColorRampItem(max_val, QColor("#006837"), "Max"),
-                ]
-                color_ramp.setColorRampItemList(items)
-                shader.setRasterShaderFunction(color_ramp)
-                color_layer.setRenderer(QgsSingleBandPseudoColorRenderer(color_layer.dataProvider(), 1, shader))
+                color_renderer, _breaks = self._color_renderer(color_layer.dataProvider(), dem_min, dem_max)
+                color_layer.setRenderer(color_renderer)
                 color_layer.setOpacity(0.7)
                 if self._save_named_style(color_layer, os.path.join(preset_dir, "dem_color.qml")):
                     exported.append("dem_color.qml")

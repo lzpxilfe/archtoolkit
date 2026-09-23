@@ -45,7 +45,7 @@
       <item>
        <widget class="QLabel" name="lblSamples">
         <property name="text">
-         <string>샘플링 정밀도 (점 개수):</string>
+         <string>샘플링 정밀도 (구간 수):</string>
         </property>
        </widget>
       </item>
@@ -61,7 +61,7 @@
          <number>50</number>
         </property>
         <property name="toolTip">
-         <string>단면선 상에서 고도를 추출할 지점의 개수입니다. 높을수록 정밀합니다.</string>
+         <string>단면선을 이 수만큼 같은 간격으로 나눕니다. 고도는 양 끝을 포함한 (구간 수 + 1)개 지점에서 읽습니다. 간격(단면 길이 / 구간 수)은 DEM 셀 크기와 비슷하게 잡으세요.</string>
         </property>
        </widget>
       </item>

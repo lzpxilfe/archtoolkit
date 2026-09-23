@@ -47,8 +47,10 @@ from qgis.core import (
 from .qtcompat import FT_INT, FT_DOUBLE, FT_STRING, SYMBOL_PROPERTY_STROKE_COLOR, RUBBER_BAND_CIRCLE
 from qgis.gui import QgsMapLayerComboBox, QgsMapToolEmitPoint, QgsRubberBand
 from .utils import (
+    is_null_value,
     log_swallowed,
     log_message,
+    move_group_to_top,
     new_run_id,
     push_message,
     restore_ui_focus,
@@ -65,6 +67,152 @@ PROFILE_GROUP_NAME = "ArchToolkit - Terrain Profile"
 PROFILE_SINGLE_SUBGROUP_NAME = "단면선 (개별 레이어)"
 PROFILE_KIND_PROP = "ArchToolkit/profile_kind"
 PROFILE_KIND_SINGLE = "terrain_profile_single"
+
+# Optional chart smoothing: +/- this many samples (moving average). Off by
+# default - the chart draws the raw samples so a narrow ditch or bank keeps its
+# real depth/height on screen and in the exported image.
+CHART_SMOOTH_HALF_WINDOW = 3
+
+
+def _profile_runs(series):
+    """Split profile samples into runs separated by NoData gaps.
+
+    A sample carries ``gap_before=True`` when one or more samples between it
+    and the previous valid sample were NoData / outside the DEM. The chart
+    breaks its line there and the statistics skip that segment instead of
+    bridging the hole with a straight line.
+    """
+    runs = []
+    cur = []
+    for p in series or []:
+        if cur and p.get("gap_before"):
+            runs.append(cur)
+            cur = []
+        cur.append(p)
+    if cur:
+        runs.append(cur)
+    return runs
+
+
+def _line_fraction(start: QgsPointXY, end: QgsPointXY, x: float, y: float) -> float:
+    """Planar position (0-1) of (x, y) projected onto start->end, clamped."""
+    vx = float(end.x() - start.x())
+    vy = float(end.y() - start.y())
+    vv = vx * vx + vy * vy
+    if vv <= 0:
+        return 0.0
+    t = ((float(x) - float(start.x())) * vx + (float(y) - float(start.y())) * vy) / vv
+    return min(1.0, max(0.0, float(t)))
+
+
+def _intersection_ranges_m(inter, start: QgsPointXY, end: QgsPointXY, total_m: float) -> List[Tuple[float, float]]:
+    """Distance ranges (m) covered by the line parts of an intersection geometry."""
+    ranges: List[Tuple[float, float]] = []
+    if inter is None or inter.isEmpty():
+        return ranges
+    parts = []
+    try:
+        if inter.type() == Qgis.GeometryType.Line:
+            parts = inter.asMultiPolyline() if inter.isMultipart() else [inter.asPolyline()]
+        elif inter.isMultipart():
+            # Geometry collection (e.g. a line part plus a touching point).
+            for g in inter.asGeometryCollection():
+                if g.type() == Qgis.GeometryType.Line:
+                    parts.extend(g.asMultiPolyline() if g.isMultipart() else [g.asPolyline()])
+    except Exception as _exc:
+        log_swallowed("terrain_profile_dialog._intersection_ranges_m", _exc)
+        parts = []
+    for seg in parts:
+        if not seg or len(seg) < 2:
+            continue
+        ts = [_line_fraction(start, end, p.x(), p.y()) for p in seg]
+        a = min(ts) * float(total_m)
+        b = max(ts) * float(total_m)
+        if math.isfinite(a) and math.isfinite(b) and b > a:
+            ranges.append((a, b))
+    ranges.sort(key=lambda t: t[0])
+    merged: List[Tuple[float, float]] = []
+    for a, b in ranges:
+        if merged and a <= merged[-1][1] + 1e-9:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], b))
+        else:
+            merged.append((a, b))
+    return merged
+
+
+def _gap_aware_profile_stats(data):
+    """Ascent/descent/slope statistics that skip NoData gap segments.
+
+    Returns a dict with per-sample ``slopes`` (None on a gap segment),
+    cumulative ``cum_up``/``cum_dn``, totals, the measured (non-gap) length and
+    the number/length of gaps.
+    """
+    dists = [float(p["distance"]) for p in data]
+    elevs = [float(p["elevation"]) for p in data]
+    slopes = [0.0] if data else []
+    cum_up = [0.0] if data else []
+    cum_dn = [0.0] if data else []
+    max_abs_slope = 0.0
+    measured = 0.0
+    gap_len = 0.0
+    n_gaps = 0
+    for i in range(1, len(dists)):
+        dd = dists[i] - dists[i - 1]
+        dz = elevs[i] - elevs[i - 1]
+        if data[i].get("gap_before"):
+            n_gaps += 1
+            gap_len += max(0.0, dd)
+            slopes.append(None)
+            cum_up.append(cum_up[-1])
+            cum_dn.append(cum_dn[-1])
+        else:
+            measured += max(0.0, dd)
+            s = (dz / dd * 100.0) if dd > 1e-9 else 0.0
+            slopes.append(s)
+            max_abs_slope = max(max_abs_slope, abs(s))
+            cum_up.append(cum_up[-1] + (dz if dz > 0 else 0.0))
+            cum_dn.append(cum_dn[-1] + ((-dz) if dz < 0 else 0.0))
+    ascent = cum_up[-1] if cum_up else 0.0
+    descent = cum_dn[-1] if cum_dn else 0.0
+    return {
+        "dists": dists,
+        "elevs": elevs,
+        "slopes": slopes,
+        "cum_up": cum_up,
+        "cum_dn": cum_dn,
+        "ascent": ascent,
+        "descent": descent,
+        "max_abs_slope": max_abs_slope,
+        "mean_abs_slope": ((ascent + descent) / measured * 100.0) if measured > 1e-9 else 0.0,
+        "measured_m": measured,
+        "n_gaps": n_gaps,
+        "gap_len_m": gap_len,
+    }
+
+
+def _segment_slope_parts(data, s0: float, s1: float):
+    """(net_dz, abs_dz, up, down, measured_run) of the non-gap segments inside [s0, s1]."""
+    net_dz = abs_dz = up = dn = run = 0.0
+    for i in range(1, len(data)):
+        if data[i].get("gap_before"):
+            continue
+        a = float(data[i - 1]["distance"])
+        b = float(data[i]["distance"])
+        if b <= s0 or a >= s1:
+            continue
+        overlap = min(s1, b) - max(s0, a)
+        dd = b - a
+        if overlap <= 0 or dd <= 1e-9:
+            continue
+        dz_seg = (float(data[i]["elevation"]) - float(data[i - 1]["elevation"])) * (overlap / dd)
+        net_dz += dz_seg
+        abs_dz += abs(dz_seg)
+        if dz_seg > 0:
+            up += dz_seg
+        else:
+            dn += -dz_seg
+        run += overlap
+    return net_dz, abs_dz, up, dn, run
 
 
 def _profile_color_palette() -> List[QColor]:
@@ -132,6 +280,15 @@ class ProfileChartWidget(QWidget):
         # Profile line color (can be varied per saved profile)
         self.profile_color = QColor(0, 100, 255)
 
+        # Curve smoothing: 0 = raw samples (default); N = +/-N-sample moving
+        # average, stated on the chart. Vertical exaggeration of the last draw.
+        self.smooth_window = 0
+        self.vertical_exaggeration: Optional[float] = None
+        self.annotation_lines: List[str] = []
+        self.export_vertical_exaggeration: Optional[float] = None
+        self.export_annotation_lines: List[str] = []
+        self.axis_label_color = QColor(60, 60, 60)
+
         # Highlight ranges on distance axis (e.g., AOI intersection)
         self.highlight_ranges: List[Tuple[float, float]] = []
         self.highlight_label: str = ""
@@ -167,22 +324,9 @@ class ProfileChartWidget(QWidget):
             self.update()
             return
 
-        # Simple moving average for smoothing
+        # The drawn curve: raw samples unless smoothing was switched on.
+        self._recompute_curve()
         elevations = [p['elevation'] for p in data]
-        smoothed = []
-        window = 3
-        for i in range(len(elevations)):
-            start = max(0, i - window)
-            end = min(len(elevations), i + window + 1)
-            avg = sum(elevations[start:end]) / (end - start)
-            smoothed.append(avg)
-        
-        self.smooth_data = []
-        for i in range(len(data)):
-            self.smooth_data.append({
-                'distance': data[i]['distance'],
-                'elevation': smoothed[i]
-            })
 
         self.min_e = min(elevations)
         self.max_e = max(elevations)
@@ -196,22 +340,81 @@ class ProfileChartWidget(QWidget):
         
         self.update()
 
+    def _recompute_curve(self):
+        """Build the drawn curve (``smooth_data``) from the raw samples.
+
+        With ``smooth_window == 0`` it is the raw samples. Otherwise a
+        +/-N-sample moving average computed inside each NoData-free run, so a
+        gap never averages values from its two far sides together.
+        """
+        k = max(0, int(self.smooth_window or 0))
+        curve = []
+        for run in _profile_runs(self.data):
+            elevs = [float(p['elevation']) for p in run]
+            for i, p in enumerate(run):
+                if k > 0:
+                    a = max(0, i - k)
+                    b = min(len(run), i + k + 1)
+                    e = sum(elevs[a:b]) / (b - a)
+                else:
+                    e = elevs[i]
+                curve.append({
+                    'distance': p['distance'],
+                    'elevation': e,
+                    'gap_before': bool(p.get('gap_before')),
+                })
+        self.smooth_data = curve
+
+    def set_smoothing(self, half_window: int):
+        """0 draws raw samples; N draws a +/-N-sample moving average (stated on the chart)."""
+        try:
+            self.smooth_window = max(0, int(half_window or 0))
+        except (TypeError, ValueError):
+            self.smooth_window = 0
+        if self.data:
+            self._recompute_curve()
+        self.update()
+
+    def _sample_spacing_m(self) -> Optional[float]:
+        ds = [float(p['distance']) for p in self.data or []]
+        steps = sorted(b - a for a, b in zip(ds, ds[1:]) if b - a > 1e-9)
+        if not steps:
+            return None
+        return steps[len(steps) // 2]
+
+    def _clamp_pan(self):
+        visible = self.total_d / self.zoom_level if self.zoom_level else self.total_d
+        max_offset = max(0.0, float(self.total_d) - float(visible))
+        self.pan_offset = max(0.0, min(max_offset, float(self.pan_offset)))
+
     def wheelEvent(self, event):
-        """Zoom in/out with scroll wheel"""
-        if not self.data:
+        """Zoom in/out with scroll wheel, keeping the distance under the cursor fixed."""
+        if not self.data or not self.total_d or self.total_d <= 0:
             return
-        
+
+        old_visible = self.total_d / self.zoom_level
+        w = self.width() - self.margin_left - self.margin_right
+        try:
+            mx = float(event.position().x())
+        except AttributeError:
+            mx = float(event.pos().x())
+        rel = ((mx - self.margin_left) / w) if w > 0 else 0.5
+        rel = min(1.0, max(0.0, rel))
+        anchor = self.pan_offset + rel * old_visible
+
         # Get zoom direction
         delta = event.angleDelta().y()
         if delta > 0:
             self.zoom_level = min(10.0, self.zoom_level * 1.2)
         else:
             self.zoom_level = max(1.0, self.zoom_level / 1.2)
-        
-        # Adjust pan offset to keep zoom centered
-        if self.zoom_level == 1.0:
-            self.pan_offset = 0
-        
+
+        # Keep the distance under the cursor where it was, then clamp so the
+        # view never runs past either end of the data.
+        new_visible = self.total_d / self.zoom_level
+        self.pan_offset = anchor - rel * new_visible
+        self._clamp_pan()
+
         self.update()
     
     def mousePressEvent(self, event):
@@ -435,21 +638,55 @@ class ProfileChartWidget(QWidget):
         # Fill background
         painter.fillRect(0, 0, width, height, QColor(255, 255, 255))
 
-        # Draw background/grid
-        painter.setPen(QPen(QColor(220, 220, 220), 1, Qt.PenStyle.DashLine))
+        # Draw background/grid. Tick labels get their own dark pen: drawn with
+        # the light grid pen they were near-invisible in the exported image.
+        grid_pen = QPen(QColor(220, 220, 220), 1, Qt.PenStyle.DashLine)
+        label_pen = QPen(self.axis_label_color)
         num_grids_y = 5
         for i in range(num_grids_y + 1):
             y = top + h - (i / num_grids_y) * h
+            painter.setPen(grid_pen)
             painter.drawLine(left, int(y), left + w, int(y))
             val = self.min_e + (i / num_grids_y) * (self.max_e - self.min_e)
+            painter.setPen(label_pen)
             painter.drawText(5, int(y + 5), f"{val:.1f}m")
-            
+
         num_grids_x = 5
         for i in range(num_grids_x + 1):
             x = left + (i / num_grids_x) * w
+            painter.setPen(grid_pen)
             painter.drawLine(int(x), top, int(x), top + h)
             dist = view_start + (i / num_grids_x) * visible_range
+            painter.setPen(label_pen)
             painter.drawText(int(x - 15), top + h + 20, f"{dist:.0f}m")
+
+        # Vertical exaggeration of THIS drawing (pixels per metre vertically
+        # over pixels per metre horizontally) and the curve method, stated on
+        # the chart itself so an exported image carries them.
+        self.vertical_exaggeration = None
+        try:
+            x_px_per_m = float(w) / float(visible_range)
+            y_px_per_m = float(h) / float(self.max_e - self.min_e)
+            if x_px_per_m > 0 and y_px_per_m > 0:
+                self.vertical_exaggeration = y_px_per_m / x_px_per_m
+        except (ZeroDivisionError, TypeError, ValueError):
+            self.vertical_exaggeration = None
+        notes = []
+        if self.vertical_exaggeration is not None:
+            notes.append(f"수직 과장 {self.vertical_exaggeration:.1f}배")
+        if self.smooth_window > 0:
+            spacing = self._sample_spacing_m()
+            win_txt = f" (약 {2 * self.smooth_window * spacing:.0f}m 창)" if spacing else ""
+            notes.append(f"곡선: ±{self.smooth_window}점 이동평균{win_txt}")
+        else:
+            notes.append("곡선: 원시 샘플")
+        if any(p.get('gap_before') for p in self.data):
+            notes.append("끊긴 구간: NoData")
+        if self.zoom_level > 1.0:
+            notes.append(f"확대: {self.zoom_level:.1f}x")
+        self.annotation_lines = notes
+        painter.setPen(label_pen)
+        painter.drawText(left, max(12, top - 10), " | ".join(notes))
 
         # Draw axis
         painter.setPen(QPen(Qt.GlobalColor.black, 2))
@@ -509,47 +746,52 @@ class ProfileChartWidget(QWidget):
                 except Exception as _exc:
                     log_swallowed("tools/terrain_profile_dialog.py:484 (draw_chart)", _exc)
 
-        # Draw Profile Line using QPainterPath for smoothness
-        path = QPainterPath()
-        first_point = True
-        
+        # Draw the profile line, broken at NoData gaps (a gap is never bridged
+        # by a straight line that would look like measured terrain).
+        runs_px = []
+        cur = []
         for p in self.smooth_data:
+            if p.get('gap_before') and cur:
+                runs_px.append(cur)
+                cur = []
             dist = p['distance']
             if dist < view_start or dist > view_end:
                 continue
-            
             px = left + ((dist - view_start) / visible_range) * w
             py = top + h - ((p['elevation'] - self.min_e) / (self.max_e - self.min_e)) * h
-            
-            if first_point:
-                path.moveTo(px, py)
-                first_point = False
-            else:
+            cur.append((px, py))
+        if cur:
+            runs_px.append(cur)
+
+        path = QPainterPath()
+        for run in runs_px:
+            path.moveTo(run[0][0], run[0][1])
+            for px, py in run[1:]:
                 path.lineTo(px, py)
-            
-        # Draw the line
+
         painter.setPen(QPen(self.profile_color, 2))
         painter.drawPath(path)
-             
-        # Draw Fill (area below profile)
+        # An isolated single valid sample between two gaps: a dot, not nothing.
+        painter.setBrush(QBrush(self.profile_color))
+        for run in runs_px:
+            if len(run) == 1:
+                painter.drawEllipse(QPointF(run[0][0], run[0][1]), 2, 2)
+
+        # Draw Fill (area below profile), one polygon per run
         painter.setOpacity(0.15)
         painter.setBrush(QBrush(self.profile_color))
         painter.setPen(Qt.PenStyle.NoPen)
-        
-        if not first_point:  # Only if we drew something
-            fill_path = QPainterPath(path)
-            # Find last drawn point
-            visible_data = [p for p in self.smooth_data if view_start <= p['distance'] <= view_end]
-            if visible_data:
-                last_p = visible_data[-1]
-                first_p = visible_data[0]
-                end_x = left + ((last_p['distance'] - view_start) / visible_range) * w
-                start_x = left + ((first_p['distance'] - view_start) / visible_range) * w
-                fill_path.lineTo(end_x, top + h)
-                fill_path.lineTo(start_x, top + h)
-                fill_path.closeSubpath()
-                painter.drawPath(fill_path)
-        
+        for run in runs_px:
+            if len(run) < 2:
+                continue
+            fill_path = QPainterPath()
+            fill_path.moveTo(run[0][0], top + h)
+            for px, py in run:
+                fill_path.lineTo(px, py)
+            fill_path.lineTo(run[-1][0], top + h)
+            fill_path.closeSubpath()
+            painter.drawPath(fill_path)
+
         painter.setOpacity(1.0)
 
         # Overlay markers (on top of profile line)
@@ -612,11 +854,6 @@ class ProfileChartWidget(QWidget):
             painter.setPen(QPen(Qt.GlobalColor.black))
             info_text = f"{self.hover_distance:.1f}m / {self.hover_elevation:.1f}m"
             painter.drawText(int(hover_x) + 8, int(hover_y) - 5, info_text)
-        
-        # Zoom indicator
-        if self.zoom_level > 1.0:
-            painter.setPen(QPen(Qt.GlobalColor.darkGray))
-            painter.drawText(width - 80, 20, f"확대: {self.zoom_level:.1f}x")
 
     def save_to_image(self, path):
         # Create image with higher resolution for better quality
@@ -633,11 +870,15 @@ class ProfileChartWidget(QWidget):
         painter = QPainter(image)
         self.draw_chart(painter, img_w, img_h)
         painter.end()
-        
+        # What the exported figure states (the on-screen values are redrawn below).
+        self.export_vertical_exaggeration = self.vertical_exaggeration
+        self.export_annotation_lines = list(self.annotation_lines)
+
         # Restore zoom
         self.zoom_level = old_zoom
         self.pan_offset = old_pan
-        
+        self.update()
+
         ext = os.path.splitext(str(path or ""))[1].lower()
         if ext == ".png":
             return image.save(path, "PNG")
@@ -687,6 +928,7 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
         # Extra options: fixed-length profile line + AOI highlight on chart
         self._last_profile_length_m: Optional[float] = None
         self._last_aoi_inside_m: Optional[float] = None
+        self._last_num_samples: Optional[int] = None
         try:
             self.grpExtra = QtWidgets.QGroupBox("추가 옵션 (길이/AOI)", self)
             grid_extra = QtWidgets.QGridLayout(self.grpExtra)
@@ -724,7 +966,8 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
             self.chkShowAoiOnProfile.setChecked(True)
             self.chkShowAoiOnProfile.setToolTip(
                 "단면선이 AOI 내부를 지나는 구간을 그래프 배경(음영)으로 표시합니다.\n"
-                "표시는 샘플링 점 기준으로 계산됩니다(샘플 수가 높을수록 경계가 정밀)."
+                "구간과 'AOI 구간' 길이는 단면선과 AOI 폴리곤의 실제 기하 교차로 계산합니다\n"
+                "(샘플 간격과 무관)."
             )
 
             grid_extra.addWidget(self.chkFixedLength, 0, 0, 1, 3)
@@ -770,6 +1013,18 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
             help_lbl.setStyleSheet("color:#555;")
             grid_extra.addWidget(help_lbl, 5, 0, 1, 3)
 
+            self.chkSmoothChart = QtWidgets.QCheckBox(
+                f"그래프 곡선 평활화 (±{CHART_SMOOTH_HALF_WINDOW}점 이동평균)", self.grpExtra
+            )
+            self.chkSmoothChart.setChecked(False)
+            self.chkSmoothChart.setToolTip(
+                "끄면(기본) 그래프는 추출한 원시 샘플을 그대로 그립니다.\n"
+                f"켜면 곡선만 앞뒤 {CHART_SMOOTH_HALF_WINDOW}개 샘플의 이동평균으로 그리며, 창 크기(m)가 그래프에 표시됩니다.\n"
+                "이동평균은 좁은 도랑/둔덕의 깊이와 높이를 줄여 보이게 합니다.\n"
+                "통계와 CSV는 항상 원시 샘플 값입니다."
+            )
+            grid_extra.addWidget(self.chkSmoothChart, 6, 0, 1, 3)
+
             try:
                 idx = int(self.verticalLayout.indexOf(self.groupProfile))
                 if idx >= 0:
@@ -786,10 +1041,12 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
             try:
                 self.chkSegmentStats.toggled.connect(self.update_stats)
                 self.spinSegmentLength.valueChanged.connect(self.update_stats)
+                self.chkSmoothChart.toggled.connect(self._on_smoothing_toggled)
             except Exception as _exc:
                 log_swallowed("tools/terrain_profile_dialog.py:758 (__init__)", _exc)
         except Exception:
             self.grpExtra = None
+            self.chkSmoothChart = None
             self.chkFixedLength = None
             self.spinFixedLength = None
             self.btnUseLastLength = None
@@ -978,7 +1235,18 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
                 " DEM 셀 크기와 비슷해지도록</b> 샘플 수를 정하세요. 셀 크기보다 훨씬 촘촘하게 잡으면"
                 " 같은 셀 값이 반복되는 계단만 늘어날 뿐 실제 정보가 늘지 않고, 훨씬 성기게 잡으면"
                 " 좁은 능선이나 구곡을 통째로 건너뛸 수 있습니다."
-                " (예: 5m DEM, 1,000m 단면 → 샘플 200개 내외)</li>"
+                " (예: 5m DEM, 1,000m 단면 → 샘플 200개 내외)."
+                " 샘플 수 N은 구간 수이며, 양 끝을 포함해 N+1개 지점에서 고도를 읽습니다.</li>"
+                "<li><b>그래프 곡선:</b> 기본은 원시 샘플을 그대로 그립니다. '그래프 곡선 평활화'를 켜면"
+                f" ±{CHART_SMOOTH_HALF_WINDOW}점 이동평균 곡선을 그리고 창 크기(m)를 그래프에 적습니다."
+                " 통계와 CSV는 항상 원시 샘플 값입니다.</li>"
+                "<li><b>수직 과장:</b> 그래프는 고도 범위에 맞춰 세로축을 늘리므로 수직 과장 배율이"
+                " 화면과 내보낸 이미지 위쪽에 표시됩니다(이미지는 1200x800 기준 배율). 보고서에 그대로 옮겨 적으세요.</li>"
+                "<li><b>NoData 구간:</b> DEM 밖이거나 NoData인 샘플은 버리고, 그 구간에서 그래프 선을 끊습니다."
+                " 끊긴 구간은 누적 상승/하강, 경사 통계에서 제외되며 CSV의 GapBefore 열에 1로 표시됩니다.</li>"
+                "<li><b>AOI 구간:</b> 단면선과 AOI 폴리곤의 실제 기하 교차로 계산합니다(샘플 간격과 무관).</li>"
+                "<li>저장된 단면을 다시 열 때 그 단면을 만든 DEM이 프로젝트에 없으면, 현재 선택한 DEM으로"
+                " 다시 계산할지 묻습니다(아니오를 고르면 열지 않습니다).</li>"
                 "</ul>"
             )
             show_help_dialog(parent=self, title="지형 단면 도움말", html=html, plugin_dir=plugin_dir, tool_id="terrain_profile")
@@ -1029,6 +1297,21 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
             self.rubber_band.show()
         except Exception as _exc:
             log_swallowed("tools/terrain_profile_dialog.py:993 (_show_profile_line_on_map)", _exc)
+
+    def _smoothing_half_window(self) -> int:
+        chk = getattr(self, "chkSmoothChart", None)
+        try:
+            return CHART_SMOOTH_HALF_WINDOW if (chk is not None and chk.isChecked()) else 0
+        except Exception as _exc:
+            log_swallowed("terrain_profile_dialog._smoothing_half_window", _exc)
+            return 0
+
+    def _on_smoothing_toggled(self, *_args):
+        try:
+            self.chart.set_smoothing(self._smoothing_half_window())
+        except Exception as _exc:
+            log_swallowed("terrain_profile_dialog._on_smoothing_toggled", _exc)
+        self.update_stats()
 
     def _update_fixed_length_ui(self):
         enabled = False
@@ -1195,7 +1478,7 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
             log_swallowed("terrain_profile_dialog.update_preview", _exc)
 
     def _compute_aoi_highlight_ranges(self) -> List[Tuple[float, float]]:
-        """Return AOI intersection ranges along distance axis using current profile_data (sample-based)."""
+        """Return AOI intersection ranges (m along the profile) from the exact line/AOI intersection."""
         self._last_aoi_inside_m = None
         if not self.profile_data:
             return []
@@ -1275,40 +1558,19 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
         except Exception:
             return []
 
-        ranges: List[Tuple[float, float]] = []
-        run_start = None
-        last_inside = None
-
-        for p in self.profile_data:
-            try:
-                dist = float(p.get("distance", 0.0))
-            except Exception:
-                dist = 0.0
-            inside = False
-            try:
-                x = float(p.get("x"))
-                y = float(p.get("y"))
-                pt_geom = QgsGeometry.fromPointXY(QgsPointXY(x, y))
-                inside = bool(aoi_geom.intersects(pt_geom))
-            except Exception:
-                inside = False
-
-            if inside:
-                if run_start is None:
-                    run_start = dist
-                last_inside = dist
-            else:
-                if run_start is not None:
-                    end = last_inside if last_inside is not None else dist
-                    if end > run_start:
-                        ranges.append((run_start, end))
-                    run_start = None
-                    last_inside = None
-
-        if run_start is not None:
-            end = last_inside if last_inside is not None else run_start
-            if end > run_start:
-                ranges.append((run_start, end))
+        # Exact geometric intersection of the profile line with the AOI (the
+        # same fraction-along-the-line mapping the overlay uses), not the
+        # first/last inside SAMPLE - that under-read every crossing by up to
+        # one sample spacing at each boundary (80 m reported for a true 90 m).
+        start_canvas, end_canvas, total_m = self._profile_line_canvas_and_length()
+        if start_canvas is None or total_m is None:
+            return []
+        try:
+            inter = aoi_geom.intersection(QgsGeometry.fromPolylineXY([start_canvas, end_canvas]))
+        except Exception as _exc:
+            log_swallowed("terrain_profile_dialog._compute_aoi_highlight_ranges", _exc)
+            return []
+        ranges = _intersection_ranges_m(inter, start_canvas, end_canvas, total_m)
 
         inside_len = 0.0
         try:
@@ -1319,6 +1581,32 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
             self._last_aoi_inside_m = inside_len
 
         return ranges
+
+    def _profile_line_canvas_and_length(self):
+        """(start, end, total_m) of the current profile line in canvas CRS, or (None, None, None)."""
+        start_canvas = end_canvas = None
+        try:
+            if len(self.points) >= 2:
+                start_canvas = QgsPointXY(self.points[0])
+                end_canvas = QgsPointXY(self.points[1])
+            elif self.profile_data:
+                start_canvas = QgsPointXY(float(self.profile_data[0]["x"]), float(self.profile_data[0]["y"]))
+                end_canvas = QgsPointXY(float(self.profile_data[-1]["x"]), float(self.profile_data[-1]["y"]))
+        except Exception as _exc:
+            log_swallowed("terrain_profile_dialog._profile_line_canvas_and_length", _exc)
+            start_canvas = end_canvas = None
+        if start_canvas is None or end_canvas is None:
+            return None, None, None
+        total_m = self._last_profile_length_m
+        if total_m is None or not math.isfinite(float(total_m)) or float(total_m) <= 0:
+            try:
+                total_m = float(self._distance_area_canvas().measureLine(start_canvas, end_canvas))
+            except Exception as _exc:
+                log_swallowed("terrain_profile_dialog._profile_line_canvas_and_length", _exc)
+                total_m = None
+        if total_m is None or not math.isfinite(float(total_m)) or float(total_m) <= 0:
+            return None, None, None
+        return start_canvas, end_canvas, float(total_m)
 
     def _refresh_aoi_highlight(self, *_args):
         """Recompute AOI highlight ranges for the current profile (if any)."""
@@ -1946,6 +2234,16 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
             )
         return spacing_m
 
+    @staticmethod
+    def _samples_done_text(valid_samples: int, num_samples: int) -> str:
+        """N intervals sample N+1 points; say so, and how many were NoData/outside."""
+        points = int(num_samples) + 1
+        skipped = points - int(valid_samples)
+        text = f"{int(valid_samples)}/{points}개 지점 유효 샘플 추출 완료!"
+        if skipped > 0:
+            text += f" (NoData/DEM 범위 밖 {skipped}개 제외)"
+        return text
+
     def calculate_profile(self):
         """Sample the DEM along the drawn line and draw/store the elevation profile.
 
@@ -2001,11 +2299,12 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
             push_message(
                 self.iface,
                 "단면 분석",
-                f"시작점에서 끝점까지 {total_distance_m:.1f}m, {num_samples}개 샘플 추출 중...",
+                f"시작점에서 끝점까지 {total_distance_m:.1f}m, {num_samples}개 구간({num_samples + 1}개 지점) 샘플 추출 중...",
                 level=0,
             )
-            
+
             valid_samples = 0
+            last_valid_i = None
             for i in range(num_samples + 1):
                 fraction = i / num_samples
                 x_canvas = start_canvas.x() + fraction * (end_canvas.x() - start_canvas.x())
@@ -2055,10 +2354,15 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
                             'distance': dist,
                             'elevation': float(value),
                             'x': x_canvas,
-                            'y': y_canvas
+                            'y': y_canvas,
+                            # NoData/outside samples since the previous valid one:
+                            # the chart breaks here and the stats skip the segment.
+                            'gap_before': last_valid_i is not None and i - last_valid_i > 1,
                         })
                         valid_samples += 1
-            
+                        last_valid_i = i
+            self._last_num_samples = int(num_samples)
+
             if self.profile_data:
                 # Save line to persistent layer first (assigns a per-profile color).
                 profile_color = None
@@ -2069,7 +2373,8 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
                         num_samples=num_samples,
                         sample_spacing_m=sample_spacing_m,
                     )
-                except Exception:
+                except Exception as _exc:
+                    log_swallowed("terrain_profile_dialog.calculate_profile (save_line_to_layer)", _exc)
                     profile_color = None
 
                 if profile_color is not None:
@@ -2088,10 +2393,10 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
                 except Exception as _exc:
                     log_swallowed("tools/terrain_profile_dialog.py:1859 (calculate_profile)", _exc)
                 
-                push_message(self.iface, "단면 완료", f"{valid_samples}개 유효 샘플 추출 완료!", level=0)
+                push_message(self.iface, "단면 완료", self._samples_done_text(valid_samples, num_samples), level=0)
             else:
                 push_message(self.iface, "경고", "유효한 고도 데이터를 추출하지 못했습니다. DEM 범위를 확인하세요.", level=1)
-            
+
         except Exception as e:
             push_message(self.iface, "오류", f"계산 실패: {str(e)}", level=2)
         finally:
@@ -2182,19 +2487,51 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
     def _open_profile_from_feature(self, layer: QgsVectorLayer, ft: QgsFeature):
         """Recompute and show profile when a saved profile line is selected."""
         dem_layer = None
+        stored_dem_id = ""
         try:
             dem_id = ft.attribute("dem_id")
-            if dem_id:
-                dem_layer = QgsProject.instance().mapLayer(str(dem_id))
-        except Exception:
+            if not is_null_value(dem_id) and str(dem_id).strip():
+                stored_dem_id = str(dem_id).strip()
+                dem_layer = QgsProject.instance().mapLayer(stored_dem_id)
+        except Exception as _exc:
+            log_swallowed("terrain_profile_dialog._open_profile_from_feature (dem_id)", _exc)
             dem_layer = None
 
         if dem_layer is None:
-            dem_layer = self.cmbDemLayer.currentLayer()
-        if dem_layer is None:
-            push_message(self.iface, "오류", "프로파일을 열 DEM을 선택해주세요.", level=2)
-            restore_ui_focus(self)
-            return
+            # The DEM this line was sampled on is gone (removed, or re-added
+            # under a new layer id). Silently sampling whatever DEM is selected
+            # would show a different surface under the saved line's name, so
+            # ask first and refuse unless the user explicitly agrees.
+            current = self.cmbDemLayer.currentLayer()
+            if current is None:
+                push_message(self.iface, "오류", "프로파일을 열 DEM을 선택해주세요.", level=2)
+                restore_ui_focus(self)
+                return
+            reply = QMessageBox.question(
+                self,
+                "지형 단면",
+                f"이 단면선을 만든 DEM(레이어 id: {stored_dem_id or '기록 없음'})이 현재 프로젝트에 없습니다.\n"
+                f"현재 선택한 DEM '{current.name()}'으로 다시 계산할까요?\n"
+                "DEM이 다르면 고도 값이 원래 단면과 달라집니다.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                push_message(
+                    self.iface,
+                    "지형 단면",
+                    "원래 DEM을 찾을 수 없어 저장된 단면을 열지 않았습니다. 원래 DEM을 프로젝트에 추가한 뒤 다시 선택하세요.",
+                    level=1,
+                )
+                restore_ui_focus(self)
+                return
+            dem_layer = current
+            push_message(
+                self.iface,
+                "지형 단면",
+                f"원래 DEM이 없어 현재 DEM '{current.name()}'으로 다시 계산합니다(원래 단면과 값이 다를 수 있음).",
+                level=1,
+            )
 
         try:
             num_samples = int(ft.attribute("samples") or 0)
@@ -2290,11 +2627,12 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
         push_message(
             self.iface,
             "단면 분석",
-            f"선택한 단면선 {total_distance_m:.1f}m, {num_samples}개 샘플 추출 중...",
+            f"선택한 단면선 {total_distance_m:.1f}m, {num_samples}개 구간({num_samples + 1}개 지점) 샘플 추출 중...",
             level=0,
         )
 
         valid_samples = 0
+        last_valid_i = None
         for i in range(num_samples + 1):
             fraction = i / num_samples
             x_canvas = start_canvas.x() + fraction * (end_canvas.x() - start_canvas.x())
@@ -2333,8 +2671,16 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
             except Exception as _exc:
                 log_swallowed("terrain_profile_dialog._compute_profile_for_points", _exc)
             dist = fraction * total_distance_m
-            self.profile_data.append({"distance": dist, "elevation": elev, "x": x_canvas, "y": y_canvas})
+            self.profile_data.append({
+                "distance": dist,
+                "elevation": elev,
+                "x": x_canvas,
+                "y": y_canvas,
+                "gap_before": last_valid_i is not None and i - last_valid_i > 1,
+            })
             valid_samples += 1
+            last_valid_i = i
+        self._last_num_samples = int(num_samples)
 
         if self.profile_data:
             self.chart.set_data(self.profile_data)
@@ -2346,7 +2692,7 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
                 self._show_profile_line_on_map(start=start_canvas, end=end_canvas)
             except Exception as _exc:
                 log_swallowed("tools/terrain_profile_dialog.py:2104 (_compute_profile_for_points)", _exc)
-            push_message(self.iface, "단면 완료", f"{valid_samples}개 유효 샘플 추출 완료!", level=0)
+            push_message(self.iface, "단면 완료", self._samples_done_text(valid_samples, num_samples), level=0)
         else:
             push_message(self.iface, "경고", "유효한 고도 데이터를 추출하지 못했습니다. DEM 범위를 확인하세요.", level=1)
 
@@ -2479,9 +2825,11 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
         if not self._single_layers_enabled:
             return None
 
-        crs = self.canvas.mapSettings().destinationCrs().authid()
         name = f"단면선_{int(no):03d} ({float(total_distance):.0f}m)"
-        layer = QgsVectorLayer(f"LineString?crs={crs}", name, "memory")
+        # setCrs, not "?crs=<authid>": a custom canvas CRS has no authid and the
+        # URI form would silently leave the layer without a CRS.
+        layer = QgsVectorLayer("LineString", name, "memory")
+        layer.setCrs(self.canvas.mapSettings().destinationCrs())
         pr = layer.dataProvider()
         pr.addAttributes(
             [
@@ -2596,9 +2944,10 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
                 log_swallowed("terrain_profile_dialog.get_or_create_profile_layer", _exc)
             return layer
         
-        # Create new memory layer
-        crs = self.canvas.mapSettings().destinationCrs().authid()
-        layer = QgsVectorLayer(f"LineString?crs={crs}", PROFILE_LAYER_NAME, "memory")
+        # Create new memory layer (in the canvas CRS of NOW; lines drawn after a
+        # later canvas CRS change are transformed into it by save_line_to_layer).
+        layer = QgsVectorLayer("LineString", PROFILE_LAYER_NAME, "memory")
+        layer.setCrs(self.canvas.mapSettings().destinationCrs())
         
         # Add fields
         pr = layer.dataProvider()
@@ -2647,12 +2996,9 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
         group.insertLayer(0, layer)
 
         try:
-            # Keep group near top
-            if group.parent() == root:
-                idx = root.children().index(group)
-                if idx != 0:
-                    root.removeChildNode(group)
-                    root.insertChildNode(0, group)
+            # Keep group near top. removeChildNode() deletes the group (and the
+            # layer node just inserted into it); move_group_to_top clones first.
+            group = move_group_to_top(root, group)
         except Exception as _exc:
             log_swallowed("terrain_profile_dialog.get_or_create_profile_layer", _exc)
 
@@ -2686,8 +3032,16 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
         palette = _profile_color_palette()
         color = palette[(next_no - 1) % len(palette)] if palette else QColor(0, 100, 255)
         
+        # self.points are in the CURRENT canvas CRS; the library layer keeps the
+        # CRS it was created with. Store in the layer's CRS, or a canvas CRS
+        # change puts every later line in the wrong place (and reopening it
+        # finds no DEM data). _open_profile_from_feature transforms back.
+        canvas_crs = self.canvas.mapSettings().destinationCrs()
+        line_pts = [
+            QgsPointXY(transform_point(QgsPointXY(p), canvas_crs, layer.crs())) for p in self.points[:2]
+        ]
         feat = QgsFeature(layer.fields())
-        feat.setGeometry(QgsGeometry.fromPolylineXY([self.points[0], self.points[1]]))
+        feat.setGeometry(QgsGeometry.fromPolylineXY(line_pts))
         feat.setAttributes([
             next_no,
             total_distance,
@@ -2740,36 +3094,31 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
     
     def update_stats(self):
         if not self.profile_data: return
-        
-        elevs = [float(p['elevation']) for p in self.profile_data]
-        dists = [float(p['distance']) for p in self.profile_data]
+
+        # NoData gap segments (samples dropped between two valid ones) are
+        # excluded from ascent/descent/slope - bridging them with a straight
+        # line would invent terrain the DEM does not have.
+        st = _gap_aware_profile_stats(self.profile_data)
+        elevs = st["elevs"]
+        dists = st["dists"]
         total_d = float(dists[-1]) if dists else 0.0
         min_e = min(elevs)
         max_e = max(elevs)
-
-        # Derived metrics: slope (%), cumulative ascent/descent
-        ascent = 0.0
-        descent = 0.0
-        max_abs_slope = 0.0
-        for i in range(1, len(dists)):
-            dd = float(dists[i]) - float(dists[i - 1])
-            dz = float(elevs[i]) - float(elevs[i - 1])
-            if dz > 0:
-                ascent += dz
-            else:
-                descent += -dz
-            if dd > 1e-9:
-                s = abs(dz / dd) * 100.0
-                if s > max_abs_slope:
-                    max_abs_slope = s
-
-        mean_abs_slope = ((ascent + descent) / total_d * 100.0) if total_d > 1e-9 else 0.0
+        ascent = st["ascent"]
+        descent = st["descent"]
+        max_abs_slope = st["max_abs_slope"]
+        mean_abs_slope = st["mean_abs_slope"]
 
         stats = (
-            f"총 거리: {total_d:.1f}m | 고도 범위: {min_e:.1f}m ~ {max_e:.1f}m (차: {max_e - min_e:.1f}m)"
+            f"총 거리: {total_d:.1f}m | 고도 범위: {min_e:.1f}m - {max_e:.1f}m (차: {max_e - min_e:.1f}m)"
             f" | 누적상승: {ascent:.1f}m | 누적하강: {descent:.1f}m"
             f" | 평균경사(|%|): {mean_abs_slope:.1f}% | 최대경사(|%|): {max_abs_slope:.1f}%"
         )
+        if st["n_gaps"] > 0:
+            stats += (
+                f" | NoData 구간: {st['n_gaps']}곳 {st['gap_len_m']:.1f}m"
+                " (그래프에서 끊고 상승/경사 계산에서 제외)"
+            )
 
         # Segment stats (example: 0–200m 평균경사)
         try:
@@ -2782,26 +3131,8 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
         if seg_enabled and seg_len > 0 and total_d > 0 and len(dists) >= 2:
             try:
                 seg0_end = min(total_d, seg_len)
-                # Distance-weighted mean absolute slope for the first segment
-                abs_dz_sum = 0.0
-                run_sum = 0.0
-                for i in range(1, len(dists)):
-                    a = float(dists[i - 1])
-                    b = float(dists[i])
-                    if b <= 0 or a >= seg0_end:
-                        continue
-                    overlap_start = max(0.0, a)
-                    overlap_end = min(seg0_end, b)
-                    overlap = overlap_end - overlap_start
-                    if overlap <= 0:
-                        continue
-                    dd = b - a
-                    if dd <= 1e-9:
-                        continue
-                    dz = float(elevs[i]) - float(elevs[i - 1])
-                    frac = overlap / dd
-                    abs_dz_sum += abs(dz * frac)
-                    run_sum += overlap
+                # Distance-weighted mean absolute slope for the first segment (gap segments excluded)
+                _net, abs_dz_sum, _up, _dn, run_sum = _segment_slope_parts(self.profile_data, 0.0, seg0_end)
                 seg0_mean_abs_slope = (abs_dz_sum / run_sum * 100.0) if run_sum > 1e-9 else 0.0
                 stats += f" | 0–{seg0_end:.0f}m 평균경사: {seg0_mean_abs_slope:.1f}%"
             except Exception as _exc:
@@ -2813,41 +3144,39 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
                 stats += f" | AOI 구간: {inside:.1f}m"
         except Exception as _exc:
             log_swallowed("terrain_profile_dialog.update_stats", _exc)
-        # Disclose the chart smoothing: the curve is a ±3-sample moving average
-        # while these stats (and CSV/hover) use raw samples — undisclosed, the
-        # drawn peak visibly disagreeing with "최대" reads as a bug.
-        stats += " | 차트 곡선: ±3점 이동평균(통계/CSV는 원시값)"
+        # Say what the drawn curve is: the stats/CSV always use raw samples.
+        k = self._smoothing_half_window()
+        if k > 0:
+            stats += f" | 차트 곡선: ±{k}점 이동평균(통계/CSV는 원시값)"
+        else:
+            stats += " | 차트 곡선: 원시 샘플"
         self.lblStats.setText(stats)
 
     def export_csv(self):
         if not self.profile_data: return
-        
+
         path, _ = QFileDialog.getSaveFileName(
             self, "CSV 저장", os.path.expanduser("~"), "CSV Files (*.csv)"
         )
         if not path: return
-        
+
         try:
             with open(path, 'w', newline='', encoding='utf-8-sig') as f:
                 writer = csv.writer(f)
-                elevs = [float(p["elevation"]) for p in self.profile_data]
-                dists = [float(p["distance"]) for p in self.profile_data]
-
-                slopes = [0.0]
-                cum_up = [0.0]
-                cum_dn = [0.0]
-                for i in range(1, len(dists)):
-                    dd = float(dists[i]) - float(dists[i - 1])
-                    dz = float(elevs[i]) - float(elevs[i - 1])
-                    slopes.append((dz / dd * 100.0) if dd > 1e-9 else 0.0)
-                    cum_up.append(cum_up[-1] + (dz if dz > 0 else 0.0))
-                    cum_dn.append(cum_dn[-1] + ((-dz) if dz < 0 else 0.0))
+                # Gap-aware: a segment spanning dropped NoData samples gets no
+                # slope and adds nothing to the cumulative ascent/descent.
+                st = _gap_aware_profile_stats(self.profile_data)
+                elevs = st["elevs"]
+                dists = st["dists"]
+                slopes = st["slopes"]
+                cum_up = st["cum_up"]
+                cum_dn = st["cum_dn"]
 
                 total_d = float(dists[-1]) if dists else 0.0
                 min_e = float(min(elevs)) if elevs else 0.0
                 max_e = float(max(elevs)) if elevs else 0.0
-                ascent = float(cum_up[-1]) if cum_up else 0.0
-                descent = float(cum_dn[-1]) if cum_dn else 0.0
+                ascent = float(st["ascent"])
+                descent = float(st["descent"])
 
                 # Segment settings
                 try:
@@ -2876,12 +3205,19 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
                 writer.writerow(["elev_range_m", round(max_e - min_e, 3)])
                 writer.writerow(["total_ascent_m", round(ascent, 3)])
                 writer.writerow(["total_descent_m", round(descent, 3)])
+                if self._last_num_samples:
+                    writer.writerow(["sample_points", int(self._last_num_samples) + 1])
+                writer.writerow(["valid_samples", len(self.profile_data)])
+                writer.writerow(["nodata_gaps", int(st["n_gaps"])])
+                writer.writerow(["nodata_gap_length_m", round(float(st["gap_len_m"]), 3)])
+                writer.writerow(["sampling", "nearest_cell_identify"])
                 if seg_len > 0:
                     writer.writerow(["segment_length_m", round(seg_len, 3)])
                 try:
                     inside = float(self._last_aoi_inside_m) if self._last_aoi_inside_m is not None else None
                     if inside is not None and math.isfinite(inside) and inside > 0:
                         writer.writerow(["aoi_inside_m", round(float(inside), 3)])
+                        writer.writerow(["aoi_method", "exact_line_polygon_intersection"])
                 except Exception as _exc:
                     log_swallowed("terrain_profile_dialog.export_csv", _exc)
 
@@ -2898,6 +3234,7 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
                         "Segment",
                         "X",
                         "Y",
+                        "GapBefore",
                     ]
                 )
                 for i, p in enumerate(self.profile_data):
@@ -2905,12 +3242,13 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
                         [
                             round(dists[i], 3),
                             round(elevs[i], 3),
-                            round(slopes[i], 3),
+                            ("" if slopes[i] is None else round(slopes[i], 3)),
                             round(cum_up[i], 3),
                             round(cum_dn[i], 3),
                             int(seg_idx[i]),
                             round(float(p["x"]), 6),
                             round(float(p["y"]), 6),
+                            1 if p.get("gap_before") else 0,
                         ]
                     )
 
@@ -2932,38 +3270,12 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
                     for sidx in range(nseg):
                         s0 = float(sidx) * float(seg_len)
                         s1 = min(total_d, float(sidx + 1) * float(seg_len))
-                        run = float(s1 - s0)
-                        if run <= 1e-9:
+                        if float(s1 - s0) <= 1e-9:
                             continue
-                        net_dz = 0.0
-                        abs_dz = 0.0
-                        seg_up = 0.0
-                        seg_dn = 0.0
-                        for i in range(1, len(dists)):
-                            a = float(dists[i - 1])
-                            b = float(dists[i])
-                            if b <= s0 or a >= s1:
-                                continue
-                            overlap_start = max(s0, a)
-                            overlap_end = min(s1, b)
-                            overlap = overlap_end - overlap_start
-                            if overlap <= 0:
-                                continue
-                            dd = b - a
-                            if dd <= 1e-9:
-                                continue
-                            dz = float(elevs[i]) - float(elevs[i - 1])
-                            frac = overlap / dd
-                            dz_seg = dz * frac
-                            net_dz += dz_seg
-                            abs_dz += abs(dz_seg)
-                            if dz_seg > 0:
-                                seg_up += dz_seg
-                            else:
-                                seg_dn += -dz_seg
-
-                        net_slope = net_dz / run * 100.0
-                        mean_abs_slope = abs_dz / run * 100.0
+                        # Run(m) is the measured (non-gap) length inside the segment.
+                        net_dz, abs_dz, seg_up, seg_dn, run = _segment_slope_parts(self.profile_data, s0, s1)
+                        net_slope = (net_dz / run * 100.0) if run > 1e-9 else 0.0
+                        mean_abs_slope = (abs_dz / run * 100.0) if run > 1e-9 else 0.0
                         writer.writerow(
                             [
                                 round(s0, 3),
