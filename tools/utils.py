@@ -353,6 +353,17 @@ def restore_ui_focus(dialog):
     except Exception as _exc:
         log_swallowed("tools/utils.py:354 (restore_ui_focus)", _exc)
 
+def _message_level(level):
+    """Map the tools' 0/1/2/3 message levels (or an enum) to Qgis.MessageLevel."""
+    if isinstance(level, Qgis.MessageLevel):
+        return level
+    return {
+        1: Qgis.MessageLevel.Warning,
+        2: Qgis.MessageLevel.Critical,
+        3: Qgis.MessageLevel.Success,
+    }.get(level, Qgis.MessageLevel.Info)
+
+
 def push_message(iface, title, text, level=0, duration=3):
     """Helper to push message to QGIS message bar"""
     try:
@@ -370,7 +381,9 @@ def push_message(iface, title, text, level=0, duration=3):
         mb = iface.messageBar()
         if mb is None:
             return
-        mb.pushMessage(title, text, level=level, duration=duration)
+        # Pass the enum, not the int: QGIS 4 declares Qgis.MessageLevel as an
+        # IntEnum and accepts ints, but the enum is correct on every binding.
+        mb.pushMessage(title, text, level=_message_level(level), duration=duration)
     except Exception:
         # Never crash due to message bar errors
         try:

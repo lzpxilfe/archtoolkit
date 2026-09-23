@@ -66,7 +66,7 @@ from .ahp_core import (
     sanitize_pair_values as _sanitize_pair_values,
     score_formula,
 )
-from .utils import split_qgis_source_path
+from .utils import move_group_to_top, split_qgis_source_path
 
 
 _SCALE_OPTIONS: List[Tuple[str, float]] = [
@@ -2359,11 +2359,9 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
         if parent_group is None:
             parent_group = root.insertGroup(0, parent_name)
         try:
-            if parent_group.parent() == root:
-                idx = root.children().index(parent_group)
-                if idx != 0:
-                    root.removeChildNode(parent_group)
-                    root.insertChildNode(0, parent_group)
+            # Clone-then-remove: removeChildNode() deletes the node, so moving the
+            # group itself would drop every earlier AHP result from the project.
+            parent_group = move_group_to_top(root, parent_group)
         except Exception as _exc:
             log_swallowed("ahp_suitability_dialog._add_output_to_project", _exc)
 

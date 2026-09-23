@@ -52,13 +52,22 @@ jobs:
         run: python tests/check_static.py
 
   qgis-tests:
-    # The QGIS-gated tests (align/export warps, dialog memory, layer tree) run
-    # for real inside the official QGIS image, headless.
+    # The QGIS-gated tests (align/export warps, dialog memory, layer tree, the
+    # per-tool review tests) run for real inside the official QGIS images,
+    # headless: 3.40 is the plugin's minimum (qgisMinimumVersion), ltr is the
+    # current long-term release.
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        qgis: ["3.40", "ltr"]
     container:
-      image: qgis/qgis:release-3_34
+      image: qgis/qgis:${{ matrix.qgis }}
     env:
       QT_QPA_PLATFORM: offscreen
+      # Processing lives outside the default path; without it every test that
+      # runs a Processing algorithm silently skips.
+      PYTHONPATH: /usr/share/qgis/python/plugins
     steps:
       - uses: actions/checkout@v4
 
