@@ -22,10 +22,33 @@ from qgis.PyQt import uic
 from qgis.PyQt import QtWidgets
 from qgis.PyQt.QtWidgets import QTableWidgetItem, QCheckBox, QWidget, QHBoxLayout, QFileDialog, QListWidgetItem
 from qgis.PyQt.QtCore import Qt, QSize
-from qgis.core import QgsProject, QgsRectangle, QgsVectorLayer, QgsWkbTypes, Qgis
+from qgis.core import (
+    Qgis,
+    QgsCoordinateReferenceSystem,
+    QgsCoordinateTransform,
+    QgsFeature,
+    QgsField,
+    QgsGeometry,
+    QgsPoint,
+    QgsPointXY,
+    QgsProject,
+    QgsRectangle,
+    QgsUnitTypes,
+    QgsVectorLayer,
+    QgsWkbTypes,
+)
 import processing
 import tempfile
-from .utils import log_swallowed, new_run_id, push_message, restore_ui_focus, set_archtoolkit_layer_metadata
+from .utils import (
+    is_metric_crs,
+    is_null_value,
+    log_swallowed,
+    new_run_id,
+    push_message,
+    restore_ui_focus,
+    set_archtoolkit_layer_metadata,
+)
+from .qtcompat import FT_DOUBLE
 from .atomic_output import (
     atomic_publish_file,
     atomic_publish_files,
@@ -43,6 +66,17 @@ FORM_CLASS, _ = uic.loadUiType(os.path.join(
     os.path.dirname(__file__), 'dem_generator_dialog_base.ui'))
 
 class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
+    # IDW distance exponent passed explicitly to qgis:idwinterpolation (its
+    # own default) so the value recorded in the layer metadata is the one used.
+    # That algorithm has no search radius: every input vertex weighs in.
+    IDW_POWER = 2.0
+    # Smallest pixel size the spin box accepts (0 used to reach the grid
+    # snapping as "float division by zero").
+    MIN_PIXEL_SIZE = 0.01
+    # Grid snapping ignores an extent overshoot below this fraction of a cell
+    # (reprojection round-off used to add an all-NoData column/row).
+    SNAP_TOLERANCE = 1e-6
+
     # Map scale to recommended pixel size (meters)
     # Based on contour interval standards from National Geographic Information Institute
     SCALE_PIXEL_MAP = {
@@ -79,7 +113,7 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
             # the description has to say so where the method is chosen.
             'desc': ('포인트 기반 Ordinary Kriging(Lite). 휴리스틱 파라미터(경험 베리오그램 미적합) '
                      '+ 예측 DEM + 상대 불확실성(_variance.tif) 출력. '
-                     '미터 단위 투영 CRS 권장 [Matheron, 1963; Cressie, 1993]')
+                     '미터 단위 투영 CRS 필요 [Matheron, 1963; Cressie, 1993]')
         }
     }
     
@@ -180,6 +214,10 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
         self.setupUi(self)
         self.iface = iface
         self.loaded_dxf_layers = []
+        try:
+            self.spinPixelSize.setMinimum(float(self.MIN_PIXEL_SIZE))
+        except Exception as _exc:
+            log_swallowed("dem_generator_dialog.__init__ (pixel minimum)", _exc)
         self._setup_kriging_controls()
         self._setup_help_button()
         
@@ -237,9 +275,20 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
                 "<h3>보간 방법</h3>"
                 "<ul>"
                 "<li><b>TIN</b>: 등고선(선) 데이터에 권장</li>"
-                "<li><b>IDW</b>: 포인트 데이터에 권장</li>"
+                "<li><b>IDW</b>: 포인트 데이터에 권장. 거리 지수 2, 검색 반경 없이 모든 점을 씁니다(메타데이터에 기록).</li>"
                 "<li><b>Kriging (Lite)</b>: 포인트 + 값 필드(Z) 기반. 예측 DEM과 함께 "
-                "<code>_variance.tif</code>도 생성됩니다. (미터 단위 투영 CRS 권장)</li>"
+                "<code>_variance.tif</code>도 생성됩니다. (미터 단위 투영 CRS 필요)</li>"
+                "</ul>"
+                "<h3>입력과 좌표계</h3>"
+                "<ul>"
+                "<li>체크한 레이어의 점은 점으로, 선·면(등고선 등)은 구조선으로 TIN에 들어갑니다. "
+                "등고선 레이어와 표고점 레이어, 여러 DXF 도엽을 함께 선택할 수 있습니다. "
+                "Kriging은 선·면의 정점을 표본점으로 씁니다.</li>"
+                "<li>모든 입력은 작업 좌표계(좌표계가 있는 첫 번째 체크 레이어)로 변환됩니다. 좌표계가 없는 DXF는 "
+                "작업 좌표계와 같은 좌표로 간주합니다.</li>"
+                "<li>픽셀 크기는 미터입니다. 작업 좌표계가 지리 좌표계(도)이거나 지도 단위가 미터가 아니면 실행하지 않습니다.</li>"
+                "<li>표고는 값 필드(Z) 또는 3D 좌표에서 읽습니다. Z 좌표가 모두 0이면(3D 형식이지만 표고 없음) "
+                "평평한 DEM을 만들지 않고 중단하며, 표고가 들어 있을 수 있는 숫자 필드를 알려 줍니다.</li>"
                 "</ul>"
                 # README.md는 분산 래스터를 '보정된 예측분산이 아님'이라고 명시하는데,
                 # 정작 도구 안의 도움말은 그냥 '불확실성'이라고만 적고 있었다. 사용자가
@@ -284,7 +333,7 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
                 self.cmbZField.setToolTip(
                     "표고/값(Z)을 읽을 필드를 선택하세요. TIN/IDW/Kriging 모두에 적용됩니다.\n"
                     "- 자동(추천): Z_COORD/Elevation/ELEV/height/표고/고도/z 등 흔한 필드를 자동 탐색\n"
-                    "- Z 좌표(3D geometry): 3차원 지오메트리의 Z값 사용 (2D 레이어는 오류로 중단)"
+                    "- Z 좌표(3D geometry): 3차원 지오메트리의 Z값 사용 (2D 레이어, Z가 모두 0인 레이어는 오류로 중단)"
                 )
             except Exception as _exc:
                 log_swallowed("tools/dem_generator_dialog.py:267 (_setup_kriging_controls)", _exc)
@@ -306,7 +355,8 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
 
             self.lblKrigingHint = QtWidgets.QLabel(
                 "<b>Kriging(Lite) 안내</b><br>"
-                "- 포인트 값(표고점 등) 기반 보간입니다. 등고선(선)에는 적합하지 않습니다.<br>"
+                "- 포인트 값(표고점 등) 기반 보간입니다. 등고선(선)에는 적합하지 않습니다"
+                "(선·면을 넣으면 정점을 표본점으로 씁니다).<br>"
                 "- 출력은 DEM과 함께 <code>_variance.tif</code>도 생성됩니다.<br>"
                 # This banner sits right next to the method combo, so it is the
                 # last thing read before running. It has to carry the same
@@ -969,15 +1019,21 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
         column and row counts from PIXEL_SIZE and QgsGridFileWriter then
         divides the extent by those counts, so an unsnapped extent yields
         cells smaller than requested and not square (DEMGEN-05). Anchored at
-        the top-left corner, like the writer. Returns (rect, ncols, nrows).
+        the top-left corner, like the writer. An overshoot below
+        SNAP_TOLERANCE of a cell is treated as round-off, not as one more
+        column/row. Returns (rect, ncols, nrows).
         """
         px = float(pixel_size)
         xmin = float(extent.xMinimum())
         ymax = float(extent.yMaximum())
         width = float(extent.width())
         height = float(extent.height())
-        ncols = int(max(1, math.ceil(width / px)))
-        nrows = int(max(1, math.ceil(height / px)))
+        # A shortfall of less than SNAP_TOLERANCE of a cell is round-off (e.g. a
+        # reprojected corner at x0 + 300.0000000001), not a reason for a column
+        # whose centre lies outside every input.
+        tol = float(DemGeneratorDialog.SNAP_TOLERANCE)
+        ncols = int(max(1, math.ceil(width / px - tol)))
+        nrows = int(max(1, math.ceil(height / px - tol)))
         xmax = xmin + ncols * px
         ymin = ymax - nrows * px
         # Guard the algorithm's own ceil() against float drift
@@ -1058,8 +1114,432 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
             log_swallowed("dem_generator_dialog._pixel_size_note", _exc)
             return ""
 
+    @staticmethod
+    def _working_crs(layers):
+        """CRS every input is brought into: the first checked layer that HAS one.
+
+        A DXF sheet carries no CRS; taking it as the working CRS used to leave
+        the DEM without one even when another checked layer had a valid CRS.
+        """
+        first = None
+        for lyr in layers or []:
+            try:
+                crs = lyr.crs()
+            except Exception as _exc:
+                log_swallowed("dem_generator_dialog._working_crs", _exc)
+                crs = None
+            if crs is None:
+                continue
+            if first is None:
+                first = crs
+            if crs.isValid():
+                return crs
+        return first
+
+    @staticmethod
+    def _crs_label(crs) -> str:
+        try:
+            if crs is None or not crs.isValid():
+                return "좌표계 미지정"
+            return str(crs.authid() or crs.description() or "사용자 좌표계")
+        except Exception as _exc:
+            log_swallowed("dem_generator_dialog._crs_label", _exc)
+            return "좌표계 미지정"
+
+    def _crs_unit_problem(self, crs) -> str:
+        """Korean refusal text when pixel sizes in metres cannot apply to ``crs``, else "".
+
+        The pixel size is typed in metres but the interpolators apply it in map
+        units: in EPSG:4326 "5 m" became 5 degrees (a 1x1-cell DEM reported as
+        success with pixel_size_m=5). An unknown CRS (a DXF sheet) is not
+        refused here: its coordinates cannot be judged.
+        """
+        try:
+            if crs is None or not crs.isValid():
+                return ""
+            if is_metric_crs(crs):
+                return ""
+            label = self._crs_label(crs)
+            if crs.isGeographic():
+                return (f"작업 좌표계({label})가 지리 좌표계(도 단위)입니다. 픽셀 크기(m)가 도(degree)로 적용되므로 "
+                        "실행하지 않았습니다. 미터 단위 투영 좌표계로 변환한 레이어를 사용하세요.")
+            try:
+                unit = QgsUnitTypes.toString(crs.mapUnits())
+            except Exception as _exc:
+                log_swallowed("dem_generator_dialog._crs_unit_problem", _exc)
+                unit = "?"
+            return (f"작업 좌표계({label})의 지도 단위가 미터가 아닙니다({unit}). 픽셀 크기(m)를 그대로 적용할 수 없어 "
+                    "실행하지 않았습니다. 미터 단위 투영 좌표계로 변환한 레이어를 사용하세요.")
+        except Exception as _exc:
+            log_swallowed("dem_generator_dialog._crs_unit_problem", _exc)
+            return ""
+
+    @staticmethod
+    def _set_layer_crs(layer, crs):
+        """Give a scratch memory layer ``crs``, or an explicitly UNKNOWN CRS.
+
+        A memory layer created without a CRS defaults to EPSG:4326, which
+        would stamp a DXF sheet's TM metres as WGS 84 degrees on the DEM.
+        """
+        try:
+            if crs is not None and crs.isValid():
+                layer.setCrs(crs)
+            else:
+                layer.setCrs(QgsCoordinateReferenceSystem())
+        except Exception as _exc:
+            log_swallowed("dem_generator_dialog._set_layer_crs", _exc)
+
+    @staticmethod
+    def _geometry_kind(geom) -> str:
+        """'point' / 'line' / 'polygon' for a single-kind geometry, else ""."""
+        try:
+            gtype = QgsWkbTypes.geometryType(geom.wkbType())
+        except Exception as _exc:
+            log_swallowed("dem_generator_dialog._geometry_kind", _exc)
+            return ""
+        if gtype == Qgis.GeometryType.Point:
+            return "point"
+        if gtype == Qgis.GeometryType.Line:
+            return "line"
+        if gtype == Qgis.GeometryType.Polygon:
+            return "polygon"
+        return ""
+
+    def _feature_parts(self, geom, ct, keep_z):
+        """Single-kind parts of ``geom`` as (kind, multi-part QgsGeometry, is_3d).
+
+        Transformed into the working CRS, curves segmentized, M dropped, and Z
+        dropped unless the elevation comes from geometry Z. A geometry
+        collection (DXF block) is split so each part lands in its own kind.
+        """
+        g = QgsGeometry(geom)
+        if ct is not None:
+            g.transform(ct)
+        if QgsWkbTypes.isCurvedType(g.wkbType()):
+            g = QgsGeometry(g.constGet().segmentize())
+        if QgsWkbTypes.flatType(g.wkbType()) == Qgis.WkbType.GeometryCollection:
+            pieces = list(g.asGeometryCollection())
+        else:
+            pieces = [g]
+        out = []
+        for piece in pieces:
+            kind = self._geometry_kind(piece)
+            if not kind or piece.isEmpty():
+                continue
+            ag = piece.constGet().clone()
+            is_3d = bool(ag.is3D())
+            ag.dropMValue()
+            if not keep_z:
+                ag.dropZValue()
+            part = QgsGeometry(ag)
+            part.convertToMultiType()
+            out.append((kind, part, is_3d))
+        return out
+
+    def _prepare_inputs(self, layers, *, field_name, working_crs, query):
+        """Copy every usable feature of ``layers`` into one memory layer per geometry kind.
+
+        Replaces native:mergevectorlayers, which refuses a line layer next to
+        a point layer (contours + spot heights, or two DXF sheets whose
+        "entities" layers QGIS typed after different first entities). Reading
+        the layer objects themselves keeps their subset filter and unsaved
+        edits, and every method (TIN/IDW/Kriging) then reads these same
+        features. Plugin-loaded DXF layers get the run-time code ``query``
+        on an independent handle, as before.
+        """
+        use_field = bool(field_name)
+        suffix = "" if use_field else "Z"
+        mem = {}
+        for kind, wkb in (("point", "MultiPoint"), ("line", "MultiLineString"), ("polygon", "MultiPolygon")):
+            lyr = QgsVectorLayer(wkb + suffix, f"dem_prepared_{kind}", "memory")
+            self._set_layer_crs(lyr, working_crs)
+            if use_field:
+                lyr.dataProvider().addAttributes([QgsField(str(field_name), FT_DOUBLE)])
+                lyr.updateFields()
+            mem[kind] = lyr
+
+        feats = {kind: [] for kind in mem}
+        info = {
+            "mem": mem,
+            "counts": {kind: 0 for kind in mem},
+            "extent": None,
+            "skipped_no_value": 0,
+            "skipped_2d": 0,
+            "skipped_transform": 0,
+            "layers_with_field": 0,
+            "filter_before": 0,
+            "filter_after": 0,
+            "filter_applied": False,
+            "crs_assumed": [],
+            "z_min": None,
+            "z_max": None,
+            "numeric_ranges": {},
+        }
+        ranges = info["numeric_ranges"]
+        for src in layers or []:
+            handle = src
+            if query and self._is_plugin_dxf_layer(src):
+                try:
+                    dxf = QgsVectorLayer(src.source(), src.name(), src.providerType())
+                    if dxf.isValid() and dxf.fields().indexFromName("Layer") >= 0:
+                        info["filter_before"] += int(dxf.featureCount())
+                        dxf.setSubsetString(query)
+                        info["filter_after"] += int(dxf.featureCount())
+                        info["filter_applied"] = True
+                        handle = dxf
+                except Exception as _exc:
+                    log_swallowed("dem_generator_dialog._prepare_inputs (dxf filter)", _exc)
+            fields = handle.fields()
+            fidx = -1
+            if use_field:
+                fidx = self._field_index(fields, field_name)
+                if fidx < 0:
+                    continue
+                info["layers_with_field"] += 1
+            numeric = []
+            if not use_field:
+                numeric = [(i, str(f.name())) for i, f in enumerate(fields) if f.isNumeric()]
+            ct = None
+            src_crs = handle.crs()
+            if working_crs is not None and working_crs.isValid():
+                if src_crs.isValid() and src_crs != working_crs:
+                    ct = QgsCoordinateTransform(src_crs, working_crs, QgsProject.instance())
+                elif not src_crs.isValid():
+                    info["crs_assumed"].append(str(src.name()))
+            for feat in handle.getFeatures():
+                geom = feat.geometry()
+                if geom is None or geom.isEmpty():
+                    continue
+                value = None
+                if use_field:
+                    raw = feat.attribute(fidx)
+                    if not is_null_value(raw):
+                        try:
+                            value = float(raw)
+                        except (TypeError, ValueError):
+                            value = None
+                    if value is None or not math.isfinite(value):
+                        info["skipped_no_value"] += 1
+                        continue
+                parts = []
+                try:
+                    parts = self._feature_parts(geom, ct, keep_z=not use_field)
+                except Exception as _exc:
+                    log_swallowed("dem_generator_dialog._prepare_inputs (transform)", _exc)
+                    info["skipped_transform"] += 1
+                for kind, part, is_3d in parts:
+                    if not use_field and not is_3d:
+                        # QgsInterpolator's ValueZ source rejects 2D parts; say so.
+                        info["skipped_2d"] += 1
+                        continue
+                    if not use_field:
+                        for vtx in part.vertices():
+                            z = float(vtx.z())
+                            if math.isfinite(z):
+                                info["z_min"] = z if info["z_min"] is None else min(info["z_min"], z)
+                                info["z_max"] = z if info["z_max"] is None else max(info["z_max"], z)
+                    out = QgsFeature(mem[kind].fields())
+                    out.setGeometry(part)
+                    if use_field:
+                        out.setAttributes([value])
+                    feats[kind].append(out)
+                    bbox = part.boundingBox()
+                    if info["extent"] is None:
+                        info["extent"] = QgsRectangle(bbox)
+                    else:
+                        info["extent"].combineExtentWith(bbox)
+                if parts and numeric:
+                    for i, name in numeric:
+                        raw = feat.attribute(i)
+                        if is_null_value(raw):
+                            continue
+                        try:
+                            v = float(raw)
+                        except (TypeError, ValueError):
+                            v = float("nan")
+                        if not math.isfinite(v):
+                            continue
+                        lo_hi = ranges.get(name)
+                        ranges[name] = (v, v) if lo_hi is None else (min(lo_hi[0], v), max(lo_hi[1], v))
+
+        for kind, flist in feats.items():
+            if flist:
+                ok = mem[kind].dataProvider().addFeatures(flist)
+                if isinstance(ok, tuple):
+                    ok = ok[0]
+                if not ok:
+                    raise RuntimeError(f"준비 레이어({kind})에 피처를 쓰지 못했습니다.")
+                mem[kind].updateExtents()
+            info["counts"][kind] = len(flist)
+        return info
+
+    @staticmethod
+    def _flat_z_problem(info) -> str:
+        """Korean refusal text when geometry Z carries no elevation, else "".
+
+        A 3D-typed layer whose Z is 0 everywhere (CAD/ArcGIS export with the
+        height in a "Contour" field) used to give a flat 0 m DEM reported as
+        success. A constant non-zero Z is refused only when a numeric field
+        with varying values could hold the real elevations.
+        """
+        z_min, z_max = info.get("z_min"), info.get("z_max")
+        if z_min is None or z_max is None or z_max != z_min:
+            return ""
+        candidates = [(name, lo, hi) for name, (lo, hi) in (info.get("numeric_ranges") or {}).items() if hi > lo]
+        if z_min != 0.0 and not candidates:
+            return ""
+        desc = ", ".join(f"{name}({lo:g}-{hi:g})" for name, lo, hi in candidates[:6]) or "없음"
+        return (f"Z 좌표가 모두 {z_min:g}입니다(3D 형식이지만 표고가 Z에 없는 자료로 보입니다). "
+                f"표고가 들어 있을 수 있는 숫자 필드: {desc}. 값 필드(Z)에서 표고 필드를 직접 선택하세요. "
+                "평평한 DEM을 만들지 않고 중단했습니다.")
+
+    @staticmethod
+    def _save_prepared(info, working_crs):
+        """Write each non-empty prepared kind to a temp file: {kind: (path, layer)}.
+
+        GeoPackage normally; FlatGeobuf when the working CRS is unknown (DXF),
+        because GeoPackage stores "no CRS" as "Undefined geographic SRS",
+        which QGIS reads as a valid CRS and would stamp on the DEM.
+        """
+        known = bool(working_crs is not None and working_crs.isValid())
+        ext = "gpkg" if known else "fgb"
+        out = {}
+        for kind in ("point", "line", "polygon"):
+            if int(info["counts"].get(kind) or 0) <= 0:
+                continue
+            path = os.path.join(tempfile.gettempdir(), f"archtoolkit_dem_{kind}_{uuid.uuid4().hex[:8]}.{ext}")
+            out[kind] = (path, None)
+            res = processing.run("native:savefeatures", {"INPUT": info["mem"][kind], "OUTPUT": path})
+            load_src = str(res.get("OUTPUT")) if (isinstance(res, dict) and res.get("OUTPUT")) else path
+            lyr = QgsVectorLayer(load_src, f"dem_{kind}", "ogr")
+            if not lyr.isValid():
+                raise RuntimeError(f"준비 레이어({kind}) 저장에 실패했습니다: {path}")
+            out[kind] = (path, lyr)
+        return out
+
+    @staticmethod
+    def _kriging_samples(info, field_name, working_crs):
+        """One point per prepared vertex (points, and line/polygon vertices) for Kriging.
+
+        Returns (layer, n_from_lines). Kriging reads exactly the features the
+        TIN/IDW path reads; line and polygon inputs contribute their vertices.
+        """
+        use_field = bool(field_name)
+        lyr = QgsVectorLayer("Point" if use_field else "PointZ", "dem_kriging_samples", "memory")
+        DemGeneratorDialog._set_layer_crs(lyr, working_crs)
+        if use_field:
+            lyr.dataProvider().addAttributes([QgsField(str(field_name), FT_DOUBLE)])
+            lyr.updateFields()
+        feats = []
+        from_lines = 0
+        for kind in ("point", "line", "polygon"):
+            src = info["mem"][kind]
+            if int(info["counts"].get(kind) or 0) <= 0:
+                continue
+            for feat in src.getFeatures():
+                value = feat.attribute(0) if use_field else None
+                for vtx in feat.geometry().vertices():
+                    f = QgsFeature(lyr.fields())
+                    if use_field:
+                        f.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(vtx.x(), vtx.y())))
+                        f.setAttributes([value])
+                    else:
+                        f.setGeometry(QgsGeometry(QgsPoint(vtx.x(), vtx.y(), vtx.z())))
+                    feats.append(f)
+                    if kind != "point":
+                        from_lines += 1
+        if feats:
+            lyr.dataProvider().addFeatures(feats)
+            lyr.updateExtents()
+        return lyr, from_lines
+
+    @staticmethod
+    def _stray_prj_path(staged) -> str:
+        """Where QGIS < 3.38's grid writer drops the .prj for ``staged`` (complete base name + .prj)."""
+        return os.path.splitext(str(staged))[0] + ".prj"
+
+    @staticmethod
+    def _grid_as_geotiff(staged, output_path, run_id, crs):
+        """(staged path, converted-from driver) of a GeoTIFF that carries ``crs``.
+
+        QGIS < 3.38 writes the TIN/IDW grid as Arc/Info ASCII whatever the
+        extension and puts the CRS only in a .prj named after the STAGED file,
+        which the publish rename left behind: the published ".tif" had no CRS.
+        That grid is copied into a real GeoTIFF with the working CRS. Newer
+        QGIS writes a GeoTIFF with the CRS already and is returned untouched.
+        """
+        try:
+            from osgeo import gdal  # type: ignore
+        except Exception as _exc:
+            log_swallowed("dem_generator_dialog._grid_as_geotiff (gdal)", _exc)
+            return staged, ""
+        wkt = ""
+        try:
+            if crs is not None and crs.isValid():
+                wkt = str(crs.toWkt() or "")
+        except Exception as _exc:
+            log_swallowed("dem_generator_dialog._grid_as_geotiff (crs)", _exc)
+        ds = None
+        try:
+            ds = gdal.Open(str(staged))
+            if ds is None:
+                return staged, ""
+            driver = str(ds.GetDriver().ShortName or "")
+            has_srs = bool(ds.GetProjection())
+        except Exception as _exc:
+            log_swallowed("dem_generator_dialog._grid_as_geotiff (open)", _exc)
+            return staged, ""
+        finally:
+            ds = None
+        if driver == "GTiff":
+            if not has_srs and wkt:
+                upd = None
+                try:
+                    upd = gdal.Open(str(staged), gdal.GA_Update)
+                    if upd is not None:
+                        upd.SetProjection(wkt)
+                except Exception as _exc:
+                    log_swallowed("dem_generator_dialog._grid_as_geotiff (srs)", _exc)
+                finally:
+                    upd = None
+            return staged, ""
+        target = reserve_staging_path(output_path, f"{run_id}-gtiff")
+        res = None
+        try:
+            res = gdal.Translate(
+                str(target),
+                str(staged),
+                format="GTiff",
+                # Float32 like QGIS >= 3.38's writer and the Kriging output
+                # (the ASCII reader picks Float32 or Float64 by content).
+                outputType=gdal.GDT_Float32,
+                outputSRS=(wkt if (wkt and not has_srs) else None),
+                creationOptions=["TILED=YES", "COMPRESS=LZW"],
+            )
+        except Exception as _exc:
+            log_swallowed("dem_generator_dialog._grid_as_geotiff (translate)", _exc)
+            res = None
+        if res is None:
+            cleanup_staging_path(target)
+            return staged, ""
+        res = None
+        cleanup_staging_path(staged)
+        return target, driver
+
+    @staticmethod
+    def _grid_meta(pixel_size, actual_x, actual_y, metric):
+        """Pixel-size metadata keyed by unit: metres only for a metric working CRS."""
+        if metric:
+            return {"pixel_size_m": float(pixel_size), "pixel_size_x_m": actual_x, "pixel_size_y_m": actual_y}
+        return {
+            "pixel_size_map_units": float(pixel_size),
+            "pixel_size_x_map_units": actual_x,
+            "pixel_size_y_map_units": actual_y,
+            "crs_units": "unknown",
+        }
+
     def run_process(self):
-        """Run the DEM generation process (Merge → Filter → Interpolate)"""
+        """Run the DEM generation process (Prepare per geometry kind → Filter → Interpolate)"""
         selected_layers = self.get_selected_layers()
         output_path = self.fileOutput.filePath()
         pixel_size = self.spinPixelSize.value()
@@ -1071,6 +1551,14 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
             return
         if not output_path:
             push_message(self.iface, "오류", "출력 파일 경로를 지정해주세요", level=2)
+            restore_ui_focus(self)
+            return
+        try:
+            pixel_ok = math.isfinite(float(pixel_size)) and float(pixel_size) > 0
+        except (TypeError, ValueError):
+            pixel_ok = False
+        if not pixel_ok:
+            push_message(self.iface, "오류", "픽셀 크기는 0보다 커야 합니다.", level=2)
             restore_ui_focus(self)
             return
 
@@ -1170,59 +1658,50 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
                     duration=8,
                 )
 
-        push_message(self.iface, "처리 중", f"{len(selected_layers)}개 레이어 병합 중...", level=0)
+        # Pixel sizes are metres; refuse a working CRS where they are not
+        # (TIN/IDW used to publish 5-degree cells as "pixel_size_m 5").
+        working_crs = self._working_crs(selected_layers)
+        crs_problem = self._crs_unit_problem(working_crs)
+        if crs_problem:
+            push_message(self.iface, "오류", crs_problem, level=2, duration=12)
+            restore_ui_focus(self)
+            return
+        crs_metric = bool(working_crs is not None and working_crs.isValid() and is_metric_crs(working_crs))
+        if str(algorithm or "") == "archtoolkit:kriging_lite" and not crs_metric:
+            push_message(
+                self.iface,
+                "오류",
+                f"Kriging(Lite)은 미터 단위 투영 좌표계가 필요합니다({self._crs_label(working_crs)}). "
+                "좌표계를 지정한 레이어를 사용하세요.",
+                level=2,
+                duration=10,
+            )
+            restore_ui_focus(self)
+            return
+
+        push_message(self.iface, "처리 중", f"{len(selected_layers)}개 레이어 준비 중...", level=0)
         self.hide()
         QtWidgets.QApplication.processEvents()
-        
+
+        prepared_files = {}
         try:
-            temp_merged = None
             staging_out = None
+            stray_prj = None
 
-            # Step 1: Merge all selected layers into one temp file
-            if len(selected_layers) > 1:
-                temp_merged = os.path.join(tempfile.gettempdir(), f'archtoolkit_merged_{uuid.uuid4().hex[:8]}.gpkg')
-                processing.run("native:mergevectorlayers", {
-                    'LAYERS': selected_layers,
-                    'CRS': selected_layers[0].crs(),
-                    'OUTPUT': temp_merged
-                })
-                merged_layer = QgsVectorLayer(temp_merged, "merged", "ogr")
-            else:
-                # NEVER filter the user's own project layer in place:
-                # setSubsetString would permanently overwrite their canvas filter.
-                # Work on an independent handle to the same source instead.
-                src0 = selected_layers[0]
-                ptype = str(src0.providerType() or "")
-                if ptype in ("ogr", "gdal", "delimitedtext", "spatialite"):
-                    # File/DB-backed: source() reloads the real features.
-                    merged_layer = QgsVectorLayer(src0.source(), "dem_input", ptype)
-                    if not merged_layer.isValid():
-                        merged_layer = None
-                else:
-                    merged_layer = None
-                if merged_layer is None or not merged_layer.isValid() or merged_layer.featureCount() == 0:
-                    # Memory/scratch/virtual layers: source() is a schema-only
-                    # URI with NO features, so QgsVectorLayer(source) would build
-                    # an empty layer and silently produce an empty DEM. Export to
-                    # a real file so the interpolation reads actual geometry.
-                    # Keep temp_merged as the PLAIN path for the finally-block
-                    # cleanup; savefeatures' OUTPUT may be a '|layername='-suffixed
-                    # URI that os.path.exists() would miss (temp-file leak).
-                    temp_merged = os.path.join(tempfile.gettempdir(), f'archtoolkit_singlesrc_{uuid.uuid4().hex[:8]}.gpkg')
-                    save_res = processing.run("native:savefeatures", {"INPUT": src0, "OUTPUT": temp_merged})
-                    load_src = str(save_res.get("OUTPUT")) if (isinstance(save_res, dict) and save_res.get("OUTPUT")) else temp_merged
-                    merged_layer = QgsVectorLayer(load_src, "dem_input", "ogr")
+            # Step 1-3: copy every checked layer's features, per geometry kind,
+            # into the working CRS with the elevation source resolved ONCE
+            # (planned_field, or geometry Z). TIN/IDW and Kriging all read these.
+            field_name = str(planned_field or "")
+            if field_name:
+                for lyr in selected_layers:
+                    idx = self._field_index(lyr.fields(), field_name)
+                    if idx >= 0:
+                        field_name = str(lyr.fields()[idx].name())
+                        break
+            prep = self._prepare_inputs(selected_layers, field_name=field_name, working_crs=working_crs, query=query)
 
-            if not merged_layer or not merged_layer.isValid():
-                push_message(self.iface, "오류", "레이어 병합에 실패했습니다.", level=2)
-                restore_ui_focus(self)
-                return
-
-            # Step 2: Apply query filter (plugin-loaded DXF layers only, see above)
-            if query and merged_layer.fields().indexFromName('Layer') >= 0:
-                before_n = int(merged_layer.featureCount())
-                merged_layer.setSubsetString(query)
-                after_n = int(merged_layer.featureCount())
+            if prep["filter_applied"]:
+                before_n, after_n = int(prep["filter_before"]), int(prep["filter_after"])
                 if after_n <= 0:
                     push_message(
                         self.iface,
@@ -1242,21 +1721,16 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
                         duration=8,
                     )
 
-            # Step 3: Resolve the elevation source on the merged layer
-            merged_fields = merged_layer.fields()
-            z_field_idx = -1
-            z_field_name = ""
-            if planned_field:
-                z_field_idx = self._field_index(merged_fields, planned_field)
-                if z_field_idx < 0:
-                    push_message(self.iface, "오류", f"값 필드 '{planned_field}'가 병합 레이어에 없습니다.", level=2)
-                    restore_ui_focus(self)
-                    return
-                z_field_name = str(merged_fields[z_field_idx].name())
-            elif not self._layer_has_z(merged_layer):
-                # ValueZ on a 2D layer: QgsInterpolator rejects every feature and
-                # QgsGridFileWriter writes -9999 into each pixel - an "empty"
-                # DEM that used to be reported as success (DEMGEN-01).
+            if field_name and int(prep["layers_with_field"]) <= 0:
+                push_message(self.iface, "오류", f"값 필드 '{field_name}'가 선택한 레이어에 없습니다.", level=2)
+                restore_ui_focus(self)
+                return
+
+            counts = dict(prep["counts"])
+            n_total = int(sum(counts.values()))
+            if n_total <= 0 and not field_name and int(prep["skipped_2d"]) > 0:
+                # ValueZ on 2D geometry: QgsInterpolator rejects every feature
+                # and QgsGridFileWriter writes -9999 into each pixel (DEMGEN-01).
                 push_message(
                     self.iface,
                     "오류",
@@ -1266,32 +1740,65 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
                 )
                 restore_ui_focus(self)
                 return
-            value_source_label = z_field_name if z_field_idx >= 0 else "Z 좌표(3D geometry)"
-
-            geom_type = merged_layer.geometryType()
-            interp_type = 0 if geom_type == 0 else 1
-
-            # Use source() for file-based layer
-            source_path = merged_layer.source()
-
-            if z_field_idx >= 0:
-                interp_data = f'{source_path}::~::0::~::{z_field_idx}::~::{interp_type}'
-            else:
-                interp_data = f'{source_path}::~::1::~::0::~::{interp_type}'
-
-            combined_extent = merged_layer.extent()
+            combined_extent = prep["extent"]
             try:
-                _ext_w, _ext_h = float(combined_extent.width()), float(combined_extent.height())
+                _ext_w = float(combined_extent.width()) if combined_extent is not None else float("nan")
+                _ext_h = float(combined_extent.height()) if combined_extent is not None else float("nan")
             except Exception as _exc:
                 log_swallowed("dem_generator_dialog.run_process", _exc)
                 _ext_w = _ext_h = float("nan")
-            if combined_extent.isNull() or not (math.isfinite(_ext_w) and math.isfinite(_ext_h)):
+            if n_total <= 0 or combined_extent is None or not (math.isfinite(_ext_w) and math.isfinite(_ext_h)):
                 # Used to surface as "cannot convert float NaN to integer" from
                 # inside the algorithm, naming neither the layer nor the cause.
                 push_message(self.iface, "오류", "입력 레이어의 범위를 구할 수 없습니다(피처가 없나요?). 레이어와 코드 필터를 확인하세요.", level=2, duration=10)
                 restore_ui_focus(self)
                 return
 
+            flat_z = "" if field_name else self._flat_z_problem(prep)
+            if flat_z:
+                push_message(self.iface, "오류", flat_z, level=2, duration=15)
+                restore_ui_focus(self)
+                return
+
+            skipped = []
+            if int(prep["skipped_no_value"]) > 0:
+                skipped.append(f"값 없음(NULL/숫자 아님) {int(prep['skipped_no_value']):,}개")
+            if int(prep["skipped_2d"]) > 0:
+                skipped.append(f"Z 없는 2D 피처 {int(prep['skipped_2d']):,}개")
+            if int(prep["skipped_transform"]) > 0:
+                skipped.append(f"좌표 변환 실패 {int(prep['skipped_transform']):,}개")
+            if skipped:
+                push_message(self.iface, "안내", "보간에서 제외: " + ", ".join(skipped), level=1, duration=8)
+            if not (working_crs is not None and working_crs.isValid()):
+                push_message(
+                    self.iface,
+                    "안내",
+                    "입력에 좌표계가 없습니다(DXF 등). 픽셀 크기를 좌표 단위 그대로 적용했고, DEM에는 좌표계가 기록되지 않습니다. "
+                    "필요하면 결과 레이어에 좌표계를 지정하세요.",
+                    level=1,
+                    duration=8,
+                )
+            if prep["crs_assumed"]:
+                push_message(
+                    self.iface,
+                    "안내",
+                    "좌표계가 없는 레이어(" + ", ".join(prep["crs_assumed"][:3])
+                    + f")는 작업 좌표계({self._crs_label(working_crs)})와 같은 좌표로 간주했습니다.",
+                    level=1,
+                    duration=8,
+                )
+
+            value_source = "attribute" if field_name else "geometry_z"
+            value_source_label = field_name if field_name else "Z 좌표(3D geometry)"
+            recorded_field = field_name if field_name else GEOM_Z_SENTINEL
+            input_counts = {"points": int(counts.get("point") or 0), "lines": int(counts.get("line") or 0),
+                            "polygons": int(counts.get("polygon") or 0)}
+            z_range = None
+            if not field_name and prep["z_min"] is not None:
+                z_range = [float(prep["z_min"]), float(prep["z_max"])]
+
+            # Snap once: TIN/IDW and Kriging write the same grid.
+            interp_extent, snap_cols, snap_rows = self._snap_extent_to_pixel(combined_extent, pixel_size)
             # Kriging (Lite) path: implemented in pure Python (numpy) + QGIS, no external providers.
             if str(algorithm or "") == "archtoolkit:kriging_lite":
                 progress = None
@@ -1300,15 +1807,21 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
                 try:
                     from .kriging_lite import ordinary_kriging_lite_to_geotiff
 
-                    value_field = None
-                    try:
-                        v = getattr(self, "cmbZField", None)
-                        if v is not None:
-                            data = v.currentData()
-                            if data:
-                                value_field = str(data)
-                    except Exception:
-                        value_field = None
+                    # The source resolved ONCE above (DEMGEN-07 follow-up): the
+                    # combo's "자동" entry carries "" and kriging_lite used to
+                    # re-resolve it on the merged fields, picking another
+                    # layer's column than TIN and the exclusion notice named.
+                    value_field = field_name if field_name else GEOM_Z_SENTINEL
+                    krig_layer, krig_from_lines = self._kriging_samples(prep, field_name, working_crs)
+                    if krig_from_lines > 0:
+                        push_message(
+                            self.iface,
+                            "안내",
+                            f"Kriging: 선/면 피처의 정점 {krig_from_lines:,}개를 표본점으로 사용합니다 "
+                            "(등고선 정점은 간격이 고르지 않아 Kriging에는 권장되지 않습니다).",
+                            level=1,
+                            duration=8,
+                        )
 
                     neighbors = 16
                     try:
@@ -1357,9 +1870,9 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
 
                     push_message(self.iface, "처리 중", f"{method_name} 보간 실행 중...", level=0)
                     info = ordinary_kriging_lite_to_geotiff(
-                        layer=merged_layer,
+                        layer=krig_layer,
                         value_field=value_field,
-                        extent=combined_extent,
+                        extent=interp_extent,
                         pixel_size=float(pixel_size),
                         out_path=str(staging_pred),
                         variance_path=str(staging_var),
@@ -1405,6 +1918,10 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
                                         "method": str(method_name or ""),
                                         "algorithm": str(algorithm or ""),
                                         "value_field": resolved_field,
+                                        "value_source": value_source,
+                                        "working_crs": self._crs_label(working_crs),
+                                        "inputs": dict(input_counts),
+                                        "kriging_samples_from_line_vertices": int(krig_from_lines),
                                         "kriging": dict(info.get("params") or {}),
                                         "n_points": int(info.get("n_points") or 0),
                                         "grid": {
@@ -1433,6 +1950,8 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
                                             "method": str(method_name or ""),
                                             "algorithm": str(algorithm or ""),
                                             "value_field": resolved_field,
+                                            "value_source": value_source,
+                                            "working_crs": self._crs_label(working_crs),
                                             "kriging": dict(info.get("params") or {}),
                                         },
                                     )
@@ -1466,9 +1985,23 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
             # Interpolate into a staged sibling of the final path so a failed or
             # killed run cannot truncate a previously-generated DEM at output_path.
             staging_out = reserve_staging_path(output_path, run_id)
-            # Snap the extent so PIXEL_SIZE is the cell size actually written
-            # (the algorithms only take ceil(extent/pixel) counts from it).
-            interp_extent, snap_cols, snap_rows = self._snap_extent_to_pixel(combined_extent, pixel_size)
+            stray_prj = self._stray_prj_path(staging_out)
+            # One interpolation source per geometry kind: points as points,
+            # lines and polygon rings as structure lines. Deciding this from
+            # the merged layer's type made the DEM depend on the first entity
+            # of a DXF sheet (contours were enforced only when it was a line).
+            prepared_files = self._save_prepared(prep, working_crs)
+            interp_rows = []
+            for kind, (_path, prep_layer) in prepared_files.items():
+                src_type = 0 if kind == "point" else 1
+                if field_name:
+                    idx = self._field_index(prep_layer.fields(), field_name)
+                    interp_rows.append(f"{prep_layer.source()}::~::0::~::{idx}::~::{src_type}")
+                else:
+                    interp_rows.append(f"{prep_layer.source()}::~::1::~::0::~::{src_type}")
+            interp_data = "::|::".join(interp_rows)
+            # Snapped extent (above): PIXEL_SIZE is the cell size actually
+            # written (the algorithms only take ceil(extent/pixel) counts from it).
             params = {
                 'INTERPOLATION_DATA': interp_data,
                 'EXTENT': interp_extent,
@@ -1477,6 +2010,9 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
             }
             if method_param is not None:
                 params['METHOD'] = method_param
+            is_idw = str(algorithm or "") == "qgis:idwinterpolation"
+            if is_idw:
+                params['DISTANCE_COEFFICIENT'] = float(self.IDW_POWER)
 
             push_message(
                 self.iface,
@@ -1503,6 +2039,12 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
                 restore_ui_focus(self)
                 return
 
+            # QGIS < 3.38 writes Arc/Info ASCII (no CRS in the file); make the
+            # published .tif the GeoTIFF with the working CRS the help promises.
+            converted_from = ""
+            if result and os.path.exists(staging_out):
+                staging_out, converted_from = self._grid_as_geotiff(staging_out, output_path, run_id, working_crs)
+
             # Publish atomically only once the interpolation produced a file.
             # Success below is bound to THIS publish, not to output_path merely
             # existing (a stale DEM from an earlier run used to be re-loaded
@@ -1519,21 +2061,34 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
                 actual_px_x, actual_px_y = self._actual_pixel_size(out_layer)
                 try:
                     if out_layer is not None:
+                        meta = self._grid_meta(pixel_size, actual_px_x, actual_px_y, crs_metric)
+                        meta.update({
+                            "method": str(method_name or ""),
+                            "algorithm": str(algorithm or ""),
+                            "value_field": recorded_field,
+                            "value_source": value_source,
+                            "working_crs": self._crs_label(working_crs),
+                            "inputs": dict(input_counts),
+                            "interpolation_sources": {"points": "points", "lines": "structure_lines",
+                                                      "polygons": "structure_lines"},
+                            "grid": {"ncols": int(snap_cols), "nrows": int(snap_rows)},
+                        })
+                        if z_range is not None:
+                            meta["z_range"] = z_range
+                        if is_idw:
+                            meta["idw"] = {"power": float(self.IDW_POWER), "search": "all_points"}
+                        if converted_from:
+                            meta["grid_file_converted_from"] = str(converted_from)
                         set_archtoolkit_layer_metadata(
                             out_layer,
                             tool_id="dem_generate",
                             run_id=str(run_id),
                             kind="dem",
+                            # Value units (elevation). The grid's own unit is in
+                            # params: pixel_size_m only for a metric CRS, else
+                            # pixel_size_map_units + crs_units "unknown".
                             units="m",
-                            params={
-                                "pixel_size_m": float(pixel_size),
-                                "pixel_size_x_m": actual_px_x,
-                                "pixel_size_y_m": actual_px_y,
-                                "method": str(method_name or ""),
-                                "algorithm": str(algorithm or ""),
-                                "value_field": z_field_name if z_field_idx >= 0 else GEOM_Z_SENTINEL,
-                                "grid": {"ncols": int(snap_cols), "nrows": int(snap_rows)},
-                            },
+                            params=meta,
                         )
                 except Exception as _exc:
                     log_swallowed("dem_generator_dialog.run_process", _exc)
@@ -1571,13 +2126,18 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
             push_message(self.iface, "오류", f"처리 중 오류: {str(e)}", level=2)
             restore_ui_focus(self)
         finally:
-            if temp_merged and os.path.exists(temp_merged):
+            leftovers = [path for path, _lyr in prepared_files.values() if path and os.path.exists(path)]
+            if leftovers:
                 from .utils import cleanup_files
-                cleanup_files([temp_merged])
+                cleanup_files(leftovers)
             # Remove a staged interpolation output left by a failed/aborted run;
             # after a successful publish staging_out is None and this is a no-op.
             if staging_out:
                 cleanup_staging_path(staging_out)
+            # QGIS < 3.38 drops "<staged name>.prj" beside the staged grid; the
+            # publish rename never carried it along.
+            if stray_prj:
+                cleanup_staging_path(stray_prj)
 
 
 
