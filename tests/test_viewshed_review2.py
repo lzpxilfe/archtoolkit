@@ -480,6 +480,39 @@ class ViewshedReview2QgisTests(unittest.TestCase):
         expected = (dist <= 300.0) & (z != -9999.0)
         self.assertTrue(np.array_equal(np.isfinite(g), expected))
 
+    def test_radius_mask_does_not_depend_on_gdal_out_of_range_flag(self):
+        """GDAL 3.11 (QGIS 3.44 LTR) leaves the first and last rows of its output
+        window at 0 instead of the -ov value; the result must still be NoData there."""
+        z = np.full((100, 100), 50.0)
+        z[45:55, 60:70] = -9999.0
+        dem, _ = self._dem("flat_ov311", z)
+        d = self._dialog()
+        rows = cols = 61
+        gt = (ORIGIN_X + 200.0, 10.0, 0.0, ORIGIN_Y - 200.0, 0.0, -10.0)
+        yy, xx = np.mgrid[0:rows, 0:cols]
+        cx = gt[0] + (xx + 0.5) * 10.0
+        cy = gt[3] - (yy + 0.5) * 10.0
+        dist = np.hypot(cx - 200505.0, cy - 499495.0)   # centre of the observer's cell
+        dem_win = z[20:81, 20:81]
+        raw = np.where(dist <= 300.0, 255, 1).astype(np.uint8)
+        raw[(dist <= 300.0) & (dem_win == -9999.0)] = 0
+        raw[0, dist[0] > 300.0] = 0      # GDAL 3.11: no -ov on the window's edge rows
+        raw[-1, dist[-1] > 300.0] = 0
+        raw_path = os.path.join(self.temp_dir, "raw_ov311.tif")
+        ds = gdal.GetDriverByName("GTiff").Create(raw_path, cols, rows, 1, gdal.GDT_Byte)
+        ds.SetGeoTransform(gt)
+        ds.GetRasterBand(1).WriteArray(raw)
+        ds = None
+        out_path = os.path.join(self.temp_dir, "final_ov311.tif")
+        d._finalize_viewshed_raster(raw_path, out_path, dem, observer_xy=(200500.0, 499500.0), max_dist=300.0)
+        out_ds = gdal.Open(out_path)
+        out = out_ds.GetRasterBand(1).ReadAsArray().astype(np.float64)
+        out_ds = None
+        out[out == -9999.0] = np.nan
+        self.assertEqual(int((out == 0).sum()), 0, "no false 'not visible' band on the edge rows")
+        expected_valid = (dist <= 300.0) & (dem_win != -9999.0)
+        self.assertTrue(np.array_equal(np.isfinite(out), expected_valid))
+
     def test_cumulative_equals_sum_of_single_viewsheds(self):
         z = self._rough(120)
         dem, _ = self._dem("rough_cum", z)

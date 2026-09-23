@@ -696,15 +696,49 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         finally:
             ds = None
 
-    def _finalize_viewshed_raster(self, raw_path, out_path, dem_layer):
+    def _range_mask(self, dem_layer, gt, xsize, ysize, observer_xy, max_dist):
+        """True for cells beyond max_dist, measured cell centre to the centre of
+        the observer's DEM cell (gdal_viewshed's own rule).
+
+        Computed here rather than read from GDAL's -ov flag: GDAL 3.11 leaves the
+        first and last rows of its output window at 0 ("not visible") instead of
+        the -ov value, so relying on the flag alone drew a false invisible band on
+        newer GDAL builds (QGIS 3.44 LTR) while GDAL 3.8 was correct.
+        """
+        mask = np.zeros((int(ysize), int(xsize)), dtype=bool)
+        try:
+            if observer_xy is None or max_dist is None or float(max_dist) <= 0:
+                return mask
+            ds = gdal.Open(self._dem_source_path(dem_layer), gdal.GA_ReadOnly)
+            if ds is None:
+                return mask
+            dgt = ds.GetGeoTransform()
+            ds = None
+            ox, oy = float(observer_xy[0]), float(observer_xy[1])
+            col = math.floor((ox - dgt[0]) / dgt[1])
+            row = math.floor((oy - dgt[3]) / dgt[5])
+            ocx = dgt[0] + (col + 0.5) * dgt[1]
+            ocy = dgt[3] + (row + 0.5) * dgt[5]
+            xs = gt[0] + (np.arange(int(xsize), dtype=np.float64) + 0.5) * gt[1]
+            ys = gt[3] + (np.arange(int(ysize), dtype=np.float64) + 0.5) * gt[5]
+            dx2 = (xs - ocx) ** 2
+            dy2 = (ys - ocy) ** 2
+            limit = float(max_dist) ** 2 * (1.0 + 1e-9)
+            return (dy2[:, None] + dx2[None, :]) > limit
+        except Exception as _exc:
+            log_swallowed("viewshed_dialog._range_mask", _exc)
+            return mask
+
+    def _finalize_viewshed_raster(self, raw_path, out_path, dem_layer, observer_xy=None, max_dist=None):
         """Raw gdal_viewshed output -> Float32 0/255 raster with NoData = -9999.
 
-        NoData: cells gdal_viewshed flagged as beyond MAX_DISTANCE (measured,
-        like GDAL, from the centre of the observer's cell) and DEM NoData cells.
-        Both were written as 0 and drawn as "보이지 않음". The raw output already
-        covers only the DEM window around the observer, so the result is never
-        larger than the DEM (the old circular crop expanded it to the full
-        circle's bounding box, far beyond the DEM).
+        NoData: cells beyond MAX_DISTANCE (measured, like GDAL, from the centre
+        of the observer's cell; see _range_mask), cells gdal_viewshed flagged
+        with -ov, and DEM NoData cells. All were written as 0 and drawn as
+        "보이지 않음". The raw output already covers only the DEM window around
+        the observer, so the result is never larger than the DEM (the old
+        circular crop expanded it to the full circle's bounding box, far beyond
+        the DEM).
         """
         src = gdal.Open(raw_path, gdal.GA_ReadOnly)
         if src is None:
@@ -721,6 +755,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             out = arr.astype(np.float32)
             nodata_mask = arr == int(self.VIEWSHED_OUT_OF_RANGE_VALUE)
             nodata_mask |= self._dem_nodata_mask(dem_layer, gt, xsize, ysize)
+            nodata_mask |= self._range_mask(dem_layer, gt, xsize, ysize, observer_xy, max_dist)
             out[nodata_mask] = float(self.VIEWSHED_NODATA)
             drv = gdal.GetDriverByName("GTiff")
             out_ds = drv.Create(out_path, xsize, ysize, 1, gdal.GDT_Float32, options=["COMPRESS=LZW"])
@@ -2386,9 +2421,12 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             if not os.path.exists(raw_output):
                 raise Exception("gdal_viewshed가 결과를 만들지 못했습니다.")
 
-            # Cells beyond the radius (GDAL's own -ov flag, measured from the
-            # observer's cell centre) and DEM NoData cells -> NoData.
-            self._finalize_viewshed_raster(raw_output, final_output, dem_layer)
+            # Cells beyond the radius (measured from the observer's cell centre,
+            # as GDAL does; not only GDAL's -ov flag, see _range_mask) and DEM
+            # NoData cells -> NoData.
+            self._finalize_viewshed_raster(
+                raw_output, final_output, dem_layer,
+                observer_xy=(point_dem.x(), point_dem.y()), max_dist=max_dist)
 
             if os.path.exists(final_output):
                 use_higuchi = self.chkHiguchi.isChecked()
@@ -2545,7 +2583,9 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             processing.run("gdal:viewshed", params)
             if not os.path.exists(raw_output):
                 raise Exception("viewshed 결과 래스터 생성 실패")
-            self._finalize_viewshed_raster(raw_output, final_output, dem_layer)
+            self._finalize_viewshed_raster(
+                raw_output, final_output, dem_layer,
+                observer_xy=(point_dem.x(), point_dem.y()), max_dist=max_dist)
             if not os.path.exists(final_output):
                 raise Exception("viewshed 결과 래스터 생성 실패")
 
