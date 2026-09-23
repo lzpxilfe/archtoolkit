@@ -74,3 +74,22 @@ QGIS 4(PyQt6) 대비 표기 이관(스코프 열거형, `QMetaType` 필드 타�
 | covariate_report | n·r·VIF 동일 | CSV 머리에 범위 블록 추가 |
 | ai_report_local | 면적·개수·거리·통계 동일 | 버퍼 기준 표기, 내부 유적 서술, 방향 분포가 전체 유적 기준으로 |
 | geochem_polygonize | 동일 | 실행 ID만 다름 |
+
+## 나머지 도구 13개 리뷰 라운드 (2026-09-23)
+
+같은 27개 시나리오를 이 라운드 직전 커밋과 비교했습니다. 11개는 수치 지문이 같고, 나머지는 다음처럼 의도한 대로 달라졌습니다.
+
+| 시나리오 | 달라진 값 |
+| --- | --- |
+| terrain_basic | 사면방향 가장자리 셀이 0(평탄 오표시)에서 NoData로 |
+| terrain_multiscale | 반경 3 TPI 범위 [-2.83, 3.20]에서 [-0.357, 0.803]으로(이전 근사는 과대), 수동 임계값 지형분류는 3-5등급만 |
+| terrain_tpi_fallback | 반경을 30으로 바꿔 3x3 대체 경로를 계속 시험(반경 15는 이제 정확한 TPI) |
+| viewshed_single, viewshed_higuchi(_custom) | 보이는 셀 수 동일(1449). 결과 래스터가 DEM 범위로 줄고(600x600에서 60x60) 반경 밖 셀은 NoData |
+| cost_tobler, cost_conolly | 비용·경로·래스터 동일. 마일스톤이 정확히 500 m에 놓이고 해석 간선 시간을 씀 |
+| cost_network_mst | 수치 동일. 대칭화 방식·후보 k 메타데이터 추가 |
+| network_ppa | 같은 위치 유적 쌍이 연결되어 간선 12개에서 13개로 |
+| network_visibility | 상호 가시 쌍 하나 추가(P4-P5, gdal_viewshed도 보임으로 판정) |
+| geochem_polygonize | 3.1·7.1 경계 구간이 한 등급 위로, 선 픽셀은 이웃 값 복사로(한 픽셀짜리 중간값 폴리곤 2개 소멸) |
+| geology_rasterize, cadastral_overlap | 래스터·CSV·면적표 동일. 경고와 메타데이터만 정정 |
+| map_styling_dem | 램프 값 동일, 범례에 구간값 |
+| trench_suggestion | 실행 시각이 든 레이어 이름만 다름 |

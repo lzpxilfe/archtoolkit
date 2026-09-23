@@ -10,12 +10,14 @@
 - 출력 격자는 픽셀 크기의 정수배로 스냅되며, 실제 x/y 픽셀 크기가 메타데이터에 기록됩니다.
 - Kriging은 측점에서 입력값을 정확히 재현합니다. 변동함수를 적합하지 않는 "Lite"이므로 `_variance.tif`는 상대적 불확실성 지도입니다.
 - 수치지형도 DXF 코드 프리셋은 이 대화상자에서 DXF로 불러온 레이어에만 적용됩니다.
+- 등고선과 표고점을 다른 레이어로 함께 넣을 수 있습니다(점은 점, 선·면은 구조선). 지리 좌표계(도) 입력과 Z가 모두 0인 3D 자료는 거부합니다.
 
 ### <img src="../icons/contour.png" width="48" alt="" align="absmiddle"> 등고선 추출 (Extract Contours)
 - DEM에서 `gdal_contour`로 일정 간격 등고선을 만듭니다. 결과 필드 `ELEV`는 DEM 생성 도구가 그대로 읽습니다.
 
 ### <img src="../icons/cadastral.png" width="48" alt="" align="absmiddle"> 지적도 중첩 면적표 (Cadastral Overlap)
-- 조사구역과 필지의 교차 면적을 `parcel_m2`, `in_aoi_m2`, `in_aoi_pct`로 기록합니다. 면적은 타원체 기준이며 지리 좌표계 입력은 경고합니다.
+- 조사구역과 필지의 교차 면적을 `parcel_m2`, `in_aoi_m2`, `in_aoi_pct`로 기록합니다. 면적은 프로젝트 타원체가 있으면 타원체 기준, 없음(NONE)이면 투영 평면 기준이며 지리 좌표계 입력은 경고합니다.
+- 면적 방식(타원체 또는 투영 평면)이 메타데이터 `area_method`에 남습니다. 분할 모드의 합계는 겹치는 조사지역을 한 번만 셉니다.
 
 ## 분석
 
@@ -24,25 +26,31 @@
 - TPI 반경 2셀 이상은 (2r+1)셀 블록 평균 근사이며 레이어 이름과 메타데이터에 실제 반경이 기록됩니다. 작은 DEM에서는 3x3으로 대체하고 그 사실을 알립니다.
 - 곡률 부호: 종단 음(-)=볼록, 횡단 음(-)=수렴. GRASS·SAGA와 부호가 반대입니다.
 - 경사 등급 프리셋 가운데 "한국표준"만 문헌(산림청 예규) 분류이고, 나머지 3종은 플러그인이 정한 표시 구분입니다.
+- 반경 2셀 이상 TPI는 (2r+1)x(2r+1) 창의 정확한 초점평균(중심 셀 제외)입니다. 가장자리 r셀은 NoData입니다. 사면방향의 평탄 셀은 -1, NoData는 -9999이며 정북은 N 구간입니다.
 
 ### <img src="../icons/slope_aspect.png" width="48" alt="" align="absmiddle"> 경사도/사면방향 도면화 (Slope/Aspect Drafting)
 - AOI 기준 인쇄용 경사 래스터와 방위각 화살표 포인트를 만듭니다. 지리 좌표계 DEM은 거부합니다.
+- 경사 단계가 구역 병합과 라벨을 정합니다(예: 5° 단계면 5-10° 구역).
 
 ### <img src="../icons/viewshed.png" width="48" alt="" align="absmiddle"> 가시권 분석 (Viewshed Analysis)
 - 단일·누적·가중 누적·역가시권·선형 가시권, LOS 단면, AOI 가시 통계. gdal_viewshed(Wang et al. 2000) 기반, 곡률·굴절 보정 옵션.
 - 히구치 거리대의 경계(기본 500 m / 2500 m)는 실무 관례이며 히구치의 정의(D/H 비율)에 맞게 대상 높이에 따라 조정할 수 있습니다. 사용한 값은 메타데이터에 기록됩니다.
+- 반경 밖과 DEM NoData 셀은 NoData입니다(보이지 않음 0과 구분). DEM 밖이나 NoData 위의 관측점은 단일 모드에서 거부하고 다른 모드에서는 제외한 뒤 개수를 보고합니다. LOS는 DEM 픽셀 간격으로 표본을 뽑고, 경로 중 NoData는 '판정 불가'로 표시합니다.
 
 ### <img src="../icons/cost.png" width="48" alt="" align="absmiddle"> 비용표면/최소비용경로 (Cost Surface / LCP)
 - Tobler·Naismith·Pandolf·Herzog(Minetti) 모델과 플러그인 정의 상대 경사 비용, 추가 마찰, LCP·회랑·등시선.
 - 8방향 격자 누적이라 누적 비용이 측지선 대비 최대 약 8% 과대평가될 수 있습니다(4방향은 약 41%). 절대값보다 상대 비교로 해석하십시오.
 - Pandolf 시간 모드는 경사에 반응하지 않습니다. 상대 경사 비용은 기준 경사(기본 5°)에 따라 결과가 달라지므로 기준 경사를 함께 보고하십시오.
+- 차량/수레(Herzog 2013) 임계경사는 경사도 %입니다(기본 12%: 이 경사에서 비용이 평지의 2배). 마일스톤·프로파일 시간에도 마찰이 반영되고, 모든 모델 변수가 메타데이터에 남습니다.
 
 ### <img src="../icons/network.png" width="48" alt="" align="absmiddle"> 최소비용 네트워크 (Least-cost Network)
 - LCP 비용으로 MST(Kruskal)·k-NN·허브 네트워크와 중심성(연결·근접·매개)을 계산합니다. 후보 간선은 유클리드 k-최근린으로 먼저 추리므로 MST는 후보 집합 위의 근사입니다.
+- 같은 DEM 셀의 유적 쌍은 직선 간선으로 연결됩니다. 대칭화 방식은 모든 모드에서 보이고 기록되며, All 모드의 SNA는 MST·k-NN·허브 간선의 합집합 기준입니다.
 
 ### <img src="../icons/spatial_network.png" width="48" alt="" align="absmiddle"> 근접/가시성 네트워크 (PPA / Visibility)
-- PPA: k-NN·반경·Delaunay·Gabriel·RNG. 좌표가 같은 유적은 간선을 공유합니다.
+- PPA: k-NN·반경·Delaunay·Gabriel·RNG. 좌표가 같은 유적은 서로 연결되고 이웃 간선을 공유합니다.
 - 가시성: DEM 샘플링 LOS에 곡률·굴절 보정(기본 굴절계수 0.13). DEM NoData로 검사하지 못한 쌍은 "샘플 실패"로 세고 노드의 `fail_deg`에 기록합니다. `betweenness`는 원시 쌍 개수, `betw_norm`은 정규화값입니다.
+- 가시성 LOS는 지형 고도를 양선형 보간으로 읽고 관측·대상 셀을 장애물에서 뺍니다. Gabriel은 엄격 정의(원 위의 점도 제외)입니다. 유적이 2곳이거나 일직선이면 경로가 됩니다.
 
 ### <img src="../icons/cost.png" width="48" alt="" align="absmiddle"> 거리 래스터 (Distance to Features)
 - 대상 피처를 굽고(선·면은 닿는 셀 모두) 셀별 최근접 거리를 계산합니다. 대상 셀이 없거나 기준 픽셀이 정사각이 아니면 거부합니다. 최대 거리 밖 셀은 NoData로 표시됩니다(밴드에 NoData 값이 기록되므로 정렬/내보내기가 거리값으로 오인하지 않습니다). 기준 래스터의 단위가 미터가 아니면 거부합니다.
@@ -60,12 +68,15 @@
 
 ### <img src="../icons/geochem.png" width="48" alt="" align="absmiddle"> 지질도 도엽 ZIP (KIGAM)
 - ZIP 해제, SHP 로드, 스타일·라벨 적용, 지질 코드의 정수 래스터 변환. 코드표는 실행 전체에서 하나로 통일되고 `*_mapping.csv`에 셀 수(`cell_count`)와 함께 저장됩니다. 셀보다 좁은 암체는 경고로 표시됩니다.
+- 값이 비었거나 NULL인 코드는 클래스로 굽지 않고 '값 없음'으로 셉니다. CRS가 없는 도엽은 병합하지 않습니다. DBF 인코딩은 .cpg를 따릅니다.
 
 ### <img src="../icons/geochem.png" width="48" alt="" align="absmiddle"> 지구화학도 래스터 수치화 (GeoChem)
 - WMS 렌더링 색상을 범례(색-값)로 역추정합니다. 범례 색과 먼 픽셀은 NoData로 제외되고 비율이 경고로 표시됩니다. 구역 통계는 픽셀 중심 규칙이며 `zone_area`와 비교할 수 있습니다. 값은 추정값입니다.
+- 경계선 보간은 무채색 선과 그 가장자리만 최근접 값 복사로 채웁니다(흰 배경 등은 NoData). 범례 경계값 색은 그 값에서 시작하는 구간으로 분류합니다.
 
 ### <img src="../icons/profile.png" width="48" alt="" align="absmiddle"> 지형 단면 (Terrain Profile)
 - 단면선 작성·저장·재선택, 다중 프로파일, 지도-차트 연동, AOI 음영, CSV·이미지 내보내기.
+- 그래프는 원시 샘플을 그리며(평활화는 선택), 수직 과장 배율을 화면과 내보낸 이미지에 적습니다. NoData 구간에서는 선을 끊고 상승·경사 통계에서 뺍니다.
 
 ## 조사 설계·도면화·보고
 
@@ -74,6 +85,7 @@
 
 ### <img src="../icons/styling.png" width="48" alt="" align="absmiddle"> 도면 시각화 (Map Styling)
 - 수치지형도 DXF 레이어를 도로·하천·건물 중심으로 분류 스타일링, DEM 배경(hillshade·gray·color), QML·JSON 프리셋 내보내기.
+- 코드 이름은 국토지리정보원 코드표(연속수치지형도 코드 및 레이어 설명서 Ver 5.1.1, 지형지물 표준코드)를 따릅니다. 스타일하지 않은 피처는 코드별로 개수를 보고합니다.
 
 ### <img src="../icons/ai_report.png" width="48" alt="" align="absmiddle"> AI 조사요약 (AOI Report)
 - AOI 반경 내 레이어를 스캔해 로컬 요약 또는 Gemini 초안을 만듭니다. 레이어별 개수·길이·면적·래스터 통계는 AOI에 반경을 더한 버퍼 기준이며 리포트·CSV·프롬프트에 그렇게 표기됩니다. 범주형 래스터는 클래스 히스토그램으로, 무효 기하는 개수로 따로 보고됩니다. 레이어를 편집하면 다음 생성 때 다시 계산합니다. 스캔 한도·표본 비율·절단 여부가 CSV와 프롬프트에 기록되고, 잘린 응답은 표시됩니다. Gemini 모드는 AOI 정보와 레이어 통계, 유적 거리·방위를 Google 서버로 보냅니다. 민감한 유적 위치는 사전 검토 없이 보내지 마십시오.
