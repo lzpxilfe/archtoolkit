@@ -68,11 +68,13 @@ def interp_rgb_to_value(
     bb = b.astype(np.float32, copy=False)
 
     out = np.full(rr.shape, np.nan, dtype=np.float32)
+    # Distance of each pixel to the winning segment, always measured to the
+    # UNSNAPPED projection. snap_last_t only changes the VALUE read off the
+    # last segment; it must neither decide which segment wins nor count as
+    # colour mismatch. Competing on the snapped distance made a pixel at
+    # t in (snap_t, 0.5) lose to the previous segment's end (value 12 instead
+    # of 51 for Fe2O3), or exceed the tolerance and become NoData.
     min_dist = np.full(rr.shape, np.float32(np.inf), dtype=np.float32)
-    # Residual of the winning segment measured to the UNSNAPPED projection:
-    # snap_last_t moves the last segment's projection to its endpoint, which
-    # is the intended value rule but must not count as colour mismatch.
-    min_dist_raw = np.full(rr.shape, np.float32(np.inf), dtype=np.float32)
 
     pts = list(points)
     last_seg_idx = len(pts) - 2
@@ -103,36 +105,30 @@ def interp_rgb_to_value(
 
         t = ((rr - c1r) * vr + (gg - c1g) * vg + (bb - c1b) * vb) / v_len_sq
         np.clip(t, np.float32(0.0), np.float32(1.0), out=t)
-        dist_sq_raw = None
-        if snap_last is not None and i == last_seg_idx:
-            # Distance to the true projection, kept for the residual only.
-            pr0 = c1r + t * vr
-            pg0 = c1g + t * vg
-            pb0 = c1b + t * vb
-            dist_sq_raw = (rr - pr0) ** 2 + (gg - pg0) ** 2 + (bb - pb0) ** 2
-            # Important: apply snap BEFORE distance comparison (affects which segment wins).
-            try:
-                t[t > np.float32(snap_last)] = np.float32(1.0)
-            except Exception as _exc:
-                log_swallowed("tools/geochem_legend.py:84 (interp_rgb_to_value)", _exc)
         pr = c1r + t * vr
         pg = c1g + t * vg
         pb = c1b + t * vb
         dist_sq = (rr - pr) ** 2 + (gg - pg) ** 2 + (bb - pb) ** 2
-        if dist_sq_raw is None:
-            dist_sq_raw = dist_sq
 
         mask = dist_sq < min_dist
         if not np.any(mask):
             continue
 
+        t_val = t
+        if snap_last is not None and i == last_seg_idx:
+            # Value rule only: t above the snap threshold reads as the top value.
+            try:
+                t_val = np.where(t > np.float32(snap_last), np.float32(1.0), t)
+            except Exception as _exc:
+                log_swallowed("tools/geochem_legend.py (interp_rgb_to_value snap)", _exc)
+                t_val = t
+
         base = np.float32(v1)
         delta = np.float32(v2 - v1)
-        out[mask] = base + t[mask].astype(np.float32, copy=False) * delta
+        out[mask] = base + t_val[mask].astype(np.float32, copy=False) * delta
         min_dist[mask] = dist_sq[mask].astype(np.float32, copy=False)
-        min_dist_raw[mask] = dist_sq_raw[mask].astype(np.float32, copy=False)
 
-    residual = np.sqrt(min_dist_raw)
+    residual = np.sqrt(min_dist)
     if max_distance is not None:
         try:
             tol = float(max_distance)
@@ -161,6 +157,191 @@ def mask_black_lines(r: np.ndarray, g: np.ndarray, b: np.ndarray) -> np.ndarray:
     mn = np.minimum(np.minimum(rr, gg), bb)
     halo = (mx < 90) & ((mx - mn) < 30)
     return strict | halo
+
+
+def _neighbour_shift(a: np.ndarray, dy: int, dx: int, fill) -> np.ndarray:
+    """``out[y, x] = a[y + dy, x + dx]``; cells whose neighbour is off the grid get ``fill``."""
+    out = np.full(a.shape, fill, dtype=a.dtype)
+    h, w = a.shape
+    ys0, ys1 = max(0, -dy), h - max(0, dy)
+    xs0, xs1 = max(0, -dx), w - max(0, dx)
+    if ys1 > ys0 and xs1 > xs0:
+        out[ys0:ys1, xs0:xs1] = a[ys0 + dy:ys1 + dy, xs0 + dx:xs1 + dx]
+    return out
+
+
+# 4-neighbours first, then diagonals: the order in which a filled pixel looks
+# for a source, so the nearest (not the diagonal) neighbour wins a tie.
+_NEIGHBOURS = ((-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1))
+
+
+def _dilate8(mask: np.ndarray) -> np.ndarray:
+    grown = mask.copy()
+    for dy, dx in _NEIGHBOURS:
+        grown |= _neighbour_shift(mask, dy, dx, False)
+    return grown
+
+
+def grow_mask(mask: np.ndarray, steps: int) -> np.ndarray:
+    """``mask`` grown by ``steps`` 8-neighbour pixels."""
+    grown = np.asarray(mask, dtype=bool).copy()
+    for _step in range(max(0, int(steps))):
+        grown = _dilate8(grown)
+    return grown
+
+
+def mask_colour_halo(
+    r: np.ndarray,
+    g: np.ndarray,
+    b: np.ndarray,
+    *,
+    core: np.ndarray,
+    rings: int = 2,
+    max_rgb_distance: float = 16.0,
+    min_alpha: float = 0.08,
+    max_alpha: float = 0.92,
+) -> np.ndarray:
+    """Anti-aliased edge pixels of dark linework drawn over a colour.
+
+    A black line over a red (12 %) area leaves an edge of (115, 0, 0): black
+    blended 50 % with red. That colour lies on the legend ramp (it is close
+    to the maroon maximum), so neither the RGB tolerance nor the neutral
+    ``mask_black_lines`` test rejects it and it read as ~50 %. A pixel is
+    such an edge when it lies within ``rings`` pixels (8-neighbour steps) of
+    the neutral dark ``core`` and its colour is ``alpha * N`` for the colour
+    ``N`` of one of its own neighbours outside the line (``min_alpha <=
+    alpha <= max_alpha``, RGB distance to that blend line at most
+    ``max_rgb_distance``). Testing against the NEIGHBOUR's colour, not any
+    legend colour, keeps legitimately dark legend areas (navy is 0.45 x the
+    blue stop) from being flagged next to a line. Returns the edge mask only
+    (``core`` excluded). Without a neutral dark core nearby nothing is
+    flagged: a darkened colour on its own is indistinguishable from data.
+    """
+    core = np.asarray(core, dtype=bool)
+    region = core.copy()
+    if not np.any(core) or rings <= 0:
+        return np.zeros(core.shape, dtype=bool)
+    h, w = core.shape
+    chans = (np.asarray(r), np.asarray(g), np.asarray(b))
+    tol_sq = float(max_rgb_distance) ** 2
+    for _ring in range(int(rings)):
+        cand = _dilate8(region) & ~region
+        ys, xs = np.nonzero(cand)
+        if ys.size == 0:
+            break
+        # Gather only the candidate pixels and their neighbours: a full-size
+        # float RGB stack of a 12 Mpx export would cost ~300 MB.
+        px = np.stack([c[ys, xs] for c in chans], axis=-1).astype(np.float64)
+        pp = np.einsum("ij,ij->i", px, px)
+        is_blend = np.zeros(ys.size, dtype=bool)
+        for dy, dx in _NEIGHBOURS:
+            ny = ys + dy
+            nx = xs + dx
+            inside = (ny >= 0) & (ny < h) & (nx >= 0) & (nx < w)
+            nyc = np.clip(ny, 0, h - 1)
+            nxc = np.clip(nx, 0, w - 1)
+            n_ok = inside & ~region[nyc, nxc]
+            nb = np.stack([c[nyc, nxc] for c in chans], axis=-1).astype(np.float64)
+            nn = np.einsum("ij,ij->i", nb, nb)
+            pn = np.einsum("ij,ij->i", px, nb)
+            a = np.where(nn > 1.0, pn / np.maximum(nn, 1.0), -1.0)
+            d_sq = pp - 2.0 * a * pn + a * a * nn
+            is_blend |= n_ok & (nn > 1.0) & (a >= min_alpha) & (a <= max_alpha) & (d_sq <= tol_sq)
+        if not np.any(is_blend):
+            break
+        region[ys[is_blend], xs[is_blend]] = True
+    return region & ~core
+
+
+def fill_nearest(
+    values: np.ndarray,
+    *,
+    fill_mask: np.ndarray,
+    valid: np.ndarray,
+    max_dist_px: int,
+    nodata: Optional[float] = None,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Give each ``fill_mask`` pixel the value of its nearest pixel outside the mask.
+
+    The fill grows one pixel (8-neighbour) per step for at most
+    ``max_dist_px`` steps and COPIES a neighbour's value, so it never makes a
+    value (or class) that is not already on the map. The GDAL inverse-
+    distance fill it replaces averaged the two sides of a line: a black line
+    between a 4.5 % and a 7.1 % area became a 5.8 % strip, a sliver of a
+    class that exists on neither side.
+
+    Every pixel outside ``fill_mask`` is a source. ``valid`` ones pass on
+    their value; when ``nodata`` is given, the others pass on NoData, so a
+    line drawn across white background or a transparent area stays NoData
+    instead of borrowing a value from data further away. Pixels outside
+    ``fill_mask`` are never changed. Returns ``(filled_values, filled_mask)``
+    where ``filled_mask`` marks the pixels that received a VALID value.
+    """
+    fill_mask = np.asarray(fill_mask, dtype=bool)
+    valid = np.asarray(valid, dtype=bool)
+    out = np.array(values, copy=True)
+    if nodata is not None:
+        have = ~fill_mask
+        src_valid = valid & ~fill_mask
+        out[~fill_mask & ~valid] = nodata
+    else:
+        have = valid & ~fill_mask
+        src_valid = have.copy()
+    todo = fill_mask.copy()
+    for _step in range(max(1, int(max_dist_px))):
+        if not np.any(todo):
+            break
+        newly = np.zeros(out.shape, dtype=bool)
+        new_vals = np.zeros(out.shape, dtype=out.dtype)
+        new_valid = np.zeros(out.shape, dtype=bool)
+        for dy, dx in _NEIGHBOURS:
+            src_have = _neighbour_shift(have, dy, dx, False)
+            take = todo & ~newly & src_have
+            if np.any(take):
+                new_vals[take] = _neighbour_shift(out, dy, dx, 0)[take]
+                new_valid[take] = _neighbour_shift(src_valid, dy, dx, False)[take]
+                newly |= take
+        if not np.any(newly):
+            break
+        out[newly] = new_vals[newly]
+        have |= newly
+        src_valid |= newly & new_valid
+        todo &= ~newly
+    filled = fill_mask & src_valid
+    return out, filled
+
+
+def legend_first_stop_is_absent_grey(points: Sequence[LegendPoint]) -> bool:
+    """True when the legend's lowest stop is a neutral grey 'absent data' colour.
+
+    The shipped presets start with (204, 204, 204) at value 0 (자료 없음), so
+    the interval up to the second stop is background, not data. A custom
+    legend usually starts at its first real class; treating that interval as
+    NoData threw the whole lowest class away. Neutral means channel spread
+    <= 16 and light means mean >= 96 (a dark neutral is linework, not a
+    legend entry).
+    """
+    pts = sorted(points, key=lambda p: float(p.value))
+    if len(pts) < 2:
+        return False
+    rgb = [int(c) for c in pts[0].rgb]
+    return (max(rgb) - min(rgb)) <= 16 and (sum(rgb) / 3.0) >= 96.0
+
+
+def break_tolerance(value: float) -> float:
+    """Tolerance for "a pixel exactly at a legend stop" in float32 values.
+
+    Values are float32; a stop such as 3.1 is stored as 3.0999999, which is
+    below the float64 break 3.1, so exact stop colours used to fall into the
+    class BELOW the stop for 3.1/5.7/7.1/9.4 but above it for 3.5/4.5/8.5/12.
+    Four float32 ULPs of the stop is far below the colour quantisation (the
+    finest Fe2O3 step is ~0.003 %) and puts every stop in the class it starts.
+    """
+    try:
+        return 4.0 * float(np.spacing(np.float32(abs(float(value)))))
+    except Exception as _exc:
+        log_swallowed("tools/geochem_legend.py (break_tolerance)", _exc)
+        return 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -308,15 +489,19 @@ def legend_points_from_csv(csv_path: str) -> LegendCsvResult:
 # Legend image sampling geometry and sanity checks (QGIS-free).
 # ---------------------------------------------------------------------------
 
-def legend_sample_rows(n_points: int, height: int, low_at_bottom: bool = True) -> List[int]:
+def legend_sample_rows(n_points: int, height: int, low_at_bottom: bool = True, continuous: bool = False) -> List[int]:
     """Image rows at which to sample ``n_points`` legend anchors on a vertical bar.
 
-    Each anchor is sampled at the centre of its band, row ``(i + 0.5) / n * h``,
-    so the extreme anchors sit half a band in from the edges. For a continuous
-    bar this is the same as insetting the sample range by half a band. The old
-    rule (rows 0 and h-1 for the extremes) read the margin or frame that every
-    real legend graphic has, so white or the border colour became the legend
-    minimum and maximum.
+    Discrete legend (one box per value, ``continuous=False``): each anchor is
+    sampled at the centre of its box, row ``(i + 0.5) / n * h``. The old rule
+    (rows 0 and h-1 for the extremes) read the margin or frame of the graphic.
+
+    Continuous colour bar (``continuous=True``): the values sit at the two
+    ends of the bar and evenly between them, so anchor ``i`` is at
+    ``i / (n - 1)`` of the (cropped) bar, rows ``0 .. h-1``. Box centres on a
+    continuous bar shifted every anchor inwards: the end colours were off by
+    ~69 RGB and a map value of 30 % came back as 46.6 %. Frames or margins at
+    the ends are caught by ``sampled_legend_problem`` and rejected.
 
     ``low_at_bottom`` orders the rows so that ``rows[0]`` is the lowest value
     (nearest the bottom of the image). Rows are clamped to ``0..height-1``.
@@ -325,12 +510,41 @@ def legend_sample_rows(n_points: int, height: int, low_at_bottom: bool = True) -
     h = max(1, int(height))
     rows: List[int] = []
     for i in range(n):
-        frac = (float(i) + 0.5) / float(n)
-        if low_at_bottom:
-            frac = 1.0 - frac
-        y = int(math.floor(frac * float(h)))
+        if continuous and n > 1:
+            frac = float(i) / float(n - 1)
+            if low_at_bottom:
+                frac = 1.0 - frac
+            y = int(round(frac * float(h - 1)))
+        else:
+            frac = (float(i) + 0.5) / float(n)
+            if low_at_bottom:
+                frac = 1.0 - frac
+            y = int(math.floor(frac * float(h)))
         rows.append(max(0, min(h - 1, y)))
     return rows
+
+
+def legend_profile_looks_discrete(colours: Sequence[Sequence[float]], n_points: int, tol: float = 12.0) -> bool:
+    """Guess whether a sampled legend column is boxes (True) or a continuous bar.
+
+    ``colours`` is the RGB of every row along the sample column. Rows are
+    grouped into runs that stay within ``tol`` RGB of the run's first row
+    (tolerant of JPEG noise). A box legend is made of runs about ``h / n``
+    rows long; a continuous bar changes colour every few rows. The guess is
+    "boxes" when the row-weighted median run is at least half a box.
+    """
+    c = np.asarray(colours, dtype=np.float64).reshape(-1, 3)
+    h = int(c.shape[0])
+    if h < 2:
+        return True
+    runs: List[int] = []
+    start = 0
+    for y in range(1, h + 1):
+        if y == h or float(np.linalg.norm(c[y] - c[start])) > float(tol):
+            runs.append(y - start)
+            start = y
+    lens = np.repeat(np.asarray(runs, dtype=np.float64), runs)
+    return float(np.median(lens)) >= 0.5 * float(h) / float(max(1, int(n_points)))
 
 
 def sampled_legend_problem(points: Sequence[LegendPoint], alphas: Optional[Sequence[int]] = None) -> Optional[str]:

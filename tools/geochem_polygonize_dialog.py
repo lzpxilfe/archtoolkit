@@ -62,6 +62,7 @@ from .utils import (
     log_swallowed,
     log_exception,
     log_message,
+    move_group_to_top,
     push_message,
     restore_ui_focus,
     set_archtoolkit_layer_metadata,
@@ -81,10 +82,16 @@ from .geochem_legend import (
     LegendCsvError,
     LegendPoint,
     RGB_MATCH_TOLERANCE as _RGB_MATCH_TOLERANCE,
+    break_tolerance as _break_tolerance,
+    fill_nearest as _fill_nearest,
+    grow_mask as _grow_mask,
     interp_rgb_to_value as _interp_rgb_to_value,
+    legend_first_stop_is_absent_grey as _legend_first_stop_is_absent_grey,
     legend_points_from_csv as _legend_points_from_csv,
+    legend_profile_looks_discrete as _legend_profile_looks_discrete,
     legend_sample_rows as _legend_sample_rows,
     mask_black_lines as _mask_black_lines,
+    mask_colour_halo as _mask_colour_halo,
     points_to_breaks as _points_to_breaks,
     sampled_legend_problem as _sampled_legend_problem,
 )
@@ -304,34 +311,6 @@ def _gdal_rasterize_wkt_mask(
         return None
 
 
-def _gdal_fill_nodata_nearestish(*, arr: np.ndarray, nodata: float, max_search_dist_px: int) -> np.ndarray:
-    """Fill nodata/NaN using GDAL FillNodata (fast, no scipy).
-
-    Note: This is not a perfect 'nearest' in Euclidean sense, but with smoothingIterations=0 it preserves edges well.
-    """
-    a = arr.astype(np.float32, copy=True)
-    a[~np.isfinite(a)] = float(nodata)
-
-    ysize, xsize = a.shape
-    drv = gdal.GetDriverByName("MEM")
-    ds = drv.Create("", int(xsize), int(ysize), 1, gdal.GDT_Float32)
-    band = ds.GetRasterBand(1)
-    band.WriteArray(a)
-    band.SetNoDataValue(float(nodata))
-    try:
-        gdal.FillNodata(
-            targetBand=band,
-            maskBand=None,
-            maxSearchDist=int(max(1, max_search_dist_px)),
-            smoothingIterations=0,
-        )
-    except Exception as _exc:
-        log_swallowed("geochem_polygonize_dialog._gdal_fill_nodata_nearestish", _exc)
-    filled = band.ReadAsArray().astype(np.float32, copy=False)
-    ds = None
-    return filled
-
-
 def _classify_to_bins(
     *,
     values: np.ndarray,
@@ -358,9 +337,13 @@ def _classify_to_bins(
 
     vmin = float(br[0])
     vmax = float(br[-1])
-    vv = np.clip(v, vmin, vmax)
+    vv = np.clip(v.astype(np.float64), vmin, vmax)
 
-    bins = br[1:-1]  # internal thresholds
+    # Internal thresholds, compared in float64 and lowered by a few float32
+    # ULPs: a pixel exactly at a stop colour holds float32(stop), e.g.
+    # 3.0999999 for 3.1, and must land in the class that STARTS at the stop
+    # (as 3.5 or 12 always did), not the one below it.
+    bins = np.asarray([b - _break_tolerance(b) for b in br[1:-1]], dtype=np.float64)
     idx = np.digitize(vv, bins=bins, right=False).astype(np.int16, copy=False)  # 0..n-1
     cls[valid] = idx[valid] + 1  # 1..n_intervals
     return cls
@@ -579,7 +562,10 @@ class GeoChemPolygonizeDialog(QtWidgets.QDialog):
         grp_clip = QtWidgets.QGroupBox("3. 처리/보정 옵션")
         grid2 = QtWidgets.QGridLayout(grp_clip)
         self.spinPixelSize = QtWidgets.QDoubleSpinBox(grp_clip)
-        self.spinPixelSize.setDecimals(2)
+        # 6 decimals: a geographic (EPSG:4326) raster needs sizes like
+        # 0.0001 deg (~10 m); with 2 decimals anything under 0.005 deg
+        # became 0 and silently fell back to the canvas resolution.
+        self.spinPixelSize.setDecimals(6)
         self.spinPixelSize.setMinimum(0.0)
         self.spinPixelSize.setMaximum(1000000.0)
         self.spinPixelSize.setSingleStep(1.0)
@@ -601,11 +587,12 @@ class GeoChemPolygonizeDialog(QtWidgets.QDialog):
         self.chkMaskAoi.setChecked(True)
         self.chkMaskAoi.setToolTip("조사지역 폴리곤 내부만 유효값으로 두고 바깥은 NoData로 처리합니다. (분석/중심점 계산에 권장)")
 
-        self.chkLowAsNoData = QtWidgets.QCheckBox("0~최소값(회색) 구간을 NoData로 취급")
+        self.chkLowAsNoData = QtWidgets.QCheckBox("0-최소값(회색) 구간을 NoData로 취급(범례 첫 색이 회색일 때)")
         self.chkLowAsNoData.setChecked(True)
         self.chkLowAsNoData.setToolTip(
-            "범례의 최저값(보통 회색)은 실제 데이터가 아닌 배경/무자료로 보고 NoData(-9999)로 처리합니다.\n"
-            "예: Fe2O3 프리셋은 0~3.1 구간을 NoData로 취급"
+            "범례의 첫 색이 회색(무자료)일 때, 첫 값-둘째 값 구간을 실제 데이터가 아닌 배경/무자료로 보고 NoData(-9999)로 처리합니다.\n"
+            "예: Fe2O3 프리셋은 0-3.1 구간을 NoData로 취급\n"
+            "범례의 첫 색이 회색이 아니면(사용자 범례 등) 최저 구간도 실제 자료이므로 적용하지 않고 로그/메시지로 알립니다."
         )
 
         self.chkFixMax = QtWidgets.QCheckBox("최댓값을 범례 최댓값으로 보정")
@@ -625,12 +612,12 @@ class GeoChemPolygonizeDialog(QtWidgets.QDialog):
 
         self.chkInpaint = QtWidgets.QCheckBox("검은 경계선 제거(보간)")
         self.chkInpaint.setChecked(True)
-        self.chkInpaint.setToolTip("무채색 계열의 어두운 경계선을 NoData로 보고 주변 값으로 메웁니다.")
+        self.chkInpaint.setToolTip("무채색 계열의 어두운 경계선을 NoData로 보고 선 밖에서 가장 가까운 픽셀 값으로 메웁니다.")
         self.spinFillDist = QtWidgets.QSpinBox(grp_clip)
         self.spinFillDist.setMinimum(1)
         self.spinFillDist.setMaximum(500)
         self.spinFillDist.setValue(30)
-        self.spinFillDist.setToolTip("보간 시 검색 거리(픽셀). 클수록 잘 메우지만 느릴 수 있습니다.")
+        self.spinFillDist.setToolTip("경계선 메우기 최대 검색 거리(픽셀). 클수록 두꺼운 선도 메우지만 느릴 수 있습니다.")
 
         grid2.addWidget(QtWidgets.QLabel("픽셀 크기(지도 단위/px)"), 0, 0)
         grid2.addWidget(self.spinPixelSize, 0, 1)
@@ -696,7 +683,7 @@ class GeoChemPolygonizeDialog(QtWidgets.QDialog):
         self.chkDropNoData = QtWidgets.QCheckBox("NoData(투명) 폴리곤 제외")
         self.chkDropNoData.setChecked(True)
         self.chkDropNoData.setEnabled(False)
-        self.chkDropNoData.setToolTip("class_id=0(투명/NoData) 폴리곤을 결과에서 제외합니다.")
+        self.chkDropNoData.setToolTip("class_id=0(투명/NoData) 폴리곤을 결과에서 제외합니다. 끄면 NoData 영역도 class_id=0 폴리곤으로 만듭니다.")
 
         grid3.addWidget(self.chkSaveRasters, 0, 0)
         grid3.addWidget(self.chkAddRasters, 0, 1)
@@ -728,7 +715,9 @@ class GeoChemPolygonizeDialog(QtWidgets.QDialog):
             "- 픽셀 집계 기준: 픽셀 중심이 구역 안에 있는 픽셀만 셉니다(QGIS 구역 통계와 같은 규칙).\n"
             "  픽셀보다 작은 구역은 닿은 픽셀로 대체하며 burn_rule 필드에 all_touched로 표시됩니다.\n"
             "- zone_area: 구역 폴리곤 자체의 면적(타원체 m2). c*_area 합과 비교해 픽셀화 오차를 확인하세요.\n"
-            "- fill_pct: 검은 경계선 제거로 보간된(측정값이 아닌) 픽셀의 비율\n\n"
+            "- ext_pct: 구역 면적 중 분석 범위(내보낸 사각형) 안에 든 비율. cov_pct와 c*_pct는 그 안쪽 픽셀 기준입니다.\n"
+            "  분석 범위 밖 구역은 pix_in=0, burn_rule=outside_extent로 남기고 경고합니다.\n"
+            "- fill_pct: 검은 경계선 제거로 메운(측정값이 아닌) 픽셀의 비율\n\n"
             "※ 많은 피처/큰 해상도에서는 시간이 오래 걸릴 수 있습니다."
         )
 
@@ -870,6 +859,7 @@ class GeoChemPolygonizeDialog(QtWidgets.QDialog):
                 "- 총 픽셀 수가 1,200만을 넘으면 픽셀을 자동으로 키우고 경고를 표시합니다.\n"
                 "- 실제 사용한 픽셀 크기는 로그와 결과 래스터 메타데이터(pixel_size)에 기록됩니다.\n"
                 "- 값이 작을수록 디테일↑, 처리시간/파일크기↑\n"
+                "- 위경도(EPSG:4326 등) 래스터는 도 단위로 입력합니다(예: 0.0001 = 약 10 m, 소수 6자리까지).\n"
                 "- WMS 색을 보존하려고 최근접(Nearest)으로 리샘플링합니다."
             )
             self.spinExtentBuffer.setToolTip(
@@ -900,17 +890,19 @@ class GeoChemPolygonizeDialog(QtWidgets.QDialog):
                 "- 값이 작을수록 더 많은 픽셀이 최댓값으로 들어갑니다."
             )
             self.chkInpaint.setToolTip(
-                "무채색(검정/짙은 회색) 경계선을 NoData로 만든 뒤 주변 값으로 메웁니다.\n"
+                "무채색(검정/짙은 회색) 경계선과, 그 선 바로 옆에서 검정과 범례 색이 섞인 안티앨리어싱 가장자리\n"
+                "(예: 빨강 위 검은 선 옆의 짙은 빨강)를 NoData로 만든 뒤, 선 밖에서 가장 가까운 픽셀의 값을 그대로 복사해 메웁니다(최근접).\n"
+                "가장 가까운 픽셀이 NoData(흰 배경·투명 등)이면 선도 NoData로 남습니다.\n"
+                "새 중간값/중간 구간을 만들지 않습니다. 흰 배경·글자·기호 등 다른 범례 밖 색은 메우지 않고 NoData로 남습니다.\n"
                 "지괴 경계선/텍스트 등 '검은 선'이 결과를 깨뜨릴 때 켜세요.\n"
-                "너무 과하면 경계 부근이 부드러워질 수 있습니다.\n"
-                "※ 메운 픽셀은 측정값이 아닌 보간값이지만 이후 통계(구간 면적/구역 평균 등)에 그대로 포함됩니다.\n"
+                "※ 메운 픽셀은 측정값이 아니지만 이후 통계(구간 면적/구역 평균 등)에 그대로 포함됩니다.\n"
                 "  메운 픽셀 수/비율은 로그와 결과 래스터 메타데이터(inpaint_fill_pct)에,\n"
                 "  구역별 비율은 구역 통계의 fill_pct 필드에 기록됩니다."
             )
             self.spinFillDist.setToolTip(
-                "보간 최대 검색 거리(px)입니다.\n"
+                "경계선 메우기 최대 검색 거리(px)입니다.\n"
                 "- 경계선이 두껍거나 지저분할수록 값을 키워보세요.\n"
-                "- 값이 클수록 더 멀리까지 메우지만 느려질 수 있습니다."
+                "- 이 거리 안에 유효 픽셀이 없으면 그 선 픽셀은 NoData로 남습니다."
             )
             self.btnRun.setToolTip("실행합니다. (중간 산출물은 창을 닫을 때 정리됩니다)")
             self.btnClose.setToolTip("닫기")
@@ -943,7 +935,8 @@ value/class 래스터와 폴리곤을 생성합니다.
 
 <h4>팁</h4>
 <ul>
-  <li><b>Inpaint</b>: 검정 경계선/문자 때문에 값이 깨지면 켜고 <b>Fill distance</b>를 조절하세요.</li>
+  <li><b>Inpaint</b>: 검정 경계선/문자 때문에 값이 깨지면 켜고 <b>Fill distance</b>를 조절하세요.
+      무채색 선과 그 안티앨리어싱 가장자리만 선 밖의 가장 가까운 픽셀 값으로 메우며, 흰 배경 등 다른 범례 밖 색은 NoData로 남습니다.</li>
   <li><b>고농도 스냅</b>: 마지막 구간이 잘 안 잡힐 때 사용하되, 과하면 고농도 영역이 과대평가될 수 있습니다.</li>
   <li><b>프리셋 확장</b>: CSV(value,r,g,b)로 프리셋을 가져오면 다른 원소도 쉽게 추가할 수 있습니다.</li>
 </ul>
@@ -1068,7 +1061,7 @@ value/class 래스터와 폴리곤을 생성합니다.
                 self,
                 "값 목록",
                 "값 목록(쉼표로 구분, 예: 0, 3.1, 3.5, 3.9, ...)\n"
-                "※ 이미지의 색상바가 위/아래로 변하는 '연속 범례'라고 가정합니다.",
+                "※ 세로 범례를 가정합니다. 연속 색상바인지 값마다 한 칸인 상자형인지는 다음 단계에서 고릅니다.",
                 text="",
             )
         except Exception:
@@ -1123,11 +1116,37 @@ value/class 래스터와 폴리곤을 생성합니다.
 
         x = int(round(float(x_ratio) * float(w - 1)))
         n = len(vals)
-        # Sample each anchor at the centre of its band (row (i+0.5)/n*h), never
-        # at row 0 / h-1: those are the margin or frame of any real legend
-        # graphic, and reading them made white (or the border colour) the
-        # legend minimum and maximum.
-        rows = _legend_sample_rows(n, h, low_at_bottom=low_at_bottom)
+        # Box legend: one box per value, sampled at box centres ((i+0.5)/n).
+        # Continuous bar: values at both ends and evenly between (i/(n-1));
+        # box centres on a continuous bar shifted every anchor inwards (end
+        # colours ~69 RGB off). The column profile suggests which one it is;
+        # the user confirms.
+        looks_discrete = True
+        try:
+            profile = [_sample_qimage_rgb(img, x, yy, radius=0) for yy in range(h)]
+            looks_discrete = bool(_legend_profile_looks_discrete(profile, n))
+        except Exception as _exc:
+            log_swallowed("geochem_polygonize_dialog._import_preset_from_legend_image (profile)", _exc)
+        style_items = [
+            "연속 색상바(값이 막대 양 끝과 그 사이에 고르게 있음)",
+            "상자형(값마다 한 칸, 칸 가운데를 샘플링)",
+        ]
+        try:
+            style, ok6 = QtWidgets.QInputDialog.getItem(
+                self,
+                "범례 형태",
+                "범례 이미지 형태 (자동 추정: " + ("상자형" if looks_discrete else "연속 색상바") + ")\n"
+                "연속 색상바는 막대만 남기고 여백 없이 잘라 주세요.",
+                style_items,
+                1 if looks_discrete else 0,
+                False,
+            )
+        except Exception:
+            style, ok6 = (style_items[1 if looks_discrete else 0], True)
+        if not ok6:
+            return
+        continuous = str(style) == style_items[0]
+        rows = _legend_sample_rows(n, h, low_at_bottom=low_at_bottom, continuous=continuous)
         points: List[LegendPoint] = []
         alphas: List[int] = []
         for v, y in zip(vals, rows):
@@ -1136,7 +1155,8 @@ value/class 래스터와 폴리곤을 생성합니다.
             points.append(LegendPoint(float(v), rgb))
         try:
             log_message(
-                f"GeoChem: legend image {w}x{h} sampled at x={x} rows={rows} -> "
+                f"GeoChem: legend image {w}x{h} ({'continuous' if continuous else 'boxes'}, "
+                f"guess={'boxes' if looks_discrete else 'continuous'}) sampled at x={x} rows={rows} -> "
                 + ", ".join(f"{p.value:g}:{p.rgb}" for p in points),
                 level=Qgis.MessageLevel.Info,
             )
@@ -1631,38 +1651,59 @@ value/class 래스터와 폴리곤을 생성합니다.
                 return_residual=True,
             )
             nodata_val = np.float32(-9999.0)
-            # Off-legend colours (black lines, label text, anything not on the
-            # ramp) used to be forced onto the nearest segment - and the dark
-            # corner of RGB space is nearest the maximum of most presets. They
-            # are NoData now; with inpainting on they get filled like the
-            # linework mask, otherwise they stay NoData. The count is reported
-            # so a map full of rejected pixels does not pass silently.
+            # Transparent pixels (if alpha band exists) are known first so the
+            # colour-mismatch count below is over OPAQUE pixels only: a WMS
+            # with transparent no-coverage areas used to blame the legend
+            # preset for them ("범례와 맞지 않는 색 16.7%" = the transparent share).
+            transparent = None
+            if a is not None:
+                try:
+                    transparent = a.astype(np.int16, copy=False) <= 0
+                except Exception as _exc:
+                    log_swallowed("geochem_polygonize_dialog.run (alpha)", _exc)
+                    transparent = None
+
+            # Off-legend colours (black lines, label text, white background,
+            # anything not on the ramp) used to be forced onto the nearest
+            # segment - and the dark corner of RGB space is nearest the maximum
+            # of most presets. They are NoData. Only neutral linework (and its
+            # anti-aliased edge) is filled by the optional inpainting below;
+            # everything else stays NoData. The count is reported so a map
+            # full of rejected pixels does not pass silently.
+            offlegend_mask = None
             try:
                 rejected = ~np.isfinite(out)
-                n_rej = int(np.count_nonzero(rejected))
-                if n_rej:
+                offlegend_mask = rejected.copy()
+                if transparent is not None:
+                    opaque_rejected = rejected & ~transparent
+                    n_opaque = int(out.size) - int(np.count_nonzero(transparent))
+                else:
+                    opaque_rejected = rejected
+                    n_opaque = int(out.size)
+                n_rej = int(np.count_nonzero(opaque_rejected))
+                if np.any(rejected):
                     out = out.astype(np.float32, copy=False)
                     out[rejected] = nodata_val
-                    pct_rej = n_rej / max(1, int(out.size)) * 100.0
+                if n_rej:
+                    pct_rej = n_rej / max(1, n_opaque) * 100.0
                     log_message(
-                        f"GeoChem: {n_rej:,}/{int(out.size):,} 픽셀({pct_rej:.2f}%)이 범례 색에서 RGB 거리 "
+                        f"GeoChem: {n_rej:,}/{n_opaque:,} 불투명 픽셀({pct_rej:.2f}%)이 범례 색에서 RGB 거리 "
                         f"{_RGB_MATCH_TOLERANCE:g} 이상 떨어져 NoData 처리 (검정 선·문자·범례 밖 색)",
                         level=Qgis.MessageLevel.Warning if pct_rej >= 5.0 else Qgis.MessageLevel.Info,
                     )
                     if pct_rej >= 5.0:
                         push_message(
                             self.iface, "GeoChem",
-                            f"범례와 맞지 않는 색 {pct_rej:.1f}%를 NoData 처리했습니다. 범례 프리셋이 이 WMS와 맞는지 확인하세요.",
+                            f"범례와 맞지 않는 색 {pct_rej:.1f}%(투명 픽셀 제외)를 NoData 처리했습니다. "
+                            "범례 프리셋이 이 WMS와 맞는지 확인하세요.",
                             level=1, duration=9,
                         )
             except Exception as _exc:
                 log_swallowed("geochem_polygonize_dialog.run (legend tolerance)", _exc)
 
-            # Transparent pixels (if alpha band exists) -> NoData
-            transparent = None
-            if a is not None:
+            # Transparent pixels -> NoData
+            if transparent is not None:
                 try:
-                    transparent = a.astype(np.int16, copy=False) <= 0
                     out = out.astype(np.float32, copy=False)
                     out[transparent] = nodata_val
                     try:
@@ -1677,13 +1718,30 @@ value/class 래스터와 폴리곤을 생성합니다.
                 except Exception:
                     transparent = None
 
+            # Legend low end (grey 'absent data') -> NoData, only when the
+            # legend's first stop IS that grey. On a custom legend that starts
+            # at its first real class, the same rule threw that class away.
             low_nodata_mask = None
+            low_rule = "off"
             if do_low_as_nodata:
                 try:
                     br = _points_to_breaks(preset.points)
                     min_valid = float(br[1]) if len(br) >= 2 else None
-                    if min_valid is not None:
-                        low_nodata_mask = np.isfinite(out) & (out != nodata_val) & (out < np.float32(min_valid))
+                    if min_valid is not None and not _legend_first_stop_is_absent_grey(preset.points):
+                        low_rule = "skipped_first_stop_not_grey"
+                        first = sorted(preset.points, key=lambda p: float(p.value))[0]
+                        msg = (
+                            f"범례의 첫 색 {tuple(first.rgb)}이 회색(무자료)이 아니어서 최저 구간 "
+                            f"{float(br[0]):g}-{min_valid:g}을 NoData로 바꾸지 않고 자료로 유지합니다."
+                        )
+                        log_message(f"GeoChem: {msg}", level=Qgis.MessageLevel.Info)
+                        push_message(self.iface, "GeoChem", msg, level=0, duration=7)
+                    elif min_valid is not None:
+                        low_rule = "applied"
+                        # Same stop tolerance as the classes: a pixel exactly at
+                        # the first data stop (float32 3.0999999) is data.
+                        low_thr = np.float32(min_valid - _break_tolerance(min_valid))
+                        low_nodata_mask = np.isfinite(out) & (out != nodata_val) & (out < low_thr)
                         n_low = int(np.count_nonzero(low_nodata_mask))
                         out = out.astype(np.float32, copy=False)
                         out[low_nodata_mask] = nodata_val
@@ -1691,8 +1749,13 @@ value/class 래스터와 폴리곤을 생성합니다.
                             f"GeoChem: treat <{min_valid:g} as nodata {n_low:,} px (legend low-end)",
                             level=Qgis.MessageLevel.Info,
                         )
-                except Exception:
+                except Exception as _exc:
+                    log_swallowed("geochem_polygonize_dialog.run (low as nodata)", _exc)
                     low_nodata_mask = None
+            self._last_geochem_run_params["low_as_nodata"] = low_rule
+            self._last_geochem_run_params["class_rule"] = "stop_starts_class"
+            if do_snap_max:
+                self._last_geochem_run_params["snap_last_t"] = float(snap_t)
 
             try:
                 total = int(out.size)
@@ -1704,54 +1767,64 @@ value/class 래스터와 폴리곤을 생성합니다.
             except Exception as _exc:
                 log_swallowed("geochem_polygonize_dialog.run", _exc)
 
-            # Optional black line masking + fill. The fill mask is kept: the
-            # filled pixels are invented (nearest-neighbour IDW), yet they are
-            # counted as data by every statistic downstream, so their share is
-            # reported per run (metadata) and per zone (fill_pct).
+            # Optional linework masking + fill. Only neutral dark linework and
+            # its anti-aliased edge over legend colours are filled, each pixel
+            # with a COPY of the nearest non-line pixel (no averaging, so no new
+            # value or class appears between two classes; a NoData neighbour
+            # such as white background passes on NoData). Other off-legend
+            # pixels (white background, text, symbols) stay NoData. The filled
+            # pixels are still invented, so their share is reported per run
+            # (metadata) and per zone (fill_pct).
             fill_mask = None
+            line_counts = {}
             if do_inpaint:
                 log_message("GeoChem: masking dark linework…", level=Qgis.MessageLevel.Info)
+                line_mask = None
                 try:
-                    mask = _mask_black_lines(r, g, b)
+                    core = _mask_black_lines(r, g, b)
                     if transparent is not None:
-                        mask &= ~transparent
+                        core &= ~transparent
+                    halo = _mask_colour_halo(r, g, b, core=core)
+                    if transparent is not None:
+                        halo &= ~transparent
+                    # Off-legend pixels hugging the line (within the same 2 px
+                    # as the colour halo) are its anti-aliasing too; they are
+                    # filled like the line, from the nearest non-line pixel.
+                    edge_off = np.zeros(core.shape, dtype=bool)
+                    if offlegend_mask is not None:
+                        edge_off = _grow_mask(core, 2) & offlegend_mask & ~core & ~halo
+                        if transparent is not None:
+                            edge_off &= ~transparent
+                    line_mask = core | halo | edge_off
+                    line_counts = {
+                        "inpaint_line_px": int(np.count_nonzero(core)),
+                        "inpaint_halo_px": int(np.count_nonzero(halo | edge_off)),
+                    }
                     try:
-                        m = int(np.count_nonzero(mask))
-                        t = int(mask.size)
+                        t = int(line_mask.size)
                         log_message(
-                            f"GeoChem: linework mask {m:,}/{t:,} ({(m / t * 100.0):.2f}%)",
+                            f"GeoChem: linework mask {line_counts['inpaint_line_px']:,} + anti-alias edge "
+                            f"{line_counts['inpaint_halo_px']:,} / {t:,} px",
                             level=Qgis.MessageLevel.Info,
                         )
                     except Exception as _exc:
                         log_swallowed("geochem_polygonize_dialog.run", _exc)
-                    out = out.astype(np.float32, copy=False)
-                    out[mask] = np.nan
                 except Exception as _exc:
-                    log_swallowed("geochem_polygonize_dialog.run", _exc)
-                pre_nodata = None
-                try:
-                    pre_nodata = (~np.isfinite(out)) | (out == nodata_val)
-                except Exception as _exc:
-                    log_swallowed("geochem_polygonize_dialog.run (fill mask)", _exc)
-                log_message("GeoChem: filling masked pixels…", level=Qgis.MessageLevel.Info)
-                out = _gdal_fill_nodata_nearestish(arr=out, nodata=float(nodata_val), max_search_dist_px=fill_dist)
-                if transparent is not None:
+                    log_swallowed("geochem_polygonize_dialog.run (linework mask)", _exc)
+                    line_mask = None
+                if line_mask is not None:
                     try:
                         out = out.astype(np.float32, copy=False)
-                        out[transparent] = nodata_val
+                        out[line_mask] = nodata_val
+                        valid_src = np.isfinite(out) & (out != nodata_val)
+                        log_message("GeoChem: filling linework from the nearest non-line pixel…", level=Qgis.MessageLevel.Info)
+                        out, fill_mask = _fill_nearest(
+                            out, fill_mask=line_mask, valid=valid_src, max_dist_px=fill_dist, nodata=nodata_val
+                        )
+                        # Line pixels that got no valid value stay NoData.
+                        out[line_mask & ~fill_mask] = nodata_val
                     except Exception as _exc:
-                        log_swallowed("geochem_polygonize_dialog.run", _exc)
-                if low_nodata_mask is not None:
-                    try:
-                        out = out.astype(np.float32, copy=False)
-                        out[low_nodata_mask] = nodata_val
-                    except Exception as _exc:
-                        log_swallowed("geochem_polygonize_dialog.run", _exc)
-                if pre_nodata is not None:
-                    try:
-                        fill_mask = pre_nodata & np.isfinite(out) & (out != nodata_val)
-                    except Exception as _exc:
-                        log_swallowed("geochem_polygonize_dialog.run (fill mask)", _exc)
+                        log_swallowed("geochem_polygonize_dialog.run (linework fill)", _exc)
                         fill_mask = None
                 try:
                     total = int(out.size)
@@ -1803,6 +1876,9 @@ value/class 래스터와 폴리곤을 생성합니다.
             # Inpaint accounting, after the AOI mask so only counted pixels are
             # in the percentage. Filled pixels are not measurements.
             inpaint_meta = {"inpaint": bool(do_inpaint), "inpaint_distance_px": int(fill_dist)}
+            if do_inpaint:
+                inpaint_meta["inpaint_method"] = "nearest_copy_linework_only"
+                inpaint_meta.update(line_counts)
             if do_inpaint:
                 try:
                     if fill_mask is not None:
@@ -2043,10 +2119,30 @@ value/class 래스터와 폴리곤을 생성합니다.
                 except Exception as _exc:
                     log_swallowed("geochem_polygonize_dialog.run", _exc)
 
+                # The class raster declares 0 as NoData, and gdal_polygonize
+                # skips masked pixels, so class_id 0 polygons never existed
+                # and 'NoData 폴리곤 제외' did nothing when unticked. Keeping
+                # them polygonizes a copy without the NoData flag.
+                poly_src = cls_path
+                if not do_drop_nodata:
+                    try:
+                        poly_src = os.path.join(self._tmp_dir, f"{preset.key}_class_all_{run_id}.tif")
+                        write_single_band_geotiff(
+                            poly_src,
+                            cls.astype(np.int16, copy=False),
+                            geotransform=gt,
+                            projection=proj_wkt,
+                            nodata=None,
+                            gdal_type=gdal.GDT_Int16,
+                            options=("COMPRESS=LZW", "TILED=YES"),
+                        )
+                    except Exception as _exc:
+                        log_swallowed("geochem_polygonize_dialog.run (class copy without nodata)", _exc)
+                        poly_src = cls_path
                 poly_out = processing.run(
                     "gdal:polygonize",
                     {
-                        "INPUT": cls_path,
+                        "INPUT": poly_src,
                         "BAND": 1,
                         "FIELD": "class_id",
                         "EIGHT_CONNECTEDNESS": True,
@@ -2693,6 +2789,7 @@ value/class 래스터와 폴리곤을 생성합니다.
             QgsField("zarea_unit", FT_STRING),
             QgsField("burn_rule", FT_STRING),
             QgsField("fill_pct", FT_DOUBLE),
+            QgsField("ext_pct", FT_DOUBLE),
         ]
 
         n_classes = max(0, int(len(breaks) - 1))
@@ -2764,6 +2861,51 @@ value/class 래스터와 폴리곤을 생성합니다.
             log_swallowed("geochem_polygonize_dialog._make_zonal_stats_layer", _exc)
             feats = zone_layer.getFeatures()
 
+        # The analysed extent (the exported rectangle) in the raster CRS. A zone
+        # outside it used to vanish from the output, and a zone half outside
+        # reported cov_pct=100 over the half that was analysed. Now every zone
+        # is written, ext_pct says how much of it was analysed, and both kinds
+        # are counted in a warning.
+        ext_geom = None
+        try:
+            gtx = [float(v) for v in geotransform]
+            ext_pts = []
+            for cc, rr_ in ((0, 0), (full_xsize, 0), (full_xsize, full_ysize), (0, full_ysize), (0, 0)):
+                ext_pts.append(QgsPointXY(gtx[0] + cc * gtx[1] + rr_ * gtx[2], gtx[3] + cc * gtx[4] + rr_ * gtx[5]))
+            ext_geom = QgsGeometry.fromPolygonXY([ext_pts])
+        except Exception as _exc:
+            log_swallowed("geochem_polygonize_dialog._make_zonal_stats_layer (extent)", _exc)
+            ext_geom = None
+        n_outside = 0
+        n_partial = 0
+
+        def _new_zone_feature(zft, out_geom, zone_area, ext_pct):
+            ft = QgsFeature(out_layer.fields())
+            try:
+                ft.setGeometry(out_geom)
+            except Exception as _exc:
+                log_swallowed("tools/geochem_polygonize_dialog.py (_make_zonal_stats_layer geometry)", _exc)
+            try:
+                attrs = list(zft.attributes())
+            except Exception:
+                attrs = []
+            try:
+                ft.setAttributes(attrs + [None] * len(extra_fields))
+            except Exception as _exc:
+                log_swallowed("tools/geochem_polygonize_dialog.py (_make_zonal_stats_layer attributes)", _exc)
+            try:
+                ft["element"] = preset.label
+                ft["unit"] = unit
+                ft["run_id"] = run_id
+                ft["px_area"] = float(px_area) if px_area > 0 else None
+                ft["area_unit"] = px_area_unit
+                ft["zone_area"] = float(zone_area) if zone_area is not None else None
+                ft["zarea_unit"] = zone_area_unit
+                ft["ext_pct"] = float(ext_pct) if ext_pct is not None else None
+            except Exception as _exc:
+                log_swallowed("geochem_polygonize_dialog._make_zonal_stats_layer (base fields)", _exc)
+            return ft
+
         added = 0
         for zft in feats:
             try:
@@ -2794,6 +2936,47 @@ value/class 래스터와 폴리곤을 생성합니다.
             if _skip_2421:
                 continue
             if bbox.isEmpty():
+                continue
+
+            zone_area = None
+            try:
+                if zone_dist is not None:
+                    zone_area = float(zone_dist.measureArea(out_geom))
+                else:
+                    zone_area = float(geom_r.area())
+                if not math.isfinite(zone_area):
+                    zone_area = None
+            except Exception as _exc:
+                log_swallowed("geochem_polygonize_dialog._make_zonal_stats_layer (zone area)", _exc)
+                zone_area = None
+
+            ext_pct = None
+            zone_outside = False
+            if ext_geom is not None:
+                try:
+                    if not geom_r.intersects(ext_geom):
+                        zone_outside = True
+                        ext_pct = 0.0
+                    else:
+                        a_all = float(geom_r.area())
+                        a_in = float(geom_r.intersection(ext_geom).area())
+                        ext_pct = min(100.0, a_in * 100.0 / a_all) if a_all > 0 else 100.0
+                        if ext_pct < 99.9:
+                            n_partial += 1
+                except Exception as _exc:
+                    log_swallowed("geochem_polygonize_dialog._make_zonal_stats_layer (ext_pct)", _exc)
+                    ext_pct = None
+            if zone_outside:
+                n_outside += 1
+                out_ft = _new_zone_feature(zft, out_geom, zone_area, ext_pct)
+                try:
+                    out_ft["pix_in"] = 0
+                    out_ft["pix_val"] = 0
+                    out_ft["burn_rule"] = "outside_extent"
+                    pr.addFeatures([out_ft])
+                    added += 1
+                except Exception as _exc:
+                    log_swallowed("geochem_polygonize_dialog._make_zonal_stats_layer (outside zone)", _exc)
                 continue
 
             # Compute pixel window from bbox (fast crop)
@@ -2889,18 +3072,6 @@ value/class 래스터와 폴리곤을 생성합니다.
             pix_val = int(np.count_nonzero(valid)) if pix_in > 0 else 0
             cov_pct = float(pix_val) * 100.0 / float(pix_in) if pix_in > 0 else 0.0
 
-            zone_area = None
-            try:
-                if zone_dist is not None:
-                    zone_area = float(zone_dist.measureArea(out_geom))
-                else:
-                    zone_area = float(geom_r.area())
-                if not math.isfinite(zone_area):
-                    zone_area = None
-            except Exception as _exc:
-                log_swallowed("geochem_polygonize_dialog._make_zonal_stats_layer (zone area)", _exc)
-                zone_area = None
-
             # Share of the zone's valid pixels that were inpainted (invented).
             # NULL when inpainting was on but the mask is unavailable.
             fill_pct = None if inpaint_on else 0.0
@@ -2940,25 +3111,9 @@ value/class 래스터와 폴리곤을 생성합니다.
             except Exception:
                 cls_counts = None
 
-            out_ft = QgsFeature(out_layer.fields())
-            try:
-                out_ft.setGeometry(out_geom)
-            except Exception as _exc:
-                log_swallowed("tools/geochem_polygonize_dialog.py:2524 (_make_zonal_stats_layer)", _exc)
+            out_ft = _new_zone_feature(zft, out_geom, zone_area, ext_pct)
 
             try:
-                attrs = list(zft.attributes())
-            except Exception:
-                attrs = []
-            try:
-                out_ft.setAttributes(attrs + [None] * len(extra_fields))
-            except Exception as _exc:
-                log_swallowed("tools/geochem_polygonize_dialog.py:2533 (_make_zonal_stats_layer)", _exc)
-
-            try:
-                out_ft["element"] = preset.label
-                out_ft["unit"] = unit
-                out_ft["run_id"] = run_id
                 out_ft["pix_in"] = int(pix_in)
                 out_ft["pix_val"] = int(pix_val)
                 out_ft["cov_pct"] = float(cov_pct)
@@ -2966,10 +3121,6 @@ value/class 래스터와 폴리곤을 생성합니다.
                 out_ft["val_std"] = float(v_std) if v_std is not None else None
                 out_ft["val_min"] = float(v_min) if v_min is not None else None
                 out_ft["val_max"] = float(v_max) if v_max is not None else None
-                out_ft["px_area"] = float(px_area) if px_area > 0 else None
-                out_ft["area_unit"] = px_area_unit
-                out_ft["zone_area"] = float(zone_area) if zone_area is not None else None
-                out_ft["zarea_unit"] = zone_area_unit
                 out_ft["burn_rule"] = burn_rule
                 out_ft["fill_pct"] = float(fill_pct) if fill_pct is not None else None
 
@@ -2998,7 +3149,16 @@ value/class 래스터와 폴리곤을 생성합니다.
             "zone_burn_rule": "cell_centre",
             "zone_burn_fallback_n": int(n_burn_fallback),
             "zone_area_unit": str(zone_area_unit),
+            "zone_outside_extent_n": int(n_outside),
+            "zone_partly_outside_n": int(n_partial),
         }
+        if n_outside > 0 or n_partial > 0:
+            msg = (
+                f"구역 통계: 분석 범위(조사지역 경계 사각형) 밖 구역 {n_outside}개(pix_in=0, burn_rule=outside_extent), "
+                f"일부만 걸친 구역 {n_partial}개가 있습니다. cov_pct/c*_pct는 범위 안 부분 기준이며 ext_pct에 범위 안 면적 비율을 기록했습니다."
+            )
+            log_message(f"GeoChem zonal: {msg}", level=Qgis.MessageLevel.Warning)
+            push_message(self.iface, "경고", msg, level=1, duration=9)
         if n_burn_fallback > 0:
             log_message(
                 f"GeoChem zonal: {n_burn_fallback}개 구역이 픽셀보다 작아 닿은 픽셀 기준(all_touched)으로 집계했습니다"
@@ -3361,6 +3521,15 @@ value/class 래스터와 폴리곤을 생성합니다.
         parent = root.findGroup(PARENT_GROUP_NAME)
         if parent is None:
             parent = root.insertGroup(0, PARENT_GROUP_NAME)
+        else:
+            # Keep the group near the top. removeChildNode + insertChildNode
+            # deleted the group node (and, through the registry bridge, every
+            # layer in it) whenever anything sat above it: a second run wiped
+            # the previous and the new results while reporting 완료.
+            try:
+                parent = move_group_to_top(root, parent)
+            except Exception as _exc:
+                log_swallowed("geochem_polygonize_dialog._add_to_project (move group)", _exc)
 
         if layer is not None:
             try:
@@ -3453,16 +3622,6 @@ value/class 래스터와 폴리곤을 생성합니다.
             parent.setExpanded(True)
         except Exception as _exc:
             log_swallowed("tools/geochem_polygonize_dialog.py:2997 (_add_to_project)", _exc)
-
-        try:
-            # Keep group near top
-            if parent.parent() == root:
-                idx = root.children().index(parent)
-                if idx != 0:
-                    root.removeChildNode(parent)
-                    root.insertChildNode(0, parent)
-        except Exception as _exc:
-            log_swallowed("geochem_polygonize_dialog._add_to_project", _exc)
 
         try:
             self.iface.mapCanvas().setExtent(extent)
