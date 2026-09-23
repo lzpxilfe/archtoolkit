@@ -6,6 +6,16 @@ Weighted variants (Dijkstra) drive the cost network; unweighted variants
 closeness correction (r/sum_d)*(r/(n-1)) and Brandes betweenness with the
 undirected 0.5 normalization.  Keeping them here, free of QGIS, lets both
 tools call one tested implementation instead of drifting copies.
+
+Edge weights (weighted variants): every weight must be a finite number > 0.
+The centrality functions REJECT anything else with ValueError instead of
+dropping the edge.  Dropping a zero-weight edge used to be silent, and it made
+two co-located sites (a 0-cost link) look unconnected: degree 1 and a shared
+component, yet closeness 0 and no betweenness through the link.  A zero cost
+is a caller-side modelling problem (the cost network gives same-cell sites a
+straight-line cost instead), not something a metric should quietly repair.
+``dijkstra_weighted`` keeps its historical lenient mode (non-positive weights
+skipped) by default for direct callers; pass ``strict=True`` to reject.
 """
 
 from __future__ import annotations
@@ -17,7 +27,34 @@ from typing import List, Tuple
 from .swallow_log import log_swallowed
 
 
-def dijkstra_weighted(*, start: int, adj: List[List[Tuple[int, float]]]) -> List[float]:
+def validate_positive_weights(adj: List[List[Tuple[int, float]]]) -> None:
+    """Raise ValueError unless every edge weight is a finite number > 0.
+
+    Used by the weighted centralities so an edge is never dropped silently
+    (see the module docstring for why zero weights are rejected).
+    """
+    for v, nbrs in enumerate(adj):
+        for w, weight in nbrs:
+            try:
+                ww = float(weight)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"edge {v}-{w}: weight {weight!r} is not a number") from exc
+            if not math.isfinite(ww) or ww <= 0:
+                raise ValueError(
+                    f"edge {v}-{w}: weight {ww!r} must be finite and > 0 "
+                    "(zero/negative weights are rejected, not dropped)"
+                )
+
+
+def dijkstra_weighted(*, start: int, adj: List[List[Tuple[int, float]]], strict: bool = False) -> List[float]:
+    """Single-source shortest weighted distances (inf = unreachable).
+
+    strict=False (default, historical behaviour pinned by tests): edges with a
+    non-numeric, non-finite or non-positive weight are skipped.  strict=True
+    raises ValueError for such an edge instead of dropping it.
+    """
+    if strict:
+        validate_positive_weights(adj)
     n = int(len(adj))
     dist = [math.inf] * n
     s = int(start)
@@ -55,7 +92,10 @@ def closeness_centrality_weighted(*, n: int, adj: List[List[Tuple[int, float]]])
     2-node pair scores the maximum) — backwards for disconnected graphs, which
     k-NN networks routinely are. Scaling by reachable/(n-1) weights the score
     by how much of the whole network the node can actually reach.
+
+    Raises ValueError if any weight is not finite and > 0 (never drops an edge).
     """
+    validate_positive_weights(adj)
     out = [0.0] * int(n)
     if n <= 1:
         return out
@@ -71,7 +111,11 @@ def closeness_centrality_weighted(*, n: int, adj: List[List[Tuple[int, float]]])
 
 
 def betweenness_centrality_weighted(*, n: int, adj: List[List[Tuple[int, float]]]) -> List[float]:
-    """Brandes betweenness for weighted undirected graphs (no external deps)."""
+    """Brandes betweenness for weighted undirected graphs (no external deps).
+
+    Raises ValueError if any weight is not finite and > 0 (never drops an edge).
+    """
+    validate_positive_weights(adj)
     bc = [0.0] * int(n)
     eps = 1e-12
     for s in range(int(n)):

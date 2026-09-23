@@ -29,6 +29,7 @@ from qgis.core import (
     Qgis,
     QgsApplication,
     QgsCategorizedSymbolRenderer,
+    QgsCoordinateReferenceSystem,
     QgsFeature,
     QgsField,
     QgsGeometry,
@@ -66,6 +67,7 @@ from .cost_surface_dialog import (
 from .utils import (
     log_swallowed,
     is_metric_crs,
+    is_null_value,
     log_message,
     push_message,
     restore_ui_focus,
@@ -74,6 +76,7 @@ from .utils import (
     transform_point,
 )
 from . import cost_budget
+from .cost_models import edge_cost as _edge_cost
 from .live_log_dialog import ensure_live_log_dialog
 from .help_dialog import show_help_dialog
 from . import dialog_memory
@@ -101,6 +104,30 @@ COST_ENERGY = "energy"
 SYMMETRY_AVG = "avg"
 SYMMETRY_MIN = "min"
 SYMMETRY_MAX = "max"
+
+# (metadata value, Korean alias fragment) per symmetrisation method.
+_SYMMETRY_DESC = {
+    SYMMETRY_AVG: ("mean(A->B, B->A)", "왕복 평균"),
+    SYMMETRY_MIN: ("min(A->B, B->A)", "편도 최소"),
+    SYMMETRY_MAX: ("max(A->B, B->A)", "편도 최대"),
+}
+
+
+def _memory_layer(geom_type: str, name: str, authid: str, crs=None) -> QgsVectorLayer:
+    """Memory layer in the DEM CRS, also when that CRS has no authid.
+
+    "Point?crs=" + "" (a custom-WKT DEM) gave an output layer with an invalid
+    CRS, which only lined up if the project CRS happened to match. The URI
+    keeps the authid when there is one; the CRS object is then set directly.
+    """
+    uri = f"{geom_type}?crs={authid}" if authid else str(geom_type)
+    lyr = QgsVectorLayer(uri, name, "memory")
+    try:
+        if crs is not None and crs.isValid():
+            lyr.setCrs(crs)
+    except Exception as _exc:
+        log_swallowed("cost_network_dialog._memory_layer", _exc)
+    return lyr
 
 
 def _sign(v: float, eps: float = 1e-12) -> int:
@@ -174,6 +201,21 @@ class NetworkTaskResult:
     allow_diagonal: bool = True
     nodes: Optional[List[NetworkNode]] = None
     edges: Optional[List[NetworkEdge]] = None
+    # The DEM CRS object itself: a CRS without an authid (custom WKT) cannot be
+    # rebuilt from dem_authid, and a memory layer made from "Point?crs=" is
+    # left with an invalid CRS.
+    dem_crs: Optional[object] = None
+    # How A->B and B->A were merged into one value (time_sym/kcal_sym, MST and
+    # hub-MST edge choice, SNA weights) - recorded so the output says it.
+    sym_method: str = SYMMETRY_AVG
+    # Candidate k actually used (raised to the k-NN k when that was larger)
+    # next to the value the user asked for, and the k-NN k itself.
+    candidate_k: int = 0
+    candidate_k_requested: int = 0
+    knn_k: int = 0
+    # Site pairs that fall in the same DEM cell: joined by a straight line at
+    # the model's flat-ground cost instead of a 0-cost, 1-vertex grid path.
+    same_cell_pairs: int = 0
 
 
 class _UnionFind:
@@ -223,6 +265,7 @@ class CostNetworkWorker(QgsTask):
         model_label: str,
         cost_mode: str,
         on_done,
+        dem_crs=None,
     ):
         super().__init__("최소비용 네트워크 (Least-cost Network)", QgsTask.Flag.CanCancel)
         self._cancel_event = threading.Event()
@@ -236,12 +279,16 @@ class CostNetworkWorker(QgsTask):
         self.knn_k = int(knn_k)
         self.hub_connect_mst = bool(hub_connect_mst)
         self.hierarchy_enabled = bool(hierarchy_enabled)
-        self.sym_method = str(sym_method)
+        # Unknown/None falls back to the documented default (round-trip mean).
+        self.sym_method = (
+            str(sym_method) if str(sym_method) in (SYMMETRY_AVG, SYMMETRY_MIN, SYMMETRY_MAX) else SYMMETRY_AVG
+        )
         self.model_key = str(model_key)
         self.model_params = dict(model_params or {})
         self.model_label = str(model_label or "")
         self.cost_mode = str(cost_mode or COST_TIME)
         self.on_done = on_done
+        self.dem_crs = dem_crs
         self.result_obj = NetworkTaskResult(ok=False)
 
     def cancel(self):
@@ -355,7 +402,18 @@ class CostNetworkWorker(QgsTask):
             pair_set.add(key)
             candidate_pairs.append(key)
 
-        k = max(1, int(self.candidate_k))
+        k_requested = max(1, int(self.candidate_k))
+        k = k_requested
+        if self.network_mode in (NETWORK_KNN, NETWORK_ALL) and int(self.knn_k) > k:
+            # A node can only link to its Euclidean candidates, so a k-NN k above
+            # the candidate k silently gave fewer than k links (6 sites, k-NN k=5,
+            # candidate k=2: 8 edges instead of 15). Raise the candidate k to the
+            # k-NN k instead; both values are recorded on the output layers.
+            k = max(1, int(self.knn_k))
+            log_message(
+                f"CostNetwork: 후보 간선(k)={k_requested} < k-NN k={k} -> 후보 간선을 {k}로 올려 계산합니다.",
+                level=Qgis.MessageLevel.Warning,
+            )
 
         if self.network_mode in (NETWORK_MST, NETWORK_KNN, NETWORK_ALL):
             for i in range(n_nodes):
@@ -502,6 +560,26 @@ class CostNetworkWorker(QgsTask):
                 level=Qgis.MessageLevel.Info,
             )
 
+        same_cell_pairs = 0
+
+        def _same_cell_edge(a: int, b: int):
+            """Cost and 2-vertex line for two sites in ONE DEM cell.
+
+            The grid search starts and ends on the same cell, so it returns a
+            0 cost and a 1-vertex path: the edge was then dropped from the
+            line layer while still counted, and a 0 weight read as "no link"
+            in closeness/betweenness. Use the straight line between the two
+            sites at the model's flat-ground cost (dz = 0); identical
+            coordinates get half a cell so the weight stays > 0.
+            """
+            ax_, ay_ = float(coords[a, 0]), float(coords[a, 1])
+            bx_, by_ = float(coords[b, 0]), float(coords[b, 1])
+            horiz = math.hypot(bx_ - ax_, by_ - ay_)
+            if not (horiz > 0.0):
+                horiz = 0.5 * min(dx, dy)
+            c = float(_edge_cost(self.model_key, horiz, 0.0, self.model_params, cost_mode=solver_cost_mode))
+            return c, [(ax_, ay_), (bx_, by_)]
+
         for (a, b), (xoff, yoff, win_xsize, win_ysize) in zip(candidate_pairs, windows):
             if self._is_cancelled():
                 return NetworkTaskResult(ok=False, message="취소됨")
@@ -536,6 +614,18 @@ class CostNetworkWorker(QgsTask):
 
             start_rc = (a_row, a_col)
             end_rc = (b_row, b_col)
+
+            if start_rc == end_rc:
+                c_same, line_ab = _same_cell_edge(a, b)
+                cost_dir[(a, b)] = c_same
+                cost_dir[(b, a)] = c_same
+                if want_paths_for_pairs:
+                    path_dir[(a, b)] = list(line_ab)
+                    path_dir[(b, a)] = list(reversed(line_ab))
+                same_cell_pairs += 1
+                done_dir += 2
+                update_progress()
+                continue
 
             def cancel_check():
                 return self._is_cancelled()
@@ -741,26 +831,30 @@ class CostNetworkWorker(QgsTask):
                     continue
                 start_rc = (a_row, a_col)
                 end_rc = (b_row, b_col)
-                prev, cost_ab = _astar_path(
-                    dem,
-                    nodata_mask,
-                    start_rc,
-                    end_rc,
-                    dx,
-                    dy,
-                    self.allow_diagonal,
-                    self.model_key,
-                    self.model_params,
-                    cost_mode=solver_cost_mode,
-                    cancel_check=self._is_cancelled,
-                )
-                if prev is None or cost_ab is None:
-                    continue
-                idxs = _reconstruct_path(prev, start_rc, end_rc, cols, rows)
-                if not idxs:
-                    continue
-                pts = [_cell_center(win_gt, (idx % cols), (idx // cols)) for idx in idxs]
-                pts = _simplify_turn_points(pts) or pts
+                if start_rc == end_rc:
+                    # Same-cell pair: the straight 2-vertex line, as in the candidate pass.
+                    _c_same, pts = _same_cell_edge(a, b)
+                else:
+                    prev, cost_ab = _astar_path(
+                        dem,
+                        nodata_mask,
+                        start_rc,
+                        end_rc,
+                        dx,
+                        dy,
+                        self.allow_diagonal,
+                        self.model_key,
+                        self.model_params,
+                        cost_mode=solver_cost_mode,
+                        cancel_check=self._is_cancelled,
+                    )
+                    if prev is None or cost_ab is None:
+                        continue
+                    idxs = _reconstruct_path(prev, start_rc, end_rc, cols, rows)
+                    if not idxs:
+                        continue
+                    pts = [_cell_center(win_gt, (idx % cols), (idx // cols)) for idx in idxs]
+                    pts = _simplify_turn_points(pts) or pts
                 dist_m = float(_polyline_length(pts) or 0.0)
 
                 cab = cost_dir.get((a, b))
@@ -1077,9 +1171,16 @@ class CostNetworkWorker(QgsTask):
                         )
                     )
 
+        # The count reported must be the count drawn: the line layer can only
+        # hold edges with >= 2 vertices.
+        edges_out = [e for e in edges_out if e.coords and len(e.coords) >= 2]
         msg = f"노드 {len(nodes)}개 / 간선 {len(edges_out)}개 생성"
         if removed:
             msg = f"{msg} (DEM 범위/NoData로 {removed}개 제외)"
+        if k != k_requested:
+            msg = f"{msg} (후보 간선 k를 {k_requested}에서 k-NN k={k}로 올림)"
+        if same_cell_pairs:
+            msg = f"{msg} (같은 DEM 셀의 유적 쌍 {same_cell_pairs}개: 직선거리·평지 비용으로 연결)"
 
         try:
             self.setProgress(100.0)
@@ -1098,6 +1199,12 @@ class CostNetworkWorker(QgsTask):
             allow_diagonal=self.allow_diagonal,
             nodes=nodes,
             edges=edges_out,
+            dem_crs=self.dem_crs,
+            sym_method=self.sym_method,
+            candidate_k=int(k),
+            candidate_k_requested=int(k_requested),
+            knn_k=int(self.knn_k),
+            same_cell_pairs=int(same_cell_pairs),
         )
 
 
@@ -1206,9 +1313,12 @@ class CostNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
         self.cmbCostMode.addItem("에너지(kcal) (Energy, kcal) - Pandolf만", COST_ENERGY)
 
         self.cmbSymmetrize.clear()
-        self.cmbSymmetrize.addItem("MST 대칭화: 왕복 평균 (Round-trip mean)", SYMMETRY_AVG)
-        self.cmbSymmetrize.addItem("MST 대칭화: 편도 최소 (One-way min)", SYMMETRY_MIN)
-        self.cmbSymmetrize.addItem("MST 대칭화: 편도 최대 (One-way max)", SYMMETRY_MAX)
+        # Not MST-only: the merged value is every edge's time_sym/kcal_sym (and
+        # label and SNA weight) in every mode, and it picks the MST/hub-MST
+        # edges. So the combo is shown in every mode (see _on_mode_changed).
+        self.cmbSymmetrize.addItem("대칭화: 왕복 평균 (Round-trip mean)", SYMMETRY_AVG)
+        self.cmbSymmetrize.addItem("대칭화: 편도 최소 (One-way min)", SYMMETRY_MIN)
+        self.cmbSymmetrize.addItem("대칭화: 편도 최대 (One-way max)", SYMMETRY_MAX)
 
         self._init_models()
         self.cmbModel.currentIndexChanged.connect(self._on_model_changed)
@@ -1526,8 +1636,9 @@ MST/k-NN/Hub 네트워크를 생성합니다.
             "너무 작으면 연결이 끊겨 MST가 실패할 수 있습니다.<br/>"
             "• <b>경로 버퍼(m)</b>: 각 후보쌍 LCP 계산창(bbox)에 여유를 줍니다. "
             "너무 작으면 최적 경로가 창 밖으로 나가 실패할 수 있습니다.<br/>"
-            "• <b>대칭화(MST)</b>: 오르막/내리막 차이로 A→B와 B→A 비용이 다를 수 있어, "
-            "MST는 (평균/최소/최대)로 한 값으로 만듭니다.<br/>"
+            "• <b>대칭화</b>: 오르막/내리막 차이로 A→B와 B→A 비용이 다를 수 있어, "
+            "(평균/최소/최대)로 한 값으로 만듭니다. 모든 방식의 대칭값(time_sym/kcal_sym, 라벨, SNA 가중치)과 "
+            "MST·허브 MST 간선 선택에 쓰입니다.<br/>"
             "• <b>A+B+C(All)</b>: MST/k-NN/Hub를 한 번에 생성합니다(Hub는 허브 값 설정 시)."
             "</html>"
         )
@@ -1537,7 +1648,8 @@ MST/k-NN/Hub 네트워크를 생성합니다.
             "후보 간선(k)\n"
             "- 각 노드에서 유클리드 거리로 가까운 k개만 후보로 잡고 LCP를 계산합니다.\n"
             "- 값이 작을수록 빠르지만, 그래프가 끊겨 MST가 실패할 수 있습니다.\n"
-            "- 200개+ 노드에서는 8~20부터 시도 후, 실패하면 k를 늘려보세요."
+            "- 200개+ 노드에서는 8-20부터 시도 후, 실패하면 k를 늘려보세요.\n"
+            "- k-NN(또는 All)에서 이 값이 k-NN의 k보다 작으면 k-NN의 k로 자동으로 올립니다(결과 메타데이터에 둘 다 기록)."
         )
         self.spinPairBuffer.setToolTip(
             "경로 버퍼(m)\n"
@@ -1551,9 +1663,11 @@ MST/k-NN/Hub 네트워크를 생성합니다.
             "- 필요하면 꺼서(4방향) 비교해보세요."
         )
         self.cmbSymmetrize.setToolTip(
-            "MST 대칭화\n"
+            "대칭화 (모든 방식에 적용)\n"
             "- 경사 때문에 A→B와 B→A 비용이 달라질 수 있습니다.\n"
             "- MST는 무방향 그래프가 필요하므로 한 값으로 합칩니다.\n"
+            "- 같은 값이 모든 방식의 time_sym/kcal_sym(라벨), SNA 가중치, 허브 MST에도 쓰입니다.\n"
+            "  (k-NN 선택과 허브 연결 선택 자체는 각 노드에서 나가는 편도 비용 기준)\n"
             "  • 왕복 평균: (A→B + B→A)/2\n"
             "  • 편도 최소: min(A→B, B→A)\n"
             "  • 편도 최대: max(A→B, B→A)"
@@ -1561,7 +1675,8 @@ MST/k-NN/Hub 네트워크를 생성합니다.
         self.spinKnnK.setToolTip(
             "k‑NN의 k\n"
             "- 각 노드에서 비용이 작은 상위 k개 노드로 연결합니다.\n"
-            "- k가 작으면 네트워크가 끊길 수 있고, k가 크면 선이 많아집니다."
+            "- k가 작으면 네트워크가 끊길 수 있고, k가 크면 선이 많아집니다.\n"
+            "- 후보 간선(k)이 이 값보다 작으면 후보 간선을 이 값으로 올려 계산합니다."
         )
         self.cmbNetworkMode.setToolTip("네트워크 방식(드롭다운 항목에 마우스를 올리면 설명/레퍼런스가 표시됩니다).")
         self.cmbCostMode.setToolTip(
@@ -1968,10 +2083,12 @@ MST/k-NN/Hub 네트워크를 생성합니다.
         params = """
         <h3>3) 파라미터를 어떻게 잡나</h3>
         <ul>
-          <li><code>후보 간선(k)</code>: 클수록 MST가 끊길 위험이 줄고 정확도가 올라가지만 계산이 느려집니다.</li>
+          <li><code>후보 간선(k)</code>: 클수록 MST가 끊길 위험이 줄고 정확도가 올라가지만 계산이 느려집니다.
+          k-NN(또는 All)에서 k-NN의 k보다 작으면 k-NN의 k로 자동으로 올립니다.</li>
           <li><code>경로 버퍼(m)</code>: 0이면 DEM 전체에서 경로를 찾습니다(매우 느림). 너무 작으면 실제 우회로가 잘려 경로가 실패할 수 있습니다.</li>
           <li><code>대각 이동</code>: 8방향 이동은 더 자연스러운 경로가 나올 수 있지만, 4방향보다 계산이 늘 수 있습니다.</li>
-          <li><code>MST 대칭화</code>: 경사 기반 비용은 A→B와 B→A가 다를 수 있어, MST는 ‘대칭 비용’이 필요합니다(평균/최소/최대).</li>
+          <li><code>대칭화</code>: 경사 기반 비용은 A→B와 B→A가 다를 수 있어, MST는 ‘대칭 비용’이 필요합니다(평균/최소/최대).
+          이 선택은 모든 방식의 <code>time_sym</code>/<code>kcal_sym</code>(라벨)과 SNA 가중치에도 쓰이며, 결과 메타데이터와 필드 별칭에 기록됩니다.</li>
         </ul>
         """
 
@@ -1985,6 +2102,9 @@ MST/k-NN/Hub 네트워크를 생성합니다.
           컴포넌트가 많으면 <code>후보 k</code> 또는 <code>버퍼</code>를 늘려보세요.</li>
           <li><code>closeness</code>(선택): 다른 노드까지의 “최단 비용 합”이 작을수록 큽니다(느릴 수 있음).</li>
           <li><code>betweenness</code>(선택): 다른 노드 쌍의 최단 비용 경로를 “중개”하는 정도(매우 느릴 수 있음).</li>
+          <li>가중치는 간선의 대칭값(<code>time_sym</code> 또는 <code>kcal_sym</code>)입니다.</li>
+          <li><b>A+B+C(All)</b>에서는 MST·k-NN·Hub 간선의 <b>합집합</b> 하나로 계산합니다
+          (어느 한 네트워크의 값이 아님). 방식별 값이 필요하면 방식별로 따로 실행하세요.</li>
         </ul>
         """
 
@@ -2009,6 +2129,10 @@ MST/k-NN/Hub 네트워크를 생성합니다.
           <li>Pandolf를 <b>‘시간(분)’ 기준</b>으로 돌리면 비용 자체가 ‘거리 / 고정속도’가 되어 경사가 전혀 반영되지 않습니다.
           이 경우 간선/네트워크는 사실상 <b>직선거리 네트워크</b>이므로, Pandolf는 ‘에너지(kcal)’ 기준으로 쓰세요.</li>
           <li>큰 데이터(예: 200개+)는 후보 k/버퍼 조절이 중요하며, SNA의 느린 지표는 자동 생략될 수 있습니다.</li>
+          <li>두 유적이 <b>같은 DEM 셀</b>에 있으면 격자 경로가 없으므로, 두 점을 잇는 직선을 모델의 평지 비용으로 연결합니다
+          (좌표가 완전히 같으면 반 셀 거리). 그 수는 완료 메시지와 메타데이터(<code>same_cell_pairs</code>)에 기록됩니다.</li>
+          <li>멀티포인트 피처에 점이 2개 이상이면 어느 점을 노드로 쓸지 정할 수 없어 실행하지 않습니다.
+          ‘다중 파트를 단일 파트로’로 나눈 뒤 실행하세요.</li>
         </ul>
         """
 
@@ -2107,7 +2231,6 @@ MST/k-NN/Hub 네트워크를 생성합니다.
         is_all = mode == NETWORK_ALL
         is_knn = (mode == NETWORK_KNN) or is_all
         is_hub = (mode == NETWORK_HUB) or is_all
-        is_mst = (mode == NETWORK_MST) or is_all
 
         for w in (self.lblKnnK, self.spinKnnK, self.lblKnnKHint):
             w.setVisible(bool(is_knn))
@@ -2118,7 +2241,10 @@ MST/k-NN/Hub 네트워크를 생성합니다.
         hub_widgets.append(self.chkHubConnectMst)
         for w in hub_widgets:
             w.setVisible(bool(is_hub))
-        self.cmbSymmetrize.setVisible(bool(is_mst))
+        # Shown in every mode: the merged value is time_sym/kcal_sym (labels,
+        # SNA weights) for k-NN and Hub edges too, so a hidden combo would
+        # silently change those results.
+        self.cmbSymmetrize.setVisible(True)
 
         # Compact layout for "All" mode to avoid vertical overflow on small screens:
         # rely on tooltips (and per-mode hover tooltips) instead of extra hint labels.
@@ -2211,6 +2337,9 @@ MST/k-NN/Hub 네트워크를 생성합니다.
 
         nodes: List[NetworkNode] = []
         skipped = 0
+        # MultiPoint features with 2+ points have no single site location;
+        # taking the first part silently moved the node. Refused below.
+        multi_part_fids: List[str] = []
         for ft in feats:
             try:
                 geom = ft.geometry()
@@ -2222,7 +2351,9 @@ MST/k-NN/Hub 네트워크를 생성합니다.
                 if geom.type() == Qgis.GeometryType.Point:
                     if geom.isMultipart():
                         mp = geom.asMultiPoint()
-                        if mp:
+                        if len(mp) > 1:
+                            multi_part_fids.append(str(ft.id()))
+                        elif mp:
                             pt = QgsPointXY(mp[0])
                     else:
                         pt = QgsPointXY(geom.asPoint())
@@ -2245,7 +2376,8 @@ MST/k-NN/Hub 네트워크를 생성합니다.
                 if name_field:
                     try:
                         v = ft[name_field]
-                        if v is not None and str(v).strip() != "":
+                        # PyQGIS NULL is not None: without this a NULL name became "NULL".
+                        if not is_null_value(v) and str(v).strip() != "":
                             name = str(v)
                     except Exception as _exc:
                         log_swallowed("tools/cost_network_dialog.py:2180 (run_analysis)", _exc)
@@ -2254,7 +2386,7 @@ MST/k-NN/Hub 네트워크를 생성합니다.
                 if mode in (NETWORK_HUB, NETWORK_ALL) and hub_field and hub_values:
                     try:
                         hv = ft[hub_field]
-                        is_hub = str(hv).strip() in hub_values if hv is not None else False
+                        is_hub = (not is_null_value(hv)) and str(hv).strip() in hub_values
                     except Exception:
                         is_hub = False
 
@@ -2269,6 +2401,22 @@ MST/k-NN/Hub 네트워크를 생성합니다.
                 )
             except Exception:
                 skipped += 1
+
+        if multi_part_fids:
+            shown = ", ".join(multi_part_fids[:5]) + (" …" if len(multi_part_fids) > 5 else "")
+            push_message(
+                self.iface,
+                "오류",
+                (
+                    f"멀티포인트 피처 {len(multi_part_fids)}개에 점이 2개 이상 있습니다 (fid: {shown}). "
+                    "어느 점을 유적 노드로 쓸지 정할 수 없어 실행하지 않습니다. "
+                    "'다중 파트를 단일 파트로(Multipart to singleparts)'로 나누거나 대표점을 만든 뒤 다시 실행하세요."
+                ),
+                level=2,
+                duration=10,
+            )
+            restore_ui_focus(self)
+            return
 
         if len(nodes) < 2:
             push_message(self.iface, "오류", "유효한 노드가 2개 이상 필요합니다.", level=2)
@@ -2333,6 +2481,7 @@ MST/k-NN/Hub 네트워크를 생성합니다.
             model_label=model_label,
             cost_mode=cost_mode,
             on_done=on_done,
+            dem_crs=QgsCoordinateReferenceSystem(dem_layer.crs()),
         )
         self._task = task
         QgsApplication.taskManager().addTask(task)
@@ -2376,15 +2525,20 @@ MST/k-NN/Hub 네트워크를 생성합니다.
             return
 
         try:
-            self._add_result_layers(res)
+            notes = self._add_result_layers(res) or []
         except Exception as e:
             log_message(f"Add network result layers error: {e}", level=Qgis.MessageLevel.Critical)
             push_message(self.iface, "오류", f"결과 레이어 추가 실패: {e}", level=2, duration=9)
             return
 
-        push_message(self.iface, "최소비용 네트워크", res.message or "완료", level=0, duration=7)
+        msg = res.message or "완료"
+        if notes:
+            msg = f"{msg} " + " ".join(notes)
+        push_message(self.iface, "최소비용 네트워크", msg, level=0, duration=7)
 
-    def _add_result_layers(self, res: NetworkTaskResult):
+    def _add_result_layers(self, res: NetworkTaskResult) -> List[str]:
+        """Build the node/edge layers; returns notes to append to the done message."""
+        notes: List[str] = []
         project = QgsProject.instance()
         root = project.layerTreeRoot()
 
@@ -2426,6 +2580,7 @@ MST/k-NN/Hub 네트워크를 생성합니다.
             try:
                 n_nodes = int(len(nodes))
                 edge_weights: Dict[Tuple[int, int], float] = {}
+                bad_weight_edges = set()
                 for e in edges:
                     _skip_2329 = False
                     try:
@@ -2451,15 +2606,19 @@ MST/k-NN/Hub 네트워크를 생성합니다.
                         w = float(w) if w is not None else None
                     except Exception:
                         w = None
-                    if w is None or (not math.isfinite(float(w))) or float(w) <= 0:
-                        try:
-                            w = float(e.dist_m)
-                        except Exception:
-                            w = 1.0
-
                     key = (a, b) if a < b else (b, a)
+                    if w is None or (not math.isfinite(float(w))) or float(w) <= 0:
+                        # No usable cost for this edge. It still counts for
+                        # degree/components, but weighted closeness/betweenness
+                        # are not computed (see below) - the old fallback to
+                        # dist_m mixed metres into a minutes/kcal graph, and a
+                        # 0 weight was dropped there without a word.
+                        bad_weight_edges.add(key)
+                        edge_weights.setdefault(key, math.nan)
+                        continue
+
                     prev = edge_weights.get(key)
-                    if prev is None or float(w) < float(prev):
+                    if prev is None or not math.isfinite(float(prev)) or float(w) < float(prev):
                         edge_weights[key] = float(w)
 
                 pairs = set(edge_weights.keys())
@@ -2493,14 +2652,23 @@ MST/k-NN/Hub 네트워크를 생성합니다.
                     do_close = False
                     do_betw = False
 
+                if (do_close or do_betw) and bad_weight_edges:
+                    log_message(
+                        f"CostNetwork: SNA closeness/betweenness skipped - {len(bad_weight_edges)} edge(s) "
+                        "without a positive cost (weights must be > 0)",
+                        level=Qgis.MessageLevel.Warning,
+                    )
+                    notes.append(
+                        f"(비용이 없는 간선 {len(bad_weight_edges)}개 때문에 closeness/betweenness는 계산하지 않았습니다)"
+                    )
+                    do_close = False
+                    do_betw = False
+
                 if do_close or do_betw:
                     adj: List[List[Tuple[int, float]]] = [[] for _ in range(int(n_nodes))]
                     for (a, b), wv in edge_weights.items():
-                        wv = float(wv)
-                        if not math.isfinite(wv) or wv <= 0:
-                            continue
-                        adj[a].append((b, wv))
-                        adj[b].append((a, wv))
+                        adj[a].append((b, float(wv)))
+                        adj[b].append((a, float(wv)))
 
                     if do_close:
                         closeness = _sna_closeness_centrality_weighted(n=int(n_nodes), adj=adj)
@@ -2513,7 +2681,7 @@ MST/k-NN/Hub 네트워크를 생성합니다.
                 do_betw = False
 
         # Nodes
-        pt_layer = QgsVectorLayer(f"Point?crs={res.dem_authid}", "유적 노드 (Sites)", "memory")
+        pt_layer = _memory_layer("Point", "유적 노드 (Sites)", str(res.dem_authid or ""), res.dem_crs)
         pr = pt_layer.dataProvider()
         fields = [QgsField("fid", FT_STRING), QgsField("name", FT_STRING), QgsField("is_hub", FT_INT)]
         if do_sna:
@@ -2538,13 +2706,15 @@ MST/k-NN/Hub 네트워크를 생성합니다.
                     if idx >= 0:
                         pt_layer.setFieldAlias(idx, alias)
 
-                _set_alias("degree", "연결 수(degree)")
-                _set_alias("component", "컴포넌트ID(component)")
-                _set_alias("comp_size", "컴포넌트 크기(comp_size)")
+                # All mode: one graph = union of the MST, k-NN and hub edges.
+                union_tag = ", MST+k-NN+Hub 합집합" if res.network_mode == NETWORK_ALL else ""
+                _set_alias("degree", f"연결 수(degree{union_tag})")
+                _set_alias("component", f"컴포넌트ID(component{union_tag})")
+                _set_alias("comp_size", f"컴포넌트 크기(comp_size{union_tag})")
                 if do_close:
-                    _set_alias("closeness", "근접 중심성(closeness)")
+                    _set_alias("closeness", f"근접 중심성(closeness{union_tag})")
                 if do_betw:
-                    _set_alias("betweenness", "매개 중심성(betweenness)")
+                    _set_alias("betweenness", f"매개 중심성(betweenness{union_tag})")
         except Exception as _exc:
             log_swallowed("cost_network_dialog._add_result_layers", _exc)
 
@@ -2586,7 +2756,7 @@ MST/k-NN/Hub 네트워크를 생성합니다.
         )
 
         # Edges
-        line_layer = QgsVectorLayer(f"LineString?crs={res.dem_authid}", "네트워크 (Network)", "memory")
+        line_layer = _memory_layer("LineString", "네트워크 (Network)", str(res.dem_authid or ""), res.dem_crs)
         pr = line_layer.dataProvider()
         pr.addAttributes(
             [
@@ -2622,6 +2792,20 @@ MST/k-NN/Hub 네트워크를 생성합니다.
                 _set_edge_alias("time_sym", "시간 대칭값 (거리/고정속도, 경사 미반영)")
             except Exception as _exc:
                 log_swallowed("cost_network_dialog._add_result_layers", _exc)
+
+        # Which merge produced *_sym, in the attribute-table header itself.
+        sym_key = res.sym_method if res.sym_method in _SYMMETRY_DESC else SYMMETRY_AVG
+        sym_meta, sym_ko = _SYMMETRY_DESC[sym_key]
+        try:
+            for fname, alias in (
+                ("time_sym", f"시간 대칭값({sym_ko})" if res.cost_mode != COST_ENERGY else None),
+                ("kcal_sym", f"에너지 대칭값({sym_ko}, kcal)"),
+            ):
+                fidx = int(line_layer.fields().indexFromName(fname))
+                if alias and fidx >= 0:
+                    line_layer.setFieldAlias(fidx, alias)
+        except Exception as _exc:
+            log_swallowed("cost_network_dialog._add_result_layers", _exc)
 
         feats = []
         for e in edges:
@@ -2716,6 +2900,27 @@ MST/k-NN/Hub 네트워크를 생성합니다.
         }
         if any(str(e.kind) in ("mst", "hub_mst") for e in edges):
             approx_params["mst"] = "approximate_over_candidates"
+        # How the result was made, so an exported layer states it.
+        approx_params["symmetrization"] = sym_meta
+        approx_params["candidate_k"] = int(res.candidate_k)
+        if int(res.candidate_k_requested) != int(res.candidate_k):
+            approx_params["candidate_k_requested"] = int(res.candidate_k_requested)
+            approx_params["candidate_k_note"] = "raised to the k-NN k"
+        if res.network_mode in (NETWORK_KNN, NETWORK_ALL):
+            approx_params["knn_k"] = int(res.knn_k)
+        if int(res.same_cell_pairs):
+            approx_params["same_cell_pairs"] = int(res.same_cell_pairs)
+            approx_params["same_cell_rule"] = (
+                "straight line between the two sites at the model's flat-ground cost (half a cell if identical)"
+            )
+        node_params = dict(approx_params)
+        if do_sna:
+            node_params["sna_weight"] = ("kcal_sym" if res.cost_mode == COST_ENERGY else "time_sym") + f" ({sym_meta})"
+            if res.network_mode == NETWORK_ALL:
+                node_params["sna_graph"] = "union of mst, knn and hub edges"
+                notes.append("(SNA 지표는 MST+k-NN+Hub 간선의 합집합 하나로 계산했습니다)")
+            else:
+                node_params["sna_graph"] = f"{res.network_mode} edges"
 
         try:
             set_archtoolkit_layer_metadata(
@@ -2741,7 +2946,7 @@ MST/k-NN/Hub 네트워크를 생성합니다.
                     "network_mode": str(res.network_mode or ""),
                     "cost_mode": str(res.cost_mode or ""),
                     "model_label": str(res.model_label or ""),
-                    **approx_params,
+                    **node_params,
                 },
             )
         except Exception as _exc:
@@ -2751,6 +2956,7 @@ MST/k-NN/Hub 네트워크를 생성합니다.
         project.addMapLayer(pt_layer, False)
         run_group.insertLayer(0, line_layer)
         run_group.insertLayer(0, pt_layer)
+        return notes
 
 
 class _ValuePickerDialog(QtWidgets.QDialog):

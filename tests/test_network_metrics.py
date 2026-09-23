@@ -9,6 +9,7 @@ from tools.network_metrics import (
     closeness_centrality_unweighted,
     closeness_centrality_weighted,
     dijkstra_weighted,
+    validate_positive_weights,
 )
 
 
@@ -116,6 +117,41 @@ class BetweennessTests(unittest.TestCase):
         adj = [[(1, 1.0), (2, 5.0)], [(0, 1.0), (2, 1.0)], [(0, 5.0), (1, 1.0)]]
         bc = betweenness_centrality_weighted(n=3, adj=adj)
         self.assertAlmostEqual(bc[1], 1.0, places=9)
+
+
+class WeightValidationTests(unittest.TestCase):
+    """Zero/negative/non-finite weights are rejected, never dropped silently.
+
+    Dropping a 0-weight edge made two co-located sites look unconnected in
+    closeness/betweenness while degree/component still counted the link.
+    """
+
+    ZERO = [[(1, 0.0), (2, 1.0)], [(0, 0.0)], [(0, 1.0)]]
+
+    def test_centralities_reject_zero_weight(self):
+        with self.assertRaises(ValueError):
+            closeness_centrality_weighted(n=3, adj=self.ZERO)
+        with self.assertRaises(ValueError):
+            betweenness_centrality_weighted(n=3, adj=self.ZERO)
+
+    def test_centralities_reject_negative_and_nonfinite(self):
+        for bad in (-1.0, math.inf, math.nan, "x"):
+            adj = [[(1, bad)], [(0, bad)]]
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                closeness_centrality_weighted(n=2, adj=adj)
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                betweenness_centrality_weighted(n=2, adj=adj)
+
+    def test_strict_dijkstra_rejects_lenient_default_skips(self):
+        with self.assertRaises(ValueError):
+            dijkstra_weighted(start=0, adj=self.ZERO, strict=True)
+        dist = dijkstra_weighted(start=0, adj=self.ZERO)
+        self.assertTrue(math.isinf(dist[1]))
+        self.assertEqual(dist[2], 1.0)
+
+    def test_positive_weights_pass_validation(self):
+        validate_positive_weights(_unit(STAR))
+        validate_positive_weights([[(1, 1e-9)], [(0, 1e-9)]])
 
 
 if __name__ == "__main__":
