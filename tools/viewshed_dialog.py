@@ -22,7 +22,6 @@ import os
 import tempfile
 import uuid
 import math
-import shutil
 import processing
 import numpy as np
 from osgeo import gdal, ogr
@@ -87,6 +86,22 @@ FORM_CLASS, _ = uic.loadUiType(os.path.join(
     os.path.dirname(__file__), 'viewshed_dialog_base.ui'))
 
 
+def _memory_layer(geom_type, name, crs):
+    """Memory vector layer that keeps `crs` even when it has no authid.
+
+    "Point?crs=" + crs.authid() silently produced a CRS-less layer for
+    user-defined projections (authid() == ""), so every output built that way
+    lost its georeferencing.
+    """
+    layer = QgsVectorLayer(str(geom_type), name, "memory")
+    try:
+        if crs is not None and crs.isValid():
+            layer.setCrs(crs)
+    except Exception as _exc:
+        log_swallowed("viewshed_dialog._memory_layer", _exc)
+    return layer
+
+
 class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
 
     # Higuchi (1975) defines the near/middle/far view zones by the RATIO of
@@ -96,6 +111,16 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
     # they are exposed as editable defaults rather than hard-coded constants.
     HIGUCHI_NEAR_DEFAULT_M = 500.0
     HIGUCHI_MID_DEFAULT_M = 2500.0
+
+    # gdal_viewshed writes 0 for both "not visible" and "beyond MAX_DISTANCE"
+    # unless -ov is given. A distinct out-of-range value (never 0 or 255) lets
+    # every consumer turn those cells into NoData instead of "보이지 않음".
+    VIEWSHED_OUT_OF_RANGE_VALUE = 1
+    VIEWSHED_NODATA = -9999
+
+    # LOS samples at the DEM pixel size; this cap only bites for very long
+    # lines on very fine DEMs (e.g. > 200 km on a 1 m DEM).
+    LOS_MAX_SAMPLES = 200000
 
     def __init__(self, iface, parent=None):
         super(ViewshedDialog, self).__init__(parent)
@@ -134,15 +159,27 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         self._los_profile_data = {}  # viscode_layer_id -> profile payload
         self._los_profile_dialogs = {}  # viscode_layer_id -> dialog instance
         self._los_selection_handlers = {}  # viscode_layer_id -> selectionChanged handler (for disconnect)
+        # Vector layers this dialog created. They are kept out of the observer
+        # combo: an empty combo auto-selects the first layer added to the
+        # project, which flipped the source to "레이어에서 선택" and made the
+        # next identical run use the previous run's observers as extra input.
+        self._own_output_layers = {}  # layer_id -> QgsMapLayer
 
-        
-        
+
+
         # Setup layer combos
         self.cmbDemLayer.setFilters(Qgis.LayerFilter.RasterLayer)
         self.cmbObserverLayer.setFilters(Qgis.LayerFilter.VectorLayer)
         try:
             if hasattr(self, "cmbAoiStatsLayer"):
                 self.cmbAoiStatsLayer.setFilters(Qgis.LayerFilter.PolygonLayer)
+            if hasattr(self, "chkAoiStats"):
+                self.chkAoiStats.setToolTip(
+                    "AOI 폴리곤마다 가시 면적/비율을 계산합니다.\n"
+                    "- 셀 중심이 AOI 안에 있는 셀만 셉니다.\n"
+                    "- 보임 기준: 결과값 > 0 (누적/가중 결과는 관측점 1개 이상, 가중치>0).\n"
+                    "- vis_pct는 분석된 부분(tot_m2) 대비 비율이고, anl_pct는 AOI 중 분석 반경/DEM 안에 든 비율입니다."
+                )
         except Exception as _exc:
             log_swallowed("tools/viewshed_dialog.py:109 (__init__)", _exc)
 
@@ -257,7 +294,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         self.spinRefraction.setValue(0.13) # Default refraction coefficient
         self.spinRefraction.setToolTip(
             "대기 굴절 계수 k (Refraction Coefficient)\n"
-            "- 범위(권장): 대략 0.00~0.20 (대기 상태에 따라 변동)\n"
+            "- 범위(권장): 대략 0.00-0.20 (대기 상태에 따라 변동)\n"
             "- 해석: k가 커질수록 지구 곡률로 인한 시야 제한이 완화됩니다.\n"
             "- 본 도구는 GDAL gdal_viewshed의 -cc(곡률/굴절 계수)에 cc=1-k로 전달합니다."
         )
@@ -308,7 +345,9 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
 
         self.radioLineOfSight.setToolTip(
             "두 지점 사이의 시야가 확보되는지를 단면(프로파일)로 확인합니다.\n"
-            "- 지도/프로파일 색상: 초록=보임, 빨강=안보임\n"
+            "- 지도/프로파일 색상: 초록=보임, 빨강=안보임, 회색=판정 불가(앞쪽 경로에 DEM NoData)\n"
+            "- DEM 픽셀 간격으로 표본을 추출하므로 픽셀 1칸 폭의 장애물도 판정에 반영됩니다.\n"
+            "- 관측점/대상점이 DEM 범위 밖이거나 NoData 위이면 분석하지 않습니다.\n"
             "- 결과 Viscode 선을 선택하면 프로파일을 다시 열 수 있습니다."
         )
         
@@ -320,7 +359,9 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         # Fix Maximum Distance limit to allow > 2500m
         if hasattr(self, "spinMaxDistance"):
             self.spinMaxDistance.setMaximum(999999) # Allow large analysis radius
-            # Set default if needed, but respect UI default usually
+            # 0 would reach gdal_viewshed as "-md 0" (= unlimited) while the
+            # layer name still said "0m".
+            self.spinMaxDistance.setMinimum(1)
         
         # Safer Refraction Widget Insertion
         # If previous insertion failed (no parent layout found), try finding thegroupBox
@@ -390,6 +431,11 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
 <ul>
   <li>결과는 <b>DEM 품질</b>(해상도/NoData/수치오차)과 <b>관측/대상 높이</b>(m)에 크게 좌우됩니다.</li>
   <li>곡률/대기굴절 옵션은 장거리 분석에서 영향이 있으며, 필요할 때만 켜는 것을 권장합니다.</li>
+  <li><b>분석 반경</b>은 GDAL과 같이 관측점이 속한 셀의 중심에서 셀 중심까지 잽니다. 반경 밖과 DEM NoData 셀은 “보이지 않음”이 아니라 <b>NoData(투명)</b>로 표시됩니다.</li>
+  <li>DEM 범위 밖이거나 NoData 셀 위의 관측점은 계산할 수 없습니다. 단일 관측점은 실행을 거부하고, 다중/선형/둘레 분석에서는 해당 점을 제외한 뒤 제외 개수를 알려 줍니다.</li>
+  <li>폐곡선(둘레)을 따라 만든 관측점은 시작점을 한 번만 사용합니다.</li>
+  <li>가시선(LOS)은 DEM 픽셀 간격으로 표본을 추출합니다. 경로 중에 DEM NoData가 있고 알려진 지형이 시선을 가리지 않으면 결과는 <b>판정 불가</b>입니다. 표시되는 고도는 DEM 값이며, 곡률/굴절 보정값은 따로 표시합니다.</li>
+  <li>AOI 통계는 셀 중심이 AOI 안에 있는 셀만 세고, 결과값 &gt; 0을 “보임”으로 봅니다. <code>anl_pct</code>는 AOI 중 실제로 분석된 비율입니다.</li>
   <li>결과 레이어를 많이 생성할 수 있으니, 필요하면 작업 전용 그룹에서 정리하세요.</li>
 </ul>
 """
@@ -474,7 +520,9 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         - curvature on, refraction on  -> -cc (1 - k)
         """
         cc = self._calculate_gdal_viewshed_cc(curvature, refraction, refraction_coeff)
-        return f"-cc {cc}"
+        # -ov: cells beyond MAX_DISTANCE get their own value (see
+        # VIEWSHED_OUT_OF_RANGE_VALUE) so they become NoData, not "보이지 않음".
+        return f"-cc {cc} -ov {int(self.VIEWSHED_OUT_OF_RANGE_VALUE)}"
 
     def _calculate_gdal_viewshed_cc(self, curvature, refraction, refraction_coeff):
         # Refraction is a correction applied together with curvature.
@@ -491,6 +539,207 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             cc = 1.0
 
         return cc
+
+    # ------------------------------------------------------------------ helpers
+    def _register_own_output(self, layer):
+        """Keep a layer this dialog created out of the observer combo.
+
+        Must run BEFORE the layer is added to the project: an empty
+        QgsMapLayerComboBox selects the first compatible layer that appears.
+        """
+        if layer is None:
+            return layer
+        try:
+            self._own_output_layers[layer.id()] = layer
+            if hasattr(self, "cmbObserverLayer"):
+                self.cmbObserverLayer.setExceptedLayerList(list(self._own_output_layers.values()))
+        except Exception as _exc:
+            log_swallowed("viewshed_dialog._register_own_output", _exc)
+        return layer
+
+    def _new_output_layer(self, geom_type, name, crs):
+        """Memory output layer with a CRS that survives a missing authid."""
+        return self._register_own_output(_memory_layer(geom_type, name, crs))
+
+    def _dem_source_path(self, dem_layer):
+        try:
+            return self._split_qgis_source_path(dem_layer.source())
+        except Exception as _exc:
+            log_swallowed("viewshed_dialog._dem_source_path", _exc)
+            return dem_layer.source()
+
+    def _observer_dem_problem(self, dem_layer, point_dem):
+        """Return None when gdal_viewshed can use the point, else "outside"/"nodata".
+
+        gdal_viewshed silently writes nothing for an observer outside the
+        raster and uses the raw NoData value (e.g. -9999 m) as the eye
+        elevation for an observer on a NoData cell.
+        """
+        try:
+            ext = dem_layer.extent()
+            x = float(point_dem.x())
+            y = float(point_dem.y())
+            # GDAL takes the cell floor((x - xmin) / res): the max edge is outside.
+            if not (ext.xMinimum() <= x < ext.xMaximum() and ext.yMinimum() < y <= ext.yMaximum()):
+                return "outside"
+            val, ok = dem_layer.dataProvider().sample(QgsPointXY(x, y), 1)
+            if not ok or val is None:
+                return "nodata"
+            if not math.isfinite(float(val)):
+                return "nodata"
+        except Exception as _exc:
+            log_swallowed("viewshed_dialog._observer_dem_problem", _exc)
+            return "nodata"
+        return None
+
+    @staticmethod
+    def _observer_problem_text(problem):
+        if problem == "outside":
+            return "DEM 범위 밖"
+        return "DEM NoData 셀 위"
+
+    def _filter_points_on_dem(self, dem_layer, points, weights=None):
+        """Drop (point, crs) entries that gdal_viewshed cannot use.
+
+        Returns (kept_points, kept_weights, dropped_count).
+        """
+        kept = []
+        kept_w = []
+        dropped = 0
+        for idx, (pt, p_crs) in enumerate(points):
+            problem = None
+            try:
+                pt_dem = self.transform_point(pt, p_crs, dem_layer.crs())
+                problem = self._observer_dem_problem(dem_layer, pt_dem)
+            except Exception as _exc:
+                log_swallowed("viewshed_dialog._filter_points_on_dem", _exc)
+                problem = "outside"
+            if problem is not None:
+                dropped += 1
+            else:
+                kept.append((pt, p_crs))
+                if weights is not None:
+                    kept_w.append(weights[idx] if idx < len(weights) else 1.0)
+        return kept, (kept_w if weights is not None else None), dropped
+
+    @staticmethod
+    def _sample_line_points(line_geom, interval):
+        """Evenly spaced points along a (metric) line, closing vertex not repeated.
+
+        A closed ring's end point equals its start point; sampling i = 0..n
+        inclusive put the start vertex in twice and double-counted it in the
+        cumulative/weighted results.
+        """
+        pts = []
+        if line_geom is None or line_geom.isEmpty():
+            return pts
+        length = line_geom.length()
+        if length <= 0:
+            return pts
+        try:
+            interval = float(interval)
+        except (TypeError, ValueError):
+            interval = 50.0
+        if interval <= 0:
+            interval = 50.0
+        num_pts = max(1, int(length / interval))
+        first = None
+        last = None
+        try:
+            first = line_geom.interpolate(0.0).asPoint()
+            last = line_geom.interpolate(length).asPoint()
+        except Exception as _exc:
+            log_swallowed("viewshed_dialog._sample_line_points", _exc)
+        closed = bool(
+            first is not None and last is not None
+            and math.hypot(first.x() - last.x(), first.y() - last.y()) <= 1e-9 * max(1.0, length)
+        )
+        n_emit = num_pts if closed else num_pts + 1
+        for i in range(n_emit):
+            frac = i / num_pts
+            pt_geom = line_geom.interpolate(frac * length)
+            if pt_geom and not pt_geom.isEmpty():
+                pts.append(QgsPointXY(pt_geom.asPoint()))
+        return pts
+
+    def _dem_nodata_mask(self, dem_layer, gt, xsize, ysize):
+        """True where the DEM is NoData/NaN (or absent) on a grid aligned to the DEM lattice."""
+        mask = np.ones((int(ysize), int(xsize)), dtype=bool)
+        ds = None
+        try:
+            ds = gdal.Open(self._dem_source_path(dem_layer), gdal.GA_ReadOnly)
+            if ds is None:
+                return np.zeros((int(ysize), int(xsize)), dtype=bool)
+            dgt = ds.GetGeoTransform()
+            band = ds.GetRasterBand(1)
+            nd = band.GetNoDataValue()
+            xoff = int(round((gt[0] - dgt[0]) / dgt[1]))
+            yoff = int(round((gt[3] - dgt[3]) / dgt[5]))
+            c0 = max(0, xoff)
+            r0 = max(0, yoff)
+            c1 = min(ds.RasterXSize, xoff + int(xsize))
+            r1 = min(ds.RasterYSize, yoff + int(ysize))
+            if c1 <= c0 or r1 <= r0:
+                return mask
+            arr = band.ReadAsArray(c0, r0, c1 - c0, r1 - r0)
+            if arr is None:
+                return np.zeros((int(ysize), int(xsize)), dtype=bool)
+            arr = arr.astype(np.float64, copy=False)
+            bad = ~np.isfinite(arr)
+            if nd is not None and math.isfinite(float(nd)):
+                bad |= arr == float(nd)
+            mask[r0 - yoff:r1 - yoff, c0 - xoff:c1 - xoff] = bad
+            return mask
+        except Exception as _exc:
+            log_swallowed("viewshed_dialog._dem_nodata_mask", _exc)
+            return np.zeros((int(ysize), int(xsize)), dtype=bool)
+        finally:
+            ds = None
+
+    def _finalize_viewshed_raster(self, raw_path, out_path, dem_layer):
+        """Raw gdal_viewshed output -> Float32 0/255 raster with NoData = -9999.
+
+        NoData: cells gdal_viewshed flagged as beyond MAX_DISTANCE (measured,
+        like GDAL, from the centre of the observer's cell) and DEM NoData cells.
+        Both were written as 0 and drawn as "보이지 않음". The raw output already
+        covers only the DEM window around the observer, so the result is never
+        larger than the DEM (the old circular crop expanded it to the full
+        circle's bounding box, far beyond the DEM).
+        """
+        src = gdal.Open(raw_path, gdal.GA_ReadOnly)
+        if src is None:
+            raise Exception("가시권 원본 래스터를 열 수 없습니다.")
+        out_ds = None
+        try:
+            band = src.GetRasterBand(1)
+            arr = band.ReadAsArray()
+            if arr is None:
+                raise Exception("가시권 원본 래스터를 읽을 수 없습니다.")
+            gt = src.GetGeoTransform()
+            proj = src.GetProjection()
+            xsize, ysize = src.RasterXSize, src.RasterYSize
+            out = arr.astype(np.float32)
+            nodata_mask = arr == int(self.VIEWSHED_OUT_OF_RANGE_VALUE)
+            nodata_mask |= self._dem_nodata_mask(dem_layer, gt, xsize, ysize)
+            out[nodata_mask] = float(self.VIEWSHED_NODATA)
+            drv = gdal.GetDriverByName("GTiff")
+            out_ds = drv.Create(out_path, xsize, ysize, 1, gdal.GDT_Float32, options=["COMPRESS=LZW"])
+            if out_ds is None:
+                raise Exception("가시권 결과 래스터를 만들 수 없습니다.")
+            out_ds.SetGeoTransform(gt)
+            out_ds.SetProjection(proj)
+            ob = out_ds.GetRasterBand(1)
+            ob.SetNoDataValue(float(self.VIEWSHED_NODATA))
+            ob.WriteArray(out)
+            ob.FlushCache()
+        except Exception:
+            out_ds = None
+            cleanup_files([out_path])
+            raise
+        finally:
+            out_ds = None
+            src = None
+        return out_path
 
     def _on_refraction_toggled(self, checked):
         if checked and hasattr(self, 'chkCurvature') and not self.chkCurvature.isChecked():
@@ -971,6 +1220,18 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
 
     def on_layers_removed(self, layer_ids):
         """Clean up markers and annotations if the corresponding analysis layer is removed"""
+        # Drop removed outputs from the observer-combo exclusion list while the
+        # layer objects still exist (the combo keeps raw layer pointers).
+        try:
+            pruned = False
+            for lid in layer_ids:
+                if lid in self._own_output_layers:
+                    self._own_output_layers.pop(lid, None)
+                    pruned = True
+            if pruned and hasattr(self, "cmbObserverLayer"):
+                self.cmbObserverLayer.setExceptedLayerList(list(self._own_output_layers.values()))
+        except Exception as _exc:
+            log_swallowed("viewshed_dialog.on_layers_removed (own outputs)", _exc)
         for lid in layer_ids:
             # 1. Clean up RubberBands (Red Dots)
             if lid in self.result_marker_map:
@@ -1303,7 +1564,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             return
 
         # Default: line viewshed path storage
-        self.drawn_line_points = points
+        self.drawn_line_points = list(points)
         self.is_line_closed = is_closed
         self.observer_point = points[0]
 
@@ -1359,6 +1620,10 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         else:
             target_height = 0.0
         max_distance = self.spinMaxDistance.value()
+        if not self.radioLineOfSight.isChecked() and not (max_distance and max_distance > 0):
+            # gdal_viewshed reads -md 0 as "no limit".
+            push_message(self.iface, "오류", "최대 거리는 0보다 커야 합니다.", level=2)
+            return
         curvature = self.chkCurvature.isChecked()
         refraction = self.chkRefraction.isChecked()
         refraction_coeff = 0.13
@@ -1447,8 +1712,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         # Consolidate perimeter points into a single ring styling
         # Instead of rays, we draw the perimeter itself, colored by visibility from center.
         
-        layer = QgsVectorLayer("LineString?crs=" + dem_layer.crs().authid(),
-                              f"가시권_링분석_{int(buffer_radius)}m", "memory")
+        layer = self._new_output_layer("LineString", f"가시권_링분석_{int(buffer_radius)}m", dem_layer.crs())
         pr = layer.dataProvider()
         pr.addAttributes([
             QgsField("status", FT_STRING),
@@ -1569,17 +1833,21 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
     
     def create_observer_layer(self, name, points_info, weights=None):
         """Create a persistent memory layer for manual observer points"""
-        crs = self.canvas.mapSettings().destinationCrs().authid()
-        
+        crs = self.canvas.mapSettings().destinationCrs()
+
         # Check if we have points or lines
         is_line = False
-        if not self.radioFromLayer.isChecked() and hasattr(self, 'drawn_line_points') and self.radioLineViewshed.isChecked():
+        if (
+            not self.radioFromLayer.isChecked()
+            and len(getattr(self, 'drawn_line_points', None) or []) >= 2
+            and self.radioLineViewshed.isChecked()
+        ):
             is_line = True
-            
+
         if is_line:
-            layer = QgsVectorLayer(f"LineString?crs={crs}", name, "memory")
+            layer = self._new_output_layer("LineString", name, crs)
         else:
-            layer = QgsVectorLayer(f"Point?crs={crs}", name, "memory")
+            layer = self._new_output_layer("Point", name, crs)
             
         pr = layer.dataProvider()
         
@@ -1673,7 +1941,12 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         return inv_geotransform(*args, **kwargs)
 
     def _rasterize_geom_mask(self, geom_dem: QgsGeometry, *, win_gt, proj_wkt: str, cols: int, rows: int):
-        """Rasterize a polygon geometry into a boolean mask aligned to the given raster window."""
+        """Rasterize a polygon into a boolean mask aligned to the given raster window.
+
+        Cell-centre rule (GDAL's default): a cell belongs to the AOI when its
+        centre lies inside the polygon. ALL_TOUCHED counted every boundary cell
+        and inflated small AOIs (a 1,963 m² circle read as 3,100 m² on 10 m cells).
+        """
         try:
             ogr_geom = ogr.CreateGeometryFromWkb(bytes(geom_dem.asWkb()))
         except Exception:
@@ -1700,7 +1973,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             feat.SetGeometry(ogr_geom)
             vlyr.CreateFeature(feat)
 
-            gdal.RasterizeLayer(rds, [1], vlyr, burn_values=[1], options=["ALL_TOUCHED=TRUE"])
+            gdal.RasterizeLayer(rds, [1], vlyr, burn_values=[1])
 
             mask = band.ReadAsArray()
             if mask is None:
@@ -1709,6 +1982,23 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         except Exception:
             return None
 
+    # AOI "visible" rule per result kind. Every viewshed product stores 0 for
+    # "seen by nobody" and a positive value otherwise (255, a Higuchi class, a
+    # count, a bit-flag combination, a weight sum or a weight percentage), so
+    # the rule is value > 0 everywhere. The old fixed 0.5 threshold read
+    # weighted cells below 0.5 (weight 0.3, or 0.5 % after normalisation) as
+    # not visible.
+    AOI_VISIBLE_RULE = "value > 0"
+
+    @staticmethod
+    def _aoi_rule_text(kind):
+        kind = str(kind or "")
+        if kind in ("weighted_cumulative", "weighted_percent"):
+            return "value > 0 (가중치>0인 관측점 1개 이상에서 보임)"
+        if kind in ("cumulative", "count", "union", "reverse_union"):
+            return "value > 0 (관측점 1개 이상에서 보임)"
+        return "value > 0 (보임)"
+
     def _compute_aoi_visibility_stats_layer(
         self,
         *,
@@ -1716,8 +2006,17 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         dem_layer: QgsRasterLayer,
         aoi_layer: QgsVectorLayer,
         selected_only: bool,
-        visible_threshold: float = 0.5,
+        visible_threshold: float = 0.0,
+        rule_text: str = None,
+        with_mean: bool = False,
     ):
+        """Per-AOI visibility statistics.
+
+        tot_px/tot_m2 count the ANALYSED cells (cell centre inside the AOI and a
+        valid result value); aoi_px/aoi_m2 describe the whole AOI, so anl_pct
+        shows how much of an AOI that extends past the analysis radius or the
+        DEM was actually analysed. vis_pct is relative to the analysed part.
+        """
         if not raster_path or not os.path.exists(raster_path):
             return None, None
         if not aoi_layer or aoi_layer.geometryType() != Qgis.GeometryType.Polygon:
@@ -1750,19 +2049,27 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         except Exception:
             return None, None
 
+        if rule_text is None:
+            rule_text = self.AOI_VISIBLE_RULE
+
         out_name = f"AOI_가시통계_{uuid.uuid4().hex[:6]}"
-        out = QgsVectorLayer(f"Polygon?crs={dem_layer.crs().authid()}", out_name, "memory")
+        out = self._new_output_layer("Polygon", out_name, dem_layer.crs())
         pr = out.dataProvider()
-        pr.addAttributes(
-            [
-                QgsField("src_id", FT_INT),
-                QgsField("tot_px", FT_INT),
-                QgsField("vis_px", FT_INT),
-                QgsField("tot_m2", FT_DOUBLE),
-                QgsField("vis_m2", FT_DOUBLE),
-                QgsField("vis_pct", FT_DOUBLE),
-            ]
-        )
+        fields = [
+            QgsField("src_id", FT_INT),
+            QgsField("tot_px", FT_INT),
+            QgsField("vis_px", FT_INT),
+            QgsField("tot_m2", FT_DOUBLE),
+            QgsField("vis_m2", FT_DOUBLE),
+            QgsField("vis_pct", FT_DOUBLE),
+            QgsField("aoi_px", FT_INT),
+            QgsField("aoi_m2", FT_DOUBLE),
+            QgsField("anl_pct", FT_DOUBLE),
+            QgsField("vis_rule", FT_STRING),
+        ]
+        if with_mean:
+            fields.append(QgsField("mean_val", FT_DOUBLE))
+        pr.addAttributes(fields)
         out.updateFields()
 
         try:
@@ -1773,6 +2080,12 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         feats = []
         total_tot_m2 = 0.0
         total_vis_m2 = 0.0
+        total_aoi_m2 = 0.0
+        total_aoi_px = 0
+        total_tot_px = 0
+
+        # Guard against rasterising a huge AOI bbox on a fine lattice.
+        max_mask_cells = 50_000_000
 
         src_iter = aoi_layer.selectedFeatures() if selected_only else aoi_layer.getFeatures()
         for f in src_iter:
@@ -1781,7 +2094,6 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                 geom = f.geometry()
             except Exception as _exc:
                 log_swallowed("viewshed_dialog._compute_aoi_visibility_stats_layer", _exc)
-                log_swallowed("tools/viewshed_dialog.py:1723 (_compute_aoi_visibility_stats_layer)", _exc)
                 _skip_1721 = True
             if _skip_1721:
                 continue
@@ -1804,30 +2116,59 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                 px1, py1 = gdal.ApplyGeoTransform(inv_gt, bbox.xMaximum(), bbox.yMinimum())
             except Exception as _exc:
                 log_swallowed("viewshed_dialog._compute_aoi_visibility_stats_layer", _exc)
-                log_swallowed("tools/viewshed_dialog.py:1742 (_compute_aoi_visibility_stats_layer)", _exc)
                 _skip_1739 = True
             if _skip_1739:
                 continue
 
-            x0 = int(math.floor(min(px0, px1)))
-            x1 = int(math.ceil(max(px0, px1)))
-            y0 = int(math.floor(min(py0, py1)))
-            y1 = int(math.ceil(max(py0, py1)))
+            # Window over the WHOLE AOI on the raster's lattice (not clamped to
+            # the raster), so cells of the AOI outside the analysed raster still
+            # count towards aoi_px.
+            fx0 = int(math.floor(min(px0, px1)))
+            fx1 = int(math.ceil(max(px0, px1)))
+            fy0 = int(math.floor(min(py0, py1)))
+            fy1 = int(math.ceil(max(py0, py1)))
+            fw = int(max(1, fx1 - fx0))
+            fh = int(max(1, fy1 - fy0))
+            try:
+                aoi_m2 = float(geom_dem.area())
+            except Exception as _exc:
+                log_swallowed("viewshed_dialog._compute_aoi_visibility_stats_layer (area)", _exc)
+                aoi_m2 = 0.0
 
-            x0 = max(0, min(xsize - 1, x0))
-            y0 = max(0, min(ysize - 1, y0))
-            x1 = max(0, min(xsize, x1))
-            y1 = max(0, min(ysize, y1))
+            if fw * fh > max_mask_cells:
+                # Too large to rasterise whole: fall back to the part inside the raster.
+                fx0 = max(0, min(xsize - 1, fx0))
+                fy0 = max(0, min(ysize - 1, fy0))
+                fx1 = max(0, min(xsize, fx1))
+                fy1 = max(0, min(ysize, fy1))
+                fw = int(max(1, fx1 - fx0))
+                fh = int(max(1, fy1 - fy0))
+                aoi_px_known = False
+            else:
+                aoi_px_known = True
 
-            w = int(max(1, x1 - x0))
-            h = int(max(1, y1 - y0))
-            if w <= 0 or h <= 0:
+            win_gt = (
+                gt[0] + fx0 * gt[1] + fy0 * gt[2],
+                gt[1],
+                gt[2],
+                gt[3] + fx0 * gt[4] + fy0 * gt[5],
+                gt[4],
+                gt[5],
+            )
+            mask = self._rasterize_geom_mask(geom_dem, win_gt=win_gt, proj_wkt=proj, cols=fw, rows=fh)
+            if mask is None:
                 continue
 
-            arr = band.ReadAsArray(x0, y0, w, h)
-            if arr is None:
-                continue
-            arr = arr.astype(np.float32, copy=False)
+            # Result values for the window; cells outside the raster stay NaN.
+            arr = np.full((fh, fw), np.nan, dtype=np.float64)
+            c0 = max(0, fx0)
+            r0 = max(0, fy0)
+            c1 = min(xsize, fx0 + fw)
+            r1 = min(ysize, fy0 + fh)
+            if c1 > c0 and r1 > r0:
+                sub = band.ReadAsArray(c0, r0, c1 - c0, r1 - r0)
+                if sub is not None:
+                    arr[r0 - fy0:r1 - fy0, c0 - fx0:c1 - fx0] = sub.astype(np.float64, copy=False)
 
             valid = np.isfinite(arr)
             if nodata is not None:
@@ -1836,35 +2177,39 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                 except Exception as _exc:
                     log_swallowed("viewshed_dialog._compute_aoi_visibility_stats_layer", _exc)
 
-            win_gt = (
-                gt[0] + x0 * gt[1] + y0 * gt[2],
-                gt[1],
-                gt[2],
-                gt[3] + x0 * gt[4] + y0 * gt[5],
-                gt[4],
-                gt[5],
-            )
-            mask = self._rasterize_geom_mask(geom_dem, win_gt=win_gt, proj_wkt=proj, cols=w, rows=h)
-            if mask is None:
-                continue
-
             in_zone = mask & valid
             tot_px = int(np.count_nonzero(in_zone))
+            aoi_px = int(np.count_nonzero(mask))
             if tot_px <= 0:
                 vis_px = 0
+                mean_val = None
             else:
                 vis_px = int(np.count_nonzero(in_zone & (arr > float(visible_threshold))))
+                mean_val = float(np.mean(arr[in_zone]))
 
             tot_m2 = float(tot_px) * float(px_area)
             vis_m2 = float(vis_px) * float(px_area)
             vis_pct = (vis_m2 / tot_m2 * 100.0) if tot_m2 > 0 else 0.0
+            if aoi_px_known:
+                anl_pct = (100.0 * tot_px / aoi_px) if aoi_px > 0 else 0.0
+            else:
+                anl_pct = min(100.0, 100.0 * tot_m2 / aoi_m2) if aoi_m2 > 0 else 0.0
 
             total_tot_m2 += tot_m2
             total_vis_m2 += vis_m2
+            total_aoi_m2 += aoi_m2
+            total_aoi_px += aoi_px
+            total_tot_px += tot_px
 
             out_feat = QgsFeature(out.fields())
             out_feat.setGeometry(geom_dem)
-            out_feat.setAttributes([int(f.id()), tot_px, vis_px, tot_m2, vis_m2, float(vis_pct)])
+            attrs = [
+                int(f.id()), tot_px, vis_px, tot_m2, vis_m2, float(vis_pct),
+                aoi_px, aoi_m2, float(anl_pct), str(rule_text),
+            ]
+            if with_mean:
+                attrs.append(mean_val)
+            out_feat.setAttributes(attrs)
             feats.append(out_feat)
 
         pr.addFeatures(feats)
@@ -1899,12 +2244,15 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             log_swallowed("viewshed_dialog._compute_aoi_visibility_stats_layer", _exc)
 
         summary = None
-        if total_tot_m2 > 0:
+        if feats:
             summary = {
                 "tot_m2": float(total_tot_m2),
                 "vis_m2": float(total_vis_m2),
-                "vis_pct": float(total_vis_m2 / total_tot_m2 * 100.0),
+                "vis_pct": float(total_vis_m2 / total_tot_m2 * 100.0) if total_tot_m2 > 0 else 0.0,
+                "aoi_m2": float(total_aoi_m2),
+                "anl_pct": float(100.0 * total_tot_px / total_aoi_px) if total_aoi_px > 0 else 0.0,
                 "feat_n": int(len(feats)),
+                "rule": str(rule_text),
             }
         return out, summary
 
@@ -1922,12 +2270,22 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         selected_only = bool(
             hasattr(self, "chkAoiStatsSelectedOnly") and self.chkAoiStatsSelectedOnly.isChecked()
         )
+        raster_kind = ""
+        try:
+            raster_kind = str(raster_layer.customProperty("archtoolkit/kind", "") or "")
+        except Exception as _exc:
+            log_swallowed("viewshed_dialog._add_aoi_stats_layer_for_raster", _exc)
+        rule_text = self._aoi_rule_text(raster_kind)
+        with_mean = raster_kind in ("cumulative", "count", "weighted_cumulative", "weighted_percent")
         raster_path = self._split_qgis_source_path(raster_layer.source())
         stats_layer, summary = self._compute_aoi_visibility_stats_layer(
             raster_path=raster_path,
             dem_layer=dem_layer,
             aoi_layer=aoi_layer,
             selected_only=selected_only,
+            visible_threshold=0.0,
+            rule_text=rule_text,
+            with_mean=with_mean,
         )
         if stats_layer is None or not stats_layer.isValid():
             push_message(self.iface, "AOI 통계", "AOI 통계 레이어 생성 실패", level=1, duration=6)
@@ -1945,8 +2303,12 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                 units="m2/%",
                 params={
                     "raster_name": str(raster_layer.name() or ""),
+                    "raster_kind": raster_kind,
                     "aoi_layer": str(aoi_layer.name() or ""),
                     "selected_only": bool(selected_only),
+                    "visible_rule": rule_text,
+                    "cell_rule": "cell centre inside AOI",
+                    "vis_pct_base": "analysed cells (tot_m2); anl_pct = analysed share of the AOI",
                 },
             )
         except Exception as _exc:
@@ -1961,38 +2323,49 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             push_message(
                 self.iface,
                 "AOI 통계",
-                f"가시비율 {summary['vis_pct']:.1f}% | 가시면적 {summary['vis_m2']:.0f} m² / {summary['tot_m2']:.0f} m² (n={summary['feat_n']})",
+                f"가시비율 {summary['vis_pct']:.1f}% | 가시면적 {summary['vis_m2']:.0f} m² / 분석면적 {summary['tot_m2']:.0f} m²"
+                f" (AOI {summary['aoi_m2']:.0f} m² 중 {summary['anl_pct']:.1f}% 분석, n={summary['feat_n']}) | 기준: {summary['rule']}",
                 level=0,
                 duration=7,
             )
 
     def run_single_viewshed(self, dem_layer, obs_height, tgt_height, max_dist, curvature, refraction, refraction_coeff=0.13):
-        """Run single point viewshed analysis with circular masking"""
+        """Run single point viewshed analysis (radius honoured as GDAL measures it)."""
         points_info = self.get_context_point_and_crs()
         if not points_info:
             push_message(self.iface, "오류", "관측점을 선택해주세요", level=2)
             restore_ui_focus(self)
             return
-            
+
+        point, src_crs = points_info[0] # Take first one for single viewshed
+
+        # Transform point to DEM CRS
+        point_dem = self.transform_point(point, src_crs, dem_layer.crs())
+
+        # Refuse observers gdal_viewshed cannot use: outside the DEM it writes no
+        # file at all (the run used to end silently with the dialog hidden), and
+        # on a NoData cell it takes the NoData value as the eye elevation.
+        problem = self._observer_dem_problem(dem_layer, point_dem)
+        if problem is not None:
+            who = "대상물 위치가" if self.radioReverseViewshed.isChecked() else "관측점이"
+            push_message(
+                self.iface,
+                "오류",
+                f"{who} {self._observer_problem_text(problem)}에 있어 가시권을 계산할 수 없습니다. "
+                "DEM 안의 유효한 셀을 선택하세요.",
+                level=2,
+                duration=8,
+            )
+            restore_ui_focus(self)
+            return
+
         # Hide dialog only when processing starts
         self.hide()
         QtWidgets.QApplication.processEvents()
 
-        point, src_crs = points_info[0] # Take first one for single viewshed
-        
-        # If manual selection, create persistent point layer
-        if not self.radioFromLayer.isChecked():
-            observer_layer_name = "가시권_관측점"
-            if self.radioReverseViewshed.isChecked():
-                observer_layer_name = "역방향_대상물"
-            self.create_observer_layer(observer_layer_name, points_info)
-        
         run_id = str(uuid.uuid4())[:12]
         raw_output = os.path.join(tempfile.gettempdir(), f'archt_vs_raw_{run_id}.tif')
         final_output = os.path.join(tempfile.gettempdir(), f'archt_vs_final_{run_id}.tif')
-        
-        # Transform point to DEM CRS
-        point_dem = self.transform_point(point, src_crs, dem_layer.crs())
 
         extra = self._build_gdal_viewshed_extra(curvature, refraction, refraction_coeff)
         
@@ -2010,33 +2383,13 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         
         try:
             processing.run("gdal:viewshed", params)
-            
-            # Circular Masking: Clip raw output by a circular buffer
-            if os.path.exists(raw_output):
-                # Create a temporary memory layer for the circular mask
-                mask_layer = QgsVectorLayer("Polygon?crs=" + dem_layer.crs().authid(), "temp_mask", "memory")
-                pr = mask_layer.dataProvider()
-                circle_feat = QgsFeature()
-                # Create extremely detailed circle buffer for smooth edges
-                circle_feat.setGeometry(QgsGeometry.fromPointXY(point_dem).buffer(max_dist, 128))
-                pr.addFeatures([circle_feat])
-                
-                # Clip using universal algorithm
-                # Force Float32 (6) and set NoData to -9999 to ensure absolute transparency
-                processing.run("gdal:cliprasterbymasklayer", {
-                    'INPUT': raw_output,
-                    'MASK': mask_layer,
-                    'NODATA': -9999,
-                    'DATA_TYPE': 6, # Float32
-                    'ALPHA_BAND': False,
-                    'CROP_TO_CUTLINE': True,
-                    'KEEP_RESOLUTION': True,
-                    'OUTPUT': final_output
-                })
-                
-                if not os.path.exists(final_output):
-                    shutil.copy(raw_output, final_output)
-            
+            if not os.path.exists(raw_output):
+                raise Exception("gdal_viewshed가 결과를 만들지 못했습니다.")
+
+            # Cells beyond the radius (GDAL's own -ov flag, measured from the
+            # observer's cell centre) and DEM NoData cells -> NoData.
+            self._finalize_viewshed_raster(raw_output, final_output, dem_layer)
+
             if os.path.exists(final_output):
                 use_higuchi = self.chkHiguchi.isChecked()
                 is_reverse = self.radioReverseViewshed.isChecked()
@@ -2074,7 +2427,21 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                             "target_height_m": float(tgt_height),
                             "use_higuchi": bool(use_higuchi),
                             "reverse": bool(is_reverse),
+                            "curvature_cc": float(self._calculate_gdal_viewshed_cc(curvature, refraction, refraction_coeff)),
+                            "range_rule": "GDAL -md from the observer cell centre; beyond = NoData",
+                            "dem_nodata_rule": "DEM NoData cells = NoData",
                         }
+                        if is_reverse:
+                            # run_reverse_viewshed passes the heights swapped (the
+                            # target location becomes GDAL's observer). Store them
+                            # as the user entered them, plus what GDAL received.
+                            meta_params["observer_height_m"] = float(tgt_height)
+                            meta_params["target_height_m"] = float(obs_height)
+                            meta_params["gdal_observer_height_m"] = float(obs_height)
+                            meta_params["gdal_target_height_m"] = float(tgt_height)
+                            meta_params["heights_note"] = (
+                                "역방향: 대상물 위치에서 계산하므로 GDAL에는 관측/대상 높이를 서로 바꿔 전달"
+                            )
                         if use_higuchi:
                             # The zone breaks are user-editable, so a Higuchi result is
                             # only traceable if the thresholds that produced it are stored.
@@ -2096,6 +2463,11 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                         self.apply_viewshed_style(viewshed_layer)
                     
                     QgsProject.instance().addMapLayers([viewshed_layer])
+                    # Observer layer only once the run has produced a result: a
+                    # failed run must not leave a stray point layer behind.
+                    if not self.radioFromLayer.isChecked():
+                        observer_layer_name = "역방향_대상물" if is_reverse else "가시권_관측점"
+                        self.create_observer_layer(observer_layer_name, points_info[:1])
                     try:
                         self._add_aoi_stats_layer_for_raster(viewshed_layer, dem_layer)
                     except Exception as _exc:
@@ -2114,6 +2486,8 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                     self.accept()
                 else:
                     raise Exception("결과 레이어 로드 실패")
+            else:
+                raise Exception("가시권 결과 래스터가 생성되지 않았습니다.")
         except Exception as e:
             push_message(self.iface, "오류", f"분석 중 오류: {str(e)}", level=2)
             restore_ui_focus(self)
@@ -2141,7 +2515,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         refraction_coeff=0.13,
         prefix="vs",
     ):
-        """Compute a binary viewshed raster (0/255) clipped to a circular radius.
+        """Compute a binary viewshed raster (0/255, NoData beyond the radius and on DEM NoData).
 
         Returns:
             str: output GeoTIFF path
@@ -2151,6 +2525,9 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         final_output = os.path.join(tempfile.gettempdir(), f"archt_vs_final_{run_id}.tif")
 
         point_dem = self.transform_point(point, src_crs, dem_layer.crs())
+        problem = self._observer_dem_problem(dem_layer, point_dem)
+        if problem is not None:
+            raise Exception(f"위치가 {self._observer_problem_text(problem)}에 있어 가시권을 계산할 수 없습니다.")
         extra = self._build_gdal_viewshed_extra(curvature, refraction, refraction_coeff)
 
         params = {
@@ -2166,35 +2543,9 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
 
         try:
             processing.run("gdal:viewshed", params)
-
-            if os.path.exists(raw_output):
-                mask_layer = QgsVectorLayer(
-                    "Polygon?crs=" + dem_layer.crs().authid(),
-                    "temp_mask",
-                    "memory",
-                )
-                pr = mask_layer.dataProvider()
-                circle_feat = QgsFeature()
-                circle_feat.setGeometry(QgsGeometry.fromPointXY(point_dem).buffer(max_dist, 128))
-                pr.addFeatures([circle_feat])
-
-                processing.run(
-                    "gdal:cliprasterbymasklayer",
-                    {
-                        "INPUT": raw_output,
-                        "MASK": mask_layer,
-                        "NODATA": -9999,
-                        "DATA_TYPE": 6,  # Float32
-                        "ALPHA_BAND": False,
-                        "CROP_TO_CUTLINE": True,
-                        "KEEP_RESOLUTION": True,
-                        "OUTPUT": final_output,
-                    },
-                )
-
-                if not os.path.exists(final_output):
-                    shutil.copy(raw_output, final_output)
-
+            if not os.path.exists(raw_output):
+                raise Exception("viewshed 결과 래스터 생성 실패")
+            self._finalize_viewshed_raster(raw_output, final_output, dem_layer)
             if not os.path.exists(final_output):
                 raise Exception("viewshed 결과 래스터 생성 실패")
 
@@ -2384,16 +2735,8 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                 continue
             exterior_ring = poly[0]
             ring_geom = QgsGeometry.fromPolylineXY(exterior_ring)
-            length = ring_geom.length()
-            if length <= 0:
-                continue
-
-            num_pts = max(1, int(length / interval))
-            for i in range(num_pts + 1):
-                frac = i / num_pts if num_pts > 0 else 0
-                pt_geom = ring_geom.interpolate(frac * length)
-                if pt_geom and not pt_geom.isEmpty():
-                    points.append(QgsPointXY(pt_geom.asPoint()))
+            # Closed ring: the start vertex is emitted once, not twice.
+            points.extend(self._sample_line_points(ring_geom, interval))
 
         return points
 
@@ -2497,6 +2840,20 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         """
         if not points:
             push_message(self.iface, "오류", "대상점이 최소 1개 이상 필요합니다", level=2)
+            restore_ui_focus(self)
+            return
+
+        # Targets outside the DEM / on NoData produce no gdal_viewshed output
+        # (or a nonsense one); drop them and say so instead of silently.
+        points, _unused_w, dropped_n = self._filter_points_on_dem(dem_layer, list(points))
+        if not points:
+            push_message(
+                self.iface,
+                "오류",
+                f"모든 대상점({dropped_n}개)이 DEM 범위 밖이거나 NoData 셀 위에 있어 계산할 수 없습니다.",
+                level=2,
+                duration=8,
+            )
             restore_ui_focus(self)
             return
 
@@ -2631,7 +2988,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                         {
                             "INPUT": output_raw,
                             "TARGET_EXTENT": target_rect,
-                            "TARGET_EXTENT_CRS": dem_layer.crs().authid(),
+                            "TARGET_EXTENT_CRS": dem_layer.crs(),
                             "NODATA": -9999,
                             "TARGET_RESOLUTION": res,
                             "RESAMPLING": 0,
@@ -2696,7 +3053,18 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                     run_id=str(result_run_id),
                     kind="reverse_union",
                     units="mask",
-                    params={"max_dist_m": float(max_dist), "points_n": int(len(points))},
+                    params={
+                        "max_dist_m": float(max_dist),
+                        "points_n": int(len(viewshed_results)),
+                        "points_dropped": int(dropped_n + len(points) - len(viewshed_results)),
+                        # This path is only used by the reverse viewshed, which
+                        # passes the heights swapped; store the user's values.
+                        "observer_height_m": float(tgt_height),
+                        "target_height_m": float(obs_height),
+                        "gdal_observer_height_m": float(obs_height),
+                        "gdal_target_height_m": float(tgt_height),
+                        "heights_note": "역방향: 대상점 위치에서 계산하므로 GDAL에는 관측/대상 높이를 서로 바꿔 전달",
+                    },
                 )
             except Exception as _exc:
                 log_swallowed("viewshed_dialog._run_union_viewshed_for_points", _exc)
@@ -2715,11 +3083,12 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                 self.link_current_marker_to_layer(viewshed_layer.id(), points[:1])
 
             self.update_layer_order()
-            self.iface.messageBar().pushMessage(
-                "완료",
-                f"역방향 가시권 분석 완료 ({len(points)}개 대상점, Union)",
-                level=0,
-            )
+            used_n = len(viewshed_results)
+            skipped_n = dropped_n + len(points) - used_n
+            done_msg = f"역방향 가시권 분석 완료 ({used_n}개 대상점, Union)"
+            if skipped_n > 0:
+                done_msg += f" - DEM 범위 밖/NoData/계산 실패로 {skipped_n}개 제외"
+            self.iface.messageBar().pushMessage("완료", done_msg, level=1 if skipped_n > 0 else 0)
             self.accept()
         except Exception as e:
             push_message(self.iface, "오류", f"역방향 가시권 처리 중 오류: {str(e)}", level=2)
@@ -2766,15 +3135,23 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             )
             return
 
+        point, src_crs = points_info[0]
+        problem = self._observer_dem_problem(dem_layer, self.transform_point(point, src_crs, dem_layer.crs()))
+        if problem is not None:
+            push_message(
+                self.iface,
+                "오류",
+                f"대상물 위치가 {self._observer_problem_text(problem)}에 있어 가시권을 계산할 수 없습니다. "
+                "DEM 안의 유효한 셀을 선택하세요.",
+                level=2,
+                duration=8,
+            )
+            restore_ui_focus(self)
+            return
+
         # Hide dialog only when processing starts
         self.hide()
         QtWidgets.QApplication.processEvents()
-
-        point, src_crs = points_info[0]
-
-        # If manual selection, create persistent point layer
-        if not self.radioFromLayer.isChecked():
-            self.create_observer_layer("역방향_대상물", points_info)
 
         forward_raster = None
         result_run_id = new_run_id("viewshed")
@@ -2827,7 +3204,15 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                     run_id=str(result_run_id),
                     kind="reverse_visual_imbalance_reverse",
                     units="mask",
-                    params={"max_dist_m": float(max_dist)},
+                    params={
+                        "max_dist_m": float(max_dist),
+                        # As entered by the user; GDAL received them swapped.
+                        "observer_height_m": float(obs_height),
+                        "target_height_m": float(tgt_height),
+                        "gdal_observer_height_m": float(tgt_height),
+                        "gdal_target_height_m": float(obs_height),
+                        "heights_note": "역방향: 대상물 위치에서 계산하므로 GDAL에는 관측/대상 높이를 서로 바꿔 전달",
+                    },
                 )
             except Exception as _exc:
                 log_swallowed("viewshed_dialog.run_reverse_viewshed_with_visual_imbalance", _exc)
@@ -2845,7 +3230,11 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                     run_id=str(result_run_id),
                     kind="visual_imbalance",
                     units="class",
-                    params={"max_dist_m": float(max_dist)},
+                    params={
+                        "max_dist_m": float(max_dist),
+                        "observer_height_m": float(obs_height),
+                        "target_height_m": float(tgt_height),
+                    },
                 )
             except Exception as _exc:
                 log_swallowed("viewshed_dialog.run_reverse_viewshed_with_visual_imbalance", _exc)
@@ -2876,6 +3265,10 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                     self.result_aux_layer_map.setdefault(imbalance_layer.id(), []).append(ring_layer.id())
             except Exception as _exc:
                 log_swallowed("viewshed_dialog.run_reverse_viewshed_with_visual_imbalance", _exc)
+
+            # Observer layer only after a successful run (no stray layer on failure).
+            if not self.radioFromLayer.isChecked():
+                self.create_observer_layer("역방향_대상물", points_info[:1])
 
             self.link_current_marker_to_layer(reverse_layer.id(), [(point, src_crs)])
             self.update_layer_order()
@@ -3140,6 +3533,22 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             restore_ui_focus(self)
             return
 
+        # Refuse endpoints without DEM elevation: the old code skipped such
+        # samples silently and anchored the eye on the first valid sample
+        # (600 m away for an observer outside the DEM) and still answered "보임".
+        for label, pt_chk in (("관측점이", observer_dem), ("대상점이", target_dem)):
+            problem = self._observer_dem_problem(dem_layer, pt_chk)
+            if problem is not None:
+                push_message(
+                    self.iface,
+                    "오류",
+                    f"{label} {self._observer_problem_text(problem)}에 있어 가시선을 판정할 수 없습니다.",
+                    level=2,
+                    duration=8,
+                )
+                restore_ui_focus(self)
+                return
+
         if not self.radioFromLayer.isChecked() and total_dist > 1000:
             from qgis.PyQt.QtWidgets import QMessageBox
 
@@ -3157,15 +3566,22 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                 restore_ui_focus(self)
                 return
         
-        # Sample terrain along line
+        # Sample terrain along line at (at most) the DEM pixel size. The old
+        # 5 m floor and 5000-sample cap stepped over walls/ridges narrower than
+        # the step (a 50 m high, 1 m thick wall on a 1 m DEM read as "보임").
         pixel_x = abs(dem_layer.rasterUnitsPerPixelX())
         pixel_y = abs(dem_layer.rasterUnitsPerPixelY())
         pixel_sizes = [v for v in (pixel_x, pixel_y) if v and v > 0]
-        min_pixel = min(pixel_sizes) if pixel_sizes else 5.0
-        desired_step = max(min_pixel, 5.0)
+        min_pixel = min(pixel_sizes) if pixel_sizes else 1.0
+        desired_step = min_pixel
 
-        num_samples = int(total_dist / desired_step) if desired_step > 0 else 200
-        num_samples = max(200, min(num_samples, 5000))
+        num_samples = int(math.ceil(total_dist / desired_step)) if desired_step > 0 else 200
+        num_samples = max(200, num_samples)
+        coarse_sampling = False
+        if num_samples > int(self.LOS_MAX_SAMPLES):
+            num_samples = int(self.LOS_MAX_SAMPLES)
+            coarse_sampling = True
+        sample_step = total_dist / float(num_samples)
 
         profile_data = []
 
@@ -3186,6 +3602,12 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             cc = 0.0
         earth_r = 6371000.0
 
+        # Interior samples without a DEM value are counted, not silently
+        # skipped: unknown terrain can hide the target, so a result that relies
+        # on it is "판정 불가".
+        nodata_samples = 0
+        first_nodata_dist = None
+
         for i in range(num_samples + 1):
             frac = i / num_samples
             x = observer_dem.x() + frac * dx
@@ -3194,23 +3616,28 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
 
             # Sample elevation from DEM
             elev, ok = provider.sample(QgsPointXY(x, y), 1)
-            if not ok:
+            elev_value = None
+            if ok:
+                try:
+                    elev_value = float(elev)
+                except (TypeError, ValueError) as _exc:
+                    log_swallowed("tools/viewshed_dialog.py:3112 (run_line_of_sight)", _exc)
+                    elev_value = None
+            if elev_value is None or not math.isfinite(elev_value):
+                nodata_samples += 1
+                if first_nodata_dist is None:
+                    first_nodata_dist = dist
                 continue
-            _skip_3110 = False
-            try:
-                elev_value = float(elev)
-            except (TypeError, ValueError) as _exc:
-                log_swallowed("tools/viewshed_dialog.py:3112 (run_line_of_sight)", _exc)
-                _skip_3110 = True
-            if _skip_3110:
-                continue
-            if math.isnan(elev_value):
-                continue
+            # 'elevation' is the DEM value (shown to the user); 'elev_calc' is
+            # the curvature/refraction-adjusted apparent height used for the
+            # visibility geometry.
+            elev_calc = elev_value
             if cc > 0.0:
-                elev_value -= cc * (dist * dist) / (2.0 * earth_r)
+                elev_calc = elev_value - cc * (dist * dist) / (2.0 * earth_r)
             profile_data.append({
                 'distance': dist,
                 'elevation': elev_value,
+                'elev_calc': elev_calc,
                 'x': x,
                 'y': y
             })
@@ -3221,22 +3648,22 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             return
         
         # Observer and target elevations (with height added)
-        obs_elev = profile_data[0]['elevation'] + obs_height
-        tgt_elev = profile_data[-1]['elevation'] + tgt_height
+        obs_elev = profile_data[0]['elev_calc'] + obs_height
+        tgt_elev = profile_data[-1]['elev_calc'] + tgt_height
 
         # Determine obstruction against the LOS line to the TARGET height (target visibility)
         first_obstruction = None
-        is_visible_overall = True
+        obstructed = False
         prev_pt = profile_data[0]
-        prev_delta = prev_pt['elevation'] - obs_elev
+        prev_delta = prev_pt['elev_calc'] - obs_elev
 
         for pt in profile_data[1:-1]:
             frac = pt['distance'] / total_dist
             sight = obs_elev + frac * (tgt_elev - obs_elev)
-            delta = pt['elevation'] - sight
+            delta = pt['elev_calc'] - sight
 
             if delta > 0:
-                is_visible_overall = False
+                obstructed = True
                 if prev_delta <= 0:
                     denom = (prev_delta - delta)
                     t = (prev_delta / denom) if denom != 0 else 0.0
@@ -3244,57 +3671,71 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                     first_obstruction = {
                         'distance': prev_pt['distance'] + t * (pt['distance'] - prev_pt['distance']),
                         'elevation': prev_pt['elevation'] + t * (pt['elevation'] - prev_pt['elevation']),
+                        'elev_calc': prev_pt['elev_calc'] + t * (pt['elev_calc'] - prev_pt['elev_calc']),
                         'x': prev_pt['x'] + t * (pt['x'] - prev_pt['x']),
                         'y': prev_pt['y'] + t * (pt['y'] - prev_pt['y']),
                     }
                 else:
-                    first_obstruction = pt
+                    first_obstruction = dict(pt)
                 break
 
             prev_pt = pt
             prev_delta = delta
 
+        # Known terrain above the sight line blocks the view whatever the
+        # unknown cells hold; otherwise NoData on the path leaves it open.
+        if obstructed:
+            is_visible_overall = False
+        elif nodata_samples > 0:
+            is_visible_overall = None
+        else:
+            is_visible_overall = True
+
         # Create result layer (Viscode-style segmented line)
-        layer = QgsVectorLayer(
-            "LineString?crs=" + dem_layer.crs().authid(),
-            f"가시선_Viscode_{int(total_dist)}m",
-            "memory",
-        )
+        layer = self._new_output_layer("LineString", f"가시선_Viscode_{int(total_dist)}m", dem_layer.crs())
         pr = layer.dataProvider()
         pr.addAttributes([
-            QgsField("status", FT_STRING),  # "보임" / "안보임"
+            QgsField("status", FT_STRING),  # "보임" / "안보임" / "판정 불가"
             QgsField("from_m", FT_DOUBLE),
             QgsField("to_m", FT_DOUBLE),
             QgsField("length_m", FT_DOUBLE),
         ])
         layer.updateFields()
 
-        # Build merged segments matching the profile visibility coloring (max-angle algorithm)
-        terrain_visibility = [True]  # Observer point is always "visible"
+        # Build merged segments matching the profile visibility coloring (max-angle algorithm).
+        # Beyond the first NoData sample a point that looks visible may be
+        # hidden by the unknown terrain, so it is "판정 불가"; a point hidden by
+        # known terrain stays "안보임".
+        terrain_status = ["보임"]  # Observer point is always "visible"
         max_angle = -float("inf")
         start_elev = obs_elev
 
         for pt in profile_data[1:]:
             d = float(pt["distance"])
             if d <= 0:
-                terrain_visibility.append(True)
+                terrain_status.append("보임")
                 continue
 
-            angle = (float(pt["elevation"]) - start_elev) / d
+            angle = (float(pt["elev_calc"]) - start_elev) / d
             if angle >= max_angle:
                 max_angle = angle
-                terrain_visibility.append(True)
+                if first_nodata_dist is not None and d > first_nodata_dist:
+                    terrain_status.append("판정 불가")
+                else:
+                    terrain_status.append("보임")
             else:
-                terrain_visibility.append(False)
+                terrain_status.append("안보임")
+        for pt, st in zip(profile_data, terrain_status):
+            pt["terrain_status"] = st
 
         segments = []
         if len(profile_data) >= 2:
-            current_status = "보임" if terrain_visibility[1] else "안보임"
+            current_status = terrain_status[1]
             seg_from = 0.0
             current_pts = [QgsPointXY(profile_data[0]["x"], profile_data[0]["y"])]
 
             for idx in range(1, len(profile_data)):
-                status = "보임" if terrain_visibility[idx] else "안보임"
+                status = terrain_status[idx]
                 if status != current_status:
                     seg_to = float(profile_data[idx - 1]["distance"])
                     segments.append((current_status, seg_from, seg_to, current_pts))
@@ -3319,28 +3760,30 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             
         layer.updateExtents()
         
-        # Style: Thin lines for visibility (Green/Red)
+        # Style: Thin lines for visibility (Green/Red, grey = undetermined)
         categories = [
             QgsRendererCategory("보임", QgsLineSymbol.createSimple({
                 'color': '0,200,0', 'width': '0.8'
             }), "보임"),
             QgsRendererCategory("안보임", QgsLineSymbol.createSimple({
                 'color': '255,0,0', 'width': '0.8'
-            }), "안보임")
+            }), "안보임"),
+            QgsRendererCategory("판정 불가", QgsLineSymbol.createSimple({
+                'color': '150,150,150', 'width': '0.8'
+            }), "판정 불가 (DEM NoData)"),
         ]
         layer.setRenderer(QgsCategorizedSymbolRenderer("status", categories))
         
         # Create observer/target point layers (reference-style legend)
-        observer_layer = QgsVectorLayer(
-            "Point?crs=" + dem_layer.crs().authid(),
-            f"가시선_Observers_{int(total_dist)}m",
-            "memory",
-        )
+        observer_layer = self._new_output_layer("Point", f"가시선_Observers_{int(total_dist)}m", dem_layer.crs())
         observer_pr = observer_layer.dataProvider()
         observer_pr.addAttributes([QgsField("status", FT_STRING)])
         observer_layer.updateFields()
 
-        observer_status = "보이는 대상 있음" if is_visible_overall else "보이는 대상 없음"
+        if is_visible_overall is None:
+            observer_status = "판정 불가"
+        else:
+            observer_status = "보이는 대상 있음" if is_visible_overall else "보이는 대상 없음"
         observer_feat = QgsFeature(observer_layer.fields())
         observer_feat.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(observer_dem.x(), observer_dem.y())))
         observer_feat.setAttributes([observer_status])
@@ -3360,19 +3803,24 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                 'outline_color': '255,255,255',
                 'size': '3.2',
             }), "보이는 대상 없음"),
+            QgsRendererCategory("판정 불가", QgsMarkerSymbol.createSimple({
+                'name': 'triangle',
+                'color': '150,150,150',
+                'outline_color': '255,255,255',
+                'size': '3.2',
+            }), "판정 불가 (DEM NoData)"),
         ]
         observer_layer.setRenderer(QgsCategorizedSymbolRenderer("status", observer_categories))
 
-        target_layer = QgsVectorLayer(
-            "Point?crs=" + dem_layer.crs().authid(),
-            f"가시선_Targets_{int(total_dist)}m",
-            "memory",
-        )
+        target_layer = self._new_output_layer("Point", f"가시선_Targets_{int(total_dist)}m", dem_layer.crs())
         target_pr = target_layer.dataProvider()
         target_pr.addAttributes([QgsField("status", FT_STRING)])
         target_layer.updateFields()
 
-        target_status = "보임" if is_visible_overall else "안보임"
+        if is_visible_overall is None:
+            target_status = "판정 불가"
+        else:
+            target_status = "보임" if is_visible_overall else "안보임"
         target_feat = QgsFeature(target_layer.fields())
         target_feat.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(target_dem.x(), target_dem.y())))
         target_feat.setAttributes([target_status])
@@ -3392,6 +3840,12 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                 'outline_color': '255,255,255',
                 'size': '3.2',
             }), "안보임"),
+            QgsRendererCategory("판정 불가", QgsMarkerSymbol.createSimple({
+                'name': 'circle',
+                'color': '150,150,150',
+                'outline_color': '255,255,255',
+                'size': '3.2',
+            }), "판정 불가 (DEM NoData)"),
         ]
         target_layer.setRenderer(QgsCategorizedSymbolRenderer("status", target_categories))
         
@@ -3399,23 +3853,30 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
 
         # If obstructed, mark the first obstacle
         if first_obstruction:
-            obs_layer = QgsVectorLayer("Point?crs=" + dem_layer.crs().authid(),
-                                       "첫번째_장애물", "memory")
+            obs_layer = self._new_output_layer("Point", "첫번째_장애물", dem_layer.crs())
             obs_pr = obs_layer.dataProvider()
-            obs_pr.addAttributes([
+            obs_fields = [
                 QgsField("distance", FT_DOUBLE),
-                QgsField("elevation", FT_DOUBLE)
-            ])
+                QgsField("elevation", FT_DOUBLE),  # DEM elevation
+            ]
+            if cc > 0.0:
+                # Curvature/refraction-adjusted apparent height, kept apart
+                # from the DEM elevation it used to replace.
+                obs_fields.append(QgsField("elev_adj", FT_DOUBLE))
+            obs_pr.addAttributes(obs_fields)
             obs_layer.updateFields()
             
             obs_feat = QgsFeature(obs_layer.fields())
             obs_feat.setGeometry(QgsGeometry.fromPointXY(
                 QgsPointXY(first_obstruction['x'], first_obstruction['y'])
             ))
-            obs_feat.setAttributes([
+            obs_attrs = [
                 first_obstruction['distance'],
-                first_obstruction['elevation']
-            ])
+                first_obstruction['elevation'],
+            ]
+            if cc > 0.0:
+                obs_attrs.append(first_obstruction.get('elev_calc'))
+            obs_feat.setAttributes(obs_attrs)
             obs_pr.addFeature(obs_feat)
             obs_layer.updateExtents()
             
@@ -3488,7 +3949,17 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                     run_id=str(run_id),
                     kind=k,
                     units=u,
-                    params={"total_dist_m": float(total_dist), "visible": bool(is_visible_overall)},
+                    params={
+                        "total_dist_m": float(total_dist),
+                        # True / False / None (None = 판정 불가: DEM NoData on the path, no known obstruction)
+                        "visible": (None if is_visible_overall is None else bool(is_visible_overall)),
+                        "nodata_samples": int(nodata_samples),
+                        "sample_step_m": float(sample_step),
+                        "dem_pixel_m": float(min_pixel),
+                        "coarse_sampling": bool(coarse_sampling),
+                        "curvature_cc": float(cc),
+                        "elevation_field": "DEM elevation (elev_adj = curvature/refraction-adjusted)",
+                    },
                 )
             except Exception as _exc:
                 log_swallowed("viewshed_dialog.run_line_of_sight", _exc)
@@ -3520,7 +3991,22 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         self.update_layer_order()
         
         # Show result message
-        if is_visible_overall:
+        if coarse_sampling:
+            push_message(
+                self.iface,
+                "가시선 분석",
+                f"표본 수 상한({int(self.LOS_MAX_SAMPLES):,}개) 때문에 {sample_step:.2f}m 간격으로 표본을 추출했습니다 "
+                f"(DEM 픽셀 {min_pixel:g}m). 이보다 좁은 장애물은 놓칠 수 있습니다.",
+                level=1,
+                duration=8,
+            )
+        if is_visible_overall is None:
+            self.iface.messageBar().pushMessage(
+                "가시선 분석",
+                f"판정 불가 | 경로 중 DEM NoData 표본 {nodata_samples}개 (첫 NoData: {first_nodata_dist:.0f}m) | 거리: {total_dist:.0f}m",
+                level=1
+            )
+        elif is_visible_overall:
             self.iface.messageBar().pushMessage(
                 "가시선 분석", 
                 f"직시 가능 (보임) | 거리: {total_dist:.0f}m",
@@ -3528,9 +4014,14 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             )
         else:
             if first_obstruction:
+                # DEM elevation at the obstruction; the curvature-adjusted
+                # apparent height (if used) is reported separately.
+                adj_txt = ""
+                if cc > 0.0 and first_obstruction.get('elev_calc') is not None:
+                    adj_txt = f", 곡률·굴절 보정 후 {first_obstruction['elev_calc']:.1f}m"
                 self.iface.messageBar().pushMessage(
                     "가시선 분석", 
-                    f"직시 불가 (안보임) | 장애물: {first_obstruction['distance']:.0f}m (고도 {first_obstruction['elevation']:.1f}m)",
+                    f"직시 불가 (안보임) | 장애물: {first_obstruction['distance']:.0f}m (DEM 고도 {first_obstruction['elevation']:.1f}m{adj_txt})",
                     level=1
                 )
             else:
@@ -3657,7 +4148,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             dem_xres = grid_info['res']
             dem_yres = grid_info['res']
             
-            dem_ds = gdal.Open(dem_layer.source(), gdal.GA_ReadOnly)
+            dem_ds = gdal.Open(self._dem_source_path(dem_layer), gdal.GA_ReadOnly)
             dem_proj = dem_ds.GetProjection()
             dem_ds = None
             
@@ -3704,23 +4195,34 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                     else:
                         val_to_add = 1 if is_count_mode else (2 ** min(pt_idx, 30))
                 
-                # Always calculate circular_mask for buffer-shape boundary
+                # Always calculate circular_mask for buffer-shape boundary.
+                # Like gdal_viewshed: the observer sits at the centre of its DEM
+                # cell and the radius is tested cell CENTRE to cell centre. The
+                # old test used cell corners (integer indices), which kept a
+                # half-pixel-shifted crescent beyond the radius as "보이지 않음"
+                # and dropped cells inside it.
                 pt, pt_crs = observer_points[pt_idx]
                 pt_dem = self.transform_point(pt, pt_crs, dem_layer.crs())
-                c_col = np.float32((pt_dem.x() - target_xmin) / dem_xres)
-                c_row = np.float32((target_ymax - pt_dem.y()) / dem_yres)
+                c_obs = np.float32(math.floor((pt_dem.x() - target_xmin) / dem_xres) + 0.5)
+                r_obs = np.float32(math.floor((target_ymax - pt_dem.y()) / dem_yres) + 0.5)
                 rad_pix = np.float32(max_dist / dem_xres)
-                point_mask = ((c_full - c_col)**2 + (r_full - c_row)**2 <= rad_pix**2)
+                point_mask = (
+                    (c_full + np.float32(0.5) - c_obs) ** 2 + (r_full + np.float32(0.5) - r_obs) ** 2
+                    <= rad_pix ** 2 * np.float32(1.0 + 1e-6)
+                )
+                # GDAL's own range decision: 0/255 are in range, the -ov value
+                # and the warp fill (-9999) are not.
+                vs_win = vs_data[:h_overlap, :w_overlap]
+                in_range = (vs_win == 0) | (vs_win == 255)
+                if vs_nodata is not None:
+                    in_range &= (vs_win != vs_nodata)
+                point_mask[:h_overlap, :w_overlap] &= in_range
+                point_mask[h_overlap:, :] = False
+                point_mask[:, w_overlap:] = False
                 circular_mask |= point_mask
                 
-                # Robust Visibility Detection
-                if union_mode:
-                    vis_mask = (vs_data[:h_overlap, :w_overlap] > 0.5)
-                else:
-                    vis_mask = (vs_data[:h_overlap, :w_overlap] > 0.5) & point_mask[:h_overlap, :w_overlap]
-                
-                if vs_nodata is not None:
-                    vis_mask &= (vs_data[:h_overlap, :w_overlap] != vs_nodata)
+                # Visible = 255 (the -ov out-of-range value 1 must not count).
+                vis_mask = (vs_win == 255) & point_mask[:h_overlap, :w_overlap]
                 
                 if union_mode:
                     cumulative[:h_overlap, :w_overlap][vis_mask] = 255
@@ -3737,8 +4239,18 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                     log_swallowed("viewshed_dialog.combine_viewsheds_numpy", _exc)
 
             # 5. Final NoData masking
-            # Apply circular buffer masking for ALL modes
+            # Apply circular buffer masking for ALL modes; DEM NoData cells are
+            # NoData too (gdal_viewshed wrote them as 0 = "보이지 않음").
             nodata_value = -9999
+            try:
+                circular_mask &= ~self._dem_nodata_mask(
+                    dem_layer,
+                    (target_xmin, dem_xres, 0.0, target_ymax, 0.0, -dem_yres),
+                    target_width,
+                    target_height,
+                )
+            except Exception as _exc:
+                log_swallowed("viewshed_dialog.combine_viewsheds_numpy (dem nodata)", _exc)
             cumulative[~circular_mask] = nodata_value
             
             # Save Result
@@ -3792,12 +4304,17 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                 w = 1.0
             weights.append(w)
 
-        if self.observer_point:  # Also check the single selection if any
+        drawn_line = list(getattr(self, 'drawn_line_points', None) or [])
+        has_drawn_line = len(drawn_line) >= 2
+        # set_line_from_tool() stores the drawn line's first vertex in
+        # observer_point (UI state only); adding it here as well counted that
+        # vertex twice (three times on a closed perimeter).
+        if self.observer_point and not has_drawn_line:  # Also check the single selection if any
             points.append((self.observer_point, canvas_crs))
             weights.append(1.0)
         
         # Handle manually drawn lines (from Line Viewshed tool)
-        if hasattr(self, 'drawn_line_points') and self.drawn_line_points and len(self.drawn_line_points) >= 2:
+        if has_drawn_line:
             pts_for_geom = list(self.drawn_line_points)
             if getattr(self, 'is_line_closed', False):
                 pts_for_geom.append(self.drawn_line_points[0])
@@ -3816,16 +4333,10 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             except Exception:
                 emit_crs = canvas_crs
 
-            length = line_geom.length()
-
-            if length > 0:
-                num_pts = max(1, int(length / interval))
-                for i in range(num_pts + 1):
-                    frac = i / num_pts if num_pts > 0 else 0
-                    pt = line_geom.interpolate(frac * length)
-                    if pt and not pt.isEmpty():
-                        points.append((pt.asPoint(), emit_crs))
-                        weights.append(1.0)
+            # A closed perimeter emits its start vertex once.
+            for pt in self._sample_line_points(line_geom, interval):
+                points.append((pt, emit_crs))
+                weights.append(1.0)
         
         # 2. Add points from layer if selected
         if self.radioFromLayer.isChecked():
@@ -3883,11 +4394,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                         geom_m = _to_dem_geom(geom)
                         if geom_m is None:
                             continue
-                        length = geom_m.length()
-                        num_pts = max(1, int(length / interval))
-                        for i in range(num_pts + 1):
-                            frac = i / num_pts if num_pts > 0 else 0
-                            pt = geom_m.interpolate(frac * length).asPoint()
+                        for pt in self._sample_line_points(geom_m, interval):
                             points.append((pt, dem_layer.crs()))
                             weights.append(1.0)
 
@@ -3915,16 +4422,29 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                             if polygon and len(polygon) > 0:
                                 exterior_ring = polygon[0]
                                 ring_geom = QgsGeometry.fromPolylineXY(exterior_ring)
-                                length = ring_geom.length()
-                                num_pts = max(1, int(length / interval))
-                                for i in range(num_pts + 1):
-                                    frac = i / num_pts if num_pts > 0 else 0
-                                    pt = ring_geom.interpolate(frac * length).asPoint()
+                                # Closed ring: start vertex once, not twice.
+                                for pt in self._sample_line_points(ring_geom, interval):
                                     points.append((pt, dem_layer.crs()))
                                     weights.append(1.0)
         
         if not points or len(points) < 1:
             push_message(self.iface, "오류", "관측점이 최소 1개 이상 필요합니다", level=2)
+            restore_ui_focus(self)
+            return
+
+        # Observers outside the DEM / on NoData: gdal_viewshed writes nothing
+        # (outside) or uses the NoData value as eye elevation. Drop them before
+        # the run and report how many, so names/metadata count only used ones.
+        n_collected = len(points)
+        points, weights, dropped_off_dem = self._filter_points_on_dem(dem_layer, points, weights)
+        if not points:
+            push_message(
+                self.iface,
+                "오류",
+                f"모든 관측점({n_collected}개)이 DEM 범위 밖이거나 NoData 셀 위에 있어 계산할 수 없습니다.",
+                level=2,
+                duration=8,
+            )
             restore_ui_focus(self)
             return
 
@@ -4060,7 +4580,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                         processing.run("gdal:warpreproject", {
                             'INPUT': output_raw, 
                             'TARGET_EXTENT': target_rect, 
-                            'TARGET_EXTENT_CRS': dem_layer.crs().authid(),
+                            'TARGET_EXTENT_CRS': dem_layer.crs(),
                             'NODATA': -9999, 'TARGET_RESOLUTION': res, 'RESAMPLING': 0, 'DATA_TYPE': 5, 'OUTPUT': full_vs
                         })
                         if os.path.exists(full_vs):
@@ -4100,6 +4620,17 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             self.iface.messageBar().pushMessage("오류", "유효한 가시권 분석 결과를 생성하지 못했습니다. 보간 또는 범위 설정을 확인하세요.", level=2)
             self.show()
             return
+
+        # Keep only the observers whose viewshed was actually computed and
+        # re-index them, so the bit flags, the weights, the numbered observer
+        # layer, the layer name and points_n all describe the same set.
+        failed_n = len(points) - len(viewshed_results)
+        used_idx = [idx for idx, _path in viewshed_results]
+        if weights and len(weights) == len(points):
+            weights = [weights[idx] for idx in used_idx]
+        points = [points[idx] for idx in used_idx]
+        viewshed_results = [(k, path) for k, (_idx, path) in enumerate(viewshed_results)]
+        dropped_total = int(dropped_off_dem + failed_n)
         
         # Combine all viewsheds by summing (cumulative viewshed)
         # Using a safer approach with processing.run("gdal:merge")
@@ -4205,7 +4736,16 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                         run_id=str(result_run_id),
                         kind=kind,
                         units=units,
-                        params={"points_n": int(len(points))},
+                        params={
+                            "points_n": int(len(points)),
+                            "points_dropped": dropped_total,
+                            "points_dropped_rule": "DEM 범위 밖/NoData 위치 또는 gdal_viewshed 실패",
+                            "max_dist_m": float(max_dist),
+                            "observer_height_m": float(obs_height),
+                            "curvature_cc": float(self._calculate_gdal_viewshed_cc(curvature, refraction, refraction_coeff)),
+                            "range_rule": "GDAL -md from each observer's cell centre; outside every disc = NoData",
+                            "dem_nodata_rule": "DEM NoData cells = NoData",
+                        },
                     )
                 except Exception as _exc:
                     log_swallowed("viewshed_dialog.run_multi_viewshed", _exc)
@@ -4268,10 +4808,13 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                 self.link_current_marker_to_layer(viewshed_layer.id(), points, annotations=current_annotations)
                 self.point_labels = [] # Ownership transferred
                 
+                done_msg = f"누적 가시권 분석 완료 ({len(points)}개 관측점)"
+                if dropped_total > 0:
+                    done_msg += f" - DEM 범위 밖/NoData/계산 실패로 {dropped_total}개 관측점 제외"
                 self.iface.messageBar().pushMessage(
-                    "완료", 
-                    f"누적 가시권 분석 완료 ({len(points)}개 관측점)", 
-                    level=0
+                    "완료",
+                    done_msg,
+                    level=1 if dropped_total > 0 else 0,
                 )
 
                 self.accept()
@@ -4940,7 +5483,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         near_m, mid_m = self._resolve_higuchi_thresholds(near_m, mid_m)
         
         # Use DEM CRS instead of hardcoded EPSG:5186
-        layer = QgsVectorLayer("LineString?crs=" + dem_layer.crs().authid(), "히구치_거리대", "memory")
+        layer = self._new_output_layer("LineString", "히구치_거리대", dem_layer.crs())
         pr = layer.dataProvider()
         pr.addAttributes([
             QgsField("zone", FT_STRING),
@@ -5019,7 +5562,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         if not layer_name:
             layer_name = f"관측반경_{int(max_dist)}m"
 
-        layer = QgsVectorLayer("LineString?crs=" + dem_layer.crs().authid(), layer_name, "memory")
+        layer = self._new_output_layer("LineString", layer_name, dem_layer.crs())
         pr = layer.dataProvider()
         pr.addAttributes(
             [
@@ -5033,7 +5576,9 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         if not buffer_geom or buffer_geom.isEmpty():
             return None
 
-        ring_geom = buffer_geom.boundary()
+        # QgsGeometry has no boundary() in QGIS 3.x; the old call raised
+        # AttributeError (swallowed by the caller), so the ring never appeared.
+        ring_geom = QgsGeometry(buffer_geom.constGet().boundary())
         feat = QgsFeature(layer.fields())
         feat.setGeometry(ring_geom)
         feat.setAttributes([int(max_dist)])
@@ -5147,6 +5692,10 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         self._reverse_target_crs = None
         self._reverse_target_layer_name = None
         self._reverse_target_fid = None
+        # A drawn line/perimeter is transient input too; keeping it made the
+        # next run in this persistent dialog reuse it silently.
+        self.drawn_line_points = []
+        self.is_line_closed = False
         super().accept()
     
     def reject(self):
@@ -5160,6 +5709,8 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         self._reverse_target_crs = None
         self._reverse_target_layer_name = None
         self._reverse_target_fid = None
+        self.drawn_line_points = []
+        self.is_line_closed = False
         # Ensure indicator is hidden if tool was active
         if self.map_tool:
             try:
@@ -5187,6 +5738,8 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         self._reverse_target_crs = None
         self._reverse_target_layer_name = None
         self._reverse_target_fid = None
+        self.drawn_line_points = []
+        self.is_line_closed = False
         event.accept()
 
     def cleanup_for_unload(self):
@@ -5443,6 +5996,7 @@ class ProfilePlotWidget(QWidget):
         self.first_obstruction = first_obstruction
         self.hover_distance = None
         self.hover_elevation = None
+        self.hover_dem_elevation = None
         self.on_hover_callback = None  # Function(distance_m|None) for map synchronization
         self.zoom_level = 1.0
         self.pan_offset = 0.0  # Horizontal offset in meters
@@ -5468,6 +6022,7 @@ class ProfilePlotWidget(QWidget):
         if distance_m is None or not self.profile_data:
             self.hover_distance = None
             self.hover_elevation = None
+            self.hover_dem_elevation = None
             self.update()
             return
 
@@ -5481,8 +6036,21 @@ class ProfilePlotWidget(QWidget):
 
         closest = min(self.profile_data, key=lambda p: abs(float(p["distance"]) - distance_m))
         self.hover_distance = float(closest["distance"])
-        self.hover_elevation = float(closest["elevation"])
+        self.hover_elevation = self._plot_elev(closest)
+        self.hover_dem_elevation = float(closest["elevation"])
         self.update()
+
+    @staticmethod
+    def _plot_elev(p):
+        """Height used for the profile geometry (curvature/refraction-adjusted when applied)."""
+        v = p.get("elev_calc")
+        return float(p["elevation"] if v is None else v)
+
+    def _curvature_applied(self):
+        return any(
+            p.get("elev_calc") is not None and abs(float(p["elev_calc"]) - float(p["elevation"])) > 1e-9
+            for p in (self.profile_data or [])
+        )
 
     def _get_view_params(self):
         if not self.profile_data:
@@ -5552,9 +6120,15 @@ class ProfilePlotWidget(QWidget):
 
         closest = min(self.profile_data, key=lambda p: abs(float(p["distance"]) - distance))
         self.hover_distance = float(closest["distance"])
-        self.hover_elevation = float(closest["elevation"])
+        self.hover_elevation = self._plot_elev(closest)
+        self.hover_dem_elevation = float(closest["elevation"])
 
-        self.setToolTip(f"거리: {self.hover_distance:.1f}m\n고도: {self.hover_elevation:.1f}m")
+        # The tooltip reports the DEM elevation; the adjusted apparent height
+        # (what the chart draws when curvature/refraction is on) is labelled.
+        tip = f"거리: {self.hover_distance:.1f}m\n고도(DEM): {self.hover_dem_elevation:.1f}m"
+        if abs(self.hover_elevation - self.hover_dem_elevation) > 1e-9:
+            tip += f"\n곡률·굴절 보정 후: {self.hover_elevation:.1f}m"
+        self.setToolTip(tip)
         if self.on_hover_callback:
             self.on_hover_callback(self.hover_distance)
         self.update()
@@ -5656,7 +6230,10 @@ class ProfilePlotWidget(QWidget):
         
         # Data extraction
         distances = [p['distance'] for p in self.profile_data]
-        elevations = [p['elevation'] for p in self.profile_data]
+        # Plot the heights the visibility was computed with (DEM elevation, or
+        # the curvature/refraction-adjusted apparent height when that is on).
+        elevations = [self._plot_elev(p) for p in self.profile_data]
+        curvature_applied = self._curvature_applied()
         
         max_dist = distances[-1] if distances[-1] > 0 else 1
         obs_elev = elevations[0] + self.obs_height
@@ -5685,7 +6262,10 @@ class ProfilePlotWidget(QWidget):
         
         # Title
         painter.setFont(QFont("Arial", 10, QFont.Weight.Bold))
-        painter.drawText(self.margin_left, 18, "지형 단면 및 가시선 (Terrain Profile & Line of Sight)")
+        title = "지형 단면 및 가시선 (Terrain Profile & Line of Sight)"
+        if curvature_applied:
+            title += " - 세로축: 곡률·굴절 보정 후 겉보기 고도"
+        painter.drawText(self.margin_left, 18, title)
         
         # --- 2. Calculate Visibility using Max-Angle Algorithm ---
         # Compute visibility status for each profile point
@@ -5707,9 +6287,20 @@ class ProfilePlotWidget(QWidget):
             else:
                 visibility.append(False)
 
+        # run_line_of_sight stores the per-sample status (including "판정 불가"
+        # beyond DEM NoData on the path); use it when present.
+        unknown = [p.get("terrain_status") == "판정 불가" for p in self.profile_data]
+        for i, p in enumerate(self.profile_data):
+            st = p.get("terrain_status")
+            if st == "보임":
+                visibility[i] = True
+            elif st == "안보임":
+                visibility[i] = False
+
         # --- 3. Fill Terrain by Visibility (Green/Red) ---
         fill_visible = QColor(0, 200, 0, 70)
         fill_hidden = QColor(255, 0, 0, 70)
+        fill_unknown = QColor(150, 150, 150, 70)
         painter.setPen(Qt.PenStyle.NoPen)
 
         for i in range(len(distances) - 1):
@@ -5747,12 +6338,16 @@ class ProfilePlotWidget(QWidget):
                 QPointF(xb2, yb2),
             ])
 
-            painter.setBrush(QBrush(fill_visible if visibility[i + 1] else fill_hidden))
+            if unknown[i + 1]:
+                painter.setBrush(QBrush(fill_unknown))
+            else:
+                painter.setBrush(QBrush(fill_visible if visibility[i + 1] else fill_hidden))
             painter.drawPolygon(poly)
         
         # --- 4. Draw Visibility Segments on Terrain Surface ---
         pen_visible = QPen(QColor(0, 200, 0), 2.0)  # Green
         pen_hidden = QPen(QColor(255, 0, 0), 2.0)   # Red
+        pen_unknown = QPen(QColor(150, 150, 150), 2.0)  # Grey: DEM NoData earlier on the path
         
         for i in range(len(distances) - 1):
             d1, e1 = distances[i], elevations[i]
@@ -5781,7 +6376,9 @@ class ProfilePlotWidget(QWidget):
             x2, y2 = to_screen(d2c, e2c)
             
             # Use status of the endpoint to determine color
-            if visibility[i + 1]:
+            if unknown[i + 1]:
+                painter.setPen(pen_unknown)
+            elif visibility[i + 1]:
                 painter.setPen(pen_visible)
             else:
                 painter.setPen(pen_hidden)
@@ -5826,7 +6423,7 @@ class ProfilePlotWidget(QWidget):
             painter.setPen(QPen(color, 1, Qt.PenStyle.DashLine))
             painter.drawLine(p1, p2)
 
-        if self.first_obstruction and not self.is_visible_overall:
+        if self.first_obstruction and self.is_visible_overall is False:
             obstruction_dist = float(self.first_obstruction.get("distance", 0.0))
             obstruction_dist = max(0.0, min(max_dist, obstruction_dist))
 
@@ -5877,6 +6474,12 @@ class ProfilePlotWidget(QWidget):
         painter.setPen(Qt.GlobalColor.black)
         painter.drawText(legend_x + 25, legend_y + 19, "안보임 (Hidden)")
 
+        if any(unknown):
+            painter.setPen(pen_unknown)
+            painter.drawLine(legend_x, legend_y + 30, legend_x + 20, legend_y + 30)
+            painter.setPen(Qt.GlobalColor.black)
+            painter.drawText(legend_x + 25, legend_y + 34, "판정 불가 (DEM NoData)")
+
 
 class ViewshedProfilerDialog(QDialog):
     """Dialog to show 2D Viewshed Profile chart"""
@@ -5906,9 +6509,12 @@ class ViewshedProfilerDialog(QDialog):
         layout = QVBoxLayout()
         
         # Info Header
-        target_visibility = "보임" if is_visible_overall else "안보임"
+        if is_visible_overall is None:
+            target_visibility = "판정 불가 (경로 중 DEM NoData)"
+        else:
+            target_visibility = "보임" if is_visible_overall else "안보임"
         obstruction_txt = ""
-        if (not is_visible_overall) and first_obstruction and first_obstruction.get('distance') is not None:
+        if (is_visible_overall is False) and first_obstruction and first_obstruction.get('distance') is not None:
             obstruction_txt = f" | <b>장애물:</b> {float(first_obstruction['distance']):.0f}m"
 
         header = QLabel(
