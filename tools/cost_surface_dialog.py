@@ -31,6 +31,7 @@ from qgis.core import (
     QgsApplication,
     QgsColorRampShader,
     QgsCategorizedSymbolRenderer,
+    QgsCoordinateReferenceSystem,
     QgsFeature,
     QgsFillSymbol,
     QgsField,
@@ -45,11 +46,13 @@ from qgis.core import (
     QgsRasterShader,
     QgsRendererCategory,
     QgsPalLayerSettings,
+    QgsSettings,
     QgsSingleBandPseudoColorRenderer,
     QgsSingleSymbolRenderer,
     QgsTask,
     QgsTextBufferSettings,
     QgsTextFormat,
+    QgsVectorFileWriter,
     QgsVectorLayer,
     QgsVectorLayerSimpleLabeling,
 )
@@ -79,6 +82,7 @@ from .cost_models import (
     edge_cost as _edge_cost,
     isochrone_levels_minutes as _default_isochrone_levels_minutes,
     isoenergy_levels_kcal as _default_isoenergy_levels_kcal,
+    wheeled_critical_slope_percent as _wheeled_critical_slope_percent,
 )
 from .live_log_dialog import ensure_live_log_dialog
 from .help_dialog import show_help_dialog
@@ -129,6 +133,20 @@ class CostTaskResult:
     # reader having the help text open (see _tag_cost_surface_layer).
     allow_diagonal: Optional[bool] = None
     cost_mode: Optional[str] = None
+    # The DEM layer's CRS object. Result memory layers are built from it, not
+    # from dem_authid: a custom CRS has an empty authid, and "Point?crs=" with
+    # an empty authid used to skip the LCP/start-end/milestone layers.
+    dem_crs: Optional[object] = None
+    # Every parameter the run used (model constants, friction inputs, window),
+    # stamped into each output layer's metadata.
+    run_params: Optional[dict] = None
+    # Profiles computed in the worker with the SAME edge costs as the solver,
+    # friction included: rows of (dist_m, x, y, z, cum_time_s, cum_energy_j|None).
+    # The milestones and the profile dialog read these instead of re-sampling
+    # the DEM without friction.
+    lcp_profile: Optional[list] = None
+    straight_profile: Optional[list] = None
+    cancelled: bool = False
 
 
 _inv_geotransform = inv_geotransform
@@ -310,7 +328,15 @@ def _bilinear_elevation(dem, nodata_mask, inv_gt, x, y):
     row_f = float(py) - 0.5
 
     if col_f < 0 or row_f < 0 or col_f > (cols - 1) or row_f > (rows - 1):
-        return None
+        # Within half a pixel of the raster edge there is no second cell
+        # centre to interpolate towards. The point is still on the DEM, so
+        # use the nearest cell along that axis (clamp) instead of returning
+        # None - which used to blank the straight-line comparison for any
+        # start/end clicked in an edge pixel's outer half.
+        if not (0.0 <= float(px) <= cols and 0.0 <= float(py) <= rows):
+            return None
+        col_f = min(max(col_f, 0.0), float(cols - 1))
+        row_f = min(max(row_f, 0.0), float(rows - 1))
 
     x0 = int(math.floor(col_f))
     y0 = int(math.floor(row_f))
@@ -339,6 +365,95 @@ def _bilinear_elevation(dem, nodata_mask, inv_gt, x, y):
     return (v0 * (1.0 - dy)) + (v1 * dy)
 
 
+def _straight_line_profile(
+    model_key,
+    model_params,
+    start_xy,
+    end_xy,
+    dem,
+    nodata_mask,
+    win_gt,
+    step_m,
+    friction=None,
+):
+    """Sample the straight segment start->end and accumulate its cost.
+
+    Returns ``(rows, complete)``. rows are ``(dist_m, x, y, z, cum_time_s,
+    cum_energy_j)`` (cum_energy_j is None except for Pandolf); a sample that
+    falls on NoData is skipped and the next step spans the gap, so the chart
+    still has a line. ``complete`` is False when any sample was skipped: the
+    straight-line TOTAL is then undefined and callers report None.
+
+    When a friction grid is supplied (same window/grid as `dem`), each step's
+    cost is multiplied by the friction at that cell - matching the LCP solver
+    so the "LCP vs straight line" comparison uses one cost system. Time and
+    energy both carry it.
+    """
+    sx, sy = start_xy
+    ex, ey = end_xy
+    straight_dist = math.hypot(ex - sx, ey - sy)
+    is_energy_model = model_key == MODEL_PANDOLF
+    inv_win_gt = _inv_geotransform(win_gt)
+
+    def _friction_at(x0, y0):
+        if friction is None:
+            return 1.0
+        try:
+            px, py = gdal.ApplyGeoTransform(inv_win_gt, float(x0), float(y0))
+            r = int(math.floor(py))
+            c = int(math.floor(px))
+            rows0, cols0 = friction.shape
+            if 0 <= r < rows0 and 0 <= c < cols0:
+                f = float(friction[r, c])
+                if math.isfinite(f) and f > 0:
+                    return f
+        except Exception as _exc:
+            log_swallowed("cost_surface_dialog._friction_at", _exc)
+        return 1.0
+
+    z0 = _bilinear_elevation(dem, nodata_mask, inv_win_gt, sx, sy)
+    if straight_dist <= 0:
+        if z0 is None:
+            return [], False
+        return [(0.0, float(sx), float(sy), float(z0), 0.0, 0.0 if is_energy_model else None)], True
+
+    step_m = max(0.001, float(step_m))
+    n_steps = max(1, int(math.ceil(straight_dist / step_m)))
+
+    rows_out = []
+    complete = z0 is not None
+    cum_t = 0.0
+    cum_e = 0.0
+    prev = None  # (x, y, z) of the last valid sample
+    if z0 is not None:
+        prev = (float(sx), float(sy), float(z0))
+        rows_out.append((0.0, float(sx), float(sy), float(z0), 0.0, 0.0 if is_energy_model else None))
+
+    for i in range(1, n_steps + 1):
+        t = float(i) / float(n_steps)
+        x = (sx * (1.0 - t)) + (ex * t)
+        y = (sy * (1.0 - t)) + (ey * t)
+        z = _bilinear_elevation(dem, nodata_mask, inv_win_gt, x, y)
+        if z is None:
+            complete = False
+        elif prev is None:
+            prev = (float(x), float(y), float(z))
+            rows_out.append((math.hypot(x - sx, y - sy), float(x), float(y), float(z), 0.0,
+                             0.0 if is_energy_model else None))
+        else:
+            x_prev, y_prev, z_prev = prev
+            horiz = math.hypot(x - x_prev, y - y_prev)
+            dz = float(z) - float(z_prev)
+            fr = _friction_at((x + x_prev) * 0.5, (y + y_prev) * 0.5)
+            cum_t += _edge_cost(model_key, horiz, dz, model_params, cost_mode="time_s") * fr
+            if is_energy_model:
+                cum_e += _edge_cost(model_key, horiz, dz, model_params, cost_mode="energy_j") * fr
+            rows_out.append((math.hypot(x - sx, y - sy), float(x), float(y), float(z), float(cum_t),
+                             float(cum_e) if is_energy_model else None))
+            prev = (float(x), float(y), float(z))
+    return rows_out, bool(complete)
+
+
 def _estimate_straight_line_cost(
     model_key,
     model_params,
@@ -353,58 +468,65 @@ def _estimate_straight_line_cost(
 ):
     """Estimate cumulative cost along a straight line by DEM sampling.
 
-    When a friction grid is supplied (same window/grid as `dem`), each step's
-    cost is multiplied by the friction at that cell — matching the LCP solver
-    so the "LCP vs straight line" comparison uses one cost system.
+    Thin wrapper over :func:`_straight_line_profile`: returns
+    ``(total_cost, straight_dist)``, total_cost None when a sample is NoData.
     """
     sx, sy = start_xy
     ex, ey = end_xy
     straight_dist = math.hypot(ex - sx, ey - sy)
     if straight_dist <= 0:
         return 0.0, 0.0
-
-    step_m = max(0.001, float(step_m))
-    n_steps = max(1, int(math.ceil(straight_dist / step_m)))
-    inv_win_gt = _inv_geotransform(win_gt)
-
-    def _friction_at(x0, y0):
-        if friction is None:
-            return 1.0
-        try:
-            px, py = gdal.ApplyGeoTransform(inv_win_gt, float(x0), float(y0))
-            r = int(py)
-            c = int(px)
-            rows0, cols0 = friction.shape
-            if 0 <= r < rows0 and 0 <= c < cols0:
-                f = float(friction[r, c])
-                if math.isfinite(f) and f > 0:
-                    return f
-        except Exception as _exc:
-            log_swallowed("cost_surface_dialog._friction_at", _exc)
-        return 1.0
-
-    z_prev = _bilinear_elevation(dem, nodata_mask, inv_win_gt, sx, sy)
-    if z_prev is None:
+    rows_out, complete = _straight_line_profile(
+        model_key, model_params, start_xy, end_xy, dem, nodata_mask, win_gt, step_m, friction=friction
+    )
+    if not complete or not rows_out:
         return None, straight_dist
+    if cost_mode == "time_s" or model_key != MODEL_PANDOLF:
+        return rows_out[-1][4], straight_dist
+    return rows_out[-1][5], straight_dist
 
-    total_cost = 0.0
-    x_prev, y_prev = float(sx), float(sy)
 
-    for i in range(1, n_steps + 1):
-        t = float(i) / float(n_steps)
-        x = (sx * (1.0 - t)) + (ex * t)
-        y = (sy * (1.0 - t)) + (ey * t)
-        z = _bilinear_elevation(dem, nodata_mask, inv_win_gt, x, y)
-        if z is None:
-            return None, straight_dist
-        horiz = math.hypot(x - x_prev, y - y_prev)
-        dz = float(z) - float(z_prev)
-        mid_x = (x + x_prev) * 0.5
-        mid_y = (y + y_prev) * 0.5
-        total_cost += _edge_cost(model_key, horiz, dz, model_params, cost_mode=cost_mode) * _friction_at(mid_x, mid_y)
-        x_prev, y_prev, z_prev = float(x), float(y), float(z)
+def _graph_path_profile(path_idx, cols, dem, win_gt, dx, dy, model_key, model_params, friction=None):
+    """Cumulative time/energy along a solver path, using the solver's own edges.
 
-    return total_cost, straight_dist
+    Each step repeats exactly what _dijkstra_full/_astar_path add for that
+    edge (same horizontal length, same cell-centre dz, same two-cell friction
+    average), so the last row's time equals the accumulated cost at the end
+    cell. Rows: ``(dist_m, x, y, z, cum_time_s, cum_energy_j|None)``.
+    """
+    if not path_idx:
+        return []
+    is_energy_model = model_key == MODEL_PANDOLF
+    out = []
+    dist = 0.0
+    cum_t = 0.0
+    cum_e = 0.0
+    prev = None
+    for idx in path_idx:
+        r = int(idx) // int(cols)
+        c = int(idx) % int(cols)
+        x, y = _cell_center(win_gt, c, r)
+        z = float(dem[r, c])
+        if prev is not None:
+            pr, pc = prev
+            horiz = math.hypot((c - pc) * dx, (r - pr) * dy)
+            dz = z - float(dem[pr, pc])
+            fr = 1.0
+            if friction is not None:
+                fr = 0.5 * (float(friction[pr, pc]) + float(friction[r, c]))
+            w_t = _edge_cost(model_key, horiz, dz, model_params, cost_mode="time_s")
+            if math.isfinite(w_t):
+                w_t *= fr
+            cum_t += w_t
+            if is_energy_model:
+                w_e = _edge_cost(model_key, horiz, dz, model_params, cost_mode="energy_j")
+                if math.isfinite(w_e):
+                    w_e *= fr
+                cum_e += w_e
+            dist += horiz
+        out.append((float(dist), float(x), float(y), z, float(cum_t), float(cum_e) if is_energy_model else None))
+        prev = (r, c)
+    return out
 
 
 def _polyline_length(coords):
@@ -929,6 +1051,8 @@ class CostSurfaceWorker(QgsTask):
         friction_vector_source=None,
         friction_vector_multiplier=1.0,
         on_done,
+        dem_crs=None,
+        run_params=None,
     ):
         super().__init__("비용표면/최소비용경로 (Cost Surface / LCP)", QgsTask.Flag.CanCancel)
         self._cancel_event = threading.Event()
@@ -954,6 +1078,8 @@ class CostSurfaceWorker(QgsTask):
             float(friction_vector_multiplier) if friction_vector_multiplier is not None else 1.0
         )
         self.on_done = on_done
+        self.dem_crs = dem_crs
+        self.run_params = dict(run_params or {})
         self.result_obj = CostTaskResult(ok=False)
 
     def cancel(self):
@@ -962,6 +1088,16 @@ class CostSurfaceWorker(QgsTask):
             self._cancel_event.set()
         except Exception as _exc:
             log_swallowed("tools/cost_surface_dialog.py:962 (cancel)", _exc)
+        # A task cancelled while still queued never runs run(), so finished()
+        # hands on_done this placeholder; mark it cancelled so the user sees
+        # "취소" rather than a bare "분석 실패". A run already under way
+        # replaces result_obj with its own (cancelled) result.
+        try:
+            if not self.result_obj.ok:
+                self.result_obj.cancelled = True
+                self.result_obj.message = self.result_obj.message or "작업이 취소되었습니다."
+        except Exception as _exc:
+            log_swallowed("cost_surface_dialog.CostSurfaceWorker.cancel", _exc)
         try:
             return super().cancel()
         except Exception:
@@ -1242,7 +1378,7 @@ class CostSurfaceWorker(QgsTask):
                     friction=friction,
                 )
                 if dist is None or prev is None:
-                    return CostTaskResult(ok=False, message="작업이 취소되었습니다.")
+                    return CostTaskResult(ok=False, message="작업이 취소되었습니다.", cancelled=True)
                 if mode == "time_s":
                     dist_time, prev_time = dist, prev
                     if has_end:
@@ -1271,7 +1407,7 @@ class CostSurfaceWorker(QgsTask):
                     reverse=True,
                 )
                 if dist is None or prev is None:
-                    return CostTaskResult(ok=False, message="작업이 취소되었습니다.")
+                    return CostTaskResult(ok=False, message="작업이 취소되었습니다.", cancelled=True)
                 dist_end_for_corridor = dist
 
         # Path: optimize by the model's primary cost (energy for Pandolf, time otherwise).
@@ -1319,7 +1455,7 @@ class CostSurfaceWorker(QgsTask):
                 end_cost_for_path = end_time_s
 
             if prev_for_path is None:
-                return CostTaskResult(ok=False, message="작업이 취소되었습니다.")
+                return CostTaskResult(ok=False, message="작업이 취소되었습니다.", cancelled=True)
 
         if not stages:
             progress_cb(100.0)
@@ -1462,6 +1598,7 @@ class CostSurfaceWorker(QgsTask):
                             corridor_raster_path = None
 
         path_coords = None
+        lcp_profile = None
         if create_path and prev_for_path is not None:
             path_idx = _reconstruct_path(prev_for_path, start_rc, end_rc, cols, rows)
             if path_idx:
@@ -1471,57 +1608,51 @@ class CostSurfaceWorker(QgsTask):
                     c = idx % cols
                     coords.append(_cell_center(win_gt, c, r))
                 path_coords = coords
+                # Same edges and friction as the solver, so milestone/profile
+                # figures agree with the path layer and the cost raster.
+                lcp_profile = _graph_path_profile(
+                    path_idx, cols, dem, win_gt, dx, dy, self.model_key, self.model_params, friction=friction
+                )
         lcp_dist_m = _polyline_length(path_coords) if path_coords else None
 
         straight_time_s = None
         straight_energy_kcal = None
         straight_dist_m = None
+        straight_profile = None
         if has_end:
             straight_dist_m = math.hypot(float(ex) - float(sx), float(ey) - float(sy))
-            if is_energy_model:
+            straight_profile, straight_complete = _straight_line_profile(
+                self.model_key,
+                self.model_params,
+                (float(sx), float(sy)),
+                (float(ex), float(ey)),
+                dem,
+                nodata_mask,
+                win_gt,
+                step_m=min(dx, dy),
+                friction=friction,
+            )
+            if straight_complete and straight_profile:
+                straight_time_s = float(straight_profile[-1][4])
+                if is_energy_model and straight_profile[-1][5] is not None:
+                    straight_energy_kcal = float(straight_profile[-1][5]) / 4184.0
+            elif is_energy_model:
+                # Pandolf time is distance / constant speed; keep reporting it
+                # when the line crosses NoData (energy is then undefined).
                 v = max(
                     0.05,
                     float(self.model_params.get("pandolf_speed_mps", 5.0 * 1000.0 / 3600.0)),
                 )
                 straight_time_s = float(straight_dist_m) / float(v)
 
-                straight_energy_j, _ = _estimate_straight_line_cost(
-                    self.model_key,
-                    self.model_params,
-                    (float(sx), float(sy)),
-                    (float(ex), float(ey)),
-                    dem,
-                    nodata_mask,
-                    win_gt,
-                    step_m=min(dx, dy),
-                    cost_mode="energy_j",
-                    friction=friction,
-                )
-                if straight_energy_j is not None and math.isfinite(straight_energy_j):
-                    straight_energy_kcal = float(straight_energy_j) / 4184.0
-            else:
-                straight_time_s, straight_dist_m = _estimate_straight_line_cost(
-                    self.model_key,
-                    self.model_params,
-                    (float(sx), float(sy)),
-                    (float(ex), float(ey)),
-                    dem,
-                    nodata_mask,
-                    win_gt,
-                    step_m=min(dx, dy),
-                    cost_mode="time_s",
-                    friction=friction,
-                )
-
         lcp_time_s = None
         if has_end:
             if is_energy_model:
-                if lcp_dist_m is not None and math.isfinite(lcp_dist_m):
-                    v = max(
-                        0.05,
-                        float(self.model_params.get("pandolf_speed_mps", 5.0 * 1000.0 / 3600.0)),
-                    )
-                    lcp_time_s = float(lcp_dist_m) / float(v)
+                # Pandolf's path is energy-optimal; its time is the time along
+                # THAT path, friction included (used to be distance / V, which
+                # ignored friction while the time raster included it).
+                if lcp_profile:
+                    lcp_time_s = float(lcp_profile[-1][4])
             else:
                 if end_time_s is not None and math.isfinite(end_time_s):
                     lcp_time_s = float(end_time_s)
@@ -1580,6 +1711,10 @@ class CostSurfaceWorker(QgsTask):
             corridor_percent=(float(corridor_percent) if create_corridor else None),
             allow_diagonal=bool(self.allow_diagonal),
             cost_mode=path_cost_mode,
+            dem_crs=self.dem_crs,
+            run_params=dict(self.run_params or {}),
+            lcp_profile=lcp_profile,
+            straight_profile=straight_profile,
         )
 
 
@@ -1794,9 +1929,141 @@ class MultiLineChartWidget(QtWidgets.QWidget):
         p.drawText(x0 + plot_w - 40, y0 + 22, f"{view_end:.0f}m")
 
 
+def _result_crs(res):
+    """The CRS for result memory layers: the DEM layer's CRS object when the
+    run carried one (works for custom CRSs without an authid), else authid."""
+    crs = getattr(res, "dem_crs", None)
+    if isinstance(crs, QgsCoordinateReferenceSystem) and crs.isValid():
+        return QgsCoordinateReferenceSystem(crs)
+    return QgsCoordinateReferenceSystem(str(getattr(res, "dem_authid", "") or ""))
+
+
+def _new_memory_layer(geometry: str, name: str, crs):
+    """Memory layer in `crs`, including a CRS that has no authid.
+
+    "Point?crs=<authid>" needs an authid; for a custom CRS the layer is
+    created without one and the CRS object is set on it afterwards.
+    """
+    authid = str(crs.authid() or "") if crs is not None else ""
+    uri = f"{geometry}?crs={authid}" if authid else geometry
+    layer = QgsVectorLayer(uri, name, "memory")
+    if crs is not None and crs.isValid():
+        layer.setCrs(crs)
+    return layer
+
+
+_WHEELED_OLD_DEFAULT_DEG = 12.0
+
+
+def _migrate_wheeled_critical_slope_setting(settings=None, key="cost_surface"):
+    """Carry a remembered DEGREE critical slope over to the percent spin, once.
+
+    The wheeled critical slope used to be a degree spin
+    (spinWheeledCriticalSlopeDeg) and is now a percent-grade spin
+    (spinWheeledCriticalSlopePct), matching Herzog (2013) and the formula in
+    Cuckovic's code. dialog_memory saves every widget on close, so almost every
+    stored value is simply the old default 12 - that is mapped to the new
+    default 12 %, the value it was meant to be. Any other stored degree value
+    was a deliberate choice and is converted with tan() so the same cart keeps
+    the same behaviour. The old key is removed so this runs only once.
+    Returns the percent value written, or None when there was nothing to do.
+    """
+    try:
+        s = settings if settings is not None else QgsSettings()
+        base = f"{getattr(dialog_memory, '_PREFIX', 'ArchToolkit/dialogs')}/{key}"
+        old_group = f"{base}/spinWheeledCriticalSlopeDeg"
+        old = s.value(f"{old_group}/value", None)
+        if old is None:
+            return None
+        pct = None
+        try:
+            deg = float(old)
+        except (TypeError, ValueError):
+            deg = None
+        new_key = f"{base}/spinWheeledCriticalSlopePct/value"
+        if deg is not None and math.isfinite(deg) and s.value(new_key, None) is None:
+            if abs(deg - _WHEELED_OLD_DEFAULT_DEG) < 1e-9:
+                pct = _WHEELED_OLD_DEFAULT_DEG
+            else:
+                deg = max(1.0, min(45.0, deg))
+                pct = max(1.0, min(100.0, math.tan(math.radians(deg)) * 100.0))
+            s.setValue(new_key, float(pct))
+        s.remove(old_group)
+        return pct
+    except Exception as exc:
+        log_swallowed("cost_surface_dialog._migrate_wheeled_critical_slope_setting", exc)
+        return None
+
+
+# The constants each model actually reads (tools/cost_models.edge_cost); only
+# these are stamped into the output metadata, so a reader sees the parameters
+# of the model that ran, not the idle spins of the other five.
+_MODEL_PARAM_KEYS = {
+    MODEL_TOBLER: ("tobler_base_kmh", "tobler_slope_factor", "tobler_slope_offset", "tobler_min_speed_mps"),
+    MODEL_NAISMITH: ("naismith_horizontal_kmh", "naismith_ascent_m_per_h"),
+    MODEL_HERZOG_METABOLIC: ("herzog_base_kmh", "min_speed_mps"),
+    MODEL_CONOLLY_LAKE: ("conolly_base_kmh", "conolly_ref_slope_deg", "min_speed_mps"),
+    MODEL_HERZOG_WHEELED: ("wheeled_base_kmh", "wheeled_critical_slope_pct", "wheeled_max_slope_deg", "min_speed_mps"),
+    MODEL_PANDOLF: ("pandolf_body_kg", "pandolf_load_kg", "pandolf_speed_mps", "pandolf_terrain_factor"),
+}
+
+
+def _model_params_for_metadata(model_key, model_params):
+    params = dict(model_params or {})
+    out = {}
+    for k in _MODEL_PARAM_KEYS.get(model_key, tuple(sorted(params))):
+        if k in params:
+            out[k] = params[k]
+    if model_key == MODEL_HERZOG_WHEELED:
+        out["wheeled_critical_slope_pct"] = float(_wheeled_critical_slope_percent(params))
+    if model_key == MODEL_PANDOLF and "pandolf_speed_mps" in out:
+        out["pandolf_speed_kmh"] = float(out["pandolf_speed_mps"]) * 3.6
+    return out
+
+
+def _export_friction_vector(layer, out_dir=None):
+    """Write the friction vector's features to a temporary GeoPackage.
+
+    Returns ``(path, n_features, error)``. The worker rasterizes a file with
+    OGR; handing it layer.source() lost the layer's filter (subset string:
+    filtered-out polygons still added friction) and failed outright for
+    memory/scratch layers and non-file providers. Exporting through
+    QgsVectorFileWriter iterates the layer as QGIS shows it, so the filter is
+    honoured and any provider works.
+    """
+    try:
+        path = os.path.join(out_dir or tempfile.gettempdir(), f"archt_friction_{uuid.uuid4().hex[:8]}.gpkg")
+        opts = QgsVectorFileWriter.SaveVectorOptions()
+        opts.driverName = "GPKG"
+        opts.layerName = "friction"
+        opts.skipAttributeCreation = True
+        opts.onlySelectedFeatures = False
+        res = QgsVectorFileWriter.writeAsVectorFormatV3(
+            layer, path, QgsProject.instance().transformContext(), opts
+        )
+        err = res[0]
+        msg = res[1] if len(res) > 1 else ""
+        if err != QgsVectorFileWriter.WriterError.NoError:
+            cleanup_files([path])
+            return None, 0, str(msg or err)
+        n = 0
+        vds = ogr.Open(path)
+        if vds is not None:
+            lyr = vds.GetLayerByName("friction")
+            n = int(lyr.GetFeatureCount()) if lyr is not None else 0
+            vds = None
+        return path, n, ""
+    except Exception as exc:
+        log_swallowed("cost_surface_dialog._export_friction_vector", exc)
+        return None, 0, str(exc)
+
+
 class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
     def __init__(self, iface, parent=None):
         super().__init__(parent)
+        # The wheeled critical slope moved from a degree spin to a percent
+        # spin; carry a remembered value over once, before the deferred restore.
+        _migrate_wheeled_critical_slope_setting()
         # Remember the last-used inputs between sessions (tools/dialog_memory.py).
         dialog_memory.attach(self, "cost_surface")
         self.setupUi(self)
@@ -1835,6 +2102,11 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
 
         self._task = None
         self._task_running = False
+        # Tasks cancelled by closing the dialog. The Python wrapper of a QgsTask
+        # subclass must stay referenced until finished() has run: dropping the
+        # last reference (self._task = None) let it be collected, finished()
+        # never fired, and the reused dialog reopened with Run/Close disabled.
+        self._closing_tasks = []
         self._layer_temp_outputs = {}  # layer_id -> [temporary file paths]
         self._profile_payloads = {}  # path_layer_id -> payload dict
         self._profile_dialogs = {}  # path_layer_id -> dialog
@@ -2111,7 +2383,9 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
                     "경사가 커질수록 속도가 비선형으로 급격히 감소하는 차량/수레 모델입니다. (상·하행 동일)<br>"
                     "<br><b>변수 해석</b><br>"
                     "• 기본속도: 평지 기준 속도. 값↑ → 전체 시간이↓<br>"
-                    "• 임계경사(°): 값↓ → 경사에 더 취약(조금만 경사져도 속도 급감). 값↑ → 경사 영향이 완만<br>"
+                    "• 임계경사(%): 경사도(%) 기준이며 도(°)가 아닙니다. 이 경사에서 비용이 평지의 2배가 됩니다"
+                    "(비용 = 1 + (경사% / 임계경사%)², Herzog 2013 기본 12%). "
+                    "값↓ → 경사에 더 취약(조금만 경사져도 속도 급감). 값↑ → 경사 영향이 완만<br>"
                     "• 통행한계(°): 이 각도를 넘는 경사는 사실상 '불통'으로 간주해 강하게 회피합니다(차량/수레에 현실적).<br>"
                     "<br><b>참고</b>: 수식은 Zoran Čučković의 QGIS 'Movement Analysis' 플러그인(slope_cost) 구현을 참고했습니다.<br>"
                     "<br><b>주의</b>: 이 도구는 '도로/길' 정보를 모르므로, 평지 우회로가 너무 길면 산을 가로지르는 경로가 선택될 수 있습니다. "
@@ -2345,7 +2619,7 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
             "conolly_base_kmh": float(self.spinConollyBaseKmh.value()),
             "conolly_ref_slope_deg": float(self.spinConollyRefSlopeDeg.value()),
             "wheeled_base_kmh": float(self.spinWheeledBaseKmh.value()),
-            "wheeled_critical_slope_deg": float(self.spinWheeledCriticalSlopeDeg.value()),
+            "wheeled_critical_slope_pct": float(self.spinWheeledCriticalSlopePct.value()),
             "wheeled_max_slope_deg": float(getattr(self, "spinWheeledMaxSlopeDeg", None).value()) if hasattr(self, "spinWheeledMaxSlopeDeg") else 45.0,
             "pandolf_body_kg": float(self.spinPandolfBodyKg.value()),
             "pandolf_load_kg": float(self.spinPandolfLoadKg.value()),
@@ -2375,12 +2649,62 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
                 duration=10,
             )
 
+        # The friction vector goes to the worker as a temporary GeoPackage of
+        # the layer's features as QGIS iterates them (layer filter honoured,
+        # memory/scratch layers supported), not as layer.source().
+        friction_vector_export = None
+        friction_vector_count = None
+        if use_friction_vector and friction_vector_layer:
+            friction_vector_export, friction_vector_count, export_err = _export_friction_vector(friction_vector_layer)
+            if not friction_vector_export:
+                push_message(
+                    self.iface,
+                    "오류",
+                    f"추가 마찰(벡터) 레이어를 내보낼 수 없습니다: {export_err}",
+                    level=2,
+                )
+                restore_ui_focus(self)
+                return
+
+        run_params = {
+            "model_params": _model_params_for_metadata(model_key, model_params),
+            "allow_diagonal": bool(allow_diagonal),
+            "buffer_m": float(buffer_m),
+        }
+        if use_friction_raster and friction_raster_layer:
+            run_params["friction_raster"] = {
+                "layer": str(friction_raster_layer.name()),
+                "scale": float(friction_raster_scale),
+                "semantics": "cost x (value x scale), mean of the two cells of each move; NoData/<=0 -> 1",
+            }
+        if use_friction_vector and friction_vector_layer:
+            run_params["friction_vector"] = {
+                "layer": str(friction_vector_layer.name()),
+                "subset": str(friction_vector_layer.subsetString() or ""),
+                "features": int(friction_vector_count or 0),
+                "multiplier": float(friction_vector_multiplier),
+                "semantics": "cost x multiplier on cells touched by features (ALL_TOUCHED), mean of the two cells of each move",
+            }
+        if create_corridor:
+            run_params["corridor_percent"] = float(corridor_percent)
+
         self._set_running_ui(True)
 
+        holder = {}
+
         def on_done(res):
-            self._task_running = False
-            self._task = None
-            self._set_running_ui(False)
+            task_obj = holder.get("task")
+            if task_obj in self._closing_tasks:
+                self._closing_tasks.remove(task_obj)
+            # A task cancelled by closing the dialog must not clobber the state
+            # of a newer run started after the dialog was reopened.
+            if self._task is task_obj:
+                self._task_running = False
+                self._task = None
+            if not self._task_running:
+                self._set_running_ui(False)
+            if friction_vector_export:
+                cleanup_files([friction_vector_export])
             self._handle_task_result(res)
 
         task = CostSurfaceWorker(
@@ -2401,10 +2725,13 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
             corridor_polygonize=corridor_polygonize,
             friction_raster_source=(friction_raster_layer.source() if use_friction_raster and friction_raster_layer else None),
             friction_raster_scale=friction_raster_scale,
-            friction_vector_source=(friction_vector_layer.source() if use_friction_vector and friction_vector_layer else None),
+            friction_vector_source=(f"{friction_vector_export}|layername=friction" if friction_vector_export else None),
             friction_vector_multiplier=friction_vector_multiplier,
             on_done=on_done,
+            dem_crs=QgsCoordinateReferenceSystem(dem_layer.crs()),
+            run_params=run_params,
         )
+        holder["task"] = task
         self._task = task
         self._task_running = True
         QgsApplication.taskManager().addTask(task)
@@ -2476,6 +2803,9 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
 
     def _handle_task_result(self, res: CostTaskResult):
         english = is_english_ui()
+        if isinstance(res, CostTaskResult) and res.cancelled:
+            push_message(self.iface, "비용표면/최소비용경로", "작업이 취소되었습니다(취소됨).", level=1, duration=8)
+            return
         if not isinstance(res, CostTaskResult) or not res.ok:
             msg = getattr(res, "message", "") or "분석 실패"
             push_message(self.iface, "오류", msg, level=2, duration=8)
@@ -2650,8 +2980,9 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
                 self._track_layer_output(iso_layer, res.isoenergy_vector_path)
                 bottom_to_top.append(iso_layer)
 
-        if res.start_xy and res.dem_authid:
-            pt_layer = QgsVectorLayer(f"Point?crs={res.dem_authid}", "시작/도착점 (Start/End)", "memory")
+        result_crs = _result_crs(res)
+        if res.start_xy and result_crs.isValid():
+            pt_layer = _new_memory_layer("Point", "시작/도착점 (Start/End)", result_crs)
             pr = pt_layer.dataProvider()
             pr.addAttributes([QgsField("role", FT_STRING)])
             pt_layer.updateFields()
@@ -2682,13 +3013,11 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
             pt_layer.setRenderer(QgsSingleSymbolRenderer(symbol))
             bottom_to_top.append(pt_layer)
 
-        if res.end_xy and res.start_xy and res.dem_authid:
+        if res.end_xy and res.start_xy and result_crs.isValid():
             path_name = "경로 비교 (Straight vs LCP)"
             if model_tag:
                 path_name = f"{path_name} - {model_tag}"
-            path_layer = QgsVectorLayer(
-                f"LineString?crs={res.dem_authid}", path_name, "memory"
-            )
+            path_layer = _new_memory_layer("LineString", path_name, result_crs)
             pr = path_layer.dataProvider()
             pr.addAttributes(
                 [
@@ -2794,6 +3123,8 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
                 "start_xy": res.start_xy,
                 "end_xy": res.end_xy,
                 "path_coords": res.path_coords,
+                "lcp_profile": res.lcp_profile or [],
+                "straight_profile": res.straight_profile or [],
             }
             try:
                 def handler(*_args, lid=path_layer.id()):
@@ -2810,13 +3141,11 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
 
             # Milestones along LCP for map-friendly reading (every 500m).
             try:
-                if res.path_coords and len(res.path_coords) >= 2 and res.dem_source:
+                if res.path_coords and len(res.path_coords) >= 2 and res.lcp_profile:
                     milestone_layer = self._create_lcp_milestones_layer(
-                        dem_source=res.dem_source,
-                        crs_authid=res.dem_authid,
+                        crs=result_crs,
                         model_key=res.model_key,
-                        model_params=res.model_params or {},
-                        path_coords=res.path_coords,
+                        profile=res.lcp_profile,
                         interval_m=500.0,
                         layer_name=f"LCP 마일스톤 (500m) - {model_tag}" if model_tag else "LCP 마일스톤 (500m)",
                     )
@@ -2866,6 +3195,11 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
                         if diagonal
                         else "4-neighbour grid (90-degree quantised, cost overestimated by up to ~41%)"
                     )
+                # Every parameter the run used (model constants such as the
+                # reference slope or the wheeled critical slope in %, friction
+                # layers/scales, window): the help asks users to report them.
+                for k, v in dict(getattr(res, "run_params", None) or {}).items():
+                    approx_params.setdefault(str(k), v)
             set_archtoolkit_layer_metadata(
                 layer,
                 tool_id="cost_surface",
@@ -3183,100 +3517,57 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
     def _create_lcp_milestones_layer(
         self,
         *,
-        dem_source: str,
-        crs_authid: str,
+        crs,
         model_key: str,
-        model_params: dict,
-        path_coords: list,
+        profile: list,
         interval_m: float,
         layer_name: str,
     ):
-        if not dem_source or not os.path.exists(str(dem_source)):
-            return None
-        if not path_coords or len(path_coords) < 2:
+        """Milestones every `interval_m` along the LCP.
+
+        `profile` is the worker's lcp_profile: cumulative time/energy on the
+        solver's own edges, friction included, so a milestone reads the same
+        as the cost raster under it and the path layer's total. (It used to
+        re-sample the DEM along the path WITHOUT friction: with friction x3 the
+        500 m milestone said 6.0 min over a cell the raster put at 17.9 min.)
+        Values are interpolated linearly inside an edge, which is exact for
+        the grid model: cost accrues uniformly along one edge.
+        """
+        if not profile or len(profile) < 2:
             return None
         interval_m = float(interval_m)
         if interval_m <= 0:
             return None
-
-        ds = gdal.Open(str(dem_source), gdal.GA_ReadOnly)
-        if ds is None:
-            return None
-        band = ds.GetRasterBand(1)
-        gt = ds.GetGeoTransform()
-        nodata = band.GetNoDataValue()
-        dx = abs(float(gt[1]))
-        dy = abs(float(gt[5]))
-        step_m = max(0.1, min(dx, dy))
-
-        def densify_line(coords, step):
-            out = [coords[0]]
-            for (x0, y0), (x1, y1) in zip(coords, coords[1:]):
-                seg_len = math.hypot(float(x1) - float(x0), float(y1) - float(y0))
-                if seg_len <= 0:
-                    continue
-                n = max(1, int(math.ceil(seg_len / float(step))))
-                for i in range(1, n + 1):
-                    t = float(i) / float(n)
-                    out.append(((x0 * (1.0 - t)) + (x1 * t), (y0 * (1.0 - t)) + (y1 * t)))
-            return out
-
-        coords_dense = densify_line(path_coords, step_m)
-        minx = min(float(x) for x, _y in coords_dense)
-        maxx = max(float(x) for x, _y in coords_dense)
-        miny = min(float(y) for _x, y in coords_dense)
-        maxy = max(float(y) for _x, y in coords_dense)
-        inv = _inv_geotransform(gt)
-        px0, py0 = gdal.ApplyGeoTransform(inv, minx, maxy)
-        px1, py1 = gdal.ApplyGeoTransform(inv, maxx, miny)
-        x0 = int(math.floor(min(px0, px1))) - 2
-        x1 = int(math.ceil(max(px0, px1))) + 2
-        y0 = int(math.floor(min(py0, py1))) - 2
-        y1 = int(math.ceil(max(py0, py1))) + 2
-        x0 = _clamp_int(x0, 0, ds.RasterXSize - 1)
-        y0 = _clamp_int(y0, 0, ds.RasterYSize - 1)
-        x1 = _clamp_int(x1, 0, ds.RasterXSize - 1)
-        y1 = _clamp_int(y1, 0, ds.RasterYSize - 1)
-        win_xsize = max(1, x1 - x0 + 1)
-        win_ysize = max(1, y1 - y0 + 1)
-        dem = band.ReadAsArray(x0, y0, win_xsize, win_ysize).astype(np.float32, copy=False)
-        nodata_mask = np.zeros(dem.shape, dtype=bool)
-        if nodata is not None:
-            nodata_mask |= dem == nodata
-        nodata_mask |= np.isnan(dem)
-        win_gt = _window_geotransform(gt, x0, y0)
-        inv_win_gt = _inv_geotransform(win_gt)
-        ds = None
-
-        profile = []
-        dist = 0.0
-        cum_time_s = 0.0
-        cum_energy_j = 0.0
-        z_prev = None
-        x_prev = None
-        y_prev = None
-        for (x, y) in coords_dense:
-            z = _bilinear_elevation(dem, nodata_mask, inv_win_gt, float(x), float(y))
-            if z is None:
-                continue
-            if x_prev is not None:
-                horiz = math.hypot(float(x) - float(x_prev), float(y) - float(y_prev))
-                dz = float(z) - float(z_prev)
-                dist += horiz
-                cum_time_s += _edge_cost(model_key, horiz, dz, model_params, cost_mode="time_s")
-                if model_key == MODEL_PANDOLF:
-                    cum_energy_j += _edge_cost(model_key, horiz, dz, model_params, cost_mode="energy_j")
-            profile.append((float(dist), float(x), float(y), float(cum_time_s) / 60.0, (float(cum_energy_j) / 4184.0) if model_key == MODEL_PANDOLF else None))
-            x_prev, y_prev, z_prev = float(x), float(y), float(z)
-
-        if not profile:
-            return None
-
-        total_d = profile[-1][0]
+        rows_p = [tuple(r) for r in profile]
+        total_d = float(rows_p[-1][0])
         if not math.isfinite(total_d) or total_d <= interval_m:
             return None
 
-        layer = QgsVectorLayer(f"Point?crs={crs_authid}", layer_name, "memory")
+        def _at(target_d):
+            for a, b in zip(rows_p, rows_p[1:]):
+                if float(a[0]) <= target_d <= float(b[0]):
+                    span = float(b[0]) - float(a[0])
+                    t = (target_d - float(a[0])) / span if span > 0 else 0.0
+                    x = float(a[1]) + (float(b[1]) - float(a[1])) * t
+                    y = float(a[2]) + (float(b[2]) - float(a[2])) * t
+                    tm = float(a[4]) + (float(b[4]) - float(a[4])) * t
+                    en = None
+                    if a[5] is not None and b[5] is not None:
+                        en = float(a[5]) + (float(b[5]) - float(a[5])) * t
+                    return x, y, tm, en
+            last = rows_p[-1]
+            return float(last[1]), float(last[2]), float(last[4]), (float(last[5]) if last[5] is not None else None)
+
+        milestones = []
+        n_ms = int(math.floor(total_d / interval_m))
+        for i in range(1, n_ms + 1):
+            target_d = float(i) * interval_m
+            x, y, t_s, e_j = _at(target_d)
+            milestones.append(
+                (target_d, x, y, t_s / 60.0, (e_j / 4184.0) if (model_key == MODEL_PANDOLF and e_j is not None) else None)
+            )
+
+        layer = _new_memory_layer("Point", layer_name, crs)
         pr = layer.dataProvider()
         pr.addAttributes(
             [
@@ -3289,11 +3580,7 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
         layer.updateFields()
 
         feats = []
-        n = int(math.floor(total_d / interval_m))
-        for i in range(1, n + 1):
-            target_d = float(i) * float(interval_m)
-            nearest = min(profile, key=lambda p: abs(float(p[0]) - target_d))
-            d_m, x, y, t_min, e_kcal = nearest
+        for d_m, x, y, t_min, e_kcal in milestones:
             parts = [f"{d_m / 1000.0:.1f}km", f"{t_min:.1f}{' min' if is_english_ui() else '분'}"]
             if e_kcal is not None:
                 parts.append(f"{e_kcal:.0f}kcal")
@@ -3355,112 +3642,40 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
                     log_swallowed("tools/cost_surface_dialog.py:3354 (open_cost_profile)", _exc)
                 return
 
-        dem_source = payload.get("dem_source")
         start_xy = payload.get("start_xy")
         end_xy = payload.get("end_xy")
         lcp_coords = payload.get("path_coords") or []
         model_key = payload.get("model_key")
-        model_params = payload.get("model_params") or {}
         model_label = payload.get("model_label") or ""
 
-        if not dem_source or not os.path.exists(str(dem_source)):
-            push_message(self.iface, "오류", "프로파일을 위해 DEM 소스를 찾을 수 없습니다.", level=2, duration=6)
-            return
         if not start_xy or not end_xy:
             return
 
-        try:
-            ds = gdal.Open(str(dem_source), gdal.GA_ReadOnly)
-            if ds is None:
-                raise Exception("GDAL open failed")
-            band = ds.GetRasterBand(1)
-            gt = ds.GetGeoTransform()
-            nodata = band.GetNoDataValue()
-            dx = abs(float(gt[1]))
-            dy = abs(float(gt[5]))
-            step_m = max(0.1, min(dx, dy))
-
-            def densify_line(coords, step):
-                if not coords or len(coords) < 2:
-                    return coords
-                out = [coords[0]]
-                for (x0, y0), (x1, y1) in zip(coords, coords[1:]):
-                    seg_len = math.hypot(float(x1) - float(x0), float(y1) - float(y0))
-                    if seg_len <= 0:
-                        continue
-                    n = max(1, int(math.ceil(seg_len / float(step))))
-                    for i in range(1, n + 1):
-                        t = float(i) / float(n)
-                        out.append(((x0 * (1.0 - t)) + (x1 * t), (y0 * (1.0 - t)) + (y1 * t)))
-                return out
-
-            straight_coords = densify_line([start_xy, end_xy], step_m)
-            lcp_coords_dense = densify_line(lcp_coords, step_m) if lcp_coords else []
-
-            # Read minimal DEM window for both paths
-            all_pts = straight_coords + lcp_coords_dense
-            minx = min(float(x) for x, _y in all_pts)
-            maxx = max(float(x) for x, _y in all_pts)
-            miny = min(float(y) for _x, y in all_pts)
-            maxy = max(float(y) for _x, y in all_pts)
-            inv = _inv_geotransform(gt)
-            px0, py0 = gdal.ApplyGeoTransform(inv, minx, maxy)
-            px1, py1 = gdal.ApplyGeoTransform(inv, maxx, miny)
-            x0 = int(math.floor(min(px0, px1))) - 2
-            x1 = int(math.ceil(max(px0, px1))) + 2
-            y0 = int(math.floor(min(py0, py1))) - 2
-            y1 = int(math.ceil(max(py0, py1))) + 2
-            x0 = _clamp_int(x0, 0, ds.RasterXSize - 1)
-            y0 = _clamp_int(y0, 0, ds.RasterYSize - 1)
-            x1 = _clamp_int(x1, 0, ds.RasterXSize - 1)
-            y1 = _clamp_int(y1, 0, ds.RasterYSize - 1)
-            win_xsize = max(1, x1 - x0 + 1)
-            win_ysize = max(1, y1 - y0 + 1)
-            dem = band.ReadAsArray(x0, y0, win_xsize, win_ysize).astype(np.float32, copy=False)
-            nodata_mask = np.zeros(dem.shape, dtype=bool)
-            if nodata is not None:
-                nodata_mask |= dem == nodata
-            nodata_mask |= np.isnan(dem)
-            win_gt = _window_geotransform(gt, x0, y0)
-            inv_win_gt = _inv_geotransform(win_gt)
-
-            def sample_profile(coords):
-                pts = []
-                dist = 0.0
-                cum_time_s = 0.0
-                cum_energy_j = 0.0
-                z_prev = None
-                x_prev = None
-                y_prev = None
-                for (x, y) in coords:
-                    z = _bilinear_elevation(dem, nodata_mask, inv_win_gt, float(x), float(y))
-                    if z is None:
-                        continue
-                    if x_prev is not None:
-                        horiz = math.hypot(float(x) - float(x_prev), float(y) - float(y_prev))
-                        dz = float(z) - float(z_prev)
-                        dist += horiz
-                        if model_key:
-                            cum_time_s += _edge_cost(model_key, horiz, dz, model_params, cost_mode="time_s")
-                            if model_key == MODEL_PANDOLF:
-                                cum_energy_j += _edge_cost(model_key, horiz, dz, model_params, cost_mode="energy_j")
-                    pts.append(
-                        (
-                            float(dist),
-                            float(z),
-                            float(cum_time_s) / 60.0,
-                            (float(cum_energy_j) / 4184.0) if model_key == MODEL_PANDOLF else None,
-                        )
+        # The series come from the worker (lcp_profile / straight_profile):
+        # the LCP on the solver's own edges and the straight line sampled the
+        # way straight_time_s is, both WITH friction. The profile used to
+        # re-sample the DEM without friction, so with friction x3 it showed
+        # "LCP 8.9분" next to a path layer and message that said 26.8 min.
+        def _series(rows_in):
+            pts = []
+            for row in rows_in or []:
+                d, _x, _y, z, t_s, e_j = row
+                pts.append(
+                    (
+                        float(d),
+                        float(z),
+                        float(t_s) / 60.0,
+                        (float(e_j) / 4184.0) if (model_key == MODEL_PANDOLF and e_j is not None) else None,
                     )
-                    x_prev, y_prev, z_prev = float(x), float(y), float(z)
-                return pts
+                )
+            return pts
 
-            straight_pts = sample_profile(straight_coords)
-            lcp_pts = sample_profile(lcp_coords_dense) if lcp_coords_dense else []
-            ds = None
-
-        except Exception as e:
-            push_message(self.iface, "오류", f"프로파일 계산 실패: {e}", level=2, duration=7)
+        straight_pts = _series(payload.get("straight_profile"))
+        lcp_pts = _series(payload.get("lcp_profile"))
+        straight_coords = [tuple(start_xy), tuple(end_xy)]
+        lcp_coords_dense = [tuple(c) for c in lcp_coords] if lcp_coords else []
+        if not straight_pts and not lcp_pts:
+            push_message(self.iface, "오류", "프로파일 자료가 없습니다.", level=2, duration=6)
             return
 
         dlg = QtWidgets.QDialog(self)
@@ -3589,6 +3804,39 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
         dlg.resize(820, 720 if model_key == MODEL_PANDOLF else 560)
         dlg.show()
 
+    def _cancel_running_task(self, *, notify: bool):
+        """Cancel a running task on close, and leave the dialog reusable.
+
+        The task is parked in self._closing_tasks rather than dropped: the
+        Python wrapper of a QgsTask subclass that nothing references is
+        collected, its finished() override never runs, and on_done never
+        re-enabled the buttons - the plugin reuses this dialog, so Run, Pick,
+        Clear and Close stayed disabled until QGIS restarted. The UI is also
+        reset here directly, so reopening works even before finished() lands.
+        """
+        task = self._task
+        if self._task_running and task is not None:
+            if task not in self._closing_tasks:
+                self._closing_tasks.append(task)
+            try:
+                task.cancel()
+            except Exception as _exc:
+                log_swallowed("cost_surface_dialog._cancel_running_task", _exc)
+            if notify:
+                push_message(
+                    self.iface,
+                    "비용표면/최소비용경로",
+                    "대화상자를 닫아 실행 중인 분석을 취소했습니다.",
+                    level=1,
+                    duration=6,
+                )
+        self._task_running = False
+        self._task = None
+        try:
+            self._set_running_ui(False)
+        except Exception as _exc:
+            log_swallowed("cost_surface_dialog._cancel_running_task", _exc)
+
     def reject(self):
         self._cleanup_for_close()
         super().reject()
@@ -3600,13 +3848,7 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
     def _cleanup_for_close(self):
         """Cleanup when the dialog closes (keep project signals for later layer/temp cleanup)."""
         try:
-            if self._task_running and self._task is not None:
-                try:
-                    self._task.cancel()
-                except Exception as _exc:
-                    log_swallowed("tools/cost_surface_dialog.py:3606 (_cleanup_for_close)", _exc)
-            self._task_running = False
-            self._task = None
+            self._cancel_running_task(notify=True)
             self._reset_preview()
 
             try:
@@ -3626,13 +3868,7 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
     def _cleanup_for_unload(self):
         """Full cleanup for plugin unload/reload (disconnect signals, release handlers, clear temp tracking)."""
         try:
-            if self._task_running and self._task is not None:
-                try:
-                    self._task.cancel()
-                except Exception as _exc:
-                    log_swallowed("tools/cost_surface_dialog.py:3632 (_cleanup_for_unload)", _exc)
-            self._task_running = False
-            self._task = None
+            self._cancel_running_task(notify=False)
         except Exception as _exc:
             log_swallowed("cost_surface_dialog._cleanup_for_unload", _exc)
 

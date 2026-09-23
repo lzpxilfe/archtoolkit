@@ -594,23 +594,29 @@
             <item row="1" column="0">
              <widget class="QLabel" name="lblWheeledCriticalSlope">
               <property name="text">
-               <string>기준 경사(°)</string>
+               <string>임계경사(%)</string>
               </property>
              </widget>
             </item>
             <item row="1" column="1">
-             <widget class="QDoubleSpinBox" name="spinWheeledCriticalSlopeDeg">
+             <widget class="QDoubleSpinBox" name="spinWheeledCriticalSlopePct">
+              <property name="toolTip">
+               <string>임계경사(경사도 %, 도(°)가 아님). 경사가 이 값에 이르면 이동 비용이 평지의 2배가 됩니다. (기본값: 12%, Herzog 2013)</string>
+              </property>
+              <property name="suffix">
+               <string> %</string>
+              </property>
               <property name="decimals">
-               <number>0</number>
+               <number>1</number>
               </property>
               <property name="minimum">
                <double>1.000000000000000</double>
               </property>
               <property name="maximum">
-               <double>80.000000000000000</double>
+               <double>100.000000000000000</double>
               </property>
               <property name="singleStep">
-               <double>1.000000000000000</double>
+               <double>0.500000000000000</double>
               </property>
               <property name="value">
                <double>12.000000000000000</double>

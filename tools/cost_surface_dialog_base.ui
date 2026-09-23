@@ -471,14 +471,17 @@
              <item row="1" column="0">
               <widget class="QLabel" name="lblWheeledCriticalSlope">
                <property name="text">
-                <string>임계경사(°)</string>
+                <string>임계경사(%)</string>
                </property>
               </widget>
              </item>
              <item row="1" column="1">
-              <widget class="QDoubleSpinBox" name="spinWheeledCriticalSlopeDeg">
+              <widget class="QDoubleSpinBox" name="spinWheeledCriticalSlopePct">
                <property name="toolTip">
-                <string>경사가 이 값(°)에 가까워질수록 속도가 급격히 감소합니다. 값이 작을수록 경사에 더 취약한 차량을 의미합니다. (기본값: 12°)</string>
+                <string>임계경사(경사도 %, 도(°)가 아님). 경사가 이 값에 이르면 이동 비용이 평지의 2배가 되고, 넘어서면 급격히 커집니다. 값이 작을수록 경사에 더 취약한 차량을 의미합니다. (기본값: 12%, Herzog 2013)</string>
+               </property>
+               <property name="suffix">
+                <string> %</string>
                </property>
                <property name="decimals">
                 <number>1</number>
@@ -487,7 +490,7 @@
                 <double>1.000000000000000</double>
                </property>
                <property name="maximum">
-                <double>45.000000000000000</double>
+                <double>100.000000000000000</double>
                </property>
                <property name="singleStep">
                 <double>0.500000000000000</double>
@@ -800,7 +803,7 @@
          <string>Use friction vector</string>
         </property>
         <property name="toolTip">
-         <string>Rasterizes the vector layer to the DEM grid (same CRS only), then multiplies costs by the multiplier where features exist.</string>
+         <string>Rasterizes the vector layer to the DEM grid (same CRS only), then multiplies costs by the multiplier where features exist. The features are taken as QGIS shows the layer: its filter (subset) is honoured, and memory/scratch layers work.</string>
         </property>
         <property name="checked">
          <bool>false</bool>
@@ -842,7 +845,7 @@
          <string>Create least-cost corridor</string>
         </property>
         <property name="toolTip">
-         <string>Creates a corridor raster where cost(start→cell)+cost(end→cell) ≤ best_cost × (1 + threshold%). Uses time cost (or energy for Pandolf).</string>
+         <string>Creates a corridor raster where cost(start→cell)+cost(cell→end) ≤ best_cost × (1 + threshold%). Uses time cost (or energy for Pandolf).</string>
         </property>
         <property name="checked">
          <bool>false</bool>

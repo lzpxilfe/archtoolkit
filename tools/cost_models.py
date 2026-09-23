@@ -11,8 +11,9 @@ Published formulae implemented here:
   - Naismith (1892) rule
   - Pandolf et al. (1977) load-carriage energy equation
   - Herzog slope-cost model: the metabolic branch is a 6th-order
-    polynomial, the wheeled branch a critical-slope form; both follow
-    Cuckovic's Movement Analysis implementation
+    polynomial, the wheeled branch a critical-slope form (critical slope
+    as a PERCENT grade, default 12 %); both follow Cuckovic's Movement
+    Analysis implementation
 
 NOT a published formula:
   - MODEL_CONOLLY_LAKE is a PLUGIN-DEFINED relative-slope penalty, written
@@ -59,6 +60,33 @@ def naismith_time_s(horizontal_m, dz_m, horizontal_kmh, ascent_m_per_h):
         max(0.0, float(dz_m)) / ascent_m_per_h
     )
     return time_h * 3600.0
+
+
+WHEELED_CRITICAL_SLOPE_PCT_DEFAULT = 12.0
+
+
+def wheeled_critical_slope_percent(model_params):
+    """Critical slope of the Herzog wheeled-vehicle function, in PERCENT grade.
+
+    Herzog (2013) and the formula in Cuckovic's Movement Analysis code
+    (``1 / (1 + (s*100 / critical_slope)**2)``, s = tan) both take the critical
+    slope as a percent grade, default 12 %: at that grade the cost is twice the
+    flat cost. This plugin used to read the number as DEGREES (12 deg = 21.3 %),
+    which made carts about half as slope-averse as the cited model.
+
+    ``wheeled_critical_slope_pct`` is the parameter. The legacy key
+    ``wheeled_critical_slope_deg`` is still honoured for callers that have not
+    moved yet: it is converted with tan(), so such a caller keeps its old
+    numbers until it switches to the percent key.
+    """
+    params = model_params or {}
+    pct = params.get("wheeled_critical_slope_pct")
+    if pct is None and params.get("wheeled_critical_slope_deg") is not None:
+        deg = max(1.0, min(89.0, float(params.get("wheeled_critical_slope_deg"))))
+        pct = math.tan(math.radians(deg)) * 100.0
+    if pct is None:
+        pct = WHEELED_CRITICAL_SLOPE_PCT_DEFAULT
+    return max(0.1, float(pct))
 
 
 def edge_cost(model_key, horiz_m, dz_m, model_params, *, cost_mode="time_s"):
@@ -184,8 +212,7 @@ def edge_cost(model_key, horiz_m, dz_m, model_params, *, cost_mode="time_s"):
             # Treat as unreachable instead of producing extreme finite costs (keeps raster ranges readable).
             return math.inf
 
-        critical_deg = max(1.0, float(model_params.get("wheeled_critical_slope_deg", 12.0)))
-        critical_percent = math.tan(math.radians(critical_deg)) * 100.0
+        critical_percent = wheeled_critical_slope_percent(model_params)
         slope_percent = slope_abs * 100.0
         speed_factor = 1.0 / (1.0 + (slope_percent / max(1e-9, critical_percent)) ** 2)
         base_mps = max(min_speed_mps, float(model_params.get("wheeled_base_kmh", 4.0)) * 1000.0 / 3600.0)

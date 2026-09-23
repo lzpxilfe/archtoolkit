@@ -1796,11 +1796,11 @@ MST/k-NN/Hub 네트워크를 생성합니다.
         )
         tt(
             self.lblWheeledCriticalSlope,
-            "기준 경사(°)\n- 이 값 이후로 비용이 급격히 증가하기 시작합니다.\n- 값↑ → 더 가파른 경사까지 '급증 전'으로 취급됩니다.",
+            "임계경사(경사도 %, 도(°)가 아님, Herzog 2013)\n- 이 경사에서 비용이 평지의 2배가 되고, 넘어서면 급격히 증가합니다.\n- 값↑ → 더 가파른 경사까지 '급증 전'으로 취급됩니다.",
         )
         tt(
-            self.spinWheeledCriticalSlopeDeg,
-            "기준 경사(°)\n- 이 값 이후로 비용이 급격히 증가하기 시작합니다.\n- 값↑ → 더 가파른 경사까지 '급증 전'으로 취급됩니다.",
+            self.spinWheeledCriticalSlopePct,
+            "임계경사(경사도 %, 도(°)가 아님, Herzog 2013)\n- 이 경사에서 비용이 평지의 2배가 되고, 넘어서면 급격히 증가합니다.\n- 값↑ → 더 가파른 경사까지 '급증 전'으로 취급됩니다.",
         )
         tt(
             self.lblWheeledMaxSlope,
@@ -2448,7 +2448,7 @@ MST/k-NN/Hub 네트워크를 생성합니다.
             "conolly_base_kmh": float(self.spinConollyBaseKmh.value()),
             "conolly_ref_slope_deg": float(self.spinConollyRefSlopeDeg.value()),
             "wheeled_base_kmh": float(self.spinWheeledBaseKmh.value()),
-            "wheeled_critical_slope_deg": float(self.spinWheeledCriticalSlopeDeg.value()),
+            "wheeled_critical_slope_pct": float(self.spinWheeledCriticalSlopePct.value()),
             "wheeled_max_slope_deg": float(self.spinWheeledMaxSlopeDeg.value()),
             "pandolf_body_kg": float(self.spinPandolfBodyKg.value()),
             "pandolf_load_kg": float(self.spinPandolfLoadKg.value()),
