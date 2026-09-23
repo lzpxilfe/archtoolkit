@@ -283,7 +283,7 @@
          <string> m</string>
         </property>
         <property name="toolTip">
-         <string>0이면 DEM 해상도 기반 자동(최소 5m). 값이 작을수록 정확하지만 느립니다.</string>
+         <string>0이면 DEM 픽셀 크기. 픽셀보다 큰 값은 픽셀 크기로 제한됩니다. 값이 작을수록 촘촘하지만 느립니다.</string>
         </property>
        </widget>
       </item>

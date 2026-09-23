@@ -53,6 +53,7 @@ from qgis.gui import QgsMapLayerComboBox  # noqa: F401 (needed for .ui custom wi
 from .utils import (
     log_swallowed,
     is_metric_crs,
+    is_null_value,
     log_message,
     push_message,
     restore_ui_focus,
@@ -94,6 +95,8 @@ LOS_EARTH_RADIUS_M = 6371000.0
 LOS_DEFAULT_REFRACTION_K = 0.13
 LOS_SAMPLE_CAP = 5000
 LOS_SAMPLE_MIN = 80
+# Terrain reading for LOS (recorded in the output metadata).
+LOS_DEM_SAMPLING = "bilinear"
 
 
 @dataclass(frozen=True)
@@ -214,7 +217,9 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
 <h4>모드</h4>
 <ul>
   <li><b>PPA</b>: 직선거리 기반 k-NN/반경/삼각망(Delaunay) 등으로 간선을 생성합니다.</li>
-  <li><b>Visibility(LOS)</b>: DEM을 샘플링하여 두 노드가 서로 보이는지 판정해 간선을 생성합니다.</li>
+  <li><b>Visibility(LOS)</b>: DEM을 샘플링하여 두 노드가 서로 보이는지 판정해 간선을 생성합니다.
+      지형 고도는 주변 4개 셀 중심의 양선형 보간으로 읽고(가장자리·NoData 옆은 가장 가까운 셀), 샘플 간격은 DEM 픽셀 이하이며,
+      관측점·대상점이 놓인 셀 자체는 장애물로 보지 않습니다.</li>
 </ul>
 
 <h4>입력/출력</h4>
@@ -243,7 +248,7 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
         tooltip_ppa = (
             "PPA(Proximal Point Analysis)\n"
             "- 지형(DEM) 비용을 쓰지 않고, 유클리드 거리(직선거리)로 최근접 k개를 연결합니다.\n"
-            "- k가 작을수록(예: 3~5) 현실적인 '이웃망' 형태가 되며, k가 크면 간선이 급격히 늘어납니다.\n"
+            "- k가 작을수록(예: 3-5) 현실적인 '이웃망' 형태가 되며, k가 크면 간선이 급격히 늘어납니다.\n"
             "- 본 도구는 SciPy(KDTree) 같은 외부 의존성 없이 동작합니다.\n\n"
             "Ref (REFERENCES.md 구분: (B) 직접 구현, (C) 해석/배경 참고):\n"
             "- (B) 구현: 유클리드 k-NN / 반경 / Delaunay-Gabriel-RNG 근접 그래프.\n"
@@ -261,7 +266,7 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
             "- 곡률·굴절 보정: 기본 적용, 계수 0.13 (가시권 분석 도구와 같은 식 cc*d^2/(2R), cc = 1 - 계수).\n"
             "  장거리 쌍에서는 보정 여부에 따라 판정이 달라질 수 있습니다(25 km에서 약 10 m). 끄려면 '지구 곡률 보정' 해제.\n\n"
             "Ref (REFERENCES.md 구분: (B) 직접 구현, (C) 해석/배경 참고):\n"
-            "- (B) 구현: DEM 등간격 샘플링 LOS + 곡률·굴절 보정 + 네트워크 지표(degree/component/centrality).\n"
+            "- (B) 구현: DEM 양선형 보간 LOS(간격 <= 픽셀 + 셀 중심선 교차점, 관측·대상 셀 제외) + 곡률·굴절 보정 + 네트워크 지표(degree/component/centrality).\n"
             "- (C) Van Dyke et al. (2016) Intervisibility in the Chacoan world (viewsheds + viewnets).\n"
             "- (C) Gillings & Wheatley (2001) unresolved issues in archaeological visibility analysis.\n"
             "- (C) 참고: Turner et al. (2001) 격자 기반 VGA(visibility graph analysis); 이 도구는 유적 간 상호가시성 네트워크이며\n"
@@ -290,7 +295,7 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
         _sync_network_type_tooltip()
 
         try:
-            self.spinPpaK.setToolTip("각 유적(노드)에서 연결할 최근접 이웃 수 k입니다. (권장 3~5)")
+            self.spinPpaK.setToolTip("각 유적(노드)에서 연결할 최근접 이웃 수 k입니다. (권장 3-5)")
             self.chkPpaMutualOnly.setToolTip(
                 "상호 최근접(Mutual)일 때만 간선을 남깁니다.\n"
                 "예) A의 최근접에 B가 포함되고, B의 최근접에도 A가 포함될 때만 연결."
@@ -318,7 +323,8 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                 PPA_KNN: (
                     "k-NN (유클리드 거리)\n"
                     "- 각 노드에서 직선거리로 가까운 k개를 연결합니다.\n"
-                    "- k가 커지면 간선이 급증하므로(스파게티) 보통 3~5 권장.\n\n"
+                    "- k가 커지면 간선이 급증하므로(스파게티) 보통 3-5 권장.\n"
+                    "- 거리가 같은 이웃(격자 등)은 피처 ID가 작은 쪽을 먼저 고릅니다.\n\n"
                     "Ref:\n"
                     "- Terrell (1977) Human Biogeography in the Solomon Islands.\n"
                     "- Brughmans & Peeples (2017) Trends in archaeological network research."
@@ -340,7 +346,8 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                 ),
                 PPA_GABRIEL: (
                     "Gabriel graph\n"
-                    "- Delaunay 간선 중 '원(지름 AB) 내부에 다른 점이 없을 때'만 남깁니다.\n"
+                    "- Delaunay 간선 중 '지름 AB인 원의 내부나 원 위에 다른 점이 없을 때'만 남깁니다\n"
+                    "  (엄격한 정의: 모든 C에 대해 d²(A,B) < d²(A,C) + d²(B,C)). 격자처럼 네 점이 한 원 위에 있으면 대각선은 빠집니다.\n"
                     "- Delaunay보다 더 희소(sparser)한 근접 그래프입니다.\n\n"
                     "Ref:\n"
                     "- Gabriel & Sokal (1969) A new statistical approach to geographic variation analysis."
@@ -630,8 +637,10 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                 "거리 제한을 두면 계산량이 크게 줄어듭니다."
             )
             self.spinSampleStep.setToolTip(
-                "LOS 샘플링 간격(m). 작을수록 정확하지만 느립니다.\n"
-                "0 또는 너무 작으면 DEM 픽셀 크기를 기준으로 자동 보정됩니다."
+                "LOS 샘플링 간격(m). 0이면 DEM 픽셀 크기와 같습니다.\n"
+                "픽셀보다 큰 값은 픽셀 크기로 제한됩니다(셀을 건너뛰지 않도록). 픽셀보다 작게 하면 더 촘촘하지만 느립니다.\n"
+                "지형 고도는 주변 4개 셀 중심의 양선형 보간으로 읽고, 셀 중심선과 시선의 교차점은 항상 검사하며,\n"
+                "관측점·대상점이 놓인 셀 자체는 장애물로 보지 않습니다."
             )
             self.chkVisAllPairs.setToolTip(
                 "체크하면 후보 k 제한을 무시하고 (최대 거리 내) 모든 쌍을 LOS로 검사합니다.\n"
@@ -698,6 +707,9 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
             <ul>
               <li><b>Edge layer</b>: the <code>status</code> field distinguishes mutually visible, one-way visible, mutually hidden, and failed samples.</li>
               <li><b>Directionality</b>: <code>vis_ab</code> and <code>vis_ba</code> store A->B and B->A separately.</li>
+              <li><b>Terrain sampling</b>: elevations are bilinearly interpolated from the four surrounding cell centres
+                  (nearest cell next to NoData or the raster edge), sampled no coarser than the DEM pixel and at every
+                  cell-centre line crossing; the observer's and target's own cells are not treated as obstacles.</li>
               <li><b>Polygon input</b>: with boundary sampling, <code>vis_ratio_ab</code> is the share of A's boundary samples
                   from which B's representative point is visible (not how much of B is visible);
                   <code>vis_ab</code> is 1 if any sample sees it.</li>
@@ -786,6 +798,8 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
         <ul>
           <li><b>Edge 레이어(LOS)</b>: <code>status</code>로 “상호 보임/단방향 보임/상호 안보임/샘플 실패”를 구분합니다.</li>
           <li><b>방향성</b>: <code>vis_ab</code>, <code>vis_ba</code> (0/1)로 A→B, B→A를 따로 기록합니다.</li>
+          <li><b>지형 샘플링</b>: 고도는 주변 4개 셀 중심의 양선형 보간(NoData·가장자리 옆은 가장 가까운 셀)으로 읽고,
+              DEM 픽셀 이하 간격과 셀 중심선 교차점마다 검사합니다. 관측점·대상점이 놓인 셀 자체는 장애물로 보지 않습니다.</li>
           <li><b>폴리곤 입력</b>: 경계 샘플링을 켜면 <code>vis_ratio_ab</code>(0-1)는 “A의 경계 샘플 중 B의 대표점이 보이는 비율”입니다
               (B가 얼마나 보이는가가 아님). <code>vis_ab</code>는 샘플 1개라도 보이면 1입니다.</li>
           <li><b>샘플 실패</b>: DEM NoData 등으로 검사하지 못한 쌍은 <code>status</code>=“샘플 실패”이며,
@@ -1100,7 +1114,9 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                 if name_field:
                     try:
                         v = ft[name_field]
-                        if v is not None and str(v).strip() != "":
+                        # PyQGIS NULL is not None: without is_null_value a
+                        # missing name became the literal text "NULL".
+                        if (not is_null_value(v)) and str(v).strip() != "":
                             name = str(v)
                     except Exception as _exc:
                         log_swallowed("tools/spatial_network_dialog.py:1019 (_collect_nodes)", _exc)
@@ -1144,9 +1160,18 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
         max_points: int,
     ) -> Tuple[Tuple[float, float], ...]:
         """Sample points along polygon boundary in *target CRS units* (meters expected)."""
+        # QgsGeometry has no boundary() (QGIS 3.34); calling it raised an
+        # AttributeError that was swallowed here, so every polygon silently
+        # fell back to its single representative point. The boundary lives on
+        # the abstract geometry.
+        boundary = None
         try:
-            boundary = geom_t.boundary()
-        except Exception:
+            ag = geom_t.constGet()
+            b_abs = ag.boundary() if ag is not None else None
+            if b_abs is not None:
+                boundary = QgsGeometry(b_abs)
+        except Exception as _exc:
+            log_swallowed("spatial_network_dialog._sample_polygon_boundary_points", _exc)
             boundary = None
 
         if boundary is None or boundary.isEmpty():
@@ -1423,16 +1448,24 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
 
         # --- Build edges ---
         edges: Set[Tuple[int, int]] = set()
+        # Recorded only when the distance limit actually filtered edges (k-NN
+        # ignores the disabled spinbox; 0 means no limit).
+        max_dist_applied = method == PPA_THRESHOLD
+        degenerate: Optional[str] = None
 
         if method == PPA_KNN:
             k_eff = max(1, min(int(k), max(1, n - 1)))
             log_message(f"PPA: k-NN building (n={n}, k={k_eff}, mutual={bool(mutual_only)})", level=Qgis.MessageLevel.Info)
 
+            # Ties (grids, rounded coordinates) are broken by feature id, not
+            # by numpy's unstable sort, so a rerun or a reordered layer gives
+            # the same graph.
+            fid_key = np.array([self._fid_sort_key(nd.fid, i) for i, nd in enumerate(nodes)], dtype=np.float64)
             neigh: List[Set[int]] = [set() for _ in range(n)]
             for i in range(n):
                 d2 = (coords[:, 0] - coords[i, 0]) ** 2 + (coords[:, 1] - coords[i, 1]) ** 2
                 d2[i] = np.inf
-                nn = np.argsort(d2)[:k_eff]
+                nn = np.lexsort((fid_key, d2))[:k_eff]
                 for j in nn:
                     neigh[i].add(int(j))
 
@@ -1461,12 +1494,26 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
             layer_name = f"PPA_threshold_{int(round(max_dist_m))}m"
 
         else:
-            crs_authid = (
-                self.cmbSiteLayer.currentLayer().crs().authid()
-                if self.cmbSiteLayer.currentLayer()
-                else QgsProject.instance().crs().authid()
-            )
-            cand = self._ppa_delaunay_edges(nodes=nodes, crs_authid=crs_authid)
+            # Two locations or all sites on one line: there is no triangle, but
+            # the Delaunay/Gabriel/RNG graph is still defined - the path through
+            # the sites in line order. GEOS returns nothing here, which used to
+            # abort the run with an error.
+            cand_path = self._ppa_collinear_path_edges(coords)
+            if cand_path is not None:
+                cand = cand_path
+                degenerate = "collinear"
+                push_message(
+                    self.iface,
+                    "PPA",
+                    "유적이 2곳이거나 모두 한 직선 위에 있어 삼각형이 없습니다. "
+                    "Delaunay/Gabriel/RNG 모두 직선 순서대로 이웃한 유적을 잇는 경로로 만듭니다.",
+                    level=1,
+                    duration=8,
+                )
+                log_message("PPA: degenerate input (2 locations or collinear) - proximity graphs built as the line-order path.",
+                            level=Qgis.MessageLevel.Warning)
+            else:
+                cand = self._ppa_delaunay_edges(nodes=nodes, crs=self._site_crs())
             if not cand:
                 push_message(self.iface, "PPA", "Delaunay 기반 간선을 만들 수 없습니다. (점이 너무 적거나 중복일 수 있음)", level=2)
                 restore_ui_focus(self)
@@ -1485,13 +1532,10 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
             if max_dist_m > 0.0:
                 edges = self._filter_edges_max_dist(edges=edges, coords=coords, max_dist_m=max_dist_m)
                 layer_name = f"{layer_name}_max{int(round(max_dist_m))}m"
+                max_dist_applied = True
 
         # --- Output layers ---
-        crs_authid = (
-            self.cmbSiteLayer.currentLayer().crs().authid()
-            if self.cmbSiteLayer.currentLayer()
-            else QgsProject.instance().crs().authid()
-        )
+        site_crs = self._site_crs()
 
         push_message(self.iface, "PPA", f"근접성 네트워크 생성 중... (노드 {n}, 간선 {len(edges)})", level=0, duration=4)
         QtWidgets.QApplication.processEvents()
@@ -1502,10 +1546,17 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
             "method": str(method),
             "k": (int(k) if method == PPA_KNN else None),
             "mutual_only": (bool(mutual_only) if method == PPA_KNN else None),
-            "max_dist_m": float(max_dist_m),
+            "max_dist_m": (float(max_dist_m) if max_dist_applied else None),
             "n_nodes": int(n),
             "n_edges": int(len(edges)),
         }
+        if method == PPA_KNN:
+            ppa_params["tie_break"] = "distance, then feature id"
+        if method in (PPA_DELAUNAY, PPA_GABRIEL, PPA_RNG):
+            ppa_params["colocated_sites_joined"] = True
+            ppa_params["degenerate"] = degenerate
+        if method == PPA_GABRIEL:
+            ppa_params["gabriel_rule"] = "strict: d2(A,B) < d2(A,C) + d2(B,C) for every other site C"
 
         edge_layer, run_group, run_id = self._add_edge_layer(
             nodes=nodes,
@@ -1513,7 +1564,7 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
             layer_name=layer_name,
             color=QColor(80, 80, 80, 220),
             add_dist=True,
-            crs_authid=crs_authid,
+            crs=site_crs,
             extra_params=ppa_params,
         )
 
@@ -1522,7 +1573,7 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
             self._add_node_metrics_layer(
                 nodes=nodes,
                 edges=set(edges),
-                crs_authid=crs_authid,
+                crs=site_crs,
                 run_group=run_group,
                 run_id=run_id,
                 title="PPA_Nodes",
@@ -1604,6 +1655,87 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
 
         return comp_id, comp_sizes
 
+    def _site_crs(self):
+        lyr = self.cmbSiteLayer.currentLayer()
+        return lyr.crs() if lyr is not None else QgsProject.instance().crs()
+
+    @staticmethod
+    def _memory_layer(geom_type: str, name: str, crs) -> QgsVectorLayer:
+        """Memory layer that keeps ``crs`` even when it has no authid.
+
+        ``f"Point?crs={crs.authid()}"`` gave an empty authid for a custom CRS
+        (a .prj / GeoTIFF that matches no EPSG code), so every output layer came
+        out with no CRS at all.
+        """
+        authid = ""
+        try:
+            authid = str(crs.authid() or "") if crs is not None else ""
+        except Exception as _exc:
+            log_swallowed("spatial_network_dialog._memory_layer", _exc)
+            authid = ""
+        uri = f"{geom_type}?crs={authid}" if authid else geom_type
+        layer = QgsVectorLayer(uri, name, "memory")
+        try:
+            if crs is not None and crs.isValid():
+                layer.setCrs(crs)
+        except Exception as _exc:
+            log_swallowed("spatial_network_dialog._memory_layer", _exc)
+        return layer
+
+    @staticmethod
+    def _fid_sort_key(fid: str, fallback: int) -> float:
+        text = str(fid).strip()
+        if text.lstrip("-").isdigit():
+            return float(int(text))
+        return float(fallback)
+
+    @staticmethod
+    def _colocated_groups(coords: np.ndarray) -> Dict[Tuple[int, int], List[int]]:
+        """Node indices per location, rounded to 1 mm (same key as the Delaunay lookup)."""
+        groups: Dict[Tuple[int, int], List[int]] = {}
+        for i in range(int(coords.shape[0])):
+            key = (int(round(float(coords[i, 0]) * 1000.0)), int(round(float(coords[i, 1]) * 1000.0)))
+            groups.setdefault(key, []).append(int(i))
+        return groups
+
+    def _ppa_collinear_path_edges(self, coords: np.ndarray) -> Optional[Set[Tuple[int, int]]]:
+        """Proximity-graph candidates when there is no triangle.
+
+        Returns None when the sites span a plane (normal Delaunay case).
+        Otherwise (one or two locations, or every location on one line) the
+        Delaunay graph is the path through the locations in line order;
+        co-located sites are joined to each other and share their neighbours.
+        """
+        groups = list(self._colocated_groups(coords).values())
+        reps = np.array([coords[g[0]] for g in groups], dtype=np.float64)
+        m = int(reps.shape[0])
+        if m >= 3:
+            p0 = reps[0]
+            d2 = (reps[:, 0] - p0[0]) ** 2 + (reps[:, 1] - p0[1]) ** 2
+            p1 = reps[int(np.argmax(d2))]
+            ux, uy = float(p1[0] - p0[0]), float(p1[1] - p0[1])
+            length = math.hypot(ux, uy)
+            if length <= 0:
+                return None
+            perp = np.abs(ux * (reps[:, 1] - p0[1]) - uy * (reps[:, 0] - p0[0])) / length
+            if float(np.max(perp)) > max(1e-6, 1e-12 * length):
+                return None
+            order = np.argsort(ux * (reps[:, 0] - p0[0]) + uy * (reps[:, 1] - p0[1]), kind="stable")
+        else:
+            order = np.arange(m)
+        edges: Set[Tuple[int, int]] = set()
+        for g in groups:
+            for ii in range(len(g)):
+                for jj in range(ii + 1, len(g)):
+                    edges.add((min(g[ii], g[jj]), max(g[ii], g[jj])))
+        for pos in range(len(order) - 1):
+            ga = groups[int(order[pos])]
+            gb = groups[int(order[pos + 1])]
+            for u in ga:
+                for v in gb:
+                    edges.add((min(u, v), max(u, v)))
+        return edges
+
     def _filter_edges_max_dist(
         self, *, edges: Set[Tuple[int, int]], coords: np.ndarray, max_dist_m: float
     ) -> Set[Tuple[int, int]]:
@@ -1626,14 +1758,14 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                 continue
         return out
 
-    def _ppa_delaunay_edges(self, *, nodes: List[_Node], crs_authid: str) -> Set[Tuple[int, int]]:
+    def _ppa_delaunay_edges(self, *, nodes: List[_Node], crs=None) -> Set[Tuple[int, int]]:
         """Return candidate edges from a Delaunay triangulation (best-effort, uses QGIS Processing)."""
         n = int(len(nodes))
         if n < 3:
             return set()
 
         try:
-            pt_layer = QgsVectorLayer(f"Point?crs={crs_authid}", "PPA_points_tmp", "memory")
+            pt_layer = self._memory_layer("Point", "PPA_points_tmp", crs)
             pr = pt_layer.dataProvider()
             pr.addAttributes([QgsField("idx", FT_INT)])
             pt_layer.updateFields()
@@ -1684,14 +1816,14 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
             n_dup = int(sum(len(ids) - 1 for ids in dup_groups))
             log_message(
                 f"PPA: {n_dup} node(s) share a coordinate (within 1 mm) at {len(dup_groups)} location(s); "
-                "co-located nodes share the same Delaunay/Gabriel/RNG edges.",
+                "co-located nodes share the same Delaunay/Gabriel/RNG edges and are joined to each other.",
                 level=Qgis.MessageLevel.Warning,
             )
             try:
                 push_message(
                     self.iface,
                     "경고",
-                    f"좌표가 같은 노드 {n_dup}개({len(dup_groups)}개 지점): 겹친 노드끼리 같은 이웃 간선을 공유합니다(고립 아님).",
+                    f"좌표가 같은 노드 {n_dup}개({len(dup_groups)}개 지점): 겹친 노드끼리 서로 연결되고 같은 이웃 간선을 공유합니다(고립 아님).",
                     level=1,
                     duration=8,
                 )
@@ -1761,12 +1893,29 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
             if _skip_1547:
                 continue
 
+        # Co-located sites are at distance 0: join them to each other as k-NN
+        # does (they used to share the neighbours but stay unlinked).
+        if edges:
+            for ids in dup_groups:
+                for ii in range(len(ids)):
+                    for jj in range(ii + 1, len(ids)):
+                        edges.add((min(ids[ii], ids[jj]), max(ids[ii], ids[jj])))
+
         return edges
 
     def _ppa_filter_gabriel(self, *, cand_edges: Set[Tuple[int, int]], coords: np.ndarray) -> Set[Tuple[int, int]]:
-        """Gabriel graph filter (usually applied on Delaunay candidate edges)."""
+        """Gabriel graph filter on Delaunay candidate edges (every Gabriel edge is one).
+
+        Strict rule (Gabriel & Sokal 1969; Matula & Sokal 1980): A-B is kept
+        only if d2(A,B) < d2(A,C) + d2(B,C) for every other site C, i.e. no
+        site inside OR ON the circle with diameter AB. The old test kept
+        sites on the circle, so on a grid or any cocircular four sites it
+        kept whichever diagonal the triangulator happened to choose.
+        Sites co-located with A or B (within 1 mm) share A's/B's edges and
+        are not counted as C.
+        """
         out: Set[Tuple[int, int]] = set()
-        eps = 1e-9
+        coloc2 = 1e-6  # (1 mm)^2
         for a, b in cand_edges:
             a = int(a)
             b = int(b)
@@ -1777,9 +1926,14 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
             r2 = ((coords[a, 0] - midx) ** 2) + ((coords[a, 1] - midy) ** 2)  # (d/2)^2
 
             d2 = (coords[:, 0] - midx) ** 2 + (coords[:, 1] - midy) ** 2
+            da2 = (coords[:, 0] - coords[a, 0]) ** 2 + (coords[:, 1] - coords[a, 1]) ** 2
+            db2 = (coords[:, 0] - coords[b, 0]) ** 2 + (coords[:, 1] - coords[b, 1]) ** 2
+            d2[(da2 <= coloc2) | (db2 <= coloc2)] = np.inf
             d2[a] = np.inf
             d2[b] = np.inf
-            if float(np.min(d2)) >= float(r2) - eps:
+            # |C - M|^2 > r^2  <=>  d2(A,C) + d2(B,C) > d2(A,B); a relative
+            # 1e-9 margin counts float-rounded cocircular sites as on the circle.
+            if float(np.min(d2)) > float(r2) * (1.0 + 1e-9):
                 out.add((a, b) if a < b else (b, a))
         return out
 
@@ -1812,7 +1966,7 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
         *,
         nodes: List[_Node],
         edges: Set[Tuple[int, int]],
-        crs_authid: str,
+        crs,
         run_group,
         run_id: str,
         title: str,
@@ -1868,7 +2022,7 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
         if compute_betweenness:
             betweenness = self._betweenness_centrality(n=n, adj=adj)
 
-        layer = QgsVectorLayer(f"Point?crs={crs_authid}", title, "memory")
+        layer = self._memory_layer("Point", title, crs)
         pr = layer.dataProvider()
         fields = [
             QgsField("fid", FT_STRING),
@@ -2033,6 +2187,21 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
     ) -> Optional[bool]:
         """DEM line-of-sight test from (ax, ay) to (bx, by).
 
+        Terrain is read by bilinear interpolation of the four surrounding
+        cell-centre values (LOS_DEM_SAMPLING). A cell whose neighbours are
+        NoData / outside the raster falls back to the nearest cell value, and
+        a NoData nearest cell makes the pair a sample failure (None).
+        The old nearest-cell reading returned a whole cell's value anywhere
+        inside it - up to slope x pixel/2 above the ground on a slope - and so
+        blocked most sight lines on inclined terrain, above all with the
+        default target height 0.
+
+        Obstruction samples: a regular step no coarser than the DEM pixel,
+        plus every crossing of the sight line with a cell-centre column or
+        row line (where a one-cell ridge reaches its full height in the
+        bilinear surface). Samples inside the observer's and the target's
+        own cells are not tested as obstacles.
+
         curvature_cc: earth-curvature/refraction coefficient, as gdal_viewshed
         -cc: every sampled terrain height (target included) is lowered by
         cc * d^2 / (2R) with d the horizontal distance from the observer.
@@ -2047,16 +2216,21 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
         px = abs(float(dem_layer.rasterUnitsPerPixelX() or 0.0))
         py = abs(float(dem_layer.rasterUnitsPerPixelY() or 0.0))
         pix = min([v for v in (px, py) if v > 0] or [5.0])
+        if px <= 0:
+            px = pix
+        if py <= 0:
+            py = pix
+        # Step 0 means exactly the DEM pixel size; a coarser request is
+        # clamped to the pixel so no cell can be stepped over.
         step = float(sample_step_m or 0.0)
-        if step <= 0:
-            step = max(pix, 5.0)
-        else:
-            step = max(pix, step)
+        if (not math.isfinite(step)) or step <= 0 or step > pix:
+            step = pix
 
-        # Network use-case: keep sampling reasonable - but say so when the
-        # ceiling coarsens a long sight line past the requested step.
-        num_samples = int(total_dist / step) if step > 0 else 200
-        num_samples = max(LOS_SAMPLE_MIN, min(num_samples, LOS_SAMPLE_CAP))
+        # Never coarser than the pixel: the cap only limits sub-pixel
+        # oversampling of long lines.
+        num_pix = int(math.ceil(total_dist / pix))
+        num_samples = int(math.ceil(total_dist / step))
+        num_samples = max(LOS_SAMPLE_MIN, min(num_samples, max(LOS_SAMPLE_CAP, num_pix)))
         eff_step = (total_dist / num_samples) if num_samples > 0 else step
         # Remembered per run so the output layers can record the step actually used.
         self._los_step_base_m = float(step)
@@ -2064,22 +2238,75 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
         if eff_step > step * 1.05 and not getattr(self, "_los_step_warned", False):
             self._los_step_warned = True
             log_message(
-                f"가시선 샘플 간격: 요청 {step:.1f} m, 장거리 상한(5000점)으로 실제 {eff_step:.1f} m 적용 "
-                f"(총거리 {total_dist:.0f} m). 이보다 긴 쌍은 모두 이 상한의 영향을 받습니다.",
+                f"가시선 샘플 간격: 요청 {step:.2f} m, 장거리 상한({LOS_SAMPLE_CAP}점)으로 실제 {eff_step:.2f} m 적용 "
+                f"(총거리 {total_dist:.0f} m, DEM 픽셀 {pix:g} m보다 거칠어지지는 않음).",
                 level=Qgis.MessageLevel.Warning,
             )
 
         if provider is None:
             provider = dem_layer.dataProvider()
 
-        # Endpoints
-        obs_elev0, ok0 = provider.sample(QgsPointXY(ax, ay), 1)
-        tgt_elev0, ok1 = provider.sample(QgsPointXY(bx, by), 1)
-        if not ok0 or not ok1:
+        try:
+            ext = dem_layer.extent()
+            x0 = float(ext.xMinimum())
+            y0 = float(ext.yMaximum())
+            ncols = int(dem_layer.width())
+            nrows = int(dem_layer.height())
+        except Exception as _exc:
+            log_swallowed("spatial_network_dialog._los_visible", _exc)
+            return None
+
+        cell_cache: Dict[Tuple[int, int], Optional[float]] = {}
+
+        def _cell(c: int, r: int) -> Optional[float]:
+            key = (c, r)
+            if key in cell_cache:
+                return cell_cache[key]
+            val: Optional[float] = None
+            if 0 <= c < ncols and 0 <= r < nrows:
+                v, ok = provider.sample(QgsPointXY(x0 + (c + 0.5) * px, y0 - (r + 0.5) * py), 1)
+                if ok:
+                    try:
+                        fv = float(v)
+                        if math.isfinite(fv):
+                            val = fv
+                    except Exception as _exc:
+                        log_swallowed("spatial_network_dialog._los_visible", _exc)
+                        val = None
+            cell_cache[key] = val
+            return val
+
+        def _cell_of(x: float, y: float) -> Tuple[int, int]:
+            return int(math.floor((x - x0) / px)), int(math.floor((y0 - y) / py))
+
+        def _z_at(x: float, y: float) -> Optional[float]:
+            u = (x - x0) / px - 0.5
+            v = (y0 - y) / py - 0.5
+            c0 = int(math.floor(u))
+            r0 = int(math.floor(v))
+            fx = u - c0
+            fy = v - r0
+            z00 = _cell(c0, r0)
+            z10 = _cell(c0 + 1, r0)
+            z01 = _cell(c0, r0 + 1)
+            z11 = _cell(c0 + 1, r0 + 1)
+            if z00 is not None and z10 is not None and z01 is not None and z11 is not None:
+                top = z00 + (z10 - z00) * fx
+                bot = z01 + (z11 - z01) * fx
+                return top + (bot - top) * fy
+            # NoData / raster edge among the neighbours: nearest cell if valid.
+            cn, rn = _cell_of(x, y)
+            return _cell(cn, rn)
+
+        # Endpoints (same bilinear surface as the obstruction samples, so a
+        # plane is reproduced exactly).
+        obs_ground = _z_at(ax, ay)
+        tgt_ground = _z_at(bx, by)
+        if obs_ground is None or tgt_ground is None:
             return None
         try:
-            obs_elev = float(obs_elev0) + float(obs_height)
-            tgt_elev = float(tgt_elev0) + float(tgt_height)
+            obs_elev = float(obs_ground) + float(obs_height)
+            tgt_elev = float(tgt_ground) + float(tgt_height)
         except Exception:
             return None
         # A Float32 DEM carrying NaN but declaring no NoData makes sample()
@@ -2107,18 +2334,32 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
         if cc > 0.0:
             tgt_elev -= cc * (total_dist * total_dist) / two_r
 
-        for i in range(1, num_samples):
-            frac = i / num_samples
+        # Sample parameters along A->B: regular step + cell-centre line crossings.
+        fracs: Set[float] = set(i / num_samples for i in range(1, num_samples))
+        for d_axis, a0, g0, g_px, sign in ((dx, ax, x0, px, 1.0), (dy, ay, y0, py, -1.0)):
+            if abs(d_axis) <= 1e-12:
+                continue
+            # centre lines: x = x0 + (c + 0.5) px ; y = y0 - (r + 0.5) py
+            k_a = sign * (a0 - g0) / g_px - 0.5
+            k_b = sign * (a0 + d_axis - g0) / g_px - 0.5
+            k_lo = int(math.ceil(min(k_a, k_b)))
+            k_hi = int(math.floor(max(k_a, k_b)))
+            for kk in range(k_lo, k_hi + 1):
+                line_pos = g0 + sign * (kk + 0.5) * g_px
+                t = (line_pos - a0) / d_axis
+                if 0.0 < t < 1.0:
+                    fracs.add(t)
+
+        cell_a = _cell_of(ax, ay)
+        cell_b = _cell_of(bx, by)
+        for frac in sorted(fracs):
             x = ax + frac * dx
             y = ay + frac * dy
-            elev, ok = provider.sample(QgsPointXY(x, y), 1)
-            if not ok:
-                return None
-            try:
-                z = float(elev)
-            except Exception:
-                return None
-            if not math.isfinite(z):
+            cxy = _cell_of(x, y)
+            if cxy == cell_a or cxy == cell_b:
+                continue
+            z = _z_at(x, y)
+            if z is None:
                 return None
             if cc > 0.0:
                 d_sample = frac * total_dist
@@ -2156,6 +2397,20 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
         n = len(nodes)
         if n < 2:
             return
+
+        # Boundary ratios only exist for polygon nodes. The (hidden) checkbox
+        # is checked by default, so a point layer used to record
+        # poly_boundary = true for a run that never sampled a boundary.
+        poly_boundary_requested = bool(use_poly_boundary_ratio)
+        poly_sample_counts = [int(len(nd.samples)) for nd in nodes if nd.is_polygon]
+        use_poly_boundary_ratio = bool(poly_boundary_requested and poly_sample_counts)
+        poly_fallback_nodes = int(sum(1 for c in poly_sample_counts if c <= 1)) if use_poly_boundary_ratio else 0
+        if poly_fallback_nodes > 0:
+            log_message(
+                f"VisibilityNetwork: {poly_fallback_nodes} polygon(s) gave no boundary samples; "
+                "their representative point is used as the only observer sample.",
+                level=Qgis.MessageLevel.Warning,
+            )
 
         # Curvature/refraction coefficient, mirroring viewshed_dialog._calculate_gdal_viewshed_cc:
         # off -> 0 (flat), on -> 1 - k clamped to [0, 1].
@@ -2496,9 +2751,16 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
             "candidate_k": (None if all_pairs else int(candidate_k)),
             "candidate_k_requested": (None if all_pairs else int(candidate_k_requested)),
             "vis_edge_rule": str(vis_edge_rule or VIS_RULE_MUTUAL),
+            "dem_sampling": LOS_DEM_SAMPLING,
+            "los_obstacle_samples": "regular step <= pixel + cell-centre line crossings",
+            "los_endpoint_cells_skipped": True,
             "poly_boundary": bool(use_poly_boundary_ratio),
+            "poly_boundary_requested": bool(poly_boundary_requested),
             "poly_boundary_step_m": (float(poly_boundary_step_m) if use_poly_boundary_ratio else None),
             "poly_boundary_max_points": (int(poly_boundary_max_points) if use_poly_boundary_ratio else None),
+            "poly_boundary_samples_min": (int(min(poly_sample_counts)) if use_poly_boundary_ratio else None),
+            "poly_boundary_samples_max": (int(max(poly_sample_counts)) if use_poly_boundary_ratio else None),
+            "poly_boundary_fallback_nodes": (int(poly_fallback_nodes) if use_poly_boundary_ratio else None),
             "curvature": bool(cc > 0.0),
             "refraction_coeff": (float(refraction_coeff) if cc > 0.0 else None),
             "curvature_cc": float(cc),
@@ -2513,7 +2775,7 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
             layer_name=edge_layer_name,
             color=QColor(0, 160, 80, 220),
             add_dist=True,
-            crs_authid=dem_layer.crs().authid(),
+            crs=dem_layer.crs(),
             status_by_edge=status_by_edge,
             ratio_by_edge=ratio_by_edge,
             extra_fields=extra_fields,
@@ -2581,7 +2843,7 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
             self._add_node_metrics_layer(
                 nodes=nodes,
                 edges=edges_for_metrics,
-                crs_authid=dem_layer.crs().authid(),
+                crs=dem_layer.crs(),
                 run_group=run_group,
                 run_id=run_id,
                 title=node_layer_name,
@@ -2625,7 +2887,7 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
         layer_name: str,
         color: QColor,
         add_dist: bool,
-        crs_authid: str,
+        crs,
         status_by_edge: Optional[Dict[Tuple[int, int], str]] = None,
         ratio_by_edge: Optional[Dict[Tuple[int, int], float]] = None,
         extra_fields: Optional[List[QgsField]] = None,
@@ -2645,11 +2907,7 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
         run_group = parent_group.insertGroup(0, f"{layer_name}_{run_id}")
         run_group.setExpanded(False)
 
-        layer = QgsVectorLayer(
-            f"LineString?crs={crs_authid}",
-            layer_name,
-            "memory",
-        )
+        layer = self._memory_layer("LineString", layer_name, crs)
         pr = layer.dataProvider()
         fields = [
             QgsField("from_id", FT_STRING),
