@@ -46,6 +46,7 @@ from .icons import icon as plugin_icon
 from .i18n import get_output_group_name, get_plugin_config_value
 from .live_log_dialog import ensure_live_log_dialog
 from .utils import (
+    is_null_value,
     log_swallowed,
     log_message,
     push_message,
@@ -173,6 +174,10 @@ GEOLOGY_UI_NODATA_DECIMALS = _cfg_int("geology_zip", "ui", "nodata_decimals", de
 GEOLOGY_UI_NODATA_DEFAULT = _cfg_float("geology_zip", "ui", "nodata_default", default=-9999.0)
 
 
+# Custom property holding the normalised path of the ZIP a layer came from.
+ZIP_PATH_PROPERTY = "archtoolkit/kigam_zip_path"
+
+
 def _safe_name(name: str) -> str:
     base = str(name or "").strip()
     if not base:
@@ -250,6 +255,7 @@ DROP_REASON_LABELS = {
     "layer_geometry_mismatch": "지오메트리 타입 불일치",
     "layer_field_missing": "필드 없음",
     "layer_transform_failed": "좌표계 변환 불가",
+    "layer_crs_missing": "좌표계 없음",
 }
 
 
@@ -297,6 +303,173 @@ def _code_key(val) -> str:
     return str(val)
 
 
+def _is_blank(val) -> bool:
+    """True for None, PyQGIS NULL (a QVariant, not None) and blank text.
+
+    str(NULL) is 'NULL', so an `is None` test let every null code through as
+    a real class called "NULL" (and a null label printed as "NULL")."""
+    if is_null_value(val):
+        return True
+    try:
+        return str(val).strip() == ""
+    except Exception as _exc:
+        log_swallowed("geology_zip_dialog._is_blank", _exc)
+        return True
+
+
+def _safe_nodata(nodata: float, codes) -> Tuple[int, bool]:
+    """Integer NoData for the Int32 class raster that is not a class code.
+
+    gdal:rasterize burns the rounded NoData value, so a NoData equal to a code
+    turned that whole class into NoData. Returns (nodata, changed); on a
+    collision the value moves below the smallest code (-9999 when free)."""
+    nd = int(round(float(nodata)))
+    used = set()
+    for c in codes or []:
+        try:
+            used.add(int(c))
+        except Exception as _exc:
+            log_swallowed("geology_zip_dialog._safe_nodata", _exc)
+    if nd not in used:
+        return nd, False
+    cand = -9999 if -9999 not in used else min(used) - 1
+    while cand in used:
+        cand -= 1
+    return cand, True
+
+
+def _dbf_text_values(dbf_path: str, max_records: int = 20000) -> List[bytes]:
+    """Raw bytes of the non-ASCII character-field values of a DBF (at most
+    `max_records` records), used to tell the text encoding apart."""
+    out: List[bytes] = []
+    try:
+        with open(dbf_path, "rb") as fh:
+            head = fh.read(32)
+            if len(head) < 32:
+                return out
+            n_rec = int.from_bytes(head[4:8], "little")
+            hdr_len = int.from_bytes(head[8:10], "little")
+            rec_len = int.from_bytes(head[10:12], "little")
+            desc = fh.read(max(0, hdr_len - 32))
+            fields = []
+            pos = 1  # deletion flag
+            for i in range(0, len(desc) - 31, 32):
+                d = desc[i:i + 32]
+                if d[0] == 0x0D:
+                    break
+                ftype = chr(d[11])
+                flen = d[16]
+                if ftype == "C":
+                    flen = d[16] + 256 * d[17]
+                    fields.append((pos, flen))
+                pos += flen
+            if not fields or rec_len <= 0:
+                return out
+            fh.seek(hdr_len)
+            for _ in range(min(n_rec, int(max_records))):
+                rec = fh.read(rec_len)
+                if len(rec) < rec_len:
+                    break
+                for start, flen in fields:
+                    raw = rec[start:start + flen].rstrip(b" \x00")
+                    if raw and any(b >= 0x80 for b in raw):
+                        out.append(raw)
+    except Exception as _exc:
+        log_swallowed("geology_zip_dialog._dbf_text_values", _exc)
+    return out
+
+
+def _choose_dbf_encoding(shp_path: str) -> Tuple[Optional[str], str]:
+    """(encoding, source) for a shapefile's attribute text.
+
+    A .cpg next to the .shp is honoured: (None, "cpg") means "leave the
+    provider encoding alone", QGIS reads the .cpg itself. Without one the
+    candidate encodings (config geology_zip.candidate_encodings, ranked by
+    encoding_preference) are tried as strict decoders on the DBF's non-ASCII
+    text and the one that decodes the most values wins, ties going to the
+    preference. Forcing cp949 unconditionally garbled UTF-8 sheets. When the
+    DBF holds no non-ASCII text, or no candidate decodes it, the configured
+    provider_encoding is used (source "config")."""
+    base = os.path.splitext(str(shp_path or ""))[0]
+    for ext in (".cpg", ".CPG"):
+        try:
+            cpg = base + ext
+            if os.path.isfile(cpg):
+                with open(cpg, "r", encoding="ascii", errors="ignore") as fh:
+                    if fh.read().strip():
+                        return None, "cpg"
+        except Exception as _exc:
+            log_swallowed("geology_zip_dialog._choose_dbf_encoding", _exc)
+    dbf = ""
+    for ext in (".dbf", ".DBF"):
+        if os.path.isfile(base + ext):
+            dbf = base + ext
+            break
+    values = _dbf_text_values(dbf) if dbf else []
+    if not values:
+        return GEOLOGY_PROVIDER_ENCODING, "config"
+    pref = GEOLOGY_ENCODING_PREFERENCE if isinstance(GEOLOGY_ENCODING_PREFERENCE, dict) else {}
+    ranked = []
+    for order, enc in enumerate(GEOLOGY_CANDIDATE_ENCODINGS or []):
+        if enc is None:
+            continue  # "default" cannot be tested; it is what the config fallback is for
+        try:
+            rank = float(pref.get(enc, pref.get(str(enc).upper(), 0)) or 0)
+        except Exception as _exc:
+            log_swallowed("geology_zip_dialog._choose_dbf_encoding (preference)", _exc)
+            rank = 0.0
+        ok = 0
+        for raw in values:
+            try:
+                raw.decode(str(enc), errors="strict")
+                decoded = True
+            except (UnicodeDecodeError, LookupError):
+                decoded = False  # expected: this candidate is not the encoding
+            if decoded:
+                ok += 1
+        ranked.append((ok, rank, -order, str(enc)))
+    ranked = [r for r in ranked if r[0] > 0]
+    if not ranked:
+        return GEOLOGY_PROVIDER_ENCODING, "config"
+    ranked.sort(reverse=True)
+    return ranked[0][3], "detected"
+
+
+def _decode_zip_member_names(infos) -> int:
+    """Re-decode ZIP member names written without the UTF-8 flag.
+
+    zipfile decodes such names as cp437, so a Korean folder or file name
+    zipped on Korean Windows (cp949) was extracted as mojibake. The raw bytes
+    are recovered and decoded as UTF-8 when valid, else with the candidate
+    encodings. Returns how many names were changed."""
+    changed = 0
+    encs = ["utf-8"] + [str(e) for e in (GEOLOGY_CANDIDATE_ENCODINGS or []) if e]
+    for info in infos or []:
+        try:
+            if int(getattr(info, "flag_bits", 0) or 0) & 0x800:
+                continue
+            name = str(info.filename or "")
+            if name.isascii():
+                continue
+            raw = name.encode("cp437")
+        except Exception as _exc:
+            log_swallowed("geology_zip_dialog._decode_zip_member_names", _exc)
+            raw = None
+        if raw is None:
+            continue
+        for enc in encs:
+            try:
+                fixed = raw.decode(enc, errors="strict")
+            except (UnicodeDecodeError, LookupError):
+                fixed = None
+            if fixed:
+                if fixed != info.filename:
+                    info.filename = fixed
+                    changed += 1
+                break
+    return changed
+
+
 class KigamZipProcessor:
     # Guard rails against malformed/malicious ZIPs (zip bombs).
     MAX_ZIP_ENTRIES = 5000
@@ -323,7 +496,10 @@ class KigamZipProcessor:
             return os.path.join(base, "ArchToolkit", root_name)
         return ""
 
-    def __init__(self):
+    def __init__(self, iface=None):
+        # The dialog passes its iface so load-time warnings (a sheet without a
+        # CRS) reach the message bar; without it they only go to the log.
+        self.iface = iface
         root_name = GEOLOGY_EXTRACT_ROOT_NAME or "ArchToolkit_KIGAM_Extract"
         base = self.default_extract_root()
         if base:
@@ -337,6 +513,9 @@ class KigamZipProcessor:
         # names it in the load message so the user knows the shapefiles live
         # in a managed folder with a retention window (GEO-13).
         self.last_extract_dir = ""
+        # How many layers of an earlier load of the same ZIP organize_layers()
+        # replaced in its KIGAM_<sheet> group (0 for a first load).
+        self.last_replaced = 0
         try:
             os.makedirs(self.extract_root, exist_ok=True)
         except Exception as _exc:
@@ -447,16 +626,20 @@ class KigamZipProcessor:
         run_id: str,
     ) -> List[QgsVectorLayer]:
         zip_basename = self._safe_extract_basename(zip_path)
+        zip_key = self._zip_key(zip_path)
+        # Every load extracts into a folder of its own and never deletes an
+        # existing one: an earlier folder of the same name may hold the files
+        # of a sheet that is still loaded (two ZIPs named alike, or a reload),
+        # and rmtree-ing it broke those layers. Unused folders are reaped by
+        # _cleanup_old_extracts after the retention window.
         extract_dir = os.path.join(self.extract_root, zip_basename)
-
         try:
-            if os.path.islink(extract_dir):
-                os.unlink(extract_dir)
-            elif os.path.exists(extract_dir):
-                shutil.rmtree(extract_dir)
+            n = 1
+            while os.path.lexists(extract_dir):
+                n += 1
+                extract_dir = os.path.join(self.extract_root, f"{zip_basename}_{n}")
             os.makedirs(extract_dir)
         except Exception:
-            # Could not reclaim the folder - extract into a fresh unique one.
             try:
                 extract_dir = tempfile.mkdtemp(prefix=f"{zip_basename}_", dir=self.extract_root)
             except Exception as e:
@@ -467,11 +650,17 @@ class KigamZipProcessor:
         # sanitizes absolute paths and '..' components).
         try:
             with zipfile.ZipFile(zip_path, "r") as zip_ref:
-                reason = self._zip_bomb_reason(zip_ref.infolist())
+                infos = zip_ref.infolist()
+                reason = self._zip_bomb_reason(infos)
                 if reason:
                     log_message(f"KIGAM ZIP 추출 중단: {reason}", level=Qgis.MessageLevel.Warning)
                     return []
-                zip_ref.extractall(extract_dir)
+                # Names zipped without the UTF-8 flag (Korean Windows: cp949)
+                # would otherwise be extracted as cp437 mojibake.
+                n_fixed = _decode_zip_member_names(infos)
+                if n_fixed:
+                    log_message(f"KIGAM ZIP: UTF-8 표시 없는 파일 이름 {n_fixed}개를 한글 인코딩으로 해석했습니다.", level=Qgis.MessageLevel.Info)
+                zip_ref.extractall(extract_dir, members=infos)
             self._touch_extract_dir(extract_dir)
         except Exception as e:
             log_message(f"KIGAM ZIP 추출 실패: {e}", level=Qgis.MessageLevel.Warning)
@@ -502,10 +691,16 @@ class KigamZipProcessor:
                 layer_name = os.path.splitext(fname)[0]
 
                 layer = QgsVectorLayer(shp_path, layer_name, "ogr")
-                try:
-                    layer.setProviderEncoding("cp949")
-                except Exception as _exc:
-                    log_swallowed("tools/geology_zip_dialog.py:413 (process_zip)", _exc)
+                # Honour a .cpg; otherwise pick the encoding the DBF text
+                # actually decodes with (was: cp949 forced on every sheet,
+                # which garbled UTF-8 sheets even when their .cpg said so).
+                encoding, enc_source = _choose_dbf_encoding(shp_path)
+                if encoding:
+                    try:
+                        layer.setProviderEncoding(encoding)
+                    except Exception as _exc:
+                        log_swallowed("tools/geology_zip_dialog.py:413 (process_zip)", _exc)
+                log_message(f"KIGAM: {fname} 속성 인코딩 {encoding or '(.cpg)'} ({enc_source})", level=Qgis.MessageLevel.Info)
                 if not layer.isValid():
                     log_message(f"KIGAM 레이어 로드 실패: {shp_path}", level=Qgis.MessageLevel.Warning)
                     continue
@@ -524,6 +719,11 @@ class KigamZipProcessor:
 
                 QgsProject.instance().addMapLayer(layer, False)
                 loaded_layers.append(layer)
+                try:
+                    # Identifies "the same ZIP" for a reload (organize_layers).
+                    layer.setCustomProperty(ZIP_PATH_PROPERTY, zip_key)
+                except Exception as _exc:
+                    log_swallowed("geology_zip_dialog.process_zip (zip key)", _exc)
 
                 if apply_style and sym_path:
                     try:
@@ -543,12 +743,13 @@ class KigamZipProcessor:
                         tool_id="kigam_zip",
                         run_id=run_id,
                         kind="vector",
-                        params={"zip": os.path.basename(zip_path)},
+                        params={"zip": os.path.basename(zip_path), "sheet": zip_basename,
+                                "encoding": encoding or "", "encoding_source": enc_source},
                     )
                 except Exception as _exc:
                     log_swallowed("geology_zip_dialog.process_zip", _exc)
 
-        self.organize_layers(loaded_layers, zip_basename)
+        self.organize_layers(loaded_layers, zip_basename, zip_key=zip_key)
         return loaded_layers
 
     def apply_sym_styling(self, layer: QgsVectorLayer, sym_path: str) -> None:
@@ -637,14 +838,68 @@ class KigamZipProcessor:
         layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
         layer.setLabelsEnabled(True)
 
-    def organize_layers(self, layers: List[QgsVectorLayer], group_name: str) -> None:
+    @staticmethod
+    def _zip_key(zip_path: str) -> str:
+        """Normalised absolute path of a ZIP: what "the same ZIP" means."""
+        try:
+            return os.path.normcase(os.path.abspath(str(zip_path or "")))
+        except Exception as _exc:
+            log_swallowed("geology_zip_dialog._zip_key", _exc)
+            return str(zip_path or "")
+
+    def organize_layers(self, layers: List[QgsVectorLayer], group_name: str, zip_key: str = "") -> None:
         if not layers:
             return
         root = QgsProject.instance().layerTreeRoot()
         parent = root.findGroup(PARENT_GROUP_NAME)
         if parent is None:
             parent = root.insertGroup(0, PARENT_GROUP_NAME)
-        run_group = parent.insertGroup(0, f"KIGAM_{group_name}")
+        # Reloading the SAME ZIP (same path) replaces the ZIP layers of its
+        # existing KIGAM_<sheet> group instead of adding a second identical
+        # group (two "[sheet] Litho" entries in the raster list). Other layers
+        # in that group - the rasters made from the sheet - are kept. A
+        # different ZIP that merely shares the name gets its own group,
+        # KIGAM_<sheet>_2, so neither sheet is lost or confused.
+        self.last_replaced = 0
+        new_ids = {lyr.id() for lyr in layers}
+        base_label = f"KIGAM_{group_name}"
+        groups = {c.name(): c for c in parent.children() if isinstance(c, QgsLayerTreeGroup)}
+        run_group = None
+        old_ids: List[str] = []
+        for label, grp in groups.items():
+            if label != base_label and not re.fullmatch(re.escape(base_label) + r"_\d+", label):
+                continue
+            zip_ids = []
+            same_zip = False
+            for node in grp.findLayers():
+                try:
+                    lyr0 = node.layer()
+                    if lyr0 is None or lyr0.id() in new_ids:
+                        continue
+                    if str(lyr0.customProperty("archtoolkit/tool_id", "") or "") != "kigam_zip":
+                        continue
+                    zip_ids.append(lyr0.id())
+                    if zip_key and str(lyr0.customProperty(ZIP_PATH_PROPERTY, "") or "") == zip_key:
+                        same_zip = True
+                except Exception as _exc:
+                    log_swallowed("geology_zip_dialog.organize_layers (replace)", _exc)
+            if same_zip:
+                run_group = grp
+                old_ids = zip_ids
+                break
+        if run_group is None:
+            group_label = base_label
+            n = 1
+            while group_label in groups:
+                n += 1
+                group_label = f"{base_label}_{n}"
+            run_group = parent.insertGroup(0, group_label)
+        else:
+            if old_ids:
+                QgsProject.instance().removeMapLayers(old_ids)
+            self.last_replaced = len(old_ids)
+            log_message(f"KIGAM: {run_group.name()} 그룹의 기존 도엽 레이어 {len(old_ids)}개를 새로 불러온 레이어로 교체했습니다.",
+                        level=Qgis.MessageLevel.Info)
 
         def _priority(layer: QgsVectorLayer) -> int:
             name = (layer.name() or "").lower()
@@ -688,9 +943,10 @@ class KigamZipProcessor:
         # Display order (top->bottom): higher priority first, stable by original order.
         scored.sort(key=lambda x: (-x[0], x[1]))
 
-        # insertLayer(0, ...) builds the list from bottom->top, so iterate reversed.
-        for _, __, layer in reversed(scored):
-            node = run_group.insertLayer(0, layer)
+        # Below whatever the group keeps (rasters from a previous load), top->bottom.
+        base = len(run_group.children())
+        for pos, (_, __, layer) in enumerate(scored):
+            node = run_group.insertLayer(base + pos, layer)
             if _hide_by_default(layer):
                 try:
                     node.setItemVisibilityChecked(False)
@@ -1211,7 +1467,7 @@ class GeologyZipDialog(QtWidgets.QDialog):
                 except Exception as _exc:
                     log_swallowed("geology_zip_dialog._build_shared_code_mapping", _exc)
                     val = None
-                if val is None or str(val).strip() == "":
+                if _is_blank(val):
                     continue
                 if numeric:
                     try:
@@ -1225,7 +1481,7 @@ class GeologyZipDialog(QtWidgets.QDialog):
                     if lf:
                         try:
                             lbl = f[lf]
-                            if lbl is not None and str(lbl).strip():
+                            if not _is_blank(lbl):
                                 seen = labels_all.setdefault(code, [])
                                 if str(lbl).strip() not in seen:
                                     seen.append(str(lbl).strip())
@@ -1329,10 +1585,19 @@ class GeologyZipDialog(QtWidgets.QDialog):
                 drops["layer_field_missing"] += 1
                 continue
             transform = None
+            if lyr.crs() != target_crs and (not lyr.crs().isValid() or not target_crs.isValid()):
+                # A transform from (or to) a missing CRS is a silent no-op that
+                # reports success, so a sheet without a .prj was merged with
+                # its coordinates read as the other sheet's CRS (GEO-14).
+                log_message(f"좌표계가 없어 레이어 제외(병합 불가): {lyr.name()}", level=Qgis.MessageLevel.Warning)
+                drops["layer_crs_missing"] += 1
+                continue
             if lyr.crs() != target_crs:
                 _skip_1052 = False
                 try:
                     transform = QgsCoordinateTransform(lyr.crs(), target_crs, QgsProject.instance())
+                    if not transform.isValid():
+                        raise RuntimeError("invalid coordinate transform")
                 except Exception as _exc:
                     # Can't reproject this layer — skip it rather than merge its
                     # features untransformed (mixed CRS → misplaced polygons).
@@ -1356,7 +1621,10 @@ class GeologyZipDialog(QtWidgets.QDialog):
                             drops["transform_failed"] += 1
                             continue
                     val = f[field_name]
-                    if val is None or str(val).strip() == "":
+                    if _is_blank(val):
+                        # NULL (a QVariant, not None) and blank text alike:
+                        # numeric NULLs used to be counted as "숫자 아님" and
+                        # text NULLs burned as a class named "NULL".
                         drops["null_value"] += 1
                         continue
                     if numeric:
@@ -1375,7 +1643,7 @@ class GeologyZipDialog(QtWidgets.QDialog):
                         if label_field and code not in labels:
                             try:
                                 lbl = f[label_field]
-                                if lbl is not None and str(lbl).strip():
+                                if not _is_blank(lbl):
                                     labels[code] = str(lbl).strip()
                             except Exception as _exc:
                                 log_swallowed("tools/geology_zip_dialog.py:1085 (_build_numeric_merge_layer)", _exc)
@@ -1533,9 +1801,15 @@ class GeologyZipDialog(QtWidgets.QDialog):
         labels: Dict[str, str],
         cell_counts: Optional[Dict[int, int]],
         raster_path: str,
+        feature_counts: Optional[Dict[int, int]] = None,
     ) -> List[str]:
         """Name the codes that have features but no cell in the written raster
-        (units narrower than one cell at this pixel size). Returns them."""
+        (units narrower than one cell at this pixel size). Returns them.
+
+        `feature_counts` (int code -> features burned into THIS raster) limits
+        the check to codes this raster actually received: the shared code
+        table also lists codes of the other sheets, and those were reported
+        as "narrower than a cell" for a sheet that never contained them."""
         if cell_counts is None:
             log_message(f"래스터 값을 읽지 못해 mapping.csv의 cell_count 열을 비워 둡니다: {raster_path}", level=Qgis.MessageLevel.Warning)
             return []
@@ -1543,6 +1817,8 @@ class GeologyZipDialog(QtWidgets.QDialog):
         for code, v in (mapping or {}).items():
             present = True  # unknown counts are never reported as missing
             try:
+                if feature_counts is not None and int(feature_counts.get(int(v), 0) or 0) <= 0:
+                    continue  # no feature of this code reached this raster
                 present = int(cell_counts.get(int(v), 0)) > 0
             except Exception as _exc:
                 log_swallowed("geology_zip_dialog._report_unburned_codes", _exc)
@@ -1775,6 +2051,19 @@ class GeologyZipDialog(QtWidgets.QDialog):
             log_swallowed("tools/geology_zip_dialog.py:1325 (_rasterize_layer)", _exc)
         raise RuntimeError("래스터 파일이 생성되지 않았습니다. 출력 경로/권한/로그를 확인하세요.")
 
+    def _display_name(self, layer: QgsVectorLayer) -> str:
+        """'[sheet] layer' as the layer list shows it (layer names repeat across sheets)."""
+        region = self._kigam_region_for_layer(layer)
+        name = str(layer.name() or "")
+        return f"[{region}] {name}" if region else name
+
+    def _warn_nodata_changed(self, requested: float, used: int, field: str) -> None:
+        """Say that the requested NoData was a class code and was replaced."""
+        text = (f"NoData 값 {requested:g}이(가) '{field}'의 클래스 코드와 같아 그 클래스가 NoData로 지워지므로, "
+                f"코드 범위 밖의 값 {used}을(를) NoData로 사용합니다.")
+        log_message(f"KIGAM rasterize: {text}", level=Qgis.MessageLevel.Warning)
+        push_message(self.iface, "NoData 값 변경", text, level=1, duration=12)
+
     def _run_rasterize(self):
         layers = self._selected_vector_layers()
         if not layers:
@@ -1822,6 +2111,18 @@ class GeologyZipDialog(QtWidgets.QDialog):
                     return
                 out_path = _ensure_output_extension(out_path, fmt)
 
+                # A sheet without a CRS cannot be placed next to the others:
+                # transforming from a missing CRS silently keeps its raw
+                # coordinates, which merged it far from where it belongs.
+                no_crs = [self._display_name(l0) for l0 in layers if not l0.crs().isValid()]
+                if no_crs:
+                    text = (f"좌표계가 없는 레이어가 있어 병합하지 않습니다: {', '.join(no_crs)}. "
+                            "레이어 속성에서 도엽의 CRS를 지정한 뒤 다시 실행하세요.")
+                    log_message(f"KIGAM rasterize: {text}", level=Qgis.MessageLevel.Warning)
+                    push_message(self.iface, "좌표계 없음", text, level=2, duration=12)
+                    restore_ui_focus(self)
+                    return
+
                 numeric, num_names, text_names, double_names = self._field_numeric_across(layers, field)
                 self._warn_field_types(field, num_names, text_names, double_names)
                 shared_map, shared_labels, labels_all, conflicts = self._build_shared_code_mapping(layers, field, numeric=numeric)
@@ -1841,9 +2142,12 @@ class GeologyZipDialog(QtWidgets.QDialog):
                 if int(merged_layer.featureCount() or 0) <= 0:
                     raise RuntimeError("래스터에 기록할 피처가 없습니다." + (f" {drop_text}" if drop_text else ""))
 
-                raster_path = self._rasterize_layer(merged_layer, "ATK_VAL", out_path, pixel, nodata)
-                cell_counts = self._raster_cell_counts(raster_path, nodata)
-                unburned = self._report_unburned_codes(mapping, labels, cell_counts, raster_path)
+                nd_used, nd_changed = _safe_nodata(nodata, mapping.values())
+                if nd_changed:
+                    self._warn_nodata_changed(nodata, nd_used, field)
+                raster_path = self._rasterize_layer(merged_layer, "ATK_VAL", out_path, pixel, float(nd_used))
+                cell_counts = self._raster_cell_counts(raster_path, float(nd_used))
+                unburned = self._report_unburned_codes(mapping, labels, cell_counts, raster_path, feature_counts=counts)
                 csv_path = self._write_mapping_csv(mapping, raster_path, labels=labels, counts=counts,
                                                    labels_all=labels_all, cell_counts=cell_counts)
 
@@ -1882,6 +2186,8 @@ class GeologyZipDialog(QtWidgets.QDialog):
                         params={
                             "field": field,
                             "pixel": pixel,
+                            "nodata": int(nd_used),
+                            "nodata_requested": float(nodata),
                             "field_numeric": bool(numeric),
                             "double_truncated": bool(double_names),
                             "dropped": {k: int(v) for k, v in drops.items() if v},
@@ -1914,8 +2220,17 @@ class GeologyZipDialog(QtWidgets.QDialog):
             total_drops: Dict[str, int] = {}
             outputs: List[str] = []
             skipped: List[str] = []
+            nodata_by_field: Dict[str, int] = {}
 
             for lyr in layers:
+                if not lyr.crs().isValid():
+                    # Refused here, per sheet, so the other sheets still run
+                    # (the CRS-less raster used to abort the whole batch).
+                    text = f"{self._display_name(lyr)}: 좌표계가 없어 건너뜁니다. 레이어 속성에서 CRS를 지정한 뒤 다시 실행하세요."
+                    log_message(f"KIGAM rasterize: {text}", level=Qgis.MessageLevel.Warning)
+                    push_message(self.iface, "좌표계 없음", text, level=1, duration=10)
+                    skipped.append(str(lyr.name() or ""))
+                    continue
                 if explicit:
                     # The user named a field: a layer that lacks it is skipped
                     # with a visible warning, never silently re-pointed at
@@ -1993,9 +2308,17 @@ class GeologyZipDialog(QtWidgets.QDialog):
                         f"KIGAM rasterize: {base_name}.{fmt}가 이미 있어 {os.path.basename(out_path)}로 저장합니다.",
                         level=Qgis.MessageLevel.Warning,
                     )
-                raster_path = self._rasterize_layer(merged_layer, "ATK_VAL", out_path, pixel, nodata)
-                cell_counts = self._raster_cell_counts(raster_path, nodata)
-                unburned = self._report_unburned_codes(mapping, labels, cell_counts, raster_path)
+                # One NoData per field (so every sheet of the field agrees),
+                # moved off the class codes when the requested value is one.
+                if field not in nodata_by_field:
+                    nd_used, nd_changed = _safe_nodata(nodata, set(shared_map.values()) | set(mapping.values()))
+                    if nd_changed:
+                        self._warn_nodata_changed(nodata, nd_used, field)
+                    nodata_by_field[field] = nd_used
+                nd_used = nodata_by_field[field]
+                raster_path = self._rasterize_layer(merged_layer, "ATK_VAL", out_path, pixel, float(nd_used))
+                cell_counts = self._raster_cell_counts(raster_path, float(nd_used))
+                unburned = self._report_unburned_codes(mapping, labels, cell_counts, raster_path, feature_counts=counts)
                 csv_path = self._write_mapping_csv(mapping, raster_path, labels=labels, counts=counts,
                                                    labels_all=labels_all, cell_counts=cell_counts)
 
@@ -2028,6 +2351,8 @@ class GeologyZipDialog(QtWidgets.QDialog):
                         params={
                             "field": field,
                             "pixel": pixel,
+                            "nodata": int(nd_used),
+                            "nodata_requested": float(nodata),
                             "region": region,
                             "source_layer": str(lyr.name() or ""),
                             "field_numeric": bool(numeric),
@@ -2072,7 +2397,7 @@ class GeologyZipDialog(QtWidgets.QDialog):
 
         ensure_live_log_dialog(self.iface, owner=self, show=True, clear=True)
         run_id = new_run_id("kigam_zip")
-        processor = KigamZipProcessor()
+        processor = KigamZipProcessor(iface=self.iface)
         layers = processor.process_zip(
             zip_path,
             font_family=self.cmbFont.currentFont().family(),
@@ -2096,6 +2421,12 @@ class GeologyZipDialog(QtWidgets.QDialog):
             # managed folder that the next ZIP load reaps after the retention
             # window if nothing touched it (GEO-13).
             done = f"ZIP에서 {len(layers)}개 레이어를 로드했습니다."
+            try:
+                n_rep = int(getattr(processor, "last_replaced", 0) or 0)
+                if n_rep:
+                    done += f" 같은 도엽 그룹의 이전 ZIP 레이어 {n_rep}개는 새로 불러온 레이어로 교체했습니다(그룹의 래스터 결과는 유지)."
+            except Exception as _exc:
+                log_swallowed("geology_zip_dialog._load_zip (replaced)", _exc)
             try:
                 extract_dir = str(getattr(processor, "last_extract_dir", "") or "")
                 days = max(1, int(GEOLOGY_EXTRACT_CLEANUP_DAYS))
@@ -2128,9 +2459,15 @@ KIGAM 1:50,000 지질도 ZIP(도엽)을 바로 로드하고, 지질 코드 기�
 <h4>ZIP 불러오기</h4>
 <ul>
   <li>KIGAM에서 받은 ZIP을 선택하면 SHP를 자동 로드하고, sym 폴더가 있으면 심볼을 적용합니다.</li>
+  <li><b>속성 인코딩</b>: SHP 옆에 <code>.cpg</code>가 있으면 그 인코딩을 따르고, 없으면 DBF 문자열을 CP949/EUC-KR/UTF-8로 풀어 보고
+      맞는 인코딩을 씁니다(설정 <code>geology_zip.candidate_encodings</code>). ZIP 안의 한글 파일/폴더 이름(CP949)도 그대로 풀립니다.</li>
+  <li><b>좌표계</b>: .prj가 없어 좌표계를 읽지 못한 도엽은 메시지 표시줄에 경고가 뜹니다. 그런 도엽은 CRS를 지정하기 전까지 래스터 변환(병합)에 쓰이지 않습니다.</li>
+  <li><b>다시 불러오기</b>: 같은 ZIP 파일(같은 경로)을 다시 불러오면 기존 <code>KIGAM_도엽명</code> 그룹의 도엽 레이어를 새로 불러온 레이어로
+      <b>교체</b>합니다(그룹 안의 래스터 결과는 그대로 둡니다). 이름만 같은 다른 ZIP은 <code>KIGAM_도엽명_2</code> 그룹으로 따로 불러옵니다.</li>
   <li>LITHOIDX/LITHONAME 레이어는 라벨을 자동 적용할 수 있습니다.</li>
   <li>레이어는 <code>ArchToolkit - Geology</code> 그룹 아래 <code>KIGAM_도엽명</code>으로 정리되고, 라인/포인트가 폴리곤(Litho) 위로 올라오도록 순서를 맞춥니다.</li>
   <li><b>추출 폴더와 보관 기간</b>: SHP는 <code>{extract_root}</code> 아래 도엽별 폴더에 풀립니다.
+      불러올 때마다 새 폴더(이미 있으면 <code>_2</code>, <code>_3</code>…)에 풀며, 이미 불러온 도엽의 파일은 지우지 않습니다.
       이 폴더는 <b>{cleanup_days}일</b> 동안 그 도엽을 다시 불러오지 않으면 다음 ZIP 로드 때 자동 삭제됩니다
       (현재 열려 있는 프로젝트가 쓰는 폴더만 보호되며, 닫혀 있는 다른 프로젝트가 참조하는 폴더는 보호되지 않습니다).
       삭제되면 그 도엽을 참조하는 저장된 프로젝트의 레이어가 깨지므로, 오래 쓸 도엽은 다른 폴더로 복사해 두세요.</li>
@@ -2149,7 +2486,11 @@ KIGAM 1:50,000 지질도 ZIP(도엽)을 바로 로드하고, 지질 코드 기�
   <li>래스터는 <b>셀 중심이 폴리곤 안에 들어가는 셀</b>에만 코드를 기록합니다. 폭이 한 셀보다 좁은 지질 단위(얇은 암맥 등)는
       그 픽셀 크기에서는 래스터에 기록되지 않으며, 매핑 CSV의 <code>cell_count</code> 열이 0인 코드가 그런 경우입니다.
       픽셀 크기를 줄이면 포함됩니다.</li>
-  <li>값이 비어 있거나(NULL) 숫자 필드에 숫자가 아닌 값이 든 피처, 좌표 변환에 실패한 피처는 래스터에서 빠지며, 완료 메시지와 로그에 제외된 피처 수가 이유별로 표시됩니다.</li>
+  <li>값이 비어 있거나(NULL) 숫자 필드에 숫자가 아닌 값이 든 피처, 좌표 변환에 실패한 피처는 래스터에서 빠지며, 완료 메시지와 로그에 제외된 피처 수가 이유별로 표시됩니다.
+      NULL/공백은 코드로 매핑되지 않고(“NULL”이라는 클래스를 만들지 않음) '값 없음'으로 셉니다.</li>
+  <li>레이어별 출력의 <code>cell_count</code> 경고(셀보다 좁은 단위)는 그 도엽에 실제로 있는 코드만 대상으로 합니다. 공용 코드표의 다른 도엽 코드는 feature_count 0으로만 기록됩니다.</li>
+  <li>NoData 값이 클래스 코드와 같으면 그 클래스가 통째로 NoData가 되므로, 코드 범위 밖의 값(보통 -9999, 겹치면 가장 작은 코드보다 작은 값)으로 바꾸고 메시지와 메타데이터(<code>nodata</code>)에 남깁니다.</li>
+  <li>좌표계가 없는 도엽이 섞여 있으면 병합하지 않고 중단합니다(레이어별 출력에서는 그 도엽만 건너뜀).</li>
   <li>ASCII Grid(.asc)는 지리좌표계(도) 레이어에서는 셀 크기가 도 단위(dx/dy)로 기록되어 ArcGIS·MaxEnt가 읽지 못할 수 있습니다. 투영 CRS(미터)로 변환한 뒤 내보내세요.</li>
   <li>실행 후에는 <b>출력 파일이 실제로 생성되었는지</b> 확인하고, 문제가 있으면 로그에 원인을 남깁니다. 매핑 CSV를 쓰지 못하면 메시지 표시줄에 경고가 뜹니다(CSV 없이는 래스터의 정수 코드를 해석할 수 없습니다).</li>
 </ul>
