@@ -38,11 +38,11 @@ python scripts/build_plugin_zip.py --check
 
 ## 4. GitHub 릴리스 (선택)
 
-`v0.1.4`처럼 태그를 푸시하면 `.github/workflows/release.yml`이 같은 ZIP을 만들어 검사하고 GitHub 릴리스에 첨부합니다.
+`v0.1.5`처럼 태그를 푸시하면 `.github/workflows/release.yml`이 같은 ZIP을 만들어 검사하고 GitHub 릴리스에 첨부합니다.
 
 ```bash
-git tag -a v0.1.4 -m "ArchToolkit 0.1.4"
-git push origin v0.1.4
+git tag -a v0.1.5 -m "ArchToolkit 0.1.5"
+git push origin v0.1.5
 ```
 
 태그 이름은 `metadata.txt`의 버전과 같아야 합니다(`check_release_identity.py --release-tag`가 확인).

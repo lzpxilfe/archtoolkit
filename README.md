@@ -11,7 +11,7 @@
 
 <p align="center">
   <img alt="QGIS 3.40 - 4.x" src="https://img.shields.io/badge/QGIS-3.40%20--%204.x-589632?logo=qgis&logoColor=white">
-  <img alt="Version 0.1.4" src="https://img.shields.io/badge/version-0.1.4-2d7ff9">
+  <img alt="Version 0.1.5" src="https://img.shields.io/badge/version-0.1.5-2d7ff9">
   <img alt="Status stable" src="https://img.shields.io/badge/status-stable-2ea44f">
   <a href="https://github.com/lzpxilfe/archtoolkit/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/lzpxilfe/archtoolkit/actions/workflows/ci.yml/badge.svg"></a>
   <img alt="License GPL-3.0-or-later" src="https://img.shields.io/badge/license-GPL--3.0--or--later-1f6feb">
@@ -166,7 +166,7 @@ CI는 push마다 순수 테스트·정적 검사·flake8 차단 규칙·릴리�
   author  = {Hwang, Jinseo},
   title   = {ArchToolkit: Archaeology Toolkit for QGIS},
   year    = {2026},
-  version = {0.1.4},
+  version = {0.1.5},
   url     = {https://github.com/lzpxilfe/archtoolkit}
 }
 ```
