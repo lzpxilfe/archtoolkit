@@ -37,7 +37,7 @@ import uuid
 
 from osgeo import gdal
 
-from qgis.PyQt import QtWidgets, uic
+from qgis.PyQt import QtCore, QtWidgets, uic
 from qgis.PyQt.QtGui import QColor
 from qgis.core import (
     Qgis,
@@ -61,7 +61,6 @@ from qgis.core import (
 )
 from .qtcompat import FT_INT, FT_DOUBLE, FT_STRING, SYMBOL_PROPERTY_ANGLE
 
-import processing
 
 from .utils import (
     log_swallowed, cleanup_files, move_group_to_top, push_message, restore_ui_focus,
@@ -69,6 +68,7 @@ from .utils import (
 )
 from .live_log_dialog import ensure_live_log_dialog
 from .help_dialog import show_help_dialog
+from .processing_task import ProcessingCancelled, run_alg_blocking
 from . import dialog_memory
 from .icons import icon as plugin_icon
 
@@ -323,6 +323,12 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
 
         intermediate_files = []
         success = False
+        # Processing steps run through the task manager (see processing_task):
+        # the dialog repaints and Cancel aborts the run.
+        self._run_progress = QtWidgets.QProgressDialog("경사도/사면방향 도면화 중…", "취소", 0, 0, self)
+        self._run_progress.setWindowModality(QtCore.Qt.WindowModality.WindowModal)
+        self._run_progress.setAutoClose(False)
+        self._run_progress.show()
         try:
             # Slope is required for both slope raster and aspect filtering.
             # SCALE=1 is gdaldem's default and is only correct when the
@@ -334,7 +340,7 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
             # explicitly (slope <= -9000 / slope <= flat_thresh_deg) because
             # -9999 is finite and isfinite() alone would let it through.
             # Both choices are recorded in the layer metadata below.
-            processing.run(
+            run_alg_blocking(
                 "gdal:slope",
                 {
                     "INPUT": dem_source,
@@ -343,6 +349,7 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
                     "AS_PERCENT": False,
                     "OUTPUT": slope_full_tif,
                 },
+                owner=self,
             )
             intermediate_files.append(slope_full_tif)
             self._clip_raster_by_mask(slope_full_tif, mask_source, slope_clip_tif)
@@ -403,7 +410,7 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
                 # slope test. Enabling it on only one of the two would ring the
                 # drawing with arrows whose direction is a half-window guess.
                 # Both choices are recorded in the layer metadata below.
-                processing.run(
+                run_alg_blocking(
                     "gdal:aspect",
                     {
                         "INPUT": dem_source,
@@ -412,6 +419,7 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
                         "ZERO_FLAT": True,
                         "OUTPUT": aspect_full_tif,
                     },
+                    owner=self,
                 )
                 intermediate_files.append(aspect_full_tif)
                 self._clip_raster_by_mask(aspect_full_tif, mask_source, aspect_clip_tif)
@@ -459,10 +467,18 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
             success = True
             self.accept()
 
+        except ProcessingCancelled:
+            push_message(self.iface, "도면화", "작업이 취소되었습니다.", level=1, duration=6)
+            restore_ui_focus(self)
         except Exception as e:
             push_message(self.iface, "오류", f"도면화 실패: {str(e)}", level=2, duration=7)
             restore_ui_focus(self)
         finally:
+            try:
+                self._run_progress.close()
+            except Exception as _exc:
+                log_swallowed("slope_aspect_drafting_dialog.run_drafting (progress)", _exc)
+            self._run_progress = None
             try:
                 cleanup_files(intermediate_files)
             except Exception as _exc:
@@ -602,11 +618,12 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
                 dissolve_params["SEPARATE_DISJOINT"] = True
             except Exception as _exc:
                 log_swallowed("tools/slope_aspect_drafting_dialog.py:511 (_build_slope_grid_layer)", _exc)
-            out_layer = processing.run("native:dissolve", dissolve_params)["OUTPUT"]
+            out_layer = run_alg_blocking("native:dissolve", dissolve_params, owner=self)["OUTPUT"]
             try:
-                out_layer = processing.run(
+                out_layer = run_alg_blocking(
                     "native:multiparttosingleparts",
                     {"INPUT": out_layer, "OUTPUT": "memory:"},
+                    owner=self,
                 )["OUTPUT"]
             except Exception as _exc:
                 log_swallowed("slope_aspect_drafting_dialog._build_slope_grid_layer", _exc)
@@ -645,7 +662,7 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
 
     def _clip_raster_by_mask(self, in_raster: str, mask_layer, out_raster: str):
         """Clip raster to AOI polygon. Output is kept (not auto-deleted)."""
-        processing.run(
+        run_alg_blocking(
             "gdal:cliprasterbymasklayer",
             {
                 "INPUT": in_raster,
@@ -657,6 +674,7 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
                 "KEEP_RESOLUTION": True,
                 "OUTPUT": out_raster,
             },
+            owner=self,
         )
 
     def _apply_slope_grid_style(

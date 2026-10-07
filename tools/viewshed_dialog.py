@@ -22,7 +22,6 @@ import os
 import tempfile
 import uuid
 import math
-import processing
 import numpy as np
 from osgeo import gdal, ogr
 from qgis.PyQt import uic, QtWidgets, QtCore
@@ -65,12 +64,14 @@ from qgis.PyQt.QtGui import QTextDocument, QTextOption
 from .utils import (
     log_swallowed,
     cleanup_files,
+    adopt_stamped_temp_outputs,
     is_metric_crs,
     log_message,
     new_run_id,
     push_message,
     restore_ui_focus,
     set_archtoolkit_layer_metadata,
+    stamp_layer_temp_outputs,
     transform_point,
 )
 from .live_log_dialog import ensure_live_log_dialog
@@ -79,6 +80,7 @@ from . import dialog_memory
 from .icons import icon as plugin_icon
 from .i18n import is_english_ui
 from .utils import split_qgis_source_path
+from .processing_task import ProcessingCancelled, run_alg_blocking
 from .raster_io import inv_geotransform
 
 # Load the UI file
@@ -122,6 +124,12 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
     # lines on very fine DEMs (e.g. > 200 km on a 1 m DEM).
     LOS_MAX_SAMPLES = 200000
 
+    # Keep at most this many LOS profile payloads alive. Each holds up to
+    # LOS_MAX_SAMPLES sample dicts (tens of MB) and used to stay in memory for
+    # the whole dialog session even after its layer was long gone. The oldest
+    # payloads are dropped first; re-running the LOS analysis regenerates one.
+    LOS_PROFILE_PAYLOAD_LIMIT = 8
+
     def __init__(self, iface, parent=None):
         super(ViewshedDialog, self).__init__(parent)
         # Remember the last-used inputs between sessions (tools/dialog_memory.py).
@@ -159,6 +167,8 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         self._los_profile_data = {}  # viscode_layer_id -> profile payload
         self._los_profile_dialogs = {}  # viscode_layer_id -> dialog instance
         self._los_selection_handlers = {}  # viscode_layer_id -> selectionChanged handler (for disconnect)
+        self._layer_temp_outputs = {}  # result layer_id -> temp file paths backing it
+        self._layer_temp_outputs.update(adopt_stamped_temp_outputs())
         # Vector layers this dialog created. They are kept out of the observer
         # combo: an empty combo auto-selects the first layer added to the
         # project, which flipped the source to "레이어에서 선택" and made the
@@ -663,13 +673,18 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         return pts
 
     def _dem_nodata_mask(self, dem_layer, gt, xsize, ysize):
-        """True where the DEM is NoData/NaN (or absent) on a grid aligned to the DEM lattice."""
+        """True where the DEM is NoData/NaN (or absent) on a grid aligned to the DEM lattice.
+
+        Fails closed: when the DEM cannot be read at all the whole window is
+        reported as NoData/absent. The old all-valid fallback turned those
+        cells into a computed "보이지 않음" instead of NoData.
+        """
         mask = np.ones((int(ysize), int(xsize)), dtype=bool)
         ds = None
         try:
             ds = gdal.Open(self._dem_source_path(dem_layer), gdal.GA_ReadOnly)
             if ds is None:
-                return np.zeros((int(ysize), int(xsize)), dtype=bool)
+                return mask
             dgt = ds.GetGeoTransform()
             band = ds.GetRasterBand(1)
             nd = band.GetNoDataValue()
@@ -683,7 +698,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                 return mask
             arr = band.ReadAsArray(c0, r0, c1 - c0, r1 - r0)
             if arr is None:
-                return np.zeros((int(ysize), int(xsize)), dtype=bool)
+                return mask
             arr = arr.astype(np.float64, copy=False)
             bad = ~np.isfinite(arr)
             if nd is not None and math.isfinite(float(nd)):
@@ -692,7 +707,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             return mask
         except Exception as _exc:
             log_swallowed("viewshed_dialog._dem_nodata_mask", _exc)
-            return np.zeros((int(ysize), int(xsize)), dtype=bool)
+            return mask
         finally:
             ds = None
 
@@ -1253,8 +1268,34 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             except Exception as _exc:
                 log_swallowed("tools/viewshed_dialog.py:919 (_update_cutout_input_polygon_ui)", _exc)
 
+    def _track_layer_output(self, layer, path) -> None:
+        """Record a temp file that only ``layer`` references (deleted with it).
+
+        Result GeoTIFFs were previously written to the session temp dir and
+        never removed - every run leaked its outputs. Same contract as
+        cost_surface_dialog: the file lives exactly as long as its layer.
+        """
+        if not layer or not path:
+            return
+        paths = self._layer_temp_outputs.setdefault(layer.id(), [])
+        paths.append(str(path))
+        # Stamp on the layer so a plugin unload/reload re-adopts the file
+        # instead of orphaning it (the tracking dict dies with the dialog).
+        stamp_layer_temp_outputs(layer, paths)
+
     def on_layers_removed(self, layer_ids):
         """Clean up markers and annotations if the corresponding analysis layer is removed"""
+        # Temp files backing removed result layers have no other owner.
+        try:
+            tracked = []
+            for lid in layer_ids:
+                outputs = self._layer_temp_outputs.pop(lid, [])
+                if outputs:
+                    tracked.extend(outputs)
+            if tracked:
+                cleanup_files(tracked)
+        except Exception as _exc:
+            log_swallowed("viewshed_dialog.on_layers_removed (temp outputs)", _exc)
         # Drop removed outputs from the observer-combo exclusion list while the
         # layer objects still exist (the combo keeps raw layer pointers).
         try:
@@ -1700,6 +1741,9 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                     dem_layer, observer_height, target_height,
                     max_distance, curvature, refraction, refraction_coeff
                 )
+        except ProcessingCancelled:
+            self.iface.messageBar().pushMessage("취소", "가시권 분석이 취소되었습니다.", level=1)
+            self.show()
         except Exception as e:
             self.iface.messageBar().pushMessage("오류", f"분석 중 오류: {str(e)}", level=2)
             self.show()
@@ -2364,6 +2408,25 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                 duration=7,
             )
 
+    def _run_progress_alg(self, label, alg_id, params):
+        """One task-manager algorithm run under a transient progress dialog.
+
+        The GUI stays live during the run and Cancel aborts it (processing.run
+        froze QGIS for the whole gdal_viewshed call).
+        """
+        self._run_progress = QtWidgets.QProgressDialog(label, "취소", 0, 0, self)
+        self._run_progress.setWindowModality(Qt.WindowModality.WindowModal)
+        self._run_progress.setAutoClose(False)
+        self._run_progress.show()
+        try:
+            return run_alg_blocking(alg_id, params, owner=self)
+        finally:
+            try:
+                self._run_progress.close()
+            except Exception as _exc:
+                log_swallowed("viewshed_dialog._run_progress_alg", _exc)
+            self._run_progress = None
+
     def run_single_viewshed(self, dem_layer, obs_height, tgt_height, max_dist, curvature, refraction, refraction_coeff=0.13):
         """Run single point viewshed analysis (radius honoured as GDAL measures it)."""
         points_info = self.get_context_point_and_crs()
@@ -2417,7 +2480,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         }
         
         try:
-            processing.run("gdal:viewshed", params)
+            self._run_progress_alg("가시권 계산 중…", "gdal:viewshed", params)
             if not os.path.exists(raw_output):
                 raise Exception("gdal_viewshed가 결과를 만들지 못했습니다.")
 
@@ -2501,6 +2564,11 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                         self.apply_viewshed_style(viewshed_layer)
                     
                     QgsProject.instance().addMapLayers([viewshed_layer])
+                    # Layer source (and, on the Higuchi path, the finalized
+                    # raster it was derived from) die with the layer.
+                    self._track_layer_output(viewshed_layer, raster_path)
+                    if raster_path != final_output:
+                        self._track_layer_output(viewshed_layer, final_output)
                     # Observer layer only once the run has produced a result: a
                     # failed run must not leave a stray point layer behind.
                     if not self.radioFromLayer.isChecked():
@@ -2580,7 +2648,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         }
 
         try:
-            processing.run("gdal:viewshed", params)
+            self._run_progress_alg("가시권 계산 중…", "gdal:viewshed", params)
             if not os.path.exists(raw_output):
                 raise Exception("viewshed 결과 래스터 생성 실패")
             self._finalize_viewshed_raster(
@@ -2997,7 +3065,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                 pt_dem = self.transform_point(point, p_crs, dem_layer.crs())
                 _skip_2520 = False
                 try:
-                    processing.run(
+                    run_alg_blocking(
                         "gdal:viewshed",
                         {
                             "INPUT": dem_layer.source(),
@@ -3009,7 +3077,10 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                             "EXTRA": extra,
                             "OUTPUT": output_raw,
                         },
+                        progress=progress,
                     )
+                except ProcessingCancelled:
+                    raise
                 except Exception as e:
                     log_message(f"reverse viewshed failed for point #{i}: {e}", level=Qgis.MessageLevel.Warning)
                     log_swallowed("tools/viewshed_dialog.py:2534 (_run_union_viewshed_for_points)", e)
@@ -3023,7 +3094,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                 temp_outputs.append(output_raw)
                 full_vs = os.path.join(tempfile.gettempdir(), f"archt_rvs_full_{i}_{uuid.uuid4().hex[:8]}.tif")
                 try:
-                    processing.run(
+                    run_alg_blocking(
                         "gdal:warpreproject",
                         {
                             "INPUT": output_raw,
@@ -3035,6 +3106,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                             "DATA_TYPE": 5,
                             "OUTPUT": full_vs,
                         },
+                        progress=progress,
                     )
                     if os.path.exists(full_vs):
                         temp_outputs.append(full_vs)
@@ -3043,6 +3115,8 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                             os.remove(output_raw)
                         except Exception as _exc:
                             log_swallowed("viewshed_dialog._run_union_viewshed_for_points", _exc)
+                except ProcessingCancelled:
+                    raise
                 except Exception as e:
                     log_message(f"warpreproject failed for reverse viewshed #{i}: {e}", level=Qgis.MessageLevel.Warning)
 
@@ -3110,6 +3184,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                 log_swallowed("viewshed_dialog._run_union_viewshed_for_points", _exc)
             self.apply_viewshed_style(viewshed_layer)
             QgsProject.instance().addMapLayer(viewshed_layer)
+            self._track_layer_output(viewshed_layer, final_output)
             self.last_result_layer_id = viewshed_layer.id()
             try:
                 self._add_aoi_stats_layer_for_raster(viewshed_layer, dem_layer)
@@ -3194,6 +3269,9 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         QtWidgets.QApplication.processEvents()
 
         forward_raster = None
+        reverse_raster = None
+        imbalance_raster = None
+        owned_by_layer = set()
         result_run_id = new_run_id("viewshed")
         try:
             self.iface.messageBar().pushMessage("처리 중", "시각적 불균등: 1/3 (정방향 가시권)", level=0)
@@ -3258,6 +3336,8 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                 log_swallowed("viewshed_dialog.run_reverse_viewshed_with_visual_imbalance", _exc)
             self.apply_viewshed_style(reverse_layer)
             QgsProject.instance().addMapLayer(reverse_layer)
+            self._track_layer_output(reverse_layer, reverse_raster)
+            owned_by_layer.add(reverse_raster)
             self.last_result_layer_id = reverse_layer.id()
 
             imbalance_layer = QgsRasterLayer(imbalance_raster, imbalance_layer_name)
@@ -3280,6 +3360,8 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                 log_swallowed("viewshed_dialog.run_reverse_viewshed_with_visual_imbalance", _exc)
             self.apply_visual_imbalance_style(imbalance_layer)
             QgsProject.instance().addMapLayer(imbalance_layer)
+            self._track_layer_output(imbalance_layer, imbalance_raster)
+            owned_by_layer.add(imbalance_raster)
 
             # Draw a radius ring so the analysis boundary is visible even when "동일" areas are transparent.
             try:
@@ -3319,7 +3401,11 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             push_message(self.iface, "오류", f"시각적 불균등 처리 중 오류: {str(e)}", level=2)
             restore_ui_focus(self)
         finally:
-            cleanup_files([forward_raster] if forward_raster else [])
+            # forward is always an intermediate; reverse/imbalance too when they
+            # failed to become layer sources (owned ones die with their layers).
+            cleanup_files(
+                [p for p in (forward_raster, reverse_raster, imbalance_raster) if p and p not in owned_by_layer]
+            )
 
     def run_reverse_viewshed(self, dem_layer, obs_height, tgt_height, max_dist, curvature, refraction, refraction_coeff=0.13):
         """Run reverse viewshed - from where can the target be seen?
@@ -3544,6 +3630,105 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                 refraction_coeff,
             )
     
+    def _sample_line_elevations(self, dem_layer, start_xy, end_xy, num_samples):
+        """Band-1 nearest-cell elevations at ``num_samples + 1`` points start→end.
+
+        Returns one entry per sample (``None`` outside the raster or on a
+        NoData/NaN cell) so the caller keeps its own nodata and curvature
+        accounting.
+
+        Each run of samples is read from one GDAL window instead of paying one
+        ``provider.sample()`` round trip per point: an LOS run samples up to
+        ``LOS_MAX_SAMPLES`` (200k) points and the per-call provider overhead
+        dominated the analysis. Point→cell mapping is the GDAL convention the
+        plugin already uses elsewhere (floor of the inverse geotransform, see
+        cost_network_dialog), which matches QGIS's own block() rounding.
+        """
+        out = [None] * (num_samples + 1)
+        if num_samples <= 0:
+            return out
+        src = self._split_qgis_source_path(dem_layer.source())
+        ds = gdal.Open(src, gdal.GA_ReadOnly) if src else None
+        if ds is None:
+            # Non-file providers (WMS/WCS/...) that GDAL cannot open directly:
+            # keep the per-point provider.sample() path rather than read empty.
+            return self._sample_line_elevations_via_provider(dem_layer, start_xy, end_xy, num_samples)
+        try:
+            band = ds.GetRasterBand(1)
+            inv = self._inv_geotransform(ds.GetGeoTransform())
+            nodata = band.GetNoDataValue()
+            xsize = int(ds.RasterXSize)
+            ysize = int(ds.RasterYSize)
+            sx, sy = float(start_xy.x()), float(start_xy.y())
+            ex, ey = float(end_xy.x()), float(end_xy.y())
+
+            chunk = 2048
+            for i0 in range(0, num_samples + 1, chunk):
+                i1 = min(i0 + chunk, num_samples + 1)
+                pts = []
+                for i in range(i0, i1):
+                    frac = i / num_samples
+                    x = sx + frac * (ex - sx)
+                    y = sy + frac * (ey - sy)
+                    px, py = gdal.ApplyGeoTransform(inv, x, y)
+                    pts.append((int(math.floor(px)), int(math.floor(py))))
+                c0 = min(p[0] for p in pts)
+                c1 = max(p[0] for p in pts)
+                r0 = min(p[1] for p in pts)
+                r1 = max(p[1] for p in pts)
+                wc0, wc1 = max(0, c0), min(xsize - 1, c1)
+                wr0, wr1 = max(0, r0), min(ysize - 1, r1)
+                if wc0 > wc1 or wr0 > wr1:
+                    continue  # whole chunk off the raster
+                arr = band.ReadAsArray(wc0, wr0, wc1 - wc0 + 1, wr1 - wr0 + 1)
+                if arr is None:
+                    continue
+                arr = arr.astype(np.float32, copy=False)
+                nd_mask = np.zeros(arr.shape, dtype=bool)
+                if nodata is not None:
+                    nd_mask |= arr == nodata
+                nd_mask |= ~np.isfinite(arr)
+                for k, (col, row) in enumerate(pts):
+                    if not (0 <= col < xsize and 0 <= row < ysize):
+                        continue
+                    if nd_mask[row - wr0, col - wc0]:
+                        continue
+                    out[i0 + k] = float(arr[row - wr0, col - wc0])
+            return out
+        finally:
+            ds = None
+
+    @staticmethod
+    def _sample_line_elevations_via_provider(dem_layer, start_xy, end_xy, num_samples):
+        """Per-point ``provider.sample()`` fallback for non-file DEM providers.
+
+        Same contract as :meth:`_sample_line_elevations`: one entry per sample,
+        ``None`` outside the raster / on NoData / on a non-finite value.
+        """
+        out = [None] * (num_samples + 1)
+        if num_samples <= 0:
+            return out
+        try:
+            provider = dem_layer.dataProvider()
+        except Exception as _exc:
+            log_swallowed("tools/viewshed_dialog.py (_sample_line_elevations_via_provider)", _exc)
+            return out
+        sx, sy = float(start_xy.x()), float(start_xy.y())
+        ex, ey = float(end_xy.x()), float(end_xy.y())
+        for i in range(num_samples + 1):
+            frac = i / num_samples
+            x = sx + frac * (ex - sx)
+            y = sy + frac * (ey - sy)
+            try:
+                elev, ok = provider.sample(QgsPointXY(x, y), 1)
+                if ok:
+                    val = float(elev)
+                    if math.isfinite(val):
+                        out[i] = val
+            except Exception as _exc:
+                log_swallowed("tools/viewshed_dialog.py (_sample_line_elevations_via_provider)", _exc)
+        return out
+
     def run_line_of_sight(self, dem_layer, obs_height, tgt_height):
         """Run Line of Sight analysis between observer and target points
         
@@ -3625,8 +3810,6 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
 
         profile_data = []
 
-        provider = dem_layer.dataProvider()
-
         # Honour the curvature/refraction checkboxes in LOS mode too (they were
         # previously only applied to the gdal_viewshed modes). Same physics as
         # gdal's -cc: apparent drop = cc·d²/(2R); cc=1 curvature-only, cc=1−k
@@ -3648,21 +3831,20 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         nodata_samples = 0
         first_nodata_dist = None
 
+        # One windowed GDAL read per sample chunk replaces one provider.sample()
+        # round trip per point (see _sample_line_elevations): same cells and the
+        # same NoData/NaN handling, a fraction of the provider calls.
+        sampled_elevs = self._sample_line_elevations(
+            dem_layer, observer_dem, target_dem, num_samples
+        )
+
         for i in range(num_samples + 1):
             frac = i / num_samples
             x = observer_dem.x() + frac * dx
             y = observer_dem.y() + frac * dy
             dist = frac * total_dist
 
-            # Sample elevation from DEM
-            elev, ok = provider.sample(QgsPointXY(x, y), 1)
-            elev_value = None
-            if ok:
-                try:
-                    elev_value = float(elev)
-                except (TypeError, ValueError) as _exc:
-                    log_swallowed("tools/viewshed_dialog.py:3112 (run_line_of_sight)", _exc)
-                    elev_value = None
+            elev_value = sampled_elevs[i]
             if elev_value is None or not math.isfinite(elev_value):
                 nodata_samples += 1
                 if first_nodata_dist is None:
@@ -4019,6 +4201,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             "line_start_canvas": observer,
             "line_end_canvas": target,
         }
+        self._trim_los_profile_data()
 
         try:
             handler = lambda *_args, lid=layer.id(): self._on_los_layer_selection_changed(lid)
@@ -4094,6 +4277,20 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             self.open_los_profile(layer_id)
         except Exception as e:
             log_message(f"LOS selection handler error: {e}", level=Qgis.MessageLevel.Warning)
+
+    def _trim_los_profile_data(self):
+        """Drop the oldest LOS profile payloads past LOS_PROFILE_PAYLOAD_LIMIT.
+
+        Dict insertion order is oldest-first, so the evictions pop from the
+        front. Without this the payloads (up to 200k sample dicts each)
+        accumulated for the whole session.
+        """
+        try:
+            excess = len(self._los_profile_data) - int(self.LOS_PROFILE_PAYLOAD_LIMIT)
+            for _ in range(max(0, excess)):
+                self._los_profile_data.pop(next(iter(self._los_profile_data)))
+        except Exception as _exc:
+            log_swallowed("viewshed_dialog._trim_los_profile_data", _exc)
 
     def open_los_profile(self, layer_id):
         payload = self._los_profile_data.get(layer_id)
@@ -4606,23 +4803,23 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
              
             _skip_3954 = False
             try:
-                processing.run("gdal:viewshed", {
+                run_alg_blocking("gdal:viewshed", {
                     'INPUT': dem_layer.source(), 'BAND': 1, 'OBSERVER': f"{pt_dem.x()},{pt_dem.y()}",
                     'OBSERVER_HEIGHT': obs_height, 'TARGET_HEIGHT': tgt_height, 'MAX_DISTANCE': max_dist,
                     'EXTRA': extra, 'OUTPUT': output_raw
-                })
+                }, progress=progress)
                 
                 if os.path.exists(output_raw):
                     temp_outputs.append(output_raw)
                     full_vs = os.path.join(tempfile.gettempdir(), f'archt_fullvs_{i}_{uuid.uuid4().hex[:8]}.tif')
                     try:
                         # ENSURE PERFECT ALIGNMENT: Warp each result to the combined target extent.
-                        processing.run("gdal:warpreproject", {
+                        run_alg_blocking("gdal:warpreproject", {
                             'INPUT': output_raw, 
                             'TARGET_EXTENT': target_rect, 
                             'TARGET_EXTENT_CRS': dem_layer.crs(),
                             'NODATA': -9999, 'TARGET_RESOLUTION': res, 'RESAMPLING': 0, 'DATA_TYPE': 5, 'OUTPUT': full_vs
-                        })
+                        }, progress=progress)
                         if os.path.exists(full_vs):
                             temp_outputs.append(full_vs)
                             viewshed_results.append((i, full_vs))
@@ -4630,8 +4827,14 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                                 os.remove(output_raw)
                             except Exception as _exc:
                                 log_swallowed("viewshed_dialog.run_multi_viewshed", _exc)
+                    except ProcessingCancelled:
+                        was_cancelled = True
+                        break
                     except Exception as e:
                         log_message(f"warpreproject failed for viewshed #{i}: {e}", level=Qgis.MessageLevel.Warning)
+            except ProcessingCancelled:
+                was_cancelled = True
+                break
             except Exception as e:
                 log_message(f"viewshed failed for point #{i}: {e}", level=Qgis.MessageLevel.Warning)
                 log_swallowed("tools/viewshed_dialog.py:3981 (run_multi_viewshed)", e)
@@ -4641,42 +4844,40 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         
         progress.setValue(len(points))
 
-        if was_cancelled:
-            # Do not merge a partial set and present it as a complete result.
-            for p in temp_outputs:
-                try:
-                    os.remove(p)
-                except Exception as _exc:
-                    log_swallowed("viewshed_dialog.run_multi_viewshed", _exc)
-            self.iface.messageBar().pushMessage(
-                "취소",
-                f"누적 가시권 분석이 취소되었습니다 ({len(viewshed_results)}/{len(points)}개 지점 계산 후 중단, 결과 폐기).",
-                level=1,
-            )
-            self.show()
-            return
-
-        if not viewshed_results:
-            self.iface.messageBar().pushMessage("오류", "유효한 가시권 분석 결과를 생성하지 못했습니다. 보간 또는 범위 설정을 확인하세요.", level=2)
-            self.show()
-            return
-
-        # Keep only the observers whose viewshed was actually computed and
-        # re-index them, so the bit flags, the weights, the numbered observer
-        # layer, the layer name and points_n all describe the same set.
-        failed_n = len(points) - len(viewshed_results)
-        used_idx = [idx for idx, _path in viewshed_results]
-        if weights and len(weights) == len(points):
-            weights = [weights[idx] for idx in used_idx]
-        points = [points[idx] for idx in used_idx]
-        viewshed_results = [(k, path) for k, (_idx, path) in enumerate(viewshed_results)]
-        dropped_total = int(dropped_off_dem + failed_n)
-        
-        # Combine all viewsheds by summing (cumulative viewshed)
-        # Using a safer approach with processing.run("gdal:merge")
-        final_output = os.path.join(tempfile.gettempdir(), f'archtoolkit_viewshed_cumulative_{uuid.uuid4().hex[:8]}.tif')
-        
+        # Everything from here runs under the finally that closes the modal
+        # progress dialog and drops temp outputs - the cancel / no-result early
+        # returns used to skip it and leave the progress dialog on screen.
         try:
+            if was_cancelled:
+                # Do not merge a partial set and present it as a complete result.
+                self.iface.messageBar().pushMessage(
+                    "취소",
+                    f"누적 가시권 분석이 취소되었습니다 ({len(viewshed_results)}/{len(points)}개 지점 계산 후 중단, 결과 폐기).",
+                    level=1,
+                )
+                self.show()
+                return
+
+            if not viewshed_results:
+                self.iface.messageBar().pushMessage("오류", "유효한 가시권 분석 결과를 생성하지 못했습니다. 보간 또는 범위 설정을 확인하세요.", level=2)
+                self.show()
+                return
+
+            # Keep only the observers whose viewshed was actually computed and
+            # re-index them, so the bit flags, the weights, the numbered observer
+            # layer, the layer name and points_n all describe the same set.
+            failed_n = len(points) - len(viewshed_results)
+            used_idx = [idx for idx, _path in viewshed_results]
+            if weights and len(weights) == len(points):
+                weights = [weights[idx] for idx in used_idx]
+            points = [points[idx] for idx in used_idx]
+            viewshed_results = [(k, path) for k, (_idx, path) in enumerate(viewshed_results)]
+            dropped_total = int(dropped_off_dem + failed_n)
+
+            # Combine all viewsheds by summing (cumulative viewshed)
+            # Using a safer approach with processing.run("gdal:merge")
+            final_output = os.path.join(tempfile.gettempdir(), f'archtoolkit_viewshed_cumulative_{uuid.uuid4().hex[:8]}.tif')
+
             # Optimized Cumulative Viewshed Merge using NumPy
             progress.setLabelText("결과 통합 중 (NumPy)...")
             QtWidgets.QApplication.processEvents()
@@ -4828,6 +5029,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                     log_swallowed("viewshed_dialog.run_multi_viewshed", _exc)
                 
                 QgsProject.instance().addMapLayer(viewshed_layer)
+                self._track_layer_output(viewshed_layer, final_output)
                 self.last_result_layer_id = viewshed_layer.id()
 
                 # Optional AOI stats layer linked to this raster

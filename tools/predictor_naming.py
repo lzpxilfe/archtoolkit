@@ -166,10 +166,11 @@ def assign_variable_keys(items):
         # The suffix cannot break the contract (it is ASCII), but assert it
         # rather than trust it: everything downstream depends on this holding.
         if not is_round_trip_stable(key):  # pragma: no cover - defensive
-            key = f"{FALLBACK_STEM}_{index + 1:02d}"
+            fb = index
+            key = f"{FALLBACK_STEM}_{fb + 1:02d}"
             while key.casefold() in taken:
-                index += 1
-                key = f"{FALLBACK_STEM}_{index + 1:02d}"
+                fb += 1
+                key = f"{FALLBACK_STEM}_{fb + 1:02d}"
         taken.add(key.casefold())
         keys.append(key)
     return keys

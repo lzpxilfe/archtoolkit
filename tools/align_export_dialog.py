@@ -53,14 +53,10 @@ from dataclasses import dataclass
 from typing import List, Optional
 
 from qgis.PyQt import QtWidgets
-from qgis.PyQt.QtCore import QEventLoop, Qt
+from qgis.PyQt.QtCore import Qt
 from qgis.core import (
     Qgis,
-    QgsApplication,
     QgsCoordinateTransform,
-    QgsProcessingAlgRunnerTask,
-    QgsProcessingContext,
-    QgsProcessingFeedback,
     QgsProject,
     QgsPoint,
     QgsRasterDataProvider,
@@ -74,6 +70,12 @@ from qgis.gui import QgsMapLayerComboBox
 from .aoi_extent import resolve_aoi_extent
 from .atomic_output import cleanup_staging_dir, create_staging_dir, publish_staging_dir
 from .gdal_outcome import GdalOutcomeTracker
+from .processing_task import (
+    ActivityFeedback,
+    ProcessingCancelled,
+    ProcessingTaskError,
+    run_alg_blocking,
+)
 from .help_dialog import show_help_dialog
 from . import dialog_memory
 from .icons import icon as plugin_icon
@@ -115,7 +117,7 @@ class _Cancelled(Exception):
     pass
 
 
-class _GdalOutcomeFeedback(QgsProcessingFeedback):
+class _GdalOutcomeFeedback(ActivityFeedback):
     """Preserve GDAL diagnostics and the provider's localized exit-0 marker."""
 
     def __init__(self, success_marker):
@@ -1282,47 +1284,22 @@ class AlignExportDialog(QtWidgets.QDialog):
             "EXTRA": _srcnodata_argument(source_nodata),
             "OUTPUT": out,
         }
-        algorithm = QgsApplication.processingRegistry().algorithmById("gdal:warpreproject")
-        if algorithm is None:
-            raise RuntimeError("QGIS GDAL 정렬 알고리즘(gdal:warpreproject)을 찾을 수 없습니다.")
-
-        context = QgsProcessingContext()
-        context.setProject(QgsProject.instance())
+        # Run through the task manager (shared watchdog included): the GUI
+        # stays live during the warp, Cancel works, and a hung gdalwarp is
+        # detected instead of leaving this dialog blocked forever.
         feedback = _GdalOutcomeFeedback(_translated_gdal_success_marker())
-        task = QgsProcessingAlgRunnerTask(algorithm, params, context, feedback)
-        loop = QEventLoop(self)
-        state = {"finished": False, "successful": False, "results": {}}
-
-        def _finished(successful, results):
-            state["finished"] = True
-            state["successful"] = bool(successful)
-            state["results"] = dict(results or {})
-            loop.quit()
-
-        def _cancel_active_warp():
-            feedback.cancel()
-            task.cancel()
-
-        task.executed.connect(_finished)
-        progress.canceled.connect(_cancel_active_warp)
         try:
-            task_id = QgsApplication.taskManager().addTask(task)
-            if not task_id:
-                raise RuntimeError("GDAL 정렬 작업을 QGIS 작업 관리자에 등록하지 못했습니다.")
-            loop.exec()
-        finally:
-            try:
-                progress.canceled.disconnect(_cancel_active_warp)
-            except Exception as _exc:
-                log_swallowed("tools/align_export_dialog.py:883 (_warp)", _exc)
-
-        if progress.wasCanceled() or feedback.isCanceled() or task.algorithmCanceled():
-            raise _Cancelled()
-        if not state["finished"] or not state["successful"]:
+            results = run_alg_blocking(
+                "gdal:warpreproject", params, feedback=feedback, progress=progress
+            )
+        except ProcessingCancelled as exc:
+            raise _Cancelled() from exc
+        except ProcessingTaskError as exc:
             diagnostics = feedback.outcome.decide().diagnostics
             details = " | ".join(item.message for item in diagnostics[-3:])
             suffix = f": {details[:1200]}" if details else ""
-            raise RuntimeError(f"GDAL 정렬 작업이 정상적으로 완료되지 않았습니다{suffix}")
+            raise RuntimeError(f"GDAL 정렬 작업이 정상적으로 완료되지 않았습니다{suffix}") from exc
+
         outcome = feedback.outcome.decide()
         if not outcome.succeeded:
             details = " | ".join(item.message for item in outcome.diagnostics[-3:])
@@ -1334,7 +1311,7 @@ class AlignExportDialog(QtWidgets.QDialog):
                 f"GDAL alignment completed with non-fatal diagnostics: {details[:1200]}",
                 level=Qgis.MessageLevel.Warning,
             )
-        result_path = str(state["results"].get("OUTPUT") or "")
+        result_path = str(results.get("OUTPUT") or "")
         if result_path and os.path.realpath(result_path) != os.path.realpath(out):
             raise RuntimeError(f"GDAL 출력 경로가 요청과 다릅니다: {result_path}")
         return out

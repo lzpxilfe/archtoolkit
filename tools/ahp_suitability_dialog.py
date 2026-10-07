@@ -25,7 +25,6 @@ try:
 except Exception:  # pragma: no cover
     np = None
 
-import processing
 from qgis.PyQt import QtWidgets
 from qgis.PyQt.QtCore import Qt, QTimer
 from qgis.PyQt.QtGui import QColor
@@ -49,6 +48,7 @@ from .help_dialog import show_help_dialog
 from . import dialog_memory
 from .icons import icon as plugin_icon
 from .i18n import is_english_ui
+from .processing_task import ProcessingCancelled, run_alg_blocking
 from .utils import (
     log_swallowed,
     log_message,
@@ -1964,7 +1964,7 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
         mask_layer: QgsVectorLayer,
         out_path: str,
     ) -> str:
-        processing.run(
+        self._run_processing_alg(
             "gdal:cliprasterbymasklayer",
             {
                 "INPUT": input_raster,
@@ -2163,6 +2163,16 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
             log_swallowed("ahp_suitability_dialog._snap_extent_to_lattice", _exc)
             return ext
 
+    def _run_processing_alg(self, alg_id: str, params: dict) -> dict:
+        """Run a Processing algorithm through the task manager (GUI stays live).
+
+        ``processing.run`` blocked the GUI thread for the whole criterion
+        pipeline - a many-criterion run left QGIS frozen and uncancelable. The
+        run progress dialog created by ``_on_run`` (``self._run_progress``)
+        turns its Cancel into an abort of the current step and of the pipeline.
+        """
+        return run_alg_blocking(alg_id, params, owner=self)
+
     def _processing_warp_to_reference(
         self,
         *,
@@ -2199,7 +2209,7 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
             "EXTRA": "",
             "OUTPUT": str(out_path),
         }
-        processing.run("gdal:warpreproject", params)
+        self._run_processing_alg("gdal:warpreproject", params)
         return str(out_path)
 
     def _processing_raster_calc(
@@ -2227,7 +2237,7 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
         if input_b:
             params["INPUT_B"] = str(input_b)
             params["BAND_B"] = 1
-        processing.run("gdal:rastercalculator", params)
+        self._run_processing_alg("gdal:rastercalculator", params)
         return str(out_path)
 
     def _apply_suitability_style(self, layer: QgsRasterLayer, *, scale: float = 1.0):
@@ -2546,6 +2556,16 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
         try:
             push_message(self.iface, "AHP", "래스터 정규화/가중합 계산 중…", level=0, duration=6)
 
+            # Progress + Cancel for the criterion pipeline: every warp/calc
+            # runs through the task manager (see _run_processing_alg), so the
+            # dialog repaints and Cancel aborts the run instead of freezing.
+            self._run_progress = QtWidgets.QProgressDialog(
+                "래스터 정규화/가중합 계산 중…", "취소", 0, max(1, int(len(self._criteria))), self
+            )
+            self._run_progress.setWindowModality(Qt.WindowModality.WindowModal)
+            self._run_progress.setAutoClose(False)
+            self._run_progress.show()
+
             align = bool(self.chkAlignToFirst.isChecked())
             acc_path = None  # weighted-score accumulator
             nodata_sentinel = -9999.0
@@ -2592,6 +2612,15 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
 
             for idx, c in enumerate(self._criteria):
                 lyr = self._criterion_layer(c)
+                try:
+                    self._run_progress.setLabelText(
+                        f"기준 {idx + 1}/{len(self._criteria)} 처리 중…"
+                        + (f" ({lyr.name()})" if lyr is not None else "")
+                    )
+                    self._run_progress.setValue(idx)
+                    QtWidgets.QApplication.processEvents()
+                except Exception as _exc:
+                    log_swallowed("ahp_suitability_dialog._on_run (progress)", _exc)
                 if lyr is None or (not lyr.isValid()):
                     raise Exception("기준 레이어가 유효하지 않습니다.")
 
@@ -2694,7 +2723,7 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
                     projwin = extent_str
                     if extent_crs:
                         projwin = f"{extent_str} [{extent_crs}]"
-                    processing.run("gdal:cliprasterbyextent", {
+                    self._run_processing_alg("gdal:cliprasterbyextent", {
                         "INPUT": acc_path,
                         "PROJWIN": projwin,
                         "OVERCRS": False,
@@ -2749,11 +2778,19 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
                 if lyr_out is None:
                     push_message(self.iface, "경고", "결과 레이어를 프로젝트에 추가하지 못했습니다.", level=1, duration=6)
 
+        except ProcessingCancelled:
+            push_message(self.iface, "AHP", "계산이 취소되었습니다.", level=1, duration=6)
+            restore_ui_focus(self)
         except Exception as e:
             log_exception("AHP suitability tool error", e)
             push_message(self.iface, "오류", f"AHP 실행 실패: {e}", level=2, duration=10)
             restore_ui_focus(self)
         finally:
+            try:
+                self._run_progress.close()
+            except Exception as _exc:
+                log_swallowed("ahp_suitability_dialog._on_run (progress close)", _exc)
+            self._run_progress = None
             try:
                 keep = {os.path.abspath(out_path_user)}
             except Exception:

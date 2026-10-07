@@ -53,6 +53,7 @@ from qgis.core import (
     QgsCoordinateTransform,
     QgsContrastEnhancement,
     QgsPointXY,
+    QgsTask,
     QgsUnitTypes,
 )
 from .qtcompat import FT_STRING, RBS_ALL, SHADER_DISCRETE
@@ -65,13 +66,51 @@ from .utils import (
     push_message,
     restore_ui_focus,
     set_archtoolkit_layer_metadata,
+    transform_geometry,
 )
 from .help_dialog import show_help_dialog
+from .processing_task import ProcessingCancelled, run_task_blocking
 from . import dialog_memory
 from .icons import icon as plugin_icon
 
 FORM_CLASS, _ = uic.loadUiType(os.path.join(
     os.path.dirname(__file__), 'map_styling_dialog_base.ui'))
+
+
+class _BuildingPassTask(QgsTask):
+    """makeValid/buffer pass over collected geometries on a worker thread.
+
+    QgsGeometry operations are reentrant, so this CPU-heavy per-polygon repair
+    runs off the GUI thread: the feature reads before it and the layer writes
+    after it stay on the main thread. Cancelled tasks return without results
+    and the caller raises ProcessingCancelled.
+    """
+
+    def __init__(self, description, items, crs):
+        super().__init__(description, QgsTask.Flag.CanCancel)
+        self._items = items  # [(code_val, QgsGeometry)] collected on the main thread
+        self._crs = crs
+        self.results = []
+        self.stats = {
+            "points_skipped": 0,
+            "degenerate_buffered": 0,
+            "degenerate_skipped": 0,
+            "invalid_repaired": 0,
+        }
+
+    def run(self):
+        total = len(self._items)
+        for i, (code_val, geom) in enumerate(self._items):
+            if self.isCanceled():
+                return False
+            poly_geom, info = MapStylingDialog._building_polygon(geom, self._crs)
+            for k, v in info.items():
+                self.stats[k] += v
+            if poly_geom is not None:
+                self.results.append((code_val, poly_geom))
+            if total and i % 64 == 0:
+                self.setProgress(100.0 * i / total)
+        return True
 
 # Layer codes and names follow the official NGII (국토지리정보원) code tables:
 #   - 국토지리정보원, "전국 연속수치지형도 코드 및 레이어 설명서" Ver 5.1.1
@@ -377,6 +416,12 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
 
         try:
             self._style_run_id = new_run_id("map_styling")
+            # Aggregation runs on a worker (see _BuildingPassTask) with this
+            # dialog as the progress/cancel UI instead of freezing QGIS.
+            self._run_progress = QtWidgets.QProgressDialog("도면 시각화 적용 중…", "취소", 0, 0, self)
+            self._run_progress.setWindowModality(Qt.WindowModality.WindowModal)
+            self._run_progress.setAutoClose(False)
+            self._run_progress.show()
             results = []
             notes = []
             
@@ -502,9 +547,18 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
                 push_message(self.iface, "정보", "선택한 레이어들에서 해당하는 데이터를 찾을 수 없습니다.", level=1)
                 restore_ui_focus(self)
                 
+        except ProcessingCancelled:
+            push_message(self.iface, "도면 시각화", "적용이 취소되었습니다.", level=1, duration=6)
+            restore_ui_focus(self)
         except Exception as e:
             push_message(self.iface, "오류", f"스타일 적용 중 오류: {str(e)}", level=2)
             restore_ui_focus(self)
+        finally:
+            try:
+                self._run_progress.close()
+            except Exception as _exc:
+                log_swallowed("map_styling_dialog.apply_styling (progress)", _exc)
+            self._run_progress = None
 
 
     def _teardown_style_group(self, group, root):
@@ -727,7 +781,8 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
                     out.append(part)
         return out
 
-    def _building_polygon(self, geom, crs):
+    @staticmethod
+    def _building_polygon(geom, crs):
         """Turn one building feature into a (Multi)Polygon, or None.
 
         - points (DXF text/labels on a building layer) are not buildings: skipped;
@@ -737,6 +792,9 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
           form a ring is buffered by BUILDING_LINE_BUFFER_M metres, or skipped
           when the CRS has no metre conversion (geographic / unknown units).
         Returns (geometry or None, counters).
+
+        Static and geometry-only so the aggregation pass can run on a worker
+        thread (QgsGeometry is reentrant).
         """
         info = {"points_skipped": 0, "degenerate_buffered": 0, "degenerate_skipped": 0, "invalid_repaired": 0}
         if geom is None or geom.isNull() or geom.isEmpty():
@@ -748,7 +806,7 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
         if gtype == Qgis.GeometryType.Polygon:
             if geom.isGeosValid():
                 return QgsGeometry(geom), info
-            parts = self._polygonal_parts(geom.makeValid())
+            parts = MapStylingDialog._polygonal_parts(geom.makeValid())
             if parts:
                 info["invalid_repaired"] = 1
                 return QgsGeometry.collectGeometry(parts), info
@@ -771,12 +829,12 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
                 if cand.isGeosValid() and cand.area() > 0:
                     part_polys = [cand]
                 else:
-                    part_polys = [pp for pp in self._polygonal_parts(cand.makeValid()) if pp.area() > 0]
+                    part_polys = [pp for pp in MapStylingDialog._polygonal_parts(cand.makeValid()) if pp.area() > 0]
                     if part_polys:
                         info["invalid_repaired"] += 1
             if not part_polys:
                 if not buf_checked:
-                    buf = self._metres_to_layer_units(BUILDING_LINE_BUFFER_M, crs)
+                    buf = MapStylingDialog._metres_to_layer_units(BUILDING_LINE_BUFFER_M, crs)
                     buf_checked = True
                 if buf and len(distinct) >= 2:
                     buffered = QgsGeometry.fromPolylineXY(pts).buffer(buf, 2)
@@ -807,8 +865,7 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
         pr.addAttributes([QgsField("Layer", FT_STRING)])
         dest_layer.updateFields()
 
-        all_features = []
-        building_stats = {"points_skipped": 0, "degenerate_buffered": 0, "degenerate_skipped": 0, "invalid_repaired": 0}
+        collected = []
 
         for sl in source_layers:
             field_name = self.detect_code_field(sl)
@@ -830,36 +887,49 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
             request = QgsFeatureRequest().setFilterExpression(query)
 
             for feat in sl.getFeatures(request):
-                new_feat = QgsFeature(dest_layer.fields())
                 code_val = feat.attribute(field_name)
-                new_feat.setAttributes([code_val])
 
                 geom = feat.geometry()
                 if layer_ct is not None:
                     _skip_592 = False
                     try:
-                        geom = QgsGeometry(geom)
-                        geom.transform(layer_ct)
+                        # transform_geometry raises on the non-zero return code
+                        # of QgsGeometry.transform() (which swallows
+                        # QgsCsException), so a failed reprojection now skips the
+                        # feature instead of styling it at its source-CRS coords.
+                        geom = transform_geometry(geom, layer_ct)
                     except Exception as _exc:
                         log_swallowed("map_styling_dialog.aggregate_features", _exc)
                         log_swallowed("tools/map_styling_dialog.py:595 (aggregate_features)", _exc)
                         _skip_592 = True
                     if _skip_592:
                         continue
-                if is_building:
-                    poly_geom, info = self._building_polygon(geom, dest_crs)
-                    for k, v in info.items():
-                        building_stats[k] += v
-                    if poly_geom is None:
-                        continue
-                    new_feat.setGeometry(poly_geom)
-                else:
-                    new_feat.setGeometry(geom)
+                collected.append((code_val, geom))
 
-                all_features.append(new_feat)
+        if not collected:
+            return None
+
+        if is_building:
+            # The makeValid/buffer pass is the CPU-heavy part: run it on a
+            # worker (QgsGeometry is reentrant) so the GUI stays live.
+            task = _BuildingPassTask(
+                f"건물 폴리곤 변환 ({len(collected):,}개)", collected, dest_crs
+            )
+            run_task_blocking(task, owner=self)
+            out_items = task.results
+            building_stats = dict(task.stats)
+        else:
+            out_items = collected
 
         if is_building:
             self._last_building_stats = dict(building_stats)
+
+        all_features = []
+        for code_val, geom in out_items:
+            new_feat = QgsFeature(dest_layer.fields())
+            new_feat.setAttributes([code_val])
+            new_feat.setGeometry(geom)
+            all_features.append(new_feat)
 
         if not all_features:
             return None

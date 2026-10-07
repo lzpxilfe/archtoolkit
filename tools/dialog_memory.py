@@ -99,7 +99,14 @@ def restore(dialog: QtWidgets.QWidget, key: str, *, skip: Iterable[str] = ()) ->
         return 0
     base = f"{_PREFIX}/{key}"
     project = QgsProject.instance()
-    for name, w in _widgets(dialog, skip):
+    try:
+        widgets = _widgets(dialog, skip)
+    except RuntimeError as exc:
+        # The zero-delay restore (QTimer.singleShot below) can outlive the
+        # dialog; findChildren() on a deleted C++ object raises RuntimeError.
+        log_swallowed("dialog_memory.restore", exc)
+        return 0
+    for name, w in widgets:
         try:
             if QgsMapLayerComboBox is not None and isinstance(w, QgsMapLayerComboBox):
                 wanted = settings.value(f"{base}/{name}/layer_name", None)

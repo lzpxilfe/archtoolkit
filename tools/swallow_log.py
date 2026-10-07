@@ -19,5 +19,10 @@ _logger.addHandler(logging.NullHandler())
 
 
 def log_swallowed(context: str, exc: Exception = None) -> None:
-    """Record an exception a handler is about to swallow on purpose (QGIS-free)."""
-    _logger.warning("[swallowed] %s: %r", context, exc)
+    """Record an exception a handler is about to swallow on purpose (QGIS-free).
+
+    Severity is Info, matching utils.log_swallowed: the point of the record is
+    traceability (filter for ``[swallowed]`` when chasing a wrong result), not
+    alarm, and a normal run must not be flooded with warnings.
+    """
+    _logger.info("[swallowed] %s: %r", context, exc)

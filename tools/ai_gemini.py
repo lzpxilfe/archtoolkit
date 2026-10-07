@@ -354,6 +354,30 @@ def generate_text(
     except Exception as e:
         return None, f"Request failed: {e}"
 
+    try:
+        return _await_reply_text(reply, model, timeout_ms)
+    finally:
+        # deleteLater() on every exit path - each generate_text() call (plus up
+        # to 4 fallback attempts) otherwise leaks the reply object, which keeps
+        # the request (including the x-goog-api-key header string) in memory
+        # for the whole session.
+        try:
+            reply.deleteLater()
+        except Exception as _exc:
+            log_swallowed("tools/ai_gemini.py (generate_text)", _exc)
+
+
+def _await_reply_text(reply, model: str, timeout_ms: int):
+    """Wait for ``reply`` under a timeout and return ``(text, error)``.
+
+    Split out of ``generate_text`` so the caller can free the reply object on
+    every return path. Blocks the calling thread in a local QEventLoop for at
+    most ``timeout_ms``; the caller must not hold a paint/update lock.
+    """
+    global _LAST_FINISH_REASON, _LAST_FINISH_WARNING
+    _LAST_FINISH_REASON = None
+    _LAST_FINISH_WARNING = None
+
     loop = QEventLoop()
     timer = QTimer()
     timer.setSingleShot(True)

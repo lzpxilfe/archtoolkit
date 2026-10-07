@@ -77,6 +77,7 @@ from .utils import (
 )
 from . import cost_budget
 from .cost_models import edge_cost as _edge_cost
+from .raster_semantics import undeclared_nodata_mask
 from .live_log_dialog import ensure_live_log_dialog
 from .help_dialog import show_help_dialog
 from . import dialog_memory
@@ -366,7 +367,11 @@ class CostNetworkWorker(QgsTask):
                     v = band.ReadAsArray(col, row, 1, 1)
                     if v is not None:
                         z = float(v[0, 0])
-                        if (nodata is not None and z == float(nodata)) or math.isnan(z):
+                        # Also guesses undeclared sentinels (-9999 & co): a DEM
+                        # without a NoData declaration would keep such a node as
+                        # a valid -9999 m elevation and poison its edge costs.
+                        nd_mask, _guessed = undeclared_nodata_mask(v, nodata)
+                        if bool(nd_mask[0, 0]):
                             removed += 1
                             continue
                 except Exception as _exc:
@@ -591,10 +596,7 @@ class CostNetworkWorker(QgsTask):
                 continue
             dem = dem.astype(np.float32, copy=False)
 
-            nodata_mask = np.zeros(dem.shape, dtype=bool)
-            if nodata is not None:
-                nodata_mask |= dem == nodata
-            nodata_mask |= np.isnan(dem)
+            nodata_mask, _guessed = undeclared_nodata_mask(dem, nodata)
 
             win_gt = _window_geotransform(gt, xoff, yoff)
             inv_win = _inv_geotransform(win_gt)
@@ -812,10 +814,7 @@ class CostNetworkWorker(QgsTask):
                 if dem is None:
                     continue
                 dem = dem.astype(np.float32, copy=False)
-                nodata_mask = np.zeros(dem.shape, dtype=bool)
-                if nodata is not None:
-                    nodata_mask |= dem == nodata
-                nodata_mask |= np.isnan(dem)
+                nodata_mask, _guessed = undeclared_nodata_mask(dem, nodata)
                 win_gt = _window_geotransform(gt, xoff, yoff)
                 inv_win = _inv_geotransform(win_gt)
                 a_px, a_py = gdal.ApplyGeoTransform(inv_win, float(ax), float(ay))

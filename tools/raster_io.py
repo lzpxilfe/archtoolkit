@@ -32,9 +32,16 @@ def write_single_band_geotiff(
     helper removes that partial file on any error and re-raises so the caller
     still reports the failure.
 
+    A failed real write raises nothing from ``WriteArray``/``FlushCache`` (both
+    are void calls) - GDAL only records it in its error state - so the write is
+    verified twice before being called a success: the GDAL error state is
+    checked after the flush, and the closed file is re-opened to confirm GDAL
+    sees one complete raster of the written shape.
+
     Returns ``True`` on success and ``False`` only when the GTiff driver could
     not create the dataset, so callers that previously branched on
-    ``driver.Create(...) is None`` keep that exact behaviour.
+    ``driver.Create(...) is None`` keep that exact behaviour.  Any other
+    failure raises after the partial file has been removed.
     """
     from osgeo import gdal
 
@@ -61,9 +68,20 @@ def write_single_band_geotiff(
         band = out_ds.GetRasterBand(1)
         if nodata is not None:
             band.SetNoDataValue(float(nodata))
+        gdal.ErrorReset()
         band.WriteArray(array)
         band.FlushCache()
         out_ds.FlushCache()
+        # FlushCache() is a void call: a failed real write (disk full, quota)
+        # raises nothing and is only recorded in GDAL's error state, so setting
+        # ok = True unconditionally let a truncated .tif publish as success.
+        if gdal.GetLastErrorType() >= gdal.CE_Failure:
+            raise RuntimeError(
+                f"GDAL write failed ({gdal.GetLastErrorMsg()}) while writing {out_path}"
+            )
+        out_ds = None  # close first: GDAL writes the TIFF directory on close
+        if not _closed_file_is_complete(out_path, rows, cols):
+            raise RuntimeError(f"GeoTIFF verification failed (truncated write?): {out_path}")
         ok = True
     finally:
         # Close the dataset before any delete (required on Windows), then drop
@@ -73,8 +91,30 @@ def write_single_band_geotiff(
             try:
                 os.remove(str(out_path))
             except OSError as _exc:
-                log_swallowed("tools/raster_io.py:74 (write_single_band_geotiff)", _exc)
+                log_swallowed("tools/raster_io.py (write_single_band_geotiff)", _exc)
     return True
+
+
+def _closed_file_is_complete(out_path, rows, cols) -> bool:
+    """True when the closed ``out_path`` re-opens as a complete rows x cols raster.
+
+    Catches the truncation a void ``FlushCache()`` cannot report: GDAL writes
+    the TIFF directory at close, so a cut-off write leaves a file that either
+    fails to open or reports the wrong raster shape.
+    """
+    from osgeo import gdal
+
+    try:
+        ds = gdal.Open(str(out_path))
+    except Exception as _exc:
+        log_swallowed("tools/raster_io.py (_closed_file_is_complete)", _exc)
+        return False
+    if ds is None:
+        return False
+    try:
+        return bool(ds.RasterCount == 1 and ds.RasterYSize == rows and ds.RasterXSize == cols)
+    finally:
+        ds = None
 
 
 def inv_geotransform(gt):

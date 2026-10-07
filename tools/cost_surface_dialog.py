@@ -62,12 +62,14 @@ from qgis.gui import QgsMapToolEmitPoint, QgsRubberBand, QgsSnapIndicator
 from .utils import (
     log_swallowed,
     cleanup_files,
+    adopt_stamped_temp_outputs,
     is_metric_crs,
     log_message,
     push_message,
     restore_ui_focus,
     move_group_to_top,
     set_archtoolkit_layer_metadata,
+    stamp_layer_temp_outputs,
     transform_point,
 )
 from .raster_io import write_single_band_geotiff
@@ -91,6 +93,7 @@ from .icons import icon as plugin_icon
 from .i18n import is_english_ui
 from .utils import split_qgis_source_path
 from .raster_io import inv_geotransform
+from .raster_semantics import undeclared_nodata_mask
 
 
 FORM_CLASS, _ = uic.loadUiType(
@@ -1199,10 +1202,10 @@ class CostSurfaceWorker(QgsTask):
             return CostTaskResult(ok=False, message="DEM 값을 읽을 수 없습니다.")
         dem = dem.astype(np.float32, copy=False)
 
-        nodata_mask = np.zeros(dem.shape, dtype=bool)
-        if nodata is not None:
-            nodata_mask |= dem == nodata
-        nodata_mask |= np.isnan(dem)
+        # Also guesses undeclared sentinels: a DEM that uses -9999 without
+        # declaring NoData otherwise reads as a valid -9999 m elevation and
+        # turns every neighbouring slope into a cliff.
+        nodata_mask, guessed_nodata_n = undeclared_nodata_mask(dem, nodata)
 
         inv = _inv_geotransform(gt)
         s_px, s_py = gdal.ApplyGeoTransform(inv, sx, sy)
@@ -1662,6 +1665,11 @@ class CostSurfaceWorker(QgsTask):
             total_energy_kcal = float(end_energy_j) / 4184.0
 
         msg_parts = []
+        if guessed_nodata_n:
+            msg_parts.append(
+                f"DEM에 NoData 선언이 없어 극단값 {guessed_nodata_n:,}셀을 NoData로 처리했습니다"
+                " (예: -9999). 원본 래스터에 NoData를 선언하는 것을 권장합니다."
+            )
 
         if create_path and (end_cost_for_path is None or not math.isfinite(end_cost_for_path)):
             msg_parts.append("도착점까지 경로를 찾지 못했습니다.")
@@ -2108,6 +2116,7 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
         # never fired, and the reused dialog reopened with Run/Close disabled.
         self._closing_tasks = []
         self._layer_temp_outputs = {}  # layer_id -> [temporary file paths]
+        self._layer_temp_outputs.update(adopt_stamped_temp_outputs())
         self._profile_payloads = {}  # path_layer_id -> payload dict
         self._profile_dialogs = {}  # path_layer_id -> dialog
         self._profile_selection_handlers = {}  # path_layer_id -> handler
@@ -2600,12 +2609,19 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
         model_label = self.cmbModel.currentText()
 
         canvas_crs = self.canvas.mapSettings().destinationCrs()
-        start_dem = transform_point(self._start_canvas, canvas_crs, dem_layer.crs())
-        end_dem = (
-            transform_point(self._end_canvas, canvas_crs, dem_layer.crs())
-            if self._end_canvas
-            else None
-        )
+        try:
+            start_dem = transform_point(self._start_canvas, canvas_crs, dem_layer.crs())
+            end_dem = (
+                transform_point(self._end_canvas, canvas_crs, dem_layer.crs())
+                if self._end_canvas
+                else None
+            )
+        except Exception as e:
+            # transform_point fails closed: computing from untransformed canvas
+            # coordinates would place the whole cost surface at the wrong site.
+            push_message(self.iface, "오류", f"좌표 변환 실패 (분석 중단): {e}", level=2)
+            restore_ui_focus(self)
+            return
 
         model_params = {
             "tobler_base_kmh": float(self.spinToblerBaseKmh.value()),
@@ -3214,7 +3230,11 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
     def _track_layer_output(self, layer: QgsMapLayer, path: Optional[str]):
         if not layer or not path:
             return
-        self._layer_temp_outputs.setdefault(layer.id(), []).append(path)
+        paths = self._layer_temp_outputs.setdefault(layer.id(), [])
+        paths.append(str(path))
+        # Stamp on the layer so a plugin unload/reload re-adopts the file
+        # instead of orphaning it (the tracking dict dies with the dialog).
+        stamp_layer_temp_outputs(layer, paths)
 
     def _cleanup_layer_outputs(self, layer_ids):
         remove_preview = False

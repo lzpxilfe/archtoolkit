@@ -45,7 +45,7 @@ from qgis.core import (
     QgsSingleBandPseudoColorRenderer,
 )
 from .qtcompat import SHADER_INTERPOLATED, SHADER_DISCRETE
-import processing
+from .processing_task import ProcessingCancelled, run_alg_blocking, run_compute_blocking
 from .utils import (
     log_swallowed,
     cleanup_files, log_message, push_message, restore_ui_focus, set_archtoolkit_layer_metadata,
@@ -68,6 +68,38 @@ from .icons import icon as plugin_icon
 # grid, the centre/shifted/difference arrays, the squared-sum and count
 # accumulators and both validity masks. Measured with tracemalloc; rounded up.
 TRI_RADIUS_BYTES_PER_PIXEL = 80
+
+# Peak working set per input pixel of the NumPy array paths (curvature kernel,
+# flat-aspect marking, aspect derivatives). The curvature kernel alone keeps
+# ~18 full-size arrays alive (measured ~72 B/px at float32); the aspect paths
+# keep fewer but share the same ceiling so one guard covers all of them.
+ARRAY_PATH_BYTES_PER_PIXEL = 72
+# Absolute ceiling regardless of how much memory the machine reports.
+ARRAY_PATH_MAX_PIXELS = 120_000_000
+
+
+def _array_path_memory_refused(npx):
+    """``None`` when the array working set fits, else a Korean reason to refuse.
+
+    The pixel-count cap alone admitted ~9 GB peaks: a merged LiDAR DEM passed
+    it and froze/swapped QGIS on the GUI thread. The working set is now checked
+    against what the machine reports, the way the TRI radius and the cost
+    surface do, with the old cap kept as an absolute ceiling.
+    """
+    npx = int(npx)
+    bytes_needed = npx * ARRAY_PATH_BYTES_PER_PIXEL
+    available = cost_budget.available_memory_bytes()
+    allowed = (available if available is not None
+               else cost_budget.ASSUMED_AVAILABLE_BYTES) * cost_budget.MEMORY_SAFETY_FRACTION
+    if npx <= ARRAY_PATH_MAX_PIXELS and bytes_needed <= allowed:
+        return None
+    if npx > ARRAY_PATH_MAX_PIXELS:
+        return f"DEM이 너무 큽니다({npx:,} 픽셀). 1.2억 픽셀 이하로 클립/리샘플 후 실행하세요."
+    return (
+        f"DEM {npx:,} 픽셀 처리에 약 {bytes_needed / 1024 ** 3:.1f}GB가 필요한데 "
+        + (f"가용 메모리가 부족합니다(가용 약 {available / 1024 ** 3:.1f}GB)." if available else "가용 메모리를 확인할 수 없습니다.")
+        + " DEM을 클립하거나 리샘플하세요."
+    )
 
 # Exact radius TPI is computed in horizontal strips (terrain_math.focal_tpi_strips)
 # so a large DEM never has to fit in memory at once. Rows per strip are chosen
@@ -425,8 +457,14 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
         push_message(self.iface, "처리 중", "지형 분석 실행 중...", level=0)
         self.hide()
         QtWidgets.QApplication.processEvents()
-        
+
         success = False
+        # Processing steps run through the task manager (see processing_task):
+        # the dialog repaints and Cancel aborts the analysis.
+        self._run_progress = QtWidgets.QProgressDialog("지형 분석 중…", "취소", 0, 0, self)
+        self._run_progress.setWindowModality(QtCore.Qt.WindowModality.WindowModal)
+        self._run_progress.setAutoClose(False)
+        self._run_progress.show()
         try:
             dem_source = dem_layer.source()
             results = []
@@ -448,9 +486,9 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                 # units; the geographic-CRS guard above is what keeps that true.
                 # COMPUTE_EDGES is left at the toolbox default (False), so the
                 # 1-px border stays NoData instead of a half-window estimate.
-                processing.run("gdal:slope", {
+                run_alg_blocking("gdal:slope", {
                     'INPUT': dem_source, 'BAND': 1, 'SCALE': 1, 'AS_PERCENT': False, 'OUTPUT': output
-                })
+                }, owner=self)
                 cls_key = self.get_selected_classification()
                 cls_info = self.SLOPE_CLASSIFICATIONS[cls_key]
                 layer = QgsRasterLayer(output, f"경사도_{cls_info['name']}")
@@ -482,10 +520,10 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                 # _write_flat_marked_aspect; DEM NoData stays NoData.
                 # COMPUTE_EDGES stays False so the 1-px border is NoData instead
                 # of a half-window guess. Both are recorded in the metadata.
-                processing.run("gdal:aspect", {
+                run_alg_blocking("gdal:aspect", {
                     'INPUT': dem_source, 'BAND': 1, 'TRIG_ANGLE': False, 'ZERO_FLAT': False,
                     'COMPUTE_EDGES': False, 'ZEVENBERGEN': False, 'OUTPUT': raw_aspect,
-                })
+                }, owner=self)
                 flat_marked = self._write_flat_marked_aspect(dem_source, raw_aspect, output)
                 if flat_marked:
                     cleanup_files([raw_aspect])
@@ -529,9 +567,9 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                     )
                 else:
                     output = os.path.join(tempfile.gettempdir(), f'archtoolkit_tri_{run_id}.tif')
-                    processing.run("gdal:triterrainruggednessindex", {
+                    run_alg_blocking("gdal:triterrainruggednessindex", {
                         'INPUT': dem_source, 'BAND': 1, 'OUTPUT': output
-                    })
+                    }, owner=self)
                     tri_classes = self.get_tri_classes(tri_max)
                     # The INDEX is Riley's (gdaldem -alg Riley, its default);
                     # the 5 display classes are ours, scaled to tri_max. Riley's
@@ -574,9 +612,9 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                 # gdaldem's roughness is Wilson, O'Connell, Brown, Guinan &
                 # Grehan (2007), Marine Geodesy 30(1-2), 3-35 - NOT Wilson &
                 # Gallant (2000), a different work by a different author.
-                processing.run("gdal:roughness", {
+                run_alg_blocking("gdal:roughness", {
                     'INPUT': dem_source, 'BAND': 1, 'OUTPUT': output
-                })
+                }, owner=self)
                 layer = QgsRasterLayer(output, "Roughness (Wilson et al. 2007)")
                 if layer.isValid():
                     try:
@@ -623,10 +661,18 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                 push_message(self.iface, "오류", "분석 결과가 없습니다.", level=2)
                 restore_ui_focus(self)
                 
+        except ProcessingCancelled:
+            push_message(self.iface, "지형 분석", "분석이 취소되었습니다.", level=1, duration=6)
+            restore_ui_focus(self)
         except Exception as e:
             push_message(self.iface, "오류", f"처리 중 오류: {str(e)}", level=2)
             restore_ui_focus(self)
         finally:
+            try:
+                self._run_progress.close()
+            except Exception as _exc:
+                log_swallowed("terrain_analysis_dialog.run_analysis (progress)", _exc)
+            self._run_progress = None
             if not success:
                 restore_ui_focus(self)
     
@@ -659,9 +705,9 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
         output = os.path.join(tempfile.gettempdir(), f'archtoolkit_tpi_{tag}_{run_id}.tif')
 
         def _fallback_3x3():
-            processing.run("gdal:tpitopographicpositionindex", {
+            run_alg_blocking("gdal:tpitopographicpositionindex", {
                 'INPUT': dem_source, 'BAND': 1, 'OUTPUT': output
-            })
+            }, owner=self)
             return output, scratch, 1
 
         if radius <= 1:
@@ -834,6 +880,8 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                 self.apply_style(layer, tpi_classes, 10)
                 results.append("TPI")
             
+        except ProcessingCancelled:
+            raise
         except Exception as e:
             self.iface.messageBar().pushMessage("경고", f"TPI 분석 오류: {str(e)}", level=1)
         finally:
@@ -873,9 +921,9 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
             
             # 2. Generate Slope
             slope_path = os.path.join(tempfile.gettempdir(), f'archtoolkit_slope_temp_{run_id}.tif')
-            processing.run("gdal:slope", {
+            run_alg_blocking("gdal:slope", {
                 'INPUT': dem_source, 'BAND': 1, 'SCALE': 1, 'AS_PERCENT': False, 'OUTPUT': slope_path
-            })
+            }, owner=self)
             
             # 3. Check if files exist
             if not os.path.exists(tpi_path) or not os.path.exists(slope_path):
@@ -940,13 +988,13 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
             if mask_expr:
                 calc_expr = f"({calc_expr}){mask_expr}"
 
-            result = processing.run("gdal:rastercalculator", {
+            result = run_alg_blocking("gdal:rastercalculator", {
                 'INPUT_A': tpi_path, 'BAND_A': 1,
                 'INPUT_B': slope_path, 'BAND_B': 1,
                 'FORMULA': calc_expr,
                 'OUTPUT': output_path,
                 'RTYPE': 1  # Int16
-            })
+            }, owner=self)
             
             if result and os.path.exists(output_path):
                 radius_label = ("3x3" if tpi_radius <= 1 else
@@ -987,6 +1035,8 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
             else:
                 self.iface.messageBar().pushMessage("경고", "지형분류 래스터 생성 실패", level=1)
                 
+        except ProcessingCancelled:
+            raise
         except Exception as e:
             self.iface.messageBar().pushMessage("경고", f"지형분류 분석 오류: {str(e)}", level=1)
         finally:
@@ -1084,7 +1134,7 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
             # responding".
             progress = QtWidgets.QProgressDialog(
                 f"TRI 반경 {radius}셀 계산 중…", "취소", 0, window_cells - 1, self)
-            progress.setWindowModality(QtCore.Qt.WindowModality.WindowModal)
+            progress.setWindowModality(QtCore.QtCore.Qt.WindowModality.WindowModal)
             progress.setMinimumDuration(500)
 
             def _progress(done, total):
@@ -1164,32 +1214,25 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                 push_message(self.iface, "경고", "DEM을 GDAL로 열 수 없습니다(곡률).", level=1)
                 return
             band = ds.GetRasterBand(1)
-            # Memory guard: the kernel keeps ~18 full-size arrays alive; at
-            # float32 that's ~72 B/px, so cap the pixel count instead of letting
-            # a merged LiDAR DEM freeze QGIS. 120M px ≈ 9 GB peak.
+            # Memory guard shared with the other array paths: the kernel keeps
+            # ~18 full-size arrays alive (~72 B/px), checked against what the
+            # machine reports instead of a fixed pixel cap alone.
             npx = int(ds.RasterXSize) * int(ds.RasterYSize)
-            if npx > 120_000_000:
+            refused = _array_path_memory_refused(npx)
+            if refused:
                 push_message(
                     self.iface,
                     "경고",
-                    f"DEM이 너무 큽니다({npx:,} 픽셀). 곡률 분석은 1.2억 픽셀 이하로 클립/리샘플 후 실행하세요.",
+                    f"곡률 분석: {refused}",
                     level=1,
                     duration=9,
                 )
                 ds = None
                 return
-            # Read, then check, then cast: ReadAsArray() returns None on a failed
-            # read, so casting first turned that into an AttributeError and left
-            # the None branch below unreachable.
-            z = band.ReadAsArray()
             gt = ds.GetGeoTransform()
             proj = ds.GetProjection()
             nodata = band.GetNoDataValue()
             ds = None
-            if z is None or z.ndim != 2:
-                push_message(self.iface, "경고", "DEM 배열을 읽을 수 없습니다(곡률).", level=1)
-                return
-            z = z.astype("float32")
 
             # Separate x/y spacing: one mean size scaled the second
             # derivatives wrongly on non-square pixels (10 x 5 m: ~1.9x).
@@ -1199,47 +1242,72 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                 push_message(self.iface, "경고", "DEM 픽셀 크기를 확인할 수 없습니다(곡률).", level=1)
                 return
 
-            valid = np.isfinite(z)
-            if nodata is not None:
-                valid &= (z != nodata)
-
-            # Curvature is invariant to an additive constant. Subtracting the
-            # mean valid elevation drops working magnitudes from ~1000 m (a
-            # Korean LiDAR base) to relief scale, avoiding float32 catastrophic
-            # cancellation in the second-difference terms (verified: cuts
-            # sign-flips/large errors on sub-meter micro-relief) while keeping
-            # the float32 memory budget.
-            try:
-                if np.any(valid):
-                    z0 = float(np.mean(z[valid]))
-                    if np.isfinite(z0):
-                        z = z - np.float32(z0)
-            except Exception as _exc:
-                log_swallowed("terrain_analysis_dialog.run_curvature_analysis", _exc)
-
-            profile, plan = self._zt_curvature(z, cell_x, cell_y)
-
-            # NoData where any 3x3 neighbour is invalid, plus the 1-px border.
-            inv = ~valid
-            inv_any = (
-                inv
-                | np.roll(inv, 1, 0) | np.roll(inv, -1, 0)
-                | np.roll(inv, 1, 1) | np.roll(inv, -1, 1)
-                | np.roll(np.roll(inv, 1, 0), 1, 1) | np.roll(np.roll(inv, 1, 0), -1, 1)
-                | np.roll(np.roll(inv, -1, 0), 1, 1) | np.roll(np.roll(inv, -1, 0), -1, 1)
-            )
-            border = np.zeros(z.shape, dtype=bool)
-            border[0, :] = border[-1, :] = border[:, 0] = border[:, -1] = True
-            out_mask = inv_any | border
-            nd = -9999.0
-            for arr in (profile, plan):
-                arr[out_mask] = nd
-
-            good = ~out_mask
             prof_path = os.path.join(tempfile.gettempdir(), f'archtoolkit_curv_profile_{run_id}.tif')
             plan_path = os.path.join(tempfile.gettempdir(), f'archtoolkit_curv_plan_{run_id}.tif')
-            self._write_geotiff(prof_path, profile.astype("float32"), gt, proj, nd)
-            self._write_geotiff(plan_path, plan.astype("float32"), gt, proj, nd)
+
+            # The array work is the CPU-heavy part and runs on a worker
+            # (run_compute_blocking): it used to freeze QGIS inline.
+            def _compute(set_progress):
+                ds2 = gdal.Open(src, gdal.GA_ReadOnly)
+                if ds2 is None:
+                    raise RuntimeError("DEM 배열을 읽을 수 없습니다(곡률).")
+                band2 = ds2.GetRasterBand(1)
+                # Read, then check, then cast: ReadAsArray() returns None on a
+                # failed read, so casting first would turn that into an
+                # AttributeError instead of the message below.
+                z = band2.ReadAsArray()
+                ds2 = None
+                if z is None or z.ndim != 2:
+                    raise RuntimeError("DEM 배열을 읽을 수 없습니다(곡률).")
+                set_progress(15)
+                z = z.astype("float32")
+
+                valid = np.isfinite(z)
+                if nodata is not None:
+                    valid &= (z != nodata)
+
+                # Curvature is invariant to an additive constant. Subtracting the
+                # mean valid elevation drops working magnitudes from ~1000 m (a
+                # Korean LiDAR base) to relief scale, avoiding float32 catastrophic
+                # cancellation in the second-difference terms (verified: cuts
+                # sign-flips/large errors on sub-meter micro-relief) while keeping
+                # the float32 memory budget.
+                try:
+                    if np.any(valid):
+                        z0 = float(np.mean(z[valid]))
+                        if np.isfinite(z0):
+                            z = z - np.float32(z0)
+                except Exception as _exc:
+                    log_swallowed("terrain_analysis_dialog.run_curvature_analysis", _exc)
+
+                profile, plan = self._zt_curvature(z, cell_x, cell_y)
+                set_progress(70)
+
+                # NoData where any 3x3 neighbour is invalid, plus the 1-px border.
+                inv = ~valid
+                inv_any = (
+                    inv
+                    | np.roll(inv, 1, 0) | np.roll(inv, -1, 0)
+                    | np.roll(inv, 1, 1) | np.roll(inv, -1, 1)
+                    | np.roll(np.roll(inv, 1, 0), 1, 1) | np.roll(np.roll(inv, 1, 0), -1, 1)
+                    | np.roll(np.roll(inv, -1, 0), 1, 1) | np.roll(np.roll(inv, -1, 0), -1, 1)
+                )
+                border = np.zeros(z.shape, dtype=bool)
+                border[0, :] = border[-1, :] = border[:, 0] = border[:, -1] = True
+                out_mask = inv_any | border
+                nd = -9999.0
+                for arr in (profile, plan):
+                    arr[out_mask] = nd
+
+                good = ~out_mask
+                self._write_geotiff(prof_path, profile.astype("float32"), gt, proj, nd)
+                self._write_geotiff(plan_path, plan.astype("float32"), gt, proj, nd)
+                set_progress(100)
+                return profile, plan, good
+
+            profile, plan, good = run_compute_blocking(
+                _compute, label="곡률 계산 중…", owner=self
+            )
 
             for path, name, kind, arr, neg_lab, pos_lab in (
                 # The sign convention belongs in the name: users cross-checking
@@ -1275,6 +1343,8 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
 
             self._log_curvature_summary(profile[good], plan[good])
             results.append("곡률")
+        except ProcessingCancelled:
+            raise
         except Exception as e:
             push_message(self.iface, "경고", f"곡률 분석 오류: {str(e)}", level=1)
 
@@ -1291,7 +1361,7 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
         DEM window is valid can only be NoData there because it is flat
         (terrain_math.mark_flat_aspect). Returns False - and the caller keeps
         the raw raster, flats left as NoData - when the arrays cannot be read
-        or the DEM is beyond the same 1.2e8-pixel cap as the other array paths.
+        or the DEM is beyond the shared array-path memory guard.
         """
         if np is None or gdal is None:
             return False
@@ -1300,9 +1370,10 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
             if ads is None:
                 return False
             npx = int(ads.RasterXSize) * int(ads.RasterYSize)
-            if npx > 120_000_000:
+            refused = _array_path_memory_refused(npx)
+            if refused:
                 log_message(
-                    f"사면방향: DEM이 커서({npx:,} 픽셀) 평탄 셀을 따로 표시하지 않고 NoData로 둡니다."
+                    f"사면방향: {refused} 평탄 셀을 따로 표시하지 않고 NoData로 둡니다."
                 )
                 ads = None
                 return False
@@ -1429,94 +1500,114 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
             # neutral 0 / 0.5 values all around the DEM. ZERO_FLAT stays at the
             # toolbox default (False) because flats must stay distinguishable to
             # get the neutral value, not 0 deg (= due north).
-            processing.run("gdal:aspect", {
+            run_alg_blocking("gdal:aspect", {
                 'INPUT': src, 'BAND': 1, 'TRIG_ANGLE': False, 'ZERO_FLAT': False,
                 'COMPUTE_EDGES': True, 'ZEVENBERGEN': False, 'OUTPUT': aspect_path,
-            })
+            }, owner=self)
             ads = gdal.Open(aspect_path, gdal.GA_ReadOnly)
             if ads is None:
                 push_message(self.iface, "경고", "사면방향 계산 실패(사면 파생).", level=1)
                 return
             aband = ads.GetRasterBand(1)
             npx = int(ads.RasterXSize) * int(ads.RasterYSize)
-            if npx > 120_000_000:
+            refused = _array_path_memory_refused(npx)
+            if refused:
                 push_message(
                     self.iface,
                     "경고",
-                    f"DEM이 너무 큽니다({npx:,} 픽셀). 사면 파생은 1.2억 픽셀 이하로 클립/리샘플 후 실행하세요.",
+                    f"사면 파생: {refused}",
                     level=1,
                     duration=9,
                 )
                 ads = None
                 return
-            # Read, then check, then cast: ReadAsArray() returns None on a failed
-            # read, so casting first turned that into an AttributeError instead of
-            # the user-facing message below.
-            aspect = aband.ReadAsArray()
             gt = ads.GetGeoTransform()
             proj = ads.GetProjection()
             a_nd = aband.GetNoDataValue()
             ads = None
-            if aspect is None or aspect.ndim != 2:
-                push_message(self.iface, "경고", "사면방향 래스터 배열을 읽을 수 없습니다(사면 파생).", level=1)
-                return
-            aspect = aspect.astype("float32")
 
-            # gdaldem aspect (ZERO_FLAT=False) writes the same sentinel for
-            # true flats AND for DEM NoData. Read the source DEM's validity so
-            # NoData stays NoData instead of being fabricated as "neutral".
-            dem_valid = None
-            try:
-                dds = gdal.Open(src, gdal.GA_ReadOnly)
-                if dds is not None:
-                    dband = dds.GetRasterBand(1)
-                    d_nd = dband.GetNoDataValue()
-                    zarr = dband.ReadAsArray()
-                    if zarr is not None and zarr.shape == aspect.shape:
-                        dem_valid = np.isfinite(zarr)
-                        if d_nd is not None:
-                            dem_valid &= (zarr != d_nd)
-                    del zarr
-                    dds = None
-            except Exception:
+            # The array work is the CPU-heavy part and runs on a worker
+            # (run_compute_blocking): it used to freeze QGIS inline.
+            def _compute(set_progress):
+                ads2 = gdal.Open(aspect_path, gdal.GA_ReadOnly)
+                if ads2 is None:
+                    raise RuntimeError("사면방향 래스터 배열을 읽을 수 없습니다(사면 파생).")
+                # Read, then check, then cast: ReadAsArray() returns None on a
+                # failed read, so casting first would turn that into an
+                # AttributeError instead of the message raised below.
+                aspect = ads2.GetRasterBand(1).ReadAsArray()
+                ads2 = None
+                if aspect is None or aspect.ndim != 2:
+                    raise RuntimeError("사면방향 래스터 배열을 읽을 수 없습니다(사면 파생).")
+                aspect = aspect.astype("float32")
+                set_progress(15)
+
+                # gdaldem aspect (ZERO_FLAT=False) writes the same sentinel for
+                # true flats AND for DEM NoData. Read the source DEM's validity so
+                # NoData stays NoData instead of being fabricated as "neutral".
                 dem_valid = None
+                try:
+                    dds = gdal.Open(src, gdal.GA_ReadOnly)
+                    if dds is not None:
+                        dband = dds.GetRasterBand(1)
+                        d_nd = dband.GetNoDataValue()
+                        zarr = dband.ReadAsArray()
+                        if zarr is not None and zarr.shape == aspect.shape:
+                            dem_valid = np.isfinite(zarr)
+                            if d_nd is not None:
+                                dem_valid &= (zarr != d_nd)
+                        del zarr
+                        dds = None
+                except Exception:
+                    dem_valid = None
 
-            undefined_aspect = (aspect < 0)
-            if a_nd is not None:
-                undefined_aspect |= (aspect == a_nd)
-            if dem_valid is not None:
-                invalid = ~dem_valid                    # DEM NoData → output NoData
-                flat = undefined_aspect & dem_valid     # true flats → neutral value
-            else:
-                invalid = np.zeros(aspect.shape, dtype=bool)
-                flat = undefined_aspect
-            defined = ~(undefined_aspect | invalid)
-            nd = -9999.0
-            rad = np.radians(aspect)
+                undefined_aspect = (aspect < 0)
+                if a_nd is not None:
+                    undefined_aspect |= (aspect == a_nd)
+                if dem_valid is not None:
+                    invalid = ~dem_valid                    # DEM NoData → output NoData
+                    flat = undefined_aspect & dem_valid     # true flats → neutral value
+                else:
+                    invalid = np.zeros(aspect.shape, dtype=bool)
+                    flat = undefined_aspect
+                defined = ~(undefined_aspect | invalid)
+                nd = -9999.0
+                rad = np.radians(aspect)
 
-            def _make(fn, flat_value):
-                arr = np.full(aspect.shape, nd, dtype="float32")
-                arr[defined] = fn(rad[defined]).astype("float32") if callable(fn) else fn[defined].astype("float32")
-                arr[flat] = flat_value
-                return arr
+                def _make(fn, flat_value):
+                    arr = np.full(aspect.shape, nd, dtype="float32")
+                    arr[defined] = fn(rad[defined]).astype("float32") if callable(fn) else fn[defined].astype("float32")
+                    arr[flat] = flat_value
+                    return arr
 
-            north = _make(np.cos, 0.0)
-            east = _make(np.sin, 0.0)
-            trasp = np.full(aspect.shape, nd, dtype="float32")
-            trasp[defined] = ((1.0 - np.cos(np.radians(aspect[defined] - 30.0))) / 2.0).astype("float32")
-            trasp[flat] = 0.5
+                north = _make(np.cos, 0.0)
+                east = _make(np.sin, 0.0)
+                trasp = np.full(aspect.shape, nd, dtype="float32")
+                trasp[defined] = ((1.0 - np.cos(np.radians(aspect[defined] - 30.0))) / 2.0).astype("float32")
+                trasp[flat] = 0.5
+                set_progress(65)
 
-            specs = [
-                ("northness", "북향성 northness = cos(aspect)", north, "diverging",
-                 "남향 south (-1)", "북향 north (+1)"),
-                ("eastness", "동향성 eastness = sin(aspect)", east, "diverging",
-                 "서향 west (-1)", "동향 east (+1)"),
-                ("trasp", "TRASP 일사프록시 (Roberts & Cooper 1989)", trasp, "sequential",
-                 "서늘/습 (0)", "따뜻/건조 (1)"),
-            ]
-            for key, name, arr, style, neg_lab, pos_lab in specs:
-                path = os.path.join(tempfile.gettempdir(), f'archtoolkit_aspderiv_{key}_{run_id}.tif')
-                self._write_geotiff(path, arr, gt, proj, nd)
+                specs = [
+                    ("northness", "북향성 northness = cos(aspect)", north, "diverging",
+                     "남향 south (-1)", "북향 north (+1)"),
+                    ("eastness", "동향성 eastness = sin(aspect)", east, "diverging",
+                     "서향 west (-1)", "동향 east (+1)"),
+                    ("trasp", "TRASP 일사프록시 (Roberts & Cooper 1989)", trasp, "sequential",
+                     "서늘/습 (0)", "따뜻/건조 (1)"),
+                ]
+                written = []
+                for i, (key, name, arr, style, neg_lab, pos_lab) in enumerate(specs):
+                    path = os.path.join(tempfile.gettempdir(), f'archtoolkit_aspderiv_{key}_{run_id}.tif')
+                    self._write_geotiff(path, arr, gt, proj, nd)
+                    written.append((key, name, path, style, neg_lab, pos_lab, arr))
+                    set_progress(65 + 35 * (i + 1) / len(specs))
+                return written, north, east, trasp, nd
+
+            written, north, east, trasp, nd = run_compute_blocking(
+                _compute, label="사면 파생 계산 중…", owner=self
+            )
+
+            for key, name, path, style, neg_lab, pos_lab, arr in written:
                 layer = QgsRasterLayer(path, name)
                 if not layer.isValid():
                     continue
@@ -1542,6 +1633,8 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
 
             self._log_aspect_summary(north, east, trasp, nd)
             results.append("사면파생")
+        except ProcessingCancelled:
+            raise
         except Exception as e:
             push_message(self.iface, "경고", f"사면 파생 오류: {str(e)}", level=1)
         finally:

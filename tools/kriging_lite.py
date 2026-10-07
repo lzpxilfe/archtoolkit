@@ -76,6 +76,15 @@ _EXACT_TOL = 1e-9
 
 @dataclass(frozen=True)
 class KrigingParams:
+    """Variogram parameters for the exponential model used below.
+
+    ``range`` is the exponential *scale* parameter: ``C(h) = partial_sill *
+    exp(-h / range)``. The practical distance at which correlation drops to
+    ~5% is ``3 * range`` - which is what most kriging packages report as
+    "range", so transcribing these values into another tool without
+    multiplying by 3 smooths about 3x less than intended.
+    """
+
     model: str
     nugget: float
     partial_sill: float
@@ -473,14 +482,19 @@ def ordinary_kriging_lite_to_geotiff(
     varr = np.full((nrows, ncols), nodata, dtype=np.float32)
 
     # Cache inverse matrices by neighbor id tuple (local neighborhoods repeat a lot on grids).
-    inv_cache: Dict[Tuple[int, ...], np.ndarray] = {}
+    inv_cache: Dict[Tuple[int, ...], Optional[np.ndarray]] = {}
     inv_cache_max = 5000
 
-    def get_inv(nei_ids: Sequence[int]) -> np.ndarray:
+    def get_inv(nei_ids: Sequence[int]) -> Optional[np.ndarray]:
+        """Inverse of the augmented kriging system, or None when it stays singular.
+
+        None (cached as such, so a broken neighborhood is not rebuilt per
+        cell) makes the caller leave that cell at NoData instead of letting a
+        single unusable neighborhood abort the whole raster mid-run.
+        """
         key = tuple(int(i) for i in nei_ids)
-        inv = inv_cache.get(key)
-        if inv is not None:
-            return inv
+        if key in inv_cache:
+            return inv_cache[key]
 
         coords = pts[list(key), :]
         dx = coords[:, 0][:, None] - coords[:, 0][None, :]
@@ -505,7 +519,11 @@ def ordinary_kriging_lite_to_geotiff(
             eps = float(max(1e-12, params.partial_sill * 1e-10))
             for i in range(n):
                 A[i, i] += eps
-            inv = np.linalg.inv(A)
+            try:
+                inv = np.linalg.inv(A)
+            except Exception as _exc:
+                log_swallowed("tools/kriging_lite.py (regularized inverse)", _exc)
+                inv = None
 
         if len(inv_cache) >= inv_cache_max:
             inv_cache.clear()
@@ -535,6 +553,10 @@ def ordinary_kriging_lite_to_geotiff(
                 continue
 
             inv = get_inv(key)
+            if inv is None:
+                # This neighborhood stays singular even after regularization:
+                # leave the cell at NoData rather than abort the run.
+                continue
             coords = pts[key, :]
             dz = zs[key]
 

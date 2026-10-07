@@ -22,10 +22,10 @@ from qgis.PyQt import uic
 from qgis.PyQt import QtWidgets
 from qgis.PyQt.QtCore import Qt
 from qgis.core import QgsProject, QgsVectorLayer, Qgis
-import processing
 from .utils import log_swallowed, push_message, set_archtoolkit_layer_metadata
 from .live_log_dialog import ensure_live_log_dialog
 from .help_dialog import show_help_dialog
+from .processing_task import ProcessingCancelled, run_alg_blocking
 from . import dialog_memory
 from .icons import icon as plugin_icon
 
@@ -279,20 +279,32 @@ class ContourExtractorDialog(QtWidgets.QDialog, FORM_CLASS):
             run_id = uuid.uuid4().hex[:8]
             temp_output = os.path.join(tempfile.gettempdir(), f'archtoolkit_contour_{interval}m_{run_id}.gpkg')
             
-            # Run GDAL contour
+            # Run GDAL contour - through the task manager so the GUI stays
+            # live and Cancel aborts (processing.run froze QGIS on fine DEMs).
             # IGNORE_NODATA maps to gdal_contour's -inodata flag, which means
             # "ignore the nodata DESIGNATION and treat every value as valid" —
             # True would draw garbage contour rings around -9999/-32768 fill.
-            result = processing.run("gdal:contour", {
-                'INPUT': layer.source(),
-                'BAND': 1,
-                'INTERVAL': interval,
-                'FIELD_NAME': 'ELEV',
-                'CREATE_3D': False,
-                'IGNORE_NODATA': False,
-                'NODATA': None,
-                'OUTPUT': temp_output
-            })
+            self._run_progress = QtWidgets.QProgressDialog("등고선 추출 중…", "취소", 0, 0, self)
+            self._run_progress.setWindowModality(Qt.WindowModality.WindowModal)
+            self._run_progress.setAutoClose(False)
+            self._run_progress.show()
+            try:
+                result = run_alg_blocking("gdal:contour", {
+                    'INPUT': layer.source(),
+                    'BAND': 1,
+                    'INTERVAL': interval,
+                    'FIELD_NAME': 'ELEV',
+                    'CREATE_3D': False,
+                    'IGNORE_NODATA': False,
+                    'NODATA': None,
+                    'OUTPUT': temp_output
+                }, owner=self)
+            finally:
+                try:
+                    self._run_progress.close()
+                except Exception as _exc:
+                    log_swallowed("contour_extractor_dialog.extract_from_dem (progress)", _exc)
+                self._run_progress = None
             
             # Add result to map
             if result and os.path.exists(temp_output):
@@ -318,7 +330,10 @@ class ContourExtractorDialog(QtWidgets.QDialog, FORM_CLASS):
             else:
                 self.iface.messageBar().pushMessage("오류", "등고선 생성에 실패했습니다.", level=2)
                 self.show()
-            
+
+        except ProcessingCancelled:
+            self.iface.messageBar().pushMessage("취소", "등고선 추출이 취소되었습니다.", level=1)
+            self.show()
         except Exception as e:
             self.iface.messageBar().pushMessage("오류", f"처리 중 오류: {str(e)}", level=2)
             self.show()

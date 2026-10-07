@@ -237,6 +237,12 @@ class SuggestedPixelTests(unittest.TestCase):
         self.assertIsNone(suggested_pixel_size(None, 10, 1))
         self.assertIsNone(suggested_pixel_size(5.0, 10, 0))
 
+    def test_boundary_noise_does_not_jump_to_the_next_step(self):
+        # target = 20 * (1 + 2.5e-10): a float-noise hair above the 20 m step
+        # used to jump to 50 m (a 2.5x overshoot for a sub-cell difference).
+        suggested = suggested_pixel_size(10.0, 4_000_000_001, 1_000_000_000)
+        self.assertEqual(suggested, 20.0)
+
 
 class AvailableMemoryTests(unittest.TestCase):
     def test_returns_a_plausible_value_or_none(self):

@@ -40,7 +40,7 @@ from .qtcompat import FT_DOUBLE
 from qgis.gui import QgsMapLayerComboBox
 
 from .live_log_dialog import ensure_live_log_dialog
-from .utils import log_swallowed, log_message, move_group_to_top, push_message, restore_ui_focus
+from .utils import log_swallowed, log_message, move_group_to_top, push_message, restore_ui_focus, transform_geometry
 from .utils import set_archtoolkit_layer_metadata
 from .help_dialog import show_help_dialog
 from . import dialog_memory
@@ -607,8 +607,11 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
                 if ct is not None:
                     _skip_427 = False
                     try:
-                        gt = QgsGeometry(g)
-                        gt.transform(ct)
+                        # transform_geometry raises on the non-zero return code
+                        # of QgsGeometry.transform() - a bare call left the
+                        # geometry untransformed while the except branch (which
+                        # skips) never fired for genuine CRS failures.
+                        gt = transform_geometry(g, ct)
                         g = _safe_make_valid(gt)
                     except Exception as _exc:
                         # Skip rather than keep the untransformed geometry —
@@ -827,8 +830,7 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
         aoi = _safe_make_valid(aoi)
         if ct is not None:
             try:
-                aoi_t = QgsGeometry(aoi)
-                aoi_t.transform(ct)
+                aoi_t = transform_geometry(aoi, ct)
                 aoi = _safe_make_valid(aoi_t)
             except Exception as e:
                 log_message(f"CadastralOverlap: failed CRS transform AOI -> cad CRS: {e}", level=Qgis.MessageLevel.Warning)

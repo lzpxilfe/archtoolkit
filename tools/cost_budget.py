@@ -157,12 +157,16 @@ def suggested_pixel_size(current_pixel_size, cells, budget_cells):
     factor = math.sqrt(cells / float(budget))
     target = current * factor
     # Round up to 1 / 2 / 5 x 10^n so the suggestion is a round number and is
-    # never slightly under the size that actually fits.
+    # never slightly under the size that actually fits. "Slightly" carries a
+    # small slack here: a target a float-noise hair above an exact boundary
+    # (sqrt/multiply rounding) used to jump to the NEXT step - a 2.5x coarser
+    # pixel for a sub-cell difference. Losing that hair costs at most one cell
+    # over budget; keeping it cost a whole factor.
     exponent = math.floor(math.log10(target))
     base = 10.0 ** exponent
     for step in (1.0, 2.0, 5.0, 10.0):
         candidate = step * base
-        if candidate >= target:
+        if candidate >= target or math.isclose(candidate, target, rel_tol=1e-6):
             return candidate
     return target
 

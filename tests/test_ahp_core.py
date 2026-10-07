@@ -423,6 +423,32 @@ class ValidatedScoreRangesTests(unittest.TestCase):
                 {"min": 40, "max": 100, "score": 0.5},
             ])
 
+    def test_wide_gap_between_intervals_raises(self):
+        # Codes inside the gap would score exactly 0.0 - indistinguishable from
+        # the worst listed interval - so the table must state them explicitly.
+        with self.assertRaises(Exception):
+            validated_score_ranges([
+                {"min": 0, "max": 5, "score": 1.0},
+                {"min": 10, "max": 15, "score": 0.5},
+            ])
+
+    def test_sparse_point_codes_raise(self):
+        # Class code 2 is unlisted: its cells would silently score 0.0.
+        with self.assertRaises(Exception):
+            validated_score_ranges([
+                {"min": 1, "max": 1, "score": 1.0},
+                {"min": 3, "max": 3, "score": 0.5},
+            ])
+
+    def test_adjacent_integer_codes_are_not_a_gap(self):
+        # [1,1] then [2,4] covers every integer code in between - the shape the
+        # categorical (class-code) tables produce.
+        rows = validated_score_ranges([
+            {"min": 1, "max": 1, "score": 0.2},
+            {"min": 2, "max": 4, "score": 1.0},
+        ])
+        self.assertEqual(len(rows), 2)
+
 
 class Clamp01Tests(unittest.TestCase):
     def test_wraps_expression_in_min_max(self):

@@ -9,6 +9,7 @@ from datetime import datetime
 
 from qgis.core import (
     QgsCoordinateTransform,
+    QgsGeometry,
     QgsMessageLog,
     QgsProject,
     Qgis,
@@ -21,12 +22,27 @@ _ui_log_queue = queue.Queue(maxsize=_UI_LOG_QUEUE_MAX)
 _ui_log_timer = None
 _ui_log_listeners = set()
 
-def transform_point(point, src_crs, dest_crs):
-    """Transform point from source CRS to destination CRS (best-effort).
 
-    This helper is used in multiple tools. Coordinate transform errors should not
-    crash the plugin UI; in that case we return the original point and log a
-    warning.
+class CRSTransformError(RuntimeError):
+    """A coordinate operation failed; results must not be computed from it."""
+
+
+def _crs_label(crs) -> str:
+    try:
+        return crs.authid() or crs.description() or "unknown CRS"
+    except Exception:
+        return repr(crs)
+
+
+def transform_point(point, src_crs, dest_crs):
+    """Transform point from source CRS to destination CRS.
+
+    Fails closed: a transform error raises :class:`CRSTransformError` instead of
+    returning the untransformed point. The old best-effort fallback let analyses
+    run at raw coordinates interpreted as the destination CRS - silently wrong
+    results with no way for the caller to detect the fallback. Callers decide
+    whether to skip the geometry, abort the run, or surface the error to the
+    user (every dialog run path is already wrapped in a try that reports it).
     """
     if point is None:
         return None
@@ -36,11 +52,42 @@ def transform_point(point, src_crs, dest_crs):
         transform = QgsCoordinateTransform(src_crs, dest_crs, QgsProject.instance())
         return transform.transform(point)
     except Exception as e:
+        msg = f"CRS transform failed ({_crs_label(src_crs)} -> {_crs_label(dest_crs)}): {e}"
         try:
-            log_message(f"CRS transform failed (fallback to original point): {e}", level=Qgis.MessageLevel.Warning)
+            log_message(msg, level=Qgis.MessageLevel.Warning)
         except Exception as _exc:
-            log_swallowed("tools/utils.py:42 (transform_point)", _exc)
-        return point
+            log_swallowed("tools/utils.py (transform_point)", _exc)
+        raise CRSTransformError(msg) from e
+
+
+def transform_geometry(geom, ct):
+    """Return a copy of ``geom`` transformed by ``ct`` (``ct`` None = copy only).
+
+    ``QgsGeometry.transform()`` swallows ``QgsCsException`` and reports failure
+    only through a non-zero return code, so a bare ``try/except`` around it
+    never sees a genuine CRS failure - the untransformed geometry kept being
+    used. This helper turns that return code into a :class:`CRSTransformError`.
+    """
+    out = QgsGeometry(geom)
+    if ct is None:
+        return out
+    try:
+        rc = out.transform(ct)
+    except Exception as e:
+        msg = f"CRS transform failed (geometry): {e}"
+        try:
+            log_message(msg, level=Qgis.MessageLevel.Warning)
+        except Exception as _exc:
+            log_swallowed("tools/utils.py (transform_geometry)", _exc)
+        raise CRSTransformError(msg) from e
+    if rc != 0:
+        msg = f"CRS transform failed (geometry, code {rc})"
+        try:
+            log_message(msg, level=Qgis.MessageLevel.Warning)
+        except Exception as _exc:
+            log_swallowed("tools/utils.py (transform_geometry)", _exc)
+        raise CRSTransformError(msg)
+    return out
 
 def is_null_value(value) -> bool:
     """True for Python None and for PyQGIS's NULL QVariant.
@@ -89,8 +136,61 @@ def cleanup_files(file_paths):
             except Exception as _exc:
                 log_swallowed("tools/utils.py:90 (cleanup_files)", _exc)
 
+
+_TEMP_OUTPUTS_PROPERTY = "archtoolkit/temp_outputs"
+
+
+def stamp_layer_temp_outputs(layer, paths) -> None:
+    """Persist the temp files backing ``layer`` onto the layer itself.
+
+    The per-dialog tracking dict dies with the dialog on plugin unload/reload
+    while the layer and its temp file stay in the project - after that the
+    new instance's removal hook never cleans them. Stamping the paths on the
+    layer lets the next instance re-adopt them via
+    :func:`adopt_stamped_temp_outputs`.
+    """
+    try:
+        layer.setCustomProperty(
+            _TEMP_OUTPUTS_PROPERTY, json.dumps([str(p) for p in (paths or []) if p])
+        )
+    except Exception as _exc:
+        log_swallowed("tools/utils.py (stamp_layer_temp_outputs)", _exc)
+
+
+def adopt_stamped_temp_outputs() -> dict:
+    """``layer_id -> [temp paths]`` stamped on project layers by an earlier run."""
+    out = {}
+    try:
+        layers = QgsProject.instance().mapLayers()
+    except Exception as _exc:
+        log_swallowed("tools/utils.py (adopt_stamped_temp_outputs)", _exc)
+        return out
+    for layer in layers.values():
+        try:
+            raw = layer.customProperty(_TEMP_OUTPUTS_PROPERTY, None)
+            if not raw:
+                continue
+            paths = [str(p) for p in (json.loads(raw) or []) if p]
+            if paths:
+                out[str(layer.id())] = paths
+        except Exception as _exc:
+            log_swallowed("tools/utils.py (adopt_stamped_temp_outputs)", _exc)
+    return out
+
+_LOG_PATH_CACHE = {"path": None}
+
+
 def _log_file_path():
-    """Return a writable log file path (best-effort)."""
+    """Return a writable log file path (best-effort).
+
+    Resolved once and cached: this ran ``os.makedirs`` plus a path lookup on
+    every logged line - per-cell syscalls in hot loops. A failed write drops
+    the cache so the next line re-resolves (e.g. after the settings dir shows
+    up late at startup).
+    """
+    cached = _LOG_PATH_CACHE.get("path")
+    if cached:
+        return cached
     try:
         from qgis.core import QgsApplication
 
@@ -107,7 +207,9 @@ def _log_file_path():
     except Exception:
         log_dir = tempfile.gettempdir()
 
-    return os.path.join(log_dir, "archtoolkit.log")
+    path = os.path.join(log_dir, "archtoolkit.log")
+    _LOG_PATH_CACHE["path"] = path
+    return path
 
 
 def get_log_path():
@@ -123,6 +225,9 @@ def _write_log_line(level_name: str, message: str):
         with open(_log_file_path(), "a", encoding="utf-8") as f:
             f.write(line)
     except Exception:
+        # The cached path may have gone stale (directory removed/moved):
+        # re-resolve on the next write.
+        _LOG_PATH_CACHE["path"] = None
         return
 
 

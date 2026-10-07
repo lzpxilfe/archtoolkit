@@ -21,7 +21,6 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import numpy as np
-import processing
 
 from qgis.PyQt import QtWidgets, uic
 from qgis.PyQt.QtCore import Qt
@@ -44,6 +43,7 @@ from qgis.core import (
     QgsTextBufferSettings,
     QgsTextFormat,
     QgsGraduatedSymbolRenderer,
+    QgsTask,
     QgsVectorLayer,
     QgsVectorLayerSimpleLabeling,
 )
@@ -59,9 +59,11 @@ from .utils import (
     restore_ui_focus,
     move_group_to_top,
     set_archtoolkit_layer_metadata,
+    transform_geometry,
 )
 from .live_log_dialog import ensure_live_log_dialog
 from .help_dialog import show_help_dialog
+from .processing_task import run_alg_blocking, run_task_blocking
 from . import dialog_memory
 from .icons import icon as plugin_icon
 from .i18n import is_english_ui
@@ -107,6 +109,35 @@ class _Node:
     y: float
     samples: Tuple[Tuple[float, float], ...]
     is_polygon: bool
+
+
+class _CentralityTask(QgsTask):
+    """Brandes closeness/betweenness over a plain adjacency list on a worker.
+
+    Pure computation (network_metrics is QGIS-free), so it runs off the GUI
+    thread: the n=500 upper bound still meant seconds of freeze while the
+    centralities were computed inline. Reports progress so the shared stall
+    watchdog can tell a slow run from a hung one.
+    """
+
+    def __init__(self, description, n, adj, *, want_closeness, want_betweenness):
+        super().__init__(description, QgsTask.Flag.CanCancel)
+        self._n = int(n)
+        self._adj = adj
+        self._want_closeness = bool(want_closeness)
+        self._want_betweenness = bool(want_betweenness)
+        self.closeness = None
+        self.betweenness = None
+
+    def run(self):
+        self.setProgress(5)
+        if self._want_closeness:
+            self.closeness = closeness_centrality_unweighted(n=self._n, adj=self._adj)
+            self.setProgress(55)
+        if self._want_betweenness:
+            self.betweenness = betweenness_centrality_unweighted(n=self._n, adj=self._adj)
+        self.setProgress(100)
+        return True
 
 
 class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
@@ -1081,12 +1112,20 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
 
                 # Work in target CRS (meters expected for distance-based tools)
                 geom_t = geom
+                _skip_transform = False
                 if ct is not None:
                     try:
-                        geom_t = QgsGeometry(geom)
-                        geom_t.transform(ct)
-                    except Exception:
-                        geom_t = geom
+                        # transform_geometry raises on the non-zero return code
+                        # of QgsGeometry.transform(). Skip the node rather than
+                        # keep the untransformed geometry - mixing CRS units into
+                        # node distances silently corrupts the network.
+                        geom_t = transform_geometry(geom, ct)
+                    except Exception as _exc:
+                        log_swallowed("tools/spatial_network_dialog.py:1087 (_collect_nodes)", _exc)
+                        skipped += 1
+                        _skip_transform = True
+                if _skip_transform:
+                    continue
 
                 pt_t = None
                 if geom_t.type() == Qgis.GeometryType.Point:
@@ -1786,7 +1825,9 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
         last_err = None
         for alg_id in ("qgis:delaunaytriangulation", "native:delaunaytriangulation"):
             try:
-                res = processing.run(alg_id, {"INPUT": pt_layer, "OUTPUT": "memory:"})
+                # Task manager (not processing.run): the GEOS triangulation is
+                # O(n^2) and used to freeze QGIS for the whole PPA run.
+                res = run_alg_blocking(alg_id, {"INPUT": pt_layer, "OUTPUT": "memory:"})
                 out = res.get("OUTPUT")
                 if isinstance(out, QgsVectorLayer):
                     tri_layer = out
@@ -2015,12 +2056,20 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
             compute_betweenness = False
 
         closeness = None
-        if compute_closeness:
-            closeness = self._closeness_centrality(n=n, adj=adj)
-
         betweenness = None
-        if compute_betweenness:
-            betweenness = self._betweenness_centrality(n=n, adj=adj)
+        if compute_closeness or compute_betweenness:
+            # Worker thread (see _CentralityTask): Brandes on up to 500 nodes
+            # used to freeze the GUI for the whole computation.
+            task = _CentralityTask(
+                f"네트워크 중심성 계산 (노드 {n:,}개)",
+                n,
+                adj,
+                want_closeness=compute_closeness,
+                want_betweenness=compute_betweenness,
+            )
+            run_task_blocking(task)
+            closeness = task.closeness
+            betweenness = task.betweenness
 
         layer = self._memory_layer("Point", title, crs)
         pr = layer.dataProvider()
@@ -2164,12 +2213,6 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
             run_group.addLayer(layer)
         except Exception:
             project.addMapLayer(layer)
-
-    def _closeness_centrality(self, *, n: int, adj: List[List[int]]) -> List[float]:
-        return closeness_centrality_unweighted(n=n, adj=adj)
-
-    def _betweenness_centrality(self, *, n: int, adj: List[List[int]]) -> List[float]:
-        return betweenness_centrality_unweighted(n=n, adj=adj)
 
     def _los_visible(
         self,

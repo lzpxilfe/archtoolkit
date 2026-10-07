@@ -46,6 +46,27 @@ def validate_positive_weights(adj: List[List[Tuple[int, float]]]) -> None:
                 )
 
 
+def validate_symmetric_adjacency(adj) -> None:
+    """Raise ValueError unless every edge v-w is also present as w-v.
+
+    Betweenness normalizes by 0.5 because each shortest path is counted twice
+    on an undirected graph; on a directed (asymmetric) adjacency that factor
+    silently halves every score. Checked strictly, like the weights above,
+    instead of trusting the caller.
+    """
+    seen = set()
+    for v, nbrs in enumerate(adj):
+        for entry in nbrs:
+            w = entry[0] if isinstance(entry, tuple) else entry
+            seen.add((int(v), int(w)))
+    for v, w in seen:
+        if (w, v) not in seen:
+            raise ValueError(
+                f"adjacency is not symmetric: edge {v}-{w} has no {w}-{v} "
+                "(betweenness assumes undirected edges)"
+            )
+
+
 def dijkstra_weighted(*, start: int, adj: List[List[Tuple[int, float]]], strict: bool = False) -> List[float]:
     """Single-source shortest weighted distances (inf = unreachable).
 
@@ -113,9 +134,12 @@ def closeness_centrality_weighted(*, n: int, adj: List[List[Tuple[int, float]]])
 def betweenness_centrality_weighted(*, n: int, adj: List[List[Tuple[int, float]]]) -> List[float]:
     """Brandes betweenness for weighted undirected graphs (no external deps).
 
-    Raises ValueError if any weight is not finite and > 0 (never drops an edge).
+    Raises ValueError if any weight is not finite and > 0 (never drops an edge)
+    or if the adjacency is not symmetric (the 0.5 undirected normalization
+    would silently halve every score on a directed graph).
     """
     validate_positive_weights(adj)
+    validate_symmetric_adjacency(adj)
     bc = [0.0] * int(n)
     eps = 1e-12
     for s in range(int(n)):
@@ -195,7 +219,12 @@ def closeness_centrality_unweighted(*, n: int, adj: List[List[int]]) -> List[flo
     return out
 
 def betweenness_centrality_unweighted(*, n: int, adj: List[List[int]]) -> List[float]:
-    """Brandes betweenness for unweighted undirected graphs (no external deps)."""
+    """Brandes betweenness for unweighted undirected graphs (no external deps).
+
+    Raises ValueError on an asymmetric adjacency: the 0.5 undirected
+    normalization would silently halve every score on a directed graph.
+    """
+    validate_symmetric_adjacency(adj)
     bc = [0.0] * int(n)
     for s in range(int(n)):
         stack: List[int] = []

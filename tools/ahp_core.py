@@ -298,7 +298,14 @@ def validated_score_ranges(score_ranges):
     """Clean, clamp, sort, and overlap-check a reclass score table.
 
     Non-numeric or non-finite rows are dropped, scores clamped to [0, 1], and
-    min/max swapped if reversed.  Raises on overlapping intervals.
+    min/max swapped if reversed.  Raises on overlapping intervals and on gaps
+    wider than one unit between consecutive rows.
+
+    A gap wider than one unit means class codes between the rows are simply
+    absent from the table, and those cells then score exactly 0.0 -
+    indistinguishable from the worst listed interval in the weighted sum.
+    Adjacent integer codes ([1,1] then [2,4]) stay valid: for the class-code
+    rasters reclass exists for, they cover the domain with no missing code.
     """
     rows_in = score_ranges or []
     rows = []
@@ -329,6 +336,13 @@ def validated_score_ranges(score_ranges):
                 "\uad6c\uac04 \uc810\uc218\ud45c\uc5d0 \uc11c\ub85c \uacb9\uce58\ub294 \uad6c\uac04\uc774 \uc788\uc2b5\ub2c8\ub2e4. "
                 "\ubc94\uc704\ub97c \ub2e4\uc2dc \uc870\uc815\ud558\uc138\uc694."
             )
+        if float(cur["min"]) - float(prev["max"]) > 1.0 + 1e-12:
+            raise Exception(
+                f"\uad6c\uac04 \uc810\uc218\ud45c\uc5d0 \ube48 \uad6c\uac04\uc774 \uc788\uc2b5\ub2c8\ub2e4"
+                f"({float(prev['max']):g} \uc55e \u2192 {float(cur['min']):g} \ub4a4). "
+                "\uac08 \uc548\uc758 \ud074\ub798\uc2a4 \ucf54\ub4dc\ub294 0\uc810\uc73c\ub85c \uacc4\uc0b0\ub418\ubbc0\ub85c, "
+                "\uad6c\uac04\uc744 \uc11c\ub85c \ub9de\ub2db\uac8c \uc870\uc815\ud558\uac70\ub098 0\uc810 \uad6c\uac04\uc744 \uba85\uc2dc\ud558\uc138\uc694."
+            )
     return rows
 
 
@@ -341,7 +355,10 @@ def score_formula(*, direction, mn, mx, target_v=None, prefer_min=None, prefer_m
     - target: 1 at the target value, ramping to 0 toward mn/mx (degrading to a
       pure ramp when the target sits on a boundary)
     - range: 1 inside [prefer_min, prefer_max], ramping to 0 outside
-    - reclass: piecewise scores from a validated interval table
+    - reclass: piecewise scores from a validated interval table. Values outside
+      the table (below the first min / above the last max) score exactly 0.0 -
+      worse than any listed interval - so add an explicit row when that is not
+      the intent.
     """
     mode = str(direction or "benefit")
     if mode == "cost":

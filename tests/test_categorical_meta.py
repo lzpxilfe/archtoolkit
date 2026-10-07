@@ -4,7 +4,11 @@ import ast
 import os
 import unittest
 
-from tools.raster_semantics import choose_nodata_sentinel, is_categorical_meta
+from tools.raster_semantics import (
+    choose_nodata_sentinel,
+    is_categorical_meta,
+    undeclared_nodata_mask,
+)
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TOOLS_DIR = os.path.join(REPO_ROOT, "tools")
@@ -258,6 +262,42 @@ class CallSiteCensusTests(unittest.TestCase):
              "terrain_analysis_dialog.py", "viewshed_dialog.py"],
             msg=f"dynamic metadata call sites changed: {dynamic}",
         )
+
+
+class UndeclaredNodataMaskTests(unittest.TestCase):
+    """undeclared_nodata_mask: NoData with and without a metadata declaration."""
+
+    def test_declared_nodata_is_masked_without_guessing(self):
+        import numpy as np
+
+        arr = np.array([[1.0, -9999.0], [np.nan, 2.0]])
+        mask, guessed = undeclared_nodata_mask(arr, -9999.0)
+        self.assertEqual(guessed, 0)
+        self.assertEqual(mask.tolist(), [[False, True], [True, False]])
+
+    def test_undeclared_sentinel_is_guessed_and_counted(self):
+        import numpy as np
+
+        arr = np.array([[1.0, -9999.0], [-32768.0, 2.0]])
+        mask, guessed = undeclared_nodata_mask(arr, None)
+        self.assertEqual(guessed, 2)
+        self.assertEqual(mask.tolist(), [[False, True], [True, False]])
+
+    def test_float32_extreme_is_a_sentinel(self):
+        import numpy as np
+
+        arr = np.array([[1.0, -3.4028234663852886e38]])
+        mask, guessed = undeclared_nodata_mask(arr, None)
+        self.assertEqual(guessed, 1)
+        self.assertEqual(mask.tolist(), [[False, True]])
+
+    def test_plain_elevations_are_left_alone(self):
+        import numpy as np
+
+        arr = np.array([[12.5, -1100.0], [0.0, 350.0]])
+        mask, guessed = undeclared_nodata_mask(arr, None)
+        self.assertEqual(guessed, 0)
+        self.assertFalse(mask.any())
 
 
 if __name__ == "__main__":

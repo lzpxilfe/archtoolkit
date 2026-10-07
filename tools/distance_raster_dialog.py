@@ -59,7 +59,7 @@ from qgis.core import (
 from .qtcompat import RBS_ALL
 from qgis.gui import QgsMapLayerComboBox
 
-import processing
+from .processing_task import ProcessingCancelled, run_alg_blocking
 
 from .help_dialog import show_help_dialog
 from . import dialog_memory
@@ -346,7 +346,10 @@ class DistanceRasterDialog(QtWidgets.QDialog):
 
         temp_files = []
         self.btnRun.setEnabled(False)
-        progress = QtWidgets.QProgressDialog("거리 계산 중…", None, 0, 3, self)
+        progress = QtWidgets.QProgressDialog("거리 계산 중…", "취소", 0, 3, self)
+        # Processing steps run through the task manager (see processing_task):
+        # this dialog's Cancel aborts the current step and the run.
+        self._run_progress = progress
         progress.setWindowModality(Qt.WindowModality.WindowModal)
         progress.setMinimumDuration(0)
         progress.setValue(0)
@@ -364,9 +367,9 @@ class DistanceRasterDialog(QtWidgets.QDialog):
                 selected_path = os.path.join(
                     tempfile.gettempdir(), f"archt_dist_sel_{run_id}.gpkg")
                 temp_files.append(selected_path)
-                prepared = processing.run("native:saveselectedfeatures", {
+                prepared = run_alg_blocking("native:saveselectedfeatures", {
                     "INPUT": source, "OUTPUT": selected_path,
-                })["OUTPUT"]
+                }, owner=self)["OUTPUT"]
 
             source_crs = source.crs()
             if source_crs.isValid() and source_crs != ref_crs:
@@ -375,11 +378,11 @@ class DistanceRasterDialog(QtWidgets.QDialog):
                 reprojected_path = os.path.join(
                     tempfile.gettempdir(), f"archt_dist_proj_{run_id}.gpkg")
                 temp_files.append(reprojected_path)
-                prepared = processing.run("native:reprojectlayer", {
+                prepared = run_alg_blocking("native:reprojectlayer", {
                     "INPUT": prepared,
                     "TARGET_CRS": QgsCoordinateReferenceSystem(ref_crs),
                     "OUTPUT": reprojected_path,
-                })["OUTPUT"]
+                }, owner=self)["OUTPUT"]
                 log_message(
                     f"거리 래스터: 대상 레이어를 {source_crs.authid()} → "
                     f"{ref_crs.authid()} 로 변환했습니다."
@@ -438,7 +441,7 @@ class DistanceRasterDialog(QtWidgets.QDialog):
             # wants every touched cell (-at); points are unaffected by -at and
             # always land in the cell that contains them.
             burn_rule = self._burn_rule(source)
-            processing.run("gdal:rasterize", {
+            run_alg_blocking("gdal:rasterize", {
                 "INPUT": prepared,
                 "BURN": 1,
                 "UNITS": 1,          # georeferenced units
@@ -453,7 +456,7 @@ class DistanceRasterDialog(QtWidgets.QDialog):
                 # is silently ignored. The flag has to travel as a raw extra option.
                 "EXTRA": "-at" if burn_rule == "all_touched" else "",
                 "OUTPUT": burned,
-            })
+            }, owner=self)
             if not os.path.exists(burned):
                 raise RuntimeError("대상 레이어를 격자에 굽지 못했습니다.")
 
@@ -510,7 +513,7 @@ class DistanceRasterDialog(QtWidgets.QDialog):
                 "DATA_TYPE": 5,      # Float32
                 "OUTPUT": output,
             }
-            processing.run("gdal:proximity", proximity_params)
+            run_alg_blocking("gdal:proximity", proximity_params, owner=self)
             if not os.path.exists(output):
                 raise RuntimeError("거리 래스터가 생성되지 않았습니다.")
 
@@ -584,12 +587,15 @@ class DistanceRasterDialog(QtWidgets.QDialog):
                 level=0, duration=8,
             )
             log_message(f"Distance raster done: {key} (run {run_id})")
+        except ProcessingCancelled:
+            push_message(self.iface, "거리 래스터", "계산이 취소되었습니다.", level=1, duration=6)
         except Exception as e:
             log_exception("Distance raster failed", e)
             push_message(self.iface, "오류", f"거리 계산에 실패했습니다: {e}",
                          level=2, duration=10)
         finally:
             self.btnRun.setEnabled(True)
+            self._run_progress = None
             try:
                 progress.close()
             except Exception as _exc:

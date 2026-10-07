@@ -55,6 +55,7 @@ from .utils import (
     push_message,
     restore_ui_focus,
     set_archtoolkit_layer_metadata,
+    transform_geometry,
     transform_point,
 )
 from .live_log_dialog import ensure_live_log_dialog
@@ -1553,8 +1554,10 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
             aoi_crs = aoi_layer.crs()
             if aoi_crs != canvas_crs:
                 ct = QgsCoordinateTransform(aoi_crs, canvas_crs, QgsProject.instance())
-                aoi_geom = QgsGeometry(aoi_geom)  # copy
-                aoi_geom.transform(ct)
+                # Raises on the non-zero return code of QgsGeometry.transform();
+                # the except below skips AOI overlay instead of intersecting in
+                # the wrong CRS.
+                aoi_geom = transform_geometry(aoi_geom, ct)
         except Exception:
             return []
 
@@ -1856,9 +1859,10 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
 
                 _skip_1485 = False
                 try:
-                    g2 = QgsGeometry(g)
-                    if ct is not None:
-                        g2.transform(ct)
+                    # Raises on the non-zero return code of
+                    # QgsGeometry.transform() so a failed reprojection skips the
+                    # overlay feature instead of using source-CRS coordinates.
+                    g2 = transform_geometry(g, ct)
                 except Exception as _exc:
                     log_swallowed("terrain_profile_dialog._refresh_overlay", _exc)
                     log_swallowed("tools/terrain_profile_dialog.py:1489 (_refresh_overlay)", _exc)
@@ -2099,8 +2103,12 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
         except Exception as _exc:
             log_swallowed("tools/terrain_profile_dialog.py:1691 (start_drawing)", _exc)
         
-        # Save original tool and set our tool
-        self.original_tool = self.canvas.mapTool()
+        # Save original tool and set our tool. Never capture our own drawing
+        # tool as "original": an abandoned draw leaves ProfileLineTool on the
+        # canvas, and restoring it afterwards stuck the canvas in draw mode.
+        current_tool = self.canvas.mapTool()
+        if not isinstance(current_tool, ProfileLineTool):
+            self.original_tool = current_tool
         self.map_tool = ProfileLineTool(self.canvas, self)
         self.canvas.setMapTool(self.map_tool)
 

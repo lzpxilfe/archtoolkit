@@ -138,6 +138,43 @@ INTEGER_TYPE_RANGES = {
 }
 
 
+# Sentinels that can never be a real elevation/depth but keep appearing in DEMs
+# whose metadata declares no NoData value.
+UNDECLARED_NODATA_SENTINELS = (-9999.0, -9999.9, -32768.0, -2147483648.0)
+_UNDECLARED_NODATA_MAGNITUDE = 1e30
+
+
+def undeclared_nodata_mask(values, declared_nodata):
+    """Build the NoData mask of a band, guessing undeclared sentinels.
+
+    Returns ``(mask, guessed_count)``.  Cells equal to the declared NoData value
+    and non-finite cells are always NoData.  When the metadata declares NO
+    NoData value, cells that match a common sentinel (-9999, -32768, the
+    Float32 extremes, ...) are treated as NoData as well and counted in
+    ``guessed_count``: a DEM that uses -9999 without declaring it otherwise
+    reads as a valid -9999 m elevation and turns every neighbouring slope into
+    a cliff.  ``guessed_count`` lets the caller report the reinterpretation
+    instead of applying it silently; it is always 0 when NoData is declared.
+
+    ``values`` is any numpy array; ``declared_nodata`` may be ``None``.
+    """
+    import numpy as np
+
+    v = np.asarray(values)
+    mask = ~np.isfinite(v)
+    if declared_nodata is not None:
+        mask |= v == declared_nodata
+        return mask, 0
+    guessed = np.zeros(v.shape, dtype=bool)
+    for sentinel in UNDECLARED_NODATA_SENTINELS:
+        guessed |= v == sentinel
+    guessed |= v <= -_UNDECLARED_NODATA_MAGNITUDE
+    guessed |= v >= _UNDECLARED_NODATA_MAGNITUDE
+    count = int(np.count_nonzero(guessed))
+    mask |= guessed
+    return mask, count
+
+
 def choose_nodata_sentinel(type_name, data_min, data_max):
     """Pick a NoData value for a class raster that has none, or None if unsafe.
 
@@ -189,8 +226,10 @@ __all__ = [
     "CLASS_CODE_MAX_DISTINCT",
     "CLASS_CODE_TYPES",
     "INTEGER_TYPE_RANGES",
+    "UNDECLARED_NODATA_SENTINELS",
     "choose_nodata_sentinel",
     "is_categorical_meta",
     "is_circular_meta",
     "looks_like_class_codes",
+    "undeclared_nodata_mask",
 ]

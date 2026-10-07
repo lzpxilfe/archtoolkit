@@ -11,7 +11,7 @@ import re
 import tempfile
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
-from qgis.PyQt import QtWidgets
+from qgis.PyQt import QtCore, QtWidgets
 from qgis.core import (
     Qgis,
     QgsCoordinateTransform,
@@ -33,7 +33,7 @@ from qgis.core import (
 from .qtcompat import FT_INT, FT_DOUBLE, FT_STRING, RBS_MIN, RBS_MAX
 from qgis.gui import QgsMapLayerComboBox
 
-import processing
+from .processing_task import ProcessingCancelled, run_alg_blocking
 
 from .help_dialog import show_help_dialog
 from . import dialog_memory
@@ -51,6 +51,7 @@ from .utils import (
     push_message,
     restore_ui_focus,
     set_archtoolkit_layer_metadata,
+    transform_geometry,
 )
 
 # Korean grave/tomb terms. Bare "묘" (1 char) is deliberately excluded: it is a
@@ -348,9 +349,12 @@ def _transform_geom(geom: QgsGeometry, src_crs, dst_crs) -> Optional[QgsGeometry
     if src_crs == dst_crs:
         return QgsGeometry(geom)
     try:
-        g = QgsGeometry(geom)
-        g.transform(QgsCoordinateTransform(src_crs, dst_crs, QgsProject.instance()))
-        return g
+        # transform_geometry raises on the non-zero return code of
+        # QgsGeometry.transform() (which swallows QgsCsException), so a genuine
+        # CRS failure now yields None here instead of source-CRS coordinates.
+        return transform_geometry(
+            geom, QgsCoordinateTransform(src_crs, dst_crs, QgsProject.instance())
+        )
     except Exception:
         return None
 
@@ -1120,8 +1124,9 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
     def _footprint_downslope_bearing(
         self,
         *,
-        aspect_layer: QgsRasterLayer,
-        slope_layer: QgsRasterLayer,
+        aspect_win: Optional[dict],
+        slope_win: Optional[dict],
+        raster_crs,
         pt: QgsPointXY,
         src_crs,
         radius_m: float,
@@ -1138,6 +1143,9 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
         (weighted by slope, so near-flat cells barely contribute) yields a stable
         downslope direction. Returns (downslope_bearing_deg or None, coherence R in
         [0,1]). None bearing / low R signals flat/incoherent terrain -> use fallback.
+
+        Samples the precomputed windows (index math) instead of one
+        ``identify()`` round trip per point per raster.
         """
         r = max(1.0, float(radius_m))
         # Rosette: centre + one ring of 8 points at the footprint radius. Enough to
@@ -1155,8 +1163,11 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
         cy = float(pt.y())
         for dx, dy in offsets:
             sp = QgsPointXY(cx + dx, cy + dy)
-            asp = self._sample_raster_value(aspect_layer, sp, src_crs)
-            slp = self._sample_raster_value(slope_layer, sp, src_crs)
+            p = _transform_point(sp, src_crs, raster_crs)
+            if p is None:
+                continue
+            asp = self._window_sample(aspect_win, p.x(), p.y())
+            slp = self._window_sample(slope_win, p.x(), p.y())
             if slp is not None and 0.0 <= float(slp) <= 90.0:
                 slope_max_seen = float(slp) if slope_max_seen is None else max(slope_max_seen, float(slp))
             if asp is None or slp is None:
@@ -1181,25 +1192,29 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
         bearing = math.degrees(math.atan2(sum_e, sum_n)) % 360.0
         return float(bearing), float(coherence), slope_max_seen
 
-    def _read_slope_window(self, slope_layer: QgsRasterLayer, extent: QgsRectangle) -> Optional[dict]:
-        """Slope cells covering ``extent`` (slope-raster CRS) as one numpy array.
+    def _read_raster_window(self, layer: QgsRasterLayer, extent: QgsRectangle, *, valid_range=None) -> Optional[dict]:
+        """Cells covering ``extent`` (raster CRS) as one numpy array.
 
-        Read once per run so _footprint_slope_max() is index math instead of an
-        identify() call per cell. Returns {"arr": float array with NaN for
-        NoData, "gt": GDAL-style geotransform of the window} or None when
-        nothing could be read.
+        Read once per run so the scan and the footprint tests are index math
+        (see _window_sample) instead of an identify() call per point - the scan
+        used to make up to 18 provider round trips per surviving candidate.
+        Returns {"arr": float array with NaN for NoData/out-of-range, "gt":
+        GDAL-style geotransform of the window} or None when nothing could be
+        read. ``valid_range`` is ``(lo, hi)`` for values that cannot be real
+        measurements (gdal:slope writes -9999 for NoData and the sentinel is
+        not declared, so slopes outside 0..90 are treated as missing).
         """
         try:
             import numpy as np
         except Exception as _exc:
-            log_swallowed("trench_suggestion_dialog._read_slope_window (numpy)", _exc)
+            log_swallowed("trench_suggestion_dialog._read_raster_window (numpy)", _exc)
             return None
         try:
-            full = slope_layer.extent()
-            px = float(slope_layer.rasterUnitsPerPixelX())
-            py = float(slope_layer.rasterUnitsPerPixelY())
-            ncols = int(slope_layer.width())
-            nrows = int(slope_layer.height())
+            full = layer.extent()
+            px = float(layer.rasterUnitsPerPixelX())
+            py = float(layer.rasterUnitsPerPixelY())
+            ncols = int(layer.width())
+            nrows = int(layer.height())
             x0 = max(float(extent.xMinimum()), float(full.xMinimum()))
             x1 = min(float(extent.xMaximum()), float(full.xMaximum()))
             y0 = max(float(extent.yMinimum()), float(full.yMinimum()))
@@ -1213,7 +1228,7 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
             if c1 <= c0 or r1 <= r0:
                 return None
         except Exception as _exc:
-            log_swallowed("trench_suggestion_dialog._read_slope_window", _exc)
+            log_swallowed("trench_suggestion_dialog._read_raster_window", _exc)
             return None
         gt = (float(full.xMinimum()) + c0 * px, px, 0.0, float(full.yMaximum()) - r0 * py, 0.0, -py)
         arr = None
@@ -1221,20 +1236,20 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
         try:
             from osgeo import gdal  # type: ignore
 
-            ds = gdal.Open(str(slope_layer.source()))
+            ds = gdal.Open(str(layer.source()))
             if ds is not None:
                 band = ds.GetRasterBand(1)
                 arr = band.ReadAsArray(c0, r0, c1 - c0, r1 - r0)
                 nodata = band.GetNoDataValue()
                 ds = None
         except Exception as _exc:
-            log_swallowed("trench_suggestion_dialog._read_slope_window (gdal)", _exc)
+            log_swallowed("trench_suggestion_dialog._read_raster_window (gdal)", _exc)
             arr = None
         if arr is None:
             # Provider fallback: one block() read, values copied cell by cell.
             try:
                 win = QgsRectangle(gt[0], gt[3] - (r1 - r0) * py, gt[0] + (c1 - c0) * px, gt[3])
-                block = slope_layer.dataProvider().block(1, win, c1 - c0, r1 - r0)
+                block = layer.dataProvider().block(1, win, c1 - c0, r1 - r0)
                 arr = np.full((r1 - r0, c1 - c0), float("nan"), dtype=float)
                 for r in range(r1 - r0):
                     for c in range(c1 - c0):
@@ -1242,14 +1257,46 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
                             arr[r, c] = float(block.value(r, c))
                 nodata = None
             except Exception as _exc:
-                log_swallowed("trench_suggestion_dialog._read_slope_window (block)", _exc)
+                log_swallowed("trench_suggestion_dialog._read_raster_window (block)", _exc)
                 return None
         arr = np.asarray(arr, dtype=float)
         if nodata is not None:
             arr = np.where(arr == float(nodata), float("nan"), arr)
-        # gdal:slope writes -9999 for NoData; anything outside [0, 90] is not a slope.
-        arr = np.where((arr < 0.0) | (arr > 90.0), float("nan"), arr)
+        if valid_range is not None:
+            lo, hi = float(valid_range[0]), float(valid_range[1])
+            arr = np.where((arr < lo) | (arr > hi), float("nan"), arr)
         return {"arr": arr, "gt": gt}
+
+    @staticmethod
+    def _window_sample(win: Optional[dict], x: float, y: float) -> Optional[float]:
+        """Value at (x, y) in the window's CRS, or None (outside / NoData).
+
+        Nearest-cell lookup on the precomputed window - the same cell rule as
+        _footprint_slope_max (floor of the geotransform mapping).
+        """
+        if not win:
+            return None
+        try:
+            import numpy as np  # noqa: F401 - arr dtype already numpy
+        except Exception:
+            return None
+        try:
+            arr = win["arr"]
+            gt = win["gt"]
+            px = float(gt[1])
+            py = -float(gt[5])
+            nrows, ncols = arr.shape
+            if px <= 0 or py <= 0:
+                return None
+            col = int(math.floor((float(x) - float(gt[0])) / px))
+            row = int(math.floor((float(gt[3]) - float(y)) / py))
+            if not (0 <= row < nrows and 0 <= col < ncols):
+                return None
+            v = float(arr[row, col])
+            return v if math.isfinite(v) else None
+        except Exception as _exc:
+            log_swallowed("trench_suggestion_dialog._window_sample", _exc)
+            return None
 
     def _footprint_slope_max(
         self,
@@ -1378,7 +1425,7 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
             projwin = f"{xmin},{xmax},{ymin},{ymax}"
             if crs_authid:
                 projwin = f"{projwin} [{crs_authid}]"
-            processing.run(
+            run_alg_blocking(
                 "gdal:cliprasterbyextent",
                 {
                     "INPUT": dem_layer.source(),
@@ -1389,11 +1436,14 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
                     "DATA_TYPE": 0,
                     "OUTPUT": out_path,
                 },
+                owner=self,
             )
             if os.path.exists(out_path):
                 probe = QgsRasterLayer(out_path, "clip_probe")
                 if probe.isValid():
                     return out_path
+        except ProcessingCancelled:
+            raise
         except Exception:
             return None
         return None
@@ -1503,6 +1553,12 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
         temp_files = [tmp_clip, tmp_aspect, tmp_slope]
 
         try:
+            # Progress + Cancel for the run (the candidate scan below is the long
+            # part; it checks this dialog and stops cleanly when cancelled).
+            self._run_progress = QtWidgets.QProgressDialog("트렌치 후보 탐색 중…", "취소", 0, 0, self)
+            self._run_progress.setWindowModality(QtCore.Qt.WindowModality.WindowModal)
+            self._run_progress.setAutoClose(False)
+            self._run_progress.show()
             # Clip the DEM to AOI + margin so slope/aspect run on a small window.
             # Margin covers the footprint-aspect rosette plus a couple of cells for
             # edge continuity. Falls back to the full DEM if clipping fails.
@@ -1525,7 +1581,7 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
                 dem_src = dem_layer.source()
 
             self._set_busy("DEM 파생 레이어(경사/사면방향) 계산 중…")
-            processing.run(
+            run_alg_blocking(
                 "gdal:aspect",
                 {
                     "INPUT": dem_src,
@@ -1536,8 +1592,9 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
                     "ZEVENBERGEN": False,
                     "OUTPUT": tmp_aspect,
                 },
+                owner=self,
             )
-            processing.run(
+            run_alg_blocking(
                 "gdal:slope",
                 {
                     "INPUT": dem_src,
@@ -1548,20 +1605,28 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
                     "ZEVENBERGEN": False,
                     "OUTPUT": tmp_slope,
                 },
+                owner=self,
             )
             aspect_layer = QgsRasterLayer(tmp_aspect, f"tmp_aspect_{run_id}")
             slope_layer = QgsRasterLayer(tmp_slope, f"tmp_slope_{run_id}")
             if (not aspect_layer.isValid()) or (not slope_layer.isValid()):
                 raise Exception("aspect/slope raster build failed")
-            # One block read of the slope raster around the AOI: the footprint
-            # test in the scan is index math on this array, not identify() per cell.
+            # One block read of the slope/aspect rasters around the AOI: the scan
+            # and the footprint tests are index math on these arrays, not an
+            # identify() call per point (up to 18 provider round trips per
+            # surviving candidate before).
             slope_ext = self._aoi_extent_in_raster_crs(aoi_geom, aoi_crs=aoi_layer.crs(), raster=slope_layer)
             if slope_ext is None:
                 raise Exception("AOI extent could not be expressed in the DEM CRS")
             slope_ext.grow(float(clip_buffer))
-            slope_win = self._read_slope_window(slope_layer, slope_ext)
+            slope_win = self._read_raster_window(slope_layer, slope_ext, valid_range=(0.0, 90.0))
             if slope_win is None:
                 raise Exception("slope raster read failed")
+            # Same grid as the slope raster (both come from the clipped DEM).
+            aspect_win = self._read_raster_window(aspect_layer, slope_ext, valid_range=(0.0, 360.0))
+            if aspect_win is None:
+                raise Exception("aspect raster read failed")
+            raster_crs = slope_layer.crs()
 
             self._set_busy("주변 유적 인덱스/무덤 회피 마스크 준비 중…")
             ref_idx, ref_geoms = self._build_reference_index(
@@ -1614,6 +1679,20 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
             ahp_available = bool(
                 ahp_layer is not None and isinstance(ahp_layer, QgsRasterLayer) and ahp_layer.isValid()
             )
+            ahp_win = None
+            if ahp_available:
+                # One window read so the scan samples the AHP raster by index
+                # math (identify() per candidate was a provider round trip).
+                try:
+                    ahp_ext = self._aoi_extent_in_raster_crs(aoi_geom, aoi_crs=aoi_layer.crs(), raster=ahp_layer)
+                    if ahp_ext is not None:
+                        ahp_ext.grow(float(clip_buffer))
+                    ahp_win = self._read_raster_window(
+                        ahp_layer, ahp_ext if ahp_ext is not None else ahp_layer.extent()
+                    )
+                except Exception as _exc:
+                    log_swallowed("trench_suggestion_dialog._run (ahp window)", _exc)
+                    ahp_win = None
             # The AHP tool tags its output with units "0-100" when scaled.
             ahp_units_0_100 = False
             if ahp_available:
@@ -1697,6 +1776,7 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
             kept = 0
             iters = 0
             truncated = False
+            scan_cancelled = False
             skipped_no_dem = 0  # centre or footprint outside the DEM / NoData
             skipped_ahp_nodata = 0  # AHP layer given but NoData at the candidate
 
@@ -1720,11 +1800,16 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
 
             x = x0
             while x <= xmax:
-                if truncated:
+                if truncated or scan_cancelled:
                     break
                 y = y0
                 while y <= ymax:
                     iters += 1
+                    if self._run_progress is not None and self._run_progress.wasCanceled():
+                        # Long scans used to be un-interruptible (up to
+                        # max_eval*4 iterations with no way out).
+                        scan_cancelled = True
+                        break
                     if iters > hard_cap:
                         truncated = True
                         break
@@ -1737,7 +1822,8 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
                         continue
 
                     scanned += 1
-                    slope = self._sample_raster_value(slope_layer, pt, aoi_layer.crs())
+                    p_r = _transform_point(pt, aoi_layer.crs(), raster_crs)
+                    slope = self._window_sample(slope_win, p_r.x(), p_r.y()) if p_r is not None else None
                     if slope is None or slope < 0.0 or slope > 90.0:
                         # Outside the DEM or a NoData cell: counted, not silent.
                         skipped_no_dem += 1
@@ -1750,8 +1836,9 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
                     # Stable orientation from footprint-averaged aspect, with a
                     # flat-terrain fallback to the AOI long axis.
                     asp_bear, coherence, _rosette_slope_max = self._footprint_downslope_bearing(
-                        aspect_layer=aspect_layer,
-                        slope_layer=slope_layer,
+                        aspect_win=aspect_win,
+                        slope_win=slope_win,
+                        raster_crs=raster_crs,
                         pt=pt,
                         src_crs=aoi_layer.crs(),
                         radius_m=foot_radius,
@@ -1807,7 +1894,15 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
                         y += grid_step
                         continue
 
-                    ahp_val = self._sample_raster_value(ahp_layer, pt, aoi_layer.crs()) if ahp_available else None
+                    ahp_val = None
+                    if ahp_available:
+                        if ahp_win is not None:
+                            p_a = _transform_point(pt, aoi_layer.crs(), ahp_layer.crs())
+                            if p_a is not None:
+                                ahp_val = self._window_sample(ahp_win, p_a.x(), p_a.y())
+                        else:
+                            # Window read failed: keep the old per-point path.
+                            ahp_val = self._sample_raster_value(ahp_layer, pt, aoi_layer.crs())
                     if ahp_available and ahp_val is None:
                         # AHP supplied but NoData (or off its extent) here: the cell has
                         # no suitability information and cannot be ranked against cells that have.
@@ -1859,6 +1954,12 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
                     kept += 1
                     y += grid_step
                 x += grid_step
+
+            if scan_cancelled:
+                push_message(
+                    self.iface, "트렌치 후보", "후보 스캔이 취소되었습니다.", level=1, duration=6,
+                )
+                return
 
             if truncated:
                 log_message(
@@ -2137,5 +2238,10 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
             push_message(self.iface, "오류", f"트렌치 후보 생성 실패: {e}", level=2, duration=10)
             restore_ui_focus(self)
         finally:
+            try:
+                self._run_progress.close()
+            except Exception as _exc:
+                log_swallowed("trench_suggestion_dialog._run (progress)", _exc)
+            self._run_progress = None
             cleanup_files(temp_files)
             self._set_busy("")

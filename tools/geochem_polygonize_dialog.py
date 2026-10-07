@@ -38,8 +38,8 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import numpy as np
 from osgeo import gdal, ogr, osr
 
-import processing
-from qgis.PyQt import QtWidgets
+from .processing_task import ProcessingCancelled, run_alg_blocking
+from qgis.PyQt import QtCore, QtWidgets
 from qgis.PyQt.QtGui import QColor, QImage
 from qgis.core import (
     Qgis,
@@ -66,6 +66,7 @@ from .utils import (
     push_message,
     restore_ui_focus,
     set_archtoolkit_layer_metadata,
+    transform_geometry,
 )
 from .raster_io import write_single_band_geotiff
 from .atomic_output import (
@@ -1595,6 +1596,14 @@ value/class 래스터와 폴리곤을 생성합니다.
         log_message(f"GeoChem: out val={val_path}", level=Qgis.MessageLevel.Info)
         log_message(f"GeoChem: out cls={cls_path}", level=Qgis.MessageLevel.Info)
 
+        # Processing steps run through the task manager (see processing_task):
+        # the dialog repaints and Cancel aborts the pipeline instead of the
+        # whole run freezing QGIS.
+        self._run_progress = QtWidgets.QProgressDialog("지구화학도 처리 중…", "취소", 0, 0, self)
+        self._run_progress.setWindowModality(QtCore.Qt.WindowModality.WindowModal)
+        self._run_progress.setAutoClose(False)
+        self._run_progress.show()
+
         try:
             # 1) Export WMS RGB to GeoTIFF within survey-area extent (rectangular).
             ok = self._export_raster_to_geotiff(
@@ -2139,7 +2148,7 @@ value/class 래스터와 폴리곤을 생성합니다.
                     except Exception as _exc:
                         log_swallowed("geochem_polygonize_dialog.run (class copy without nodata)", _exc)
                         poly_src = cls_path
-                poly_out = processing.run(
+                poly_out = run_alg_blocking(
                     "gdal:polygonize",
                     {
                         "INPUT": poly_src,
@@ -2148,6 +2157,7 @@ value/class 래스터와 폴리곤을 생성합니다.
                         "EIGHT_CONNECTEDNESS": True,
                         "OUTPUT": poly_path,
                     },
+                    owner=self,
                 ).get("OUTPUT")
 
                 log_message(f"GeoChem: polygonize OUTPUT type={type(poly_out).__name__} value={poly_out}", level=Qgis.MessageLevel.Info)
@@ -2220,22 +2230,54 @@ value/class 래스터와 폴리곤을 생성합니다.
                 # Drop nodata (class_id == 0)
                 if do_drop_nodata:
                     try:
-                        poly = processing.run(
+                        poly = run_alg_blocking(
                             "native:extractbyexpression",
                             {"INPUT": poly, "EXPRESSION": "\"class_id\" > 0", "OUTPUT": "memory:"},
+                            owner=self,
                         )["OUTPUT"]
+                    except ProcessingCancelled:
+                        raise
                     except Exception as _exc:
                         log_swallowed("geochem_polygonize_dialog.run", _exc)
 
                 if do_dissolve:
                     log_message("GeoChem: dissolve by class…", level=Qgis.MessageLevel.Info)
-                    poly = processing.run(
+                    poly = run_alg_blocking(
                         "native:dissolve",
                         {"INPUT": poly, "FIELD": ["class_id"], "OUTPUT": "memory:"},
+                        owner=self,
                     )["OUTPUT"]
 
                 # Add descriptive fields
                 self._decorate_polygons(layer=poly, preset=preset, unit=unit)
+
+                # Persist the polygon alongside the rasters when saving: the
+                # polygonize output lives in the session temp dir and the
+                # dissolved variant in memory, so without this the project
+                # layer source breaks on restart / the next run's cleanup.
+                if do_save_rasters and poly is not None:
+                    try:
+                        persisted_poly = self._persist_geochem_polygon(
+                            poly=poly, preset=preset, run_id=run_id
+                        )
+                    except ProcessingCancelled:
+                        raise
+                    except Exception as e:
+                        log_message(f"GeoChem: failed to save polygons: {e}", level=Qgis.MessageLevel.Warning)
+                        persisted_poly = None
+                    if persisted_poly:
+                        try:
+                            poly_name = poly.name()
+                        except Exception as _exc:
+                            log_swallowed("geochem_polygonize_dialog.run (poly name)", _exc)
+                            poly_name = f"{preset.key}_polygons_{run_id}"
+                        loaded = QgsVectorLayer(persisted_poly, poly_name, "ogr")
+                        if loaded.isValid():
+                            poly = loaded
+                            log_message(
+                                f"GeoChem: saved polygons poly={persisted_poly}",
+                                level=Qgis.MessageLevel.Info,
+                            )
 
             # Add to project (rasters / polygon / point)
             self._add_to_project(
@@ -2250,6 +2292,8 @@ value/class 래스터와 폴리곤을 생성합니다.
                 class_raster_path=persist_cls_path if do_add_rasters else None,
             )
             push_message(self.iface, "지구화학도 래스터 수치화", "완료", level=0, duration=7)
+        except ProcessingCancelled:
+            push_message(self.iface, "지구화학도", "처리가 취소되었습니다.", level=1, duration=6)
         except Exception as e:
             log_exception("GeoChem error", e)
             try:
@@ -2258,6 +2302,11 @@ value/class 래스터와 폴리곤을 생성합니다.
                 log_swallowed("tools/geochem_polygonize_dialog.py:1910 (run)", _exc)
             push_message(self.iface, "오류", f"처리 실패: {e}", level=2, duration=10)
         finally:
+            try:
+                self._run_progress.close()
+            except Exception as _exc:
+                log_swallowed("geochem_polygonize_dialog.run (progress)", _exc)
+            self._run_progress = None
             restore_ui_focus(self)
 
     def _canvas_pixel_size_in_raster_crs(self, *, dest_crs, raster_crs, centre_dest) -> float:
@@ -2331,7 +2380,7 @@ value/class 래스터와 폴리곤을 생성합니다.
             # Match the requested width/height via target resolution in layer CRS units.
             px = max(extent.width() / max(1, int(width)), extent.height() / max(1, int(height)))
             px = float(px) if px > 0 else None
-            processing.run(
+            run_alg_blocking(
                 "gdal:warpreproject",
                 {
                     "INPUT": raster,
@@ -2348,11 +2397,14 @@ value/class 래스터와 폴리곤을 생성합니다.
                     "EXTRA": "",
                     "OUTPUT": out_path,
                 },
+                owner=self,
             )
             if os.path.exists(out_path):
                 return True
             log_message("GeoChem: GDAL warp completed but output missing", level=Qgis.MessageLevel.Warning)
             return False
+        except ProcessingCancelled:
+            raise
         except Exception as e:
             log_message(f"GeoChem: GDAL warp export failed: {e}", level=Qgis.MessageLevel.Warning)
             return False
@@ -2376,15 +2428,8 @@ value/class 래스터와 폴리곤을 생성합니다.
             options=("COMPRESS=LZW", "TILED=YES"),
         )
 
-    def _persist_geochem_rasters(
-        self,
-        *,
-        preset: GeoChemPreset,
-        run_id: str,
-        val_path: str,
-        cls_path: Optional[str] = None,
-    ) -> Tuple[str, Optional[str]]:
-        """Persist generated rasters so they remain usable after the dialog closes."""
+    def _geochem_output_dir(self) -> str:
+        """Persistent output directory for geochem outputs (created on demand)."""
         out_dir = ""
         try:
             base = (QgsProject.instance().homePath() or "").strip()
@@ -2410,6 +2455,18 @@ value/class 래스터와 폴리곤을 생성합니다.
                 out_dir = os.path.join(os.path.expanduser("~"), "ArchToolkit_outputs", "geochem")
 
         os.makedirs(out_dir, exist_ok=True)
+        return out_dir
+
+    def _persist_geochem_rasters(
+        self,
+        *,
+        preset: GeoChemPreset,
+        run_id: str,
+        val_path: str,
+        cls_path: Optional[str] = None,
+    ) -> Tuple[str, Optional[str]]:
+        """Persist generated rasters so they remain usable after the dialog closes."""
+        out_dir = self._geochem_output_dir()
 
         # Copy each raster into a staged sibling of its final path, then publish
         # it with an atomic rename, so a crash mid-copy cannot leave a truncated
@@ -2437,6 +2494,30 @@ value/class 래스터와 폴리곤을 생성합니다.
             except Exception:
                 cls_dst = None
         return val_dst, cls_dst
+
+    def _persist_geochem_polygon(self, *, poly, preset: GeoChemPreset, run_id: str) -> Optional[str]:
+        """Persist the polygon result as a GeoPackage, returning its final path.
+
+        The polygonize output otherwise lives in the session temp dir and the
+        dissolved variant in memory - the project layer source breaks when the
+        temp dir is cleaned or QGIS restarts. Staged write + atomic publish,
+        like the rasters, so a crash mid-write cannot leave a truncated GPKG.
+        """
+        out_dir = self._geochem_output_dir()
+        dst = os.path.join(out_dir, f"{preset.key}_polygons_{run_id}.gpkg")
+        staging = reserve_staging_path(dst, "geochem")
+        try:
+            run_alg_blocking(
+                "native:savefeatures",
+                {"INPUT": poly, "OUTPUT": staging},
+                owner=self,
+            )
+            if not os.path.exists(staging):
+                return None
+            atomic_publish_file(staging, dst)
+            return dst
+        finally:
+            cleanup_staging_path(staging)
 
     def _make_weighted_center_layer(
         self,
@@ -2598,15 +2679,20 @@ value/class 래스터와 폴리곤을 생성합니다.
 
         # Transform to destination CRS for display.
         pt = QgsPointXY(x, y)
-        try:
-            if dest_crs and src_crs and dest_crs != src_crs:
+        pt_crs = src_crs
+        if dest_crs and src_crs and dest_crs != src_crs:
+            try:
                 ct = QgsCoordinateTransform(src_crs, dest_crs, QgsProject.instance())
                 pt = QgsPointXY(ct.transform(pt))
-        except Exception as _exc:
-            log_swallowed("geochem_polygonize_dialog._make_weighted_center_layer", _exc)
+                pt_crs = dest_crs
+            except Exception as _exc:
+                # Keep the untransformed point and label it with the CRS it is
+                # actually in - tagging source-CRS coordinates as dest_crs
+                # plots the centre at a wrong location with no visible error.
+                log_swallowed("geochem_polygonize_dialog._make_weighted_center_layer", _exc)
 
         # Create output point layer
-        crs = dest_crs if dest_crs else src_crs
+        crs = pt_crs if pt_crs else src_crs
         uri = "Point?crs=EPSG:4326"
         try:
             auth = (crs.authid() or "").strip() if crs else ""
@@ -2918,13 +3004,19 @@ value/class 래스터와 폴리곤을 생성합니다.
             # Keep original geometry for output
             out_geom = geom
 
-            # Copy & transform for rasterization
-            geom_r = QgsGeometry(geom)
+            # Copy & transform for rasterization. transform_geometry raises on
+            # the non-zero return code of QgsGeometry.transform(); skip the
+            # feature rather than rasterize source-CRS coords as dest-CRS ones.
+            geom_r = geom
+            _skip_transform = False
             if ct is not None:
                 try:
-                    geom_r.transform(ct)
+                    geom_r = transform_geometry(geom, ct)
                 except Exception as _exc:
-                    log_swallowed("geochem_polygonize_dialog._make_zonal_stats_layer", _exc)
+                    log_swallowed("tools/geochem_polygonize_dialog.py:2925 (_make_zonal_stats_layer)", _exc)
+                    _skip_transform = True
+            if _skip_transform:
+                continue
 
             _skip_2421 = False
             try:

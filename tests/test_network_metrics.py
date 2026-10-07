@@ -10,6 +10,7 @@ from tools.network_metrics import (
     closeness_centrality_weighted,
     dijkstra_weighted,
     validate_positive_weights,
+    validate_symmetric_adjacency,
 )
 
 
@@ -152,6 +153,25 @@ class WeightValidationTests(unittest.TestCase):
     def test_positive_weights_pass_validation(self):
         validate_positive_weights(_unit(STAR))
         validate_positive_weights([[(1, 1e-9)], [(0, 1e-9)]])
+
+
+class SymmetryValidationTests(unittest.TestCase):
+    ASYM = [[1], [0, 2], []]  # 1->2 without 2->1
+
+    def test_asymmetric_adjacency_raises(self):
+        with self.assertRaises(ValueError):
+            validate_symmetric_adjacency(self.ASYM)
+        with self.assertRaises(ValueError):
+            betweenness_centrality_unweighted(n=3, adj=self.ASYM)
+        with self.assertRaises(ValueError):
+            betweenness_centrality_weighted(n=3, adj=_unit(self.ASYM))
+
+    def test_symmetric_adjacency_passes(self):
+        validate_symmetric_adjacency(PATH)
+        bc = betweenness_centrality_unweighted(n=3, adj=PATH)
+        self.assertAlmostEqual(bc[1], 1.0)  # 0.5 normalization: the middle node
+        bc_w = betweenness_centrality_weighted(n=3, adj=_unit(PATH))
+        self.assertAlmostEqual(bc_w[1], 1.0)
 
 
 if __name__ == "__main__":

@@ -14,7 +14,6 @@ import csv
 import math
 from typing import Dict, List, Optional, Tuple
 
-import processing
 from qgis.PyQt import QtWidgets
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtGui import QColor, QFont, QIcon
@@ -45,6 +44,7 @@ from . import dialog_memory
 from .icons import icon as plugin_icon
 from .i18n import get_output_group_name, get_plugin_config_value
 from .live_log_dialog import ensure_live_log_dialog
+from .processing_task import ProcessingCancelled, run_alg_blocking
 from .utils import (
     is_null_value,
     log_swallowed,
@@ -1835,6 +1835,15 @@ class GeologyZipDialog(QtWidgets.QDialog):
         push_message(self.iface, "래스터에 없는 코드", text, level=1, duration=12)
         return missing
 
+    def _run_processing_alg(self, alg_id: str, params: dict) -> dict:
+        """Run a Processing algorithm through the task manager (GUI stays live).
+
+        ``processing.run`` blocked the GUI thread for the whole sheet, so large
+        sheets froze QGIS with no feedback. The run progress dialog created by
+        ``_run_rasterize`` turns Cancel into an abort of the current step.
+        """
+        return run_alg_blocking(alg_id, params, owner=self)
+
     def _rasterize_layer(
         self,
         layer: QgsVectorLayer,
@@ -1867,7 +1876,7 @@ class GeologyZipDialog(QtWidgets.QDialog):
             )
             tif_path = self._rasterize_layer(layer, field_name, tmp_tif, pixel_size, nodata)
             try:
-                processing.run("gdal:translate", {
+                self._run_processing_alg("gdal:translate", {
                     "INPUT": tif_path,
                     "TARGET_CRS": None,
                     "NODATA": float(nodata),
@@ -1982,7 +1991,7 @@ class GeologyZipDialog(QtWidgets.QDialog):
             "OUTPUT": out_path,
         }
         try:
-            result = processing.run("gdal:rasterize", params)
+            result = self._run_processing_alg("gdal:rasterize", params)
         except Exception as e:
             log_message(f"gdal:rasterize 실패: {e}", level=Qgis.MessageLevel.Warning)
             raise
@@ -2016,31 +2025,34 @@ class GeologyZipDialog(QtWidgets.QDialog):
             tmp_root = os.path.join(tempfile.gettempdir(), "ArchToolkit_KIGAM_Rasterize")
             os.makedirs(tmp_root, exist_ok=True)
             tmp_vec = os.path.join(tmp_root, f"atk_vec_{new_run_id('kigam')}.gpkg")
-            save_res = processing.run("native:savefeatures", {"INPUT": layer, "OUTPUT": tmp_vec})
+            save_res = self._run_processing_alg("native:savefeatures", {"INPUT": layer, "OUTPUT": tmp_vec})
             vec_path = tmp_vec
             if isinstance(save_res, dict) and save_res.get("OUTPUT"):
                 vec_path = str(save_res.get("OUTPUT"))
+            try:
+                params2 = dict(params)
+                params2["INPUT"] = vec_path
+                result2 = self._run_processing_alg("gdal:rasterize", params2)
+                raster_path2 = out_path
+                if isinstance(result2, dict) and result2.get("OUTPUT"):
+                    raster_path2 = str(result2.get("OUTPUT"))
 
-            params2 = dict(params)
-            params2["INPUT"] = vec_path
-            result2 = processing.run("gdal:rasterize", params2)
-            raster_path2 = out_path
-            if isinstance(result2, dict) and result2.get("OUTPUT"):
-                raster_path2 = str(result2.get("OUTPUT"))
-
-            exists2 = os.path.exists(raster_path2)
-            size2 = os.path.getsize(raster_path2) if exists2 else 0
-            log_message(
-                f"KIGAM rasterize retry: INPUT={vec_path} OUTPUT={raster_path2} exists={exists2} size={size2}",
-                level=Qgis.MessageLevel.Info if exists2 and size2 > 0 else Qgis.MessageLevel.Warning,
-            )
-            if exists2 and size2 > 0:
+                exists2 = os.path.exists(raster_path2)
+                size2 = os.path.getsize(raster_path2) if exists2 else 0
+                log_message(
+                    f"KIGAM rasterize retry: INPUT={vec_path} OUTPUT={raster_path2} exists={exists2} size={size2}",
+                    level=Qgis.MessageLevel.Info if exists2 and size2 > 0 else Qgis.MessageLevel.Warning,
+                )
+                if exists2 and size2 > 0:
+                    return raster_path2
+            finally:
+                # The exported vector only feeds the retry: drop it on every
+                # exit path (a failed retry used to leak it in the temp dir).
                 try:
                     if os.path.exists(vec_path):
                         os.remove(vec_path)
                 except Exception as _exc:
                     log_swallowed("geology_zip_dialog._rasterize_layer", _exc)
-                return raster_path2
         except Exception as e:
             log_message(f"KIGAM rasterize 재시도 실패: {e}", level=Qgis.MessageLevel.Warning)
 
@@ -2101,6 +2113,14 @@ class GeologyZipDialog(QtWidgets.QDialog):
         nodata = float(self.spinNoData.value())
         run_id = new_run_id("kigam_raster")
         ensure_live_log_dialog(self.iface, owner=self, show=True, clear=True)
+
+        # Progress + Cancel for the sheet pipeline: every gdal/native step runs
+        # through the task manager (see _run_processing_alg), so the dialog
+        # repaints and Cancel aborts instead of freezing QGIS on large sheets.
+        self._run_progress = QtWidgets.QProgressDialog("KIGAM 래스터 변환 중…", "취소", 0, 0, self)
+        self._run_progress.setWindowModality(Qt.WindowModality.WindowModal)
+        self._run_progress.setAutoClose(False)
+        self._run_progress.show()
 
         try:
             if self.radMerge.isChecked():
@@ -2380,9 +2400,18 @@ class GeologyZipDialog(QtWidgets.QDialog):
                 return
             level = 1 if (skipped or total_text) else 0
             push_message(self.iface, "완료", done, level=level, duration=10 if level else 7)
+        except ProcessingCancelled:
+            push_message(self.iface, "KIGAM 래스터 변환", "작업이 취소되었습니다.", level=1, duration=6)
+            restore_ui_focus(self)
         except Exception as e:
             log_message(f"래스터 변환 실패: {e}", level=Qgis.MessageLevel.Warning)
             push_message(self.iface, "오류", f"래스터 변환 실패: {e}", level=2)
+        finally:
+            try:
+                self._run_progress.close()
+            except Exception as _exc:
+                log_swallowed("geology_zip_dialog._run_rasterize (progress close)", _exc)
+            self._run_progress = None
 
     def _load_zip(self):
         zip_path = (self.txtZip.text() or "").strip()

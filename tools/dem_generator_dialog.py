@@ -37,7 +37,6 @@ from qgis.core import (
     QgsVectorLayer,
     QgsWkbTypes,
 )
-import processing
 import tempfile
 from .utils import (
     is_metric_crs,
@@ -47,6 +46,7 @@ from .utils import (
     push_message,
     restore_ui_focus,
     set_archtoolkit_layer_metadata,
+    transform_geometry,
 )
 from .qtcompat import FT_DOUBLE
 from .atomic_output import (
@@ -60,10 +60,21 @@ from .help_dialog import show_help_dialog
 from . import dialog_memory
 from .icons import icon as plugin_icon
 from .kriging_lite import GEOM_Z_SENTINEL, auto_elevation_field
+from .processing_task import ProcessingCancelled, run_alg_blocking
 
 # Load the UI file
 FORM_CLASS, _ = uic.loadUiType(os.path.join(
     os.path.dirname(__file__), 'dem_generator_dialog_base.ui'))
+
+# The prepared-input copy holds every feature/vertex of every checked layer in
+# Python until the run ends (Kriging then expands each vertex into a point
+# feature again). A merged DXF sheet reached millions of entities and froze
+# QGIS / exhausted RAM on the GUI thread.
+MAX_PREPARED_FEATURES = 500_000
+MAX_PREPARED_VERTICES = 5_000_000
+# Ordinary Kriging solves an n x n system over its samples (n^2 memory).
+MAX_KRIGING_SAMPLES = 10_000
+
 
 class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
     # IDW distance exponent passed explicitly to qgis:idwinterpolation (its
@@ -1212,9 +1223,10 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
         dropped unless the elevation comes from geometry Z. A geometry
         collection (DXF block) is split so each part lands in its own kind.
         """
-        g = QgsGeometry(geom)
-        if ct is not None:
-            g.transform(ct)
+        # transform_geometry raises on the non-zero return code of
+        # QgsGeometry.transform() - a bare call swallowed QgsCsException and
+        # merged source-CRS vertices into the DEM as if transformed.
+        g = transform_geometry(geom, ct)
         if QgsWkbTypes.isCurvedType(g.wkbType()):
             g = QgsGeometry(g.constGet().segmentize())
         if QgsWkbTypes.flatType(g.wkbType()) == Qgis.WkbType.GeometryCollection:
@@ -1259,6 +1271,8 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
             mem[kind] = lyr
 
         feats = {kind: [] for kind in mem}
+        total_features = 0
+        total_vertices = 0
         info = {
             "mem": mem,
             "counts": {kind: 0 for kind in mem},
@@ -1327,6 +1341,21 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
                 except Exception as _exc:
                     log_swallowed("dem_generator_dialog._prepare_inputs (transform)", _exc)
                     info["skipped_transform"] += 1
+                total_features += 1
+                try:
+                    total_vertices += sum(int(p.vertexCount()) for p in parts)
+                except Exception as _exc:
+                    log_swallowed("dem_generator_dialog._prepare_inputs (vertex count)", _exc)
+                    total_vertices += 1
+                if total_features > MAX_PREPARED_FEATURES or total_vertices > MAX_PREPARED_VERTICES:
+                    # Refuse instead of accumulating further: the copy lives in
+                    # Python until the run ends, and a merged DXF sheet froze
+                    # QGIS / exhausted RAM long before the interpolation ran.
+                    raise RuntimeError(
+                        f"DEM 생성 입력이 너무 큽니다(피처 {total_features:,}개, 정점 {total_vertices:,}개). "
+                        f"한도: 피처 {MAX_PREPARED_FEATURES:,}개 / 정점 {MAX_PREPARED_VERTICES:,}개. "
+                        "레이어 선택을 좁히거나 DXF 필터(레이어 코드)로 줄인 뒤 다시 실행하세요."
+                    )
                 for kind, part, is_3d in parts:
                     if not use_field and not is_3d:
                         # QgsInterpolator's ValueZ source rejects 2D parts; say so.
@@ -1409,7 +1438,7 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
                 continue
             path = os.path.join(tempfile.gettempdir(), f"archtoolkit_dem_{kind}_{uuid.uuid4().hex[:8]}.{ext}")
             out[kind] = (path, None)
-            res = processing.run("native:savefeatures", {"INPUT": info["mem"][kind], "OUTPUT": path})
+            res = run_alg_blocking("native:savefeatures", {"INPUT": info["mem"][kind], "OUTPUT": path})
             load_src = str(res.get("OUTPUT")) if (isinstance(res, dict) and res.get("OUTPUT")) else path
             lyr = QgsVectorLayer(load_src, f"dem_{kind}", "ogr")
             if not lyr.isValid():
@@ -1448,6 +1477,14 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
                     feats.append(f)
                     if kind != "point":
                         from_lines += 1
+                    if len(feats) > MAX_KRIGING_SAMPLES:
+                        # Ordinary Kriging solves an n x n system over these
+                        # samples - past a few thousand the matrix alone is
+                        # gigabytes and the factorisation never finishes.
+                        raise RuntimeError(
+                            f"크리깅 표본이 너무 많습니다({len(feats):,}개, 한도 {MAX_KRIGING_SAMPLES:,}개). "
+                            "입력 레이어/정점을 줄이거나 TIN/IDW 방식을 사용하세요."
+                        )
         if feats:
             lyr.dataProvider().addFeatures(feats)
             lyr.updateExtents()
@@ -2022,8 +2059,27 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
             )
             QtWidgets.QApplication.processEvents()
 
-            # Step 4: Run TIN interpolation
-            result = processing.run(algorithm, params)
+            # Step 4: Run TIN interpolation - through the task manager so the
+            # GUI stays live and Cancel aborts (processing.run froze QGIS for
+            # the whole interpolation).
+            self._run_progress = QtWidgets.QProgressDialog(
+                f"{method_name} 보간 실행 중…", "취소", 0, 0, self
+            )
+            self._run_progress.setWindowModality(Qt.WindowModality.WindowModal)
+            self._run_progress.setAutoClose(False)
+            self._run_progress.show()
+            try:
+                result = run_alg_blocking(algorithm, params, owner=self)
+            except ProcessingCancelled:
+                push_message(self.iface, "DEM 생성", "보간이 취소되었습니다.", level=1, duration=6)
+                restore_ui_focus(self)
+                return
+            finally:
+                try:
+                    self._run_progress.close()
+                except Exception as _exc:
+                    log_swallowed("dem_generator_dialog.run_process (progress close)", _exc)
+                self._run_progress = None
 
             # An all-NoData raster (every feature rejected by the interpolator)
             # is a failure, not a DEM: never publish it over a previous result.

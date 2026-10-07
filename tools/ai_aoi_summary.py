@@ -1945,10 +1945,23 @@ def export_aoi_context_csv(
             if v is None:
                 return ""
             if isinstance(v, (dict, list)):
-                return json.dumps(v, ensure_ascii=False, separators=(",", ":"))
-            return str(v)
+                s = json.dumps(v, ensure_ascii=False, separators=(",", ":"))
+            else:
+                s = str(v)
         except Exception:
             return ""
+        # CSV formula injection: layer names and attribute values come from
+        # untrusted datasets, and a cell starting with =+-@ runs as a formula
+        # when the CSV is opened in a spreadsheet. Numbers keep their sign
+        # ("-12.5" is a value, not a formula); anything else that starts with
+        # a formula trigger is defused with a leading quote.
+        stripped = s.strip(" \t\r\n")
+        if stripped[:1] in ("=", "+", "-", "@"):
+            try:
+                float(stripped)
+            except (TypeError, ValueError):
+                s = "'" + s
+        return s
 
     # 1) Layer summary CSV (one row per layer)
     try:
