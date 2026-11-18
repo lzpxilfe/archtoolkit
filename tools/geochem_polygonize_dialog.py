@@ -1793,7 +1793,12 @@ value/class 래스터와 폴리곤을 생성합니다.
                     core = _mask_black_lines(r, g, b)
                     if transparent is not None:
                         core &= ~transparent
-                    halo = _mask_colour_halo(r, g, b, core=core)
+                    sorted_pts = sorted(preset.points, key=lambda p: float(p.value))
+                    if _legend_first_stop_is_absent_grey(sorted_pts):
+                        active_stop_rgbs = [p.rgb for p in sorted_pts[1:]]
+                    else:
+                        active_stop_rgbs = [p.rgb for p in sorted_pts]
+                    halo = _mask_colour_halo(r, g, b, core=core, palette=active_stop_rgbs)
                     if transparent is not None:
                         halo &= ~transparent
                     # Off-legend pixels hugging the line (within the same 2 px
@@ -3443,7 +3448,6 @@ value/class 래스터와 폴리곤을 생성합니다.
                 if not ell or ell.upper() == "NONE":
                     ell = "WGS84"
                 dist.setEllipsoid(ell)
-                dist.setEllipsoidalMode(True)
             except Exception as _exc:
                 log_swallowed("tools/geochem_polygonize_dialog.py:2749 (_decorate_polygons)", _exc)
 

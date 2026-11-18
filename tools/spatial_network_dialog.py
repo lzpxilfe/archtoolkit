@@ -63,14 +63,19 @@ from .utils import (
 )
 from .live_log_dialog import ensure_live_log_dialog
 from .help_dialog import show_help_dialog
-from .processing_task import run_alg_blocking, run_task_blocking
+from .processing_task import ProcessingCancelled, ProcessingTaskError, run_alg_blocking, run_task_blocking
 from . import dialog_memory
 from .icons import icon as plugin_icon
 from .i18n import is_english_ui
+from .raster_semantics import undeclared_nodata_mask
 from .network_metrics import (
     betweenness_centrality_unweighted,
     closeness_centrality_unweighted,
+    graph_summary,
+    harmonic_centrality_unweighted,
+    local_clustering_coefficients,
 )
+from .ppa_filters import ppa_filter_gabriel, ppa_filter_rng
 
 
 FORM_CLASS, _ = uic.loadUiType(
@@ -1093,6 +1098,8 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
 
         nodes: List[_Node] = []
         skipped = 0
+        multi_part_fids: List[str] = []
+        self._collect_error_msg = None
 
         ct = None
         try:
@@ -1131,7 +1138,10 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                 if geom_t.type() == Qgis.GeometryType.Point:
                     if geom_t.isMultipart():
                         mp = geom_t.asMultiPoint()
-                        if mp:
+                        if len(mp) > 1:
+                            multi_part_fids.append(str(ft.id()))
+                            continue
+                        elif mp:
                             pt_t = QgsPointXY(mp[0])
                     else:
                         pt_t = QgsPointXY(geom_t.asPoint())
@@ -1187,6 +1197,14 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
             except Exception:
                 skipped += 1
 
+        if multi_part_fids:
+            shown = ", ".join(multi_part_fids[:5]) + (" …" if len(multi_part_fids) > 5 else "")
+            self._collect_error_msg = (
+                f"멀티포인트 피처 {len(multi_part_fids)}개에 점이 2개 이상 있습니다 (fid: {shown}). "
+                "어느 점을 유적 노드로 쓸지 정할 수 없어 실행하지 않습니다. "
+                "'다중 파트를 단일 파트로(Multipart to singleparts)'로 나눈 뒤 다시 실행하세요."
+            )
+            return []
         if skipped:
             log_message(f"SpatialNetwork: skipped {skipped} feature(s) (empty/unsupported geometry)", level=Qgis.MessageLevel.Warning)
         return nodes
@@ -1306,6 +1324,8 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
         return False
 
     def run_analysis(self):
+        if getattr(self, "_running", False):
+            return
         mode = self.cmbNetworkType.currentData()
 
         site_layer = self.cmbSiteLayer.currentLayer()
@@ -1326,136 +1346,158 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
         name_field = str(self.cmbNameField.currentData() or "")
         poly_mode = str(self.cmbPolyPointMode.currentData() or "surface")
 
-        if mode == NETWORK_PPA:
-            if not self._ensure_metric(site_layer.crs(), "PPA"):
+        self._running = True
+        if hasattr(self, "btnRun") and self.btnRun is not None:
+            self.btnRun.setEnabled(False)
+        try:
+            if mode == NETWORK_PPA:
+                if not self._ensure_metric(site_layer.crs(), "PPA"):
+                    restore_ui_focus(self)
+                    return
+
+                nodes = self._collect_nodes(
+                    layer=site_layer,
+                    name_field=name_field,
+                    poly_mode=poly_mode,
+                    use_selected_only=use_selected,
+                    target_crs=site_layer.crs(),
+                )
+                if getattr(self, "_collect_error_msg", None):
+                    push_message(self.iface, "오류", str(self._collect_error_msg), level=2, duration=10)
+                    restore_ui_focus(self)
+                    return
+                if len(nodes) < 2:
+                    push_message(self.iface, "PPA", "유효한 노드가 2개 이상 필요합니다.", level=2)
+                    restore_ui_focus(self)
+                    return
+
+                k = int(self.spinPpaK.value())
+                mutual = bool(self.chkPpaMutualOnly.isChecked())
+                method = str(getattr(self, "cmbPpaGraph", None).currentData() if hasattr(self, "cmbPpaGraph") else PPA_KNN)
+                try:
+                    max_dist_m = float(self.spinPpaMaxDist.value()) if hasattr(self, "spinPpaMaxDist") else 0.0
+                except Exception:
+                    max_dist_m = 0.0
+
+                make_nodes = bool(getattr(self, "chkCreateNodeMetrics", None) and self.chkCreateNodeMetrics.isChecked())
+                do_close = bool(getattr(self, "chkCloseness", None) and self.chkCloseness.isChecked())
+                do_betw = bool(getattr(self, "chkBetweenness", None) and self.chkBetweenness.isChecked())
+
+                self._run_ppa(
+                    nodes,
+                    method=method,
+                    k=k,
+                    mutual_only=mutual,
+                    max_dist_m=max_dist_m,
+                    create_node_metrics=make_nodes,
+                    compute_closeness=do_close,
+                    compute_betweenness=do_betw,
+                )
+                return
+
+            # Visibility network
+            dem_layer = self.cmbDemLayer.currentLayer()
+            if dem_layer is None or (not dem_layer.isValid()):
+                push_message(self.iface, "가시성 네트워크", "DEM(래스터) 레이어를 선택해주세요.", level=2)
                 restore_ui_focus(self)
                 return
+            if not self._ensure_metric(dem_layer.crs(), "가시성 네트워크"):
+                restore_ui_focus(self)
+                return
+
+            poly_boundary = False
+            boundary_step = 50.0
+            boundary_max_pts = 30
+            try:
+                poly_boundary = bool(self.chkPolyBoundaryVis.isChecked())
+            except Exception:
+                poly_boundary = False
+            try:
+                boundary_step = float(self.spinPolyBoundaryStep.value())
+            except Exception:
+                boundary_step = 50.0
+            try:
+                boundary_max_pts = int(self.spinPolyMaxBoundaryPts.value())
+            except Exception:
+                boundary_max_pts = 30
 
             nodes = self._collect_nodes(
                 layer=site_layer,
                 name_field=name_field,
                 poly_mode=poly_mode,
                 use_selected_only=use_selected,
-                target_crs=site_layer.crs(),
+                target_crs=dem_layer.crs(),
+                collect_polygon_boundary=poly_boundary,
+                boundary_step_m=boundary_step,
+                boundary_max_points=boundary_max_pts,
             )
+            if getattr(self, "_collect_error_msg", None):
+                push_message(self.iface, "오류", str(self._collect_error_msg), level=2, duration=10)
+                restore_ui_focus(self)
+                return
             if len(nodes) < 2:
-                push_message(self.iface, "PPA", "유효한 노드가 2개 이상 필요합니다.", level=2)
+                push_message(self.iface, "가시성 네트워크", "유효한 노드가 2개 이상 필요합니다.", level=2)
                 restore_ui_focus(self)
                 return
 
-            k = int(self.spinPpaK.value())
-            mutual = bool(self.chkPpaMutualOnly.isChecked())
-            method = str(getattr(self, "cmbPpaGraph", None).currentData() if hasattr(self, "cmbPpaGraph") else PPA_KNN)
+            obs_h = float(self.spinObsHeight.value())
+            tgt_h = float(self.spinTgtHeight.value())
+            cand_k = int(self.spinCandidateK.value())
+            max_dist = float(self.spinMaxDist.value())
+            step_m = float(self.spinSampleStep.value())
+
+            # Curvature/refraction controls are created at runtime; default to the
+            # viewshed tool's behaviour (curvature on, k = 0.13) if they are missing.
+            curvature_on = True
+            refraction_k = LOS_DEFAULT_REFRACTION_K
             try:
-                max_dist_m = float(self.spinPpaMaxDist.value()) if hasattr(self, "spinPpaMaxDist") else 0.0
-            except Exception:
-                max_dist_m = 0.0
+                curvature_on = bool(self.chkVisCurvature.isChecked())
+            except Exception as _exc:
+                log_swallowed("spatial_network_dialog.run_analysis", _exc)
+                curvature_on = True
+            try:
+                refraction_k = float(self.spinVisRefraction.value())
+            except Exception as _exc:
+                log_swallowed("spatial_network_dialog.run_analysis", _exc)
+                refraction_k = LOS_DEFAULT_REFRACTION_K
 
             make_nodes = bool(getattr(self, "chkCreateNodeMetrics", None) and self.chkCreateNodeMetrics.isChecked())
             do_close = bool(getattr(self, "chkCloseness", None) and self.chkCloseness.isChecked())
             do_betw = bool(getattr(self, "chkBetweenness", None) and self.chkBetweenness.isChecked())
+            vis_rule = str(
+                getattr(self, "cmbVisEdgeRule", None).currentData()
+                if hasattr(self, "cmbVisEdgeRule")
+                else VIS_RULE_MUTUAL
+            )
 
-            self._run_ppa(
-                nodes,
-                method=method,
-                k=k,
-                mutual_only=mutual,
-                max_dist_m=max_dist_m,
+            self._run_visibility_network(
+                dem_layer=dem_layer,
+                nodes=nodes,
+                obs_height=obs_h,
+                tgt_height=tgt_h,
+                candidate_k=cand_k,
+                max_dist=max_dist,
+                sample_step_m=step_m,
+                use_poly_boundary_ratio=poly_boundary,
                 create_node_metrics=make_nodes,
                 compute_closeness=do_close,
                 compute_betweenness=do_betw,
+                vis_edge_rule=vis_rule,
+                curvature=curvature_on,
+                refraction_coeff=refraction_k,
+                poly_boundary_step_m=boundary_step,
+                poly_boundary_max_points=boundary_max_pts,
             )
-            return
-
-        # Visibility network
-        dem_layer = self.cmbDemLayer.currentLayer()
-        if dem_layer is None or (not dem_layer.isValid()):
-            push_message(self.iface, "가시성 네트워크", "DEM(래스터) 레이어를 선택해주세요.", level=2)
+        except ProcessingCancelled as exc:
+            push_message(self.iface, "네트워크", str(exc) or "작업이 취소되었습니다.", level=1, duration=6)
             restore_ui_focus(self)
-            return
-        if not self._ensure_metric(dem_layer.crs(), "가시성 네트워크"):
+        except ProcessingTaskError as exc:
+            push_message(self.iface, "오류", f"네트워크 분석 실패: {exc}", level=2, duration=10)
             restore_ui_focus(self)
-            return
-
-        poly_boundary = False
-        boundary_step = 50.0
-        boundary_max_pts = 30
-        try:
-            poly_boundary = bool(self.chkPolyBoundaryVis.isChecked())
-        except Exception:
-            poly_boundary = False
-        try:
-            boundary_step = float(self.spinPolyBoundaryStep.value())
-        except Exception:
-            boundary_step = 50.0
-        try:
-            boundary_max_pts = int(self.spinPolyMaxBoundaryPts.value())
-        except Exception:
-            boundary_max_pts = 30
-
-        nodes = self._collect_nodes(
-            layer=site_layer,
-            name_field=name_field,
-            poly_mode=poly_mode,
-            use_selected_only=use_selected,
-            target_crs=dem_layer.crs(),
-            collect_polygon_boundary=poly_boundary,
-            boundary_step_m=boundary_step,
-            boundary_max_points=boundary_max_pts,
-        )
-        if len(nodes) < 2:
-            push_message(self.iface, "가시성 네트워크", "유효한 노드가 2개 이상 필요합니다.", level=2)
-            restore_ui_focus(self)
-            return
-
-        obs_h = float(self.spinObsHeight.value())
-        tgt_h = float(self.spinTgtHeight.value())
-        cand_k = int(self.spinCandidateK.value())
-        max_dist = float(self.spinMaxDist.value())
-        step_m = float(self.spinSampleStep.value())
-
-        # Curvature/refraction controls are created at runtime; default to the
-        # viewshed tool's behaviour (curvature on, k = 0.13) if they are missing.
-        curvature_on = True
-        refraction_k = LOS_DEFAULT_REFRACTION_K
-        try:
-            curvature_on = bool(self.chkVisCurvature.isChecked())
-        except Exception as _exc:
-            log_swallowed("spatial_network_dialog.run_analysis", _exc)
-            curvature_on = True
-        try:
-            refraction_k = float(self.spinVisRefraction.value())
-        except Exception as _exc:
-            log_swallowed("spatial_network_dialog.run_analysis", _exc)
-            refraction_k = LOS_DEFAULT_REFRACTION_K
-
-        make_nodes = bool(getattr(self, "chkCreateNodeMetrics", None) and self.chkCreateNodeMetrics.isChecked())
-        do_close = bool(getattr(self, "chkCloseness", None) and self.chkCloseness.isChecked())
-        do_betw = bool(getattr(self, "chkBetweenness", None) and self.chkBetweenness.isChecked())
-        vis_rule = str(
-            getattr(self, "cmbVisEdgeRule", None).currentData()
-            if hasattr(self, "cmbVisEdgeRule")
-            else VIS_RULE_MUTUAL
-        )
-
-        self._run_visibility_network(
-            dem_layer=dem_layer,
-            nodes=nodes,
-            obs_height=obs_h,
-            tgt_height=tgt_h,
-            candidate_k=cand_k,
-            max_dist=max_dist,
-            sample_step_m=step_m,
-            use_poly_boundary_ratio=poly_boundary,
-            create_node_metrics=make_nodes,
-            compute_closeness=do_close,
-            compute_betweenness=do_betw,
-            vis_edge_rule=vis_rule,
-            curvature=curvature_on,
-            refraction_coeff=refraction_k,
-            poly_boundary_step_m=boundary_step,
-            poly_boundary_max_points=boundary_max_pts,
-        )
+        finally:
+            self._running = False
+            if hasattr(self, "btnRun") and self.btnRun is not None:
+                self.btnRun.setEnabled(True)
 
     def _run_ppa(
         self,
@@ -1945,62 +1987,12 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
         return edges
 
     def _ppa_filter_gabriel(self, *, cand_edges: Set[Tuple[int, int]], coords: np.ndarray) -> Set[Tuple[int, int]]:
-        """Gabriel graph filter on Delaunay candidate edges (every Gabriel edge is one).
-
-        Strict rule (Gabriel & Sokal 1969; Matula & Sokal 1980): A-B is kept
-        only if d2(A,B) < d2(A,C) + d2(B,C) for every other site C, i.e. no
-        site inside OR ON the circle with diameter AB. The old test kept
-        sites on the circle, so on a grid or any cocircular four sites it
-        kept whichever diagonal the triangulator happened to choose.
-        Sites co-located with A or B (within 1 mm) share A's/B's edges and
-        are not counted as C.
-        """
-        out: Set[Tuple[int, int]] = set()
-        coloc2 = 1e-6  # (1 mm)^2
-        for a, b in cand_edges:
-            a = int(a)
-            b = int(b)
-            if a == b:
-                continue
-            midx = 0.5 * (coords[a, 0] + coords[b, 0])
-            midy = 0.5 * (coords[a, 1] + coords[b, 1])
-            r2 = ((coords[a, 0] - midx) ** 2) + ((coords[a, 1] - midy) ** 2)  # (d/2)^2
-
-            d2 = (coords[:, 0] - midx) ** 2 + (coords[:, 1] - midy) ** 2
-            da2 = (coords[:, 0] - coords[a, 0]) ** 2 + (coords[:, 1] - coords[a, 1]) ** 2
-            db2 = (coords[:, 0] - coords[b, 0]) ** 2 + (coords[:, 1] - coords[b, 1]) ** 2
-            d2[(da2 <= coloc2) | (db2 <= coloc2)] = np.inf
-            d2[a] = np.inf
-            d2[b] = np.inf
-            # |C - M|^2 > r^2  <=>  d2(A,C) + d2(B,C) > d2(A,B); a relative
-            # 1e-9 margin counts float-rounded cocircular sites as on the circle.
-            if float(np.min(d2)) > float(r2) * (1.0 + 1e-9):
-                out.add((a, b) if a < b else (b, a))
-        return out
+        """Gabriel graph filter delegating to QGIS-free tools.ppa_filters."""
+        return set(ppa_filter_gabriel(coords, cand_edges))
 
     def _ppa_filter_rng(self, *, cand_edges: Set[Tuple[int, int]], coords: np.ndarray) -> Set[Tuple[int, int]]:
-        """Relative Neighborhood Graph (RNG) filter (usually applied on Delaunay candidate edges)."""
-        out: Set[Tuple[int, int]] = set()
-        eps = 1e-9
-        for a, b in cand_edges:
-            a = int(a)
-            b = int(b)
-            if a == b:
-                continue
-            dx = float(coords[a, 0] - coords[b, 0])
-            dy = float(coords[a, 1] - coords[b, 1])
-            dij2 = dx * dx + dy * dy
-
-            d2a = (coords[:, 0] - coords[a, 0]) ** 2 + (coords[:, 1] - coords[a, 1]) ** 2
-            d2b = (coords[:, 0] - coords[b, 0]) ** 2 + (coords[:, 1] - coords[b, 1]) ** 2
-            d2a[a] = np.inf
-            d2a[b] = np.inf
-            d2b[a] = np.inf
-            d2b[b] = np.inf
-
-            if not bool(np.any(np.maximum(d2a, d2b) < (float(dij2) - eps))):
-                out.add((a, b) if a < b else (b, a))
-        return out
+        """Relative Neighborhood Graph (RNG) filter delegating to tools.ppa_filters."""
+        return set(ppa_filter_rng(coords, cand_edges))
 
     def _add_node_metrics_layer(
         self,
@@ -2021,16 +2013,17 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
         if n <= 0:
             return
 
-        deg = self._degrees(n, edges)
-        comp_id, comp_sizes = self._components(n, edges)
+        simple_edges = {
+            (min(int(a), int(b)), max(int(a), int(b)))
+            for a, b in edges
+            if int(a) != int(b)
+        }
+        deg = self._degrees(n, simple_edges)
+        comp_id, comp_sizes = self._components(n, simple_edges)
 
-        # Build adjacency
+        # Build deduplicated undirected adjacency
         adj: List[List[int]] = [[] for _ in range(n)]
-        for a, b in edges:
-            a = int(a)
-            b = int(b)
-            if a == b:
-                continue
+        for a, b in sorted(simple_edges):
             adj[a].append(b)
             adj[b].append(a)
 
@@ -2057,6 +2050,9 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
 
         closeness = None
         betweenness = None
+        clustering = local_clustering_coefficients(n=n, adj=adj)
+        summary = graph_summary(n=n, adj=adj)
+        harmonic = harmonic_centrality_unweighted(n=n, adj=adj) if n <= 500 else None
         if compute_closeness or compute_betweenness:
             # Worker thread (see _CentralityTask): Brandes on up to 500 nodes
             # used to freeze the GUI for the whole computation.
@@ -2079,7 +2075,10 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
             QgsField("degree", FT_INT),
             QgsField("component", FT_INT),
             QgsField("comp_size", FT_INT),
+            QgsField("clustering", FT_DOUBLE),
         ]
+        if harmonic is not None:
+            fields.append(QgsField("harmonic", FT_DOUBLE))
         if compute_closeness:
             fields.append(QgsField("closeness", FT_DOUBLE))
         if compute_betweenness:
@@ -2089,6 +2088,16 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
             fields.extend(extra_node_fields)
         pr.addAttributes(fields)
         layer.updateFields()
+        try:
+            for fname, alias in (
+                ("clustering", "국소 군집계수(clustering)"),
+                ("harmonic", "조화 중심성(harmonic)"),
+            ):
+                fidx = int(layer.fields().indexFromName(fname))
+                if fidx >= 0:
+                    layer.setFieldAlias(fidx, alias)
+        except Exception as _exc:
+            log_swallowed("spatial_network_dialog._add_node_metrics_layer.alias", _exc)
 
         # Raw Brandes pair counts scaled by the number of unordered pairs that
         # exclude i, so networks of different size and NetworkX/Gephi defaults
@@ -2103,6 +2112,9 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
             f["degree"] = int(deg[i])
             f["component"] = int(comp_id[i])
             f["comp_size"] = int(comp_sizes.get(int(comp_id[i]), 1))
+            f["clustering"] = float(clustering[i]) if i < len(clustering) else 0.0
+            if harmonic is not None:
+                f["harmonic"] = float(harmonic[i]) if i < len(harmonic) else 0.0
             if compute_closeness and closeness is not None:
                 try:
                     f["closeness"] = float(closeness[i])
@@ -2196,6 +2208,7 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                     "n_edges": int(len(edges)),
                     "closeness": bool(compute_closeness),
                     "betweenness": bool(compute_betweenness),
+                    "graph_summary": summary,
                 }
             )
             set_archtoolkit_layer_metadata(
@@ -2300,6 +2313,14 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
             return None
 
         cell_cache: Dict[Tuple[int, int], Optional[float]] = {}
+        try:
+            has_decl_nd = bool(hasattr(provider, "sourceHasNoDataValue") and provider.sourceHasNoDataValue(1))
+            decl_nd = float(provider.sourceNoDataValue(1)) if has_decl_nd else None
+            if decl_nd is not None and not math.isfinite(decl_nd):
+                decl_nd = None
+        except Exception as _exc:
+            log_swallowed("spatial_network_dialog._los_visible.nodata", _exc)
+            decl_nd = None
 
         def _cell(c: int, r: int) -> Optional[float]:
             key = (c, r)
@@ -2312,7 +2333,13 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                     try:
                         fv = float(v)
                         if math.isfinite(fv):
-                            val = fv
+                            if decl_nd is not None:
+                                if not math.isclose(fv, decl_nd, rel_tol=1e-5, abs_tol=1e-5):
+                                    val = fv
+                            else:
+                                nd_mask, _ = undeclared_nodata_mask([fv], None)
+                                if not bool(nd_mask[0]):
+                                    val = fv
                     except Exception as _exc:
                         log_swallowed("spatial_network_dialog._los_visible", _exc)
                         val = None
@@ -2549,6 +2576,9 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
             obs_h: float,
             tgt_h: float,
         ) -> Optional[float]:
+            total_samples = int(len(obs_samples))
+            if total_samples <= 0:
+                return None
             visible = 0
             valid = 0
             for ox, oy in obs_samples:
@@ -2571,7 +2601,7 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                     visible += 1
             if valid <= 0:
                 return None
-            return float(visible) / float(valid)
+            return float(visible) / float(total_samples)
 
         def _status_from_vis(vis: Optional[bool]) -> str:
             if vis is None:
@@ -2640,9 +2670,9 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
             status_ab = _status_from_vis(vis_ab)
             status_ba = _status_from_vis(vis_ba)
 
-            # Aggregate ratio
+            # Aggregate ratio (None when failed so NULL is stored, never fake 0.0)
             vals = [v for v in (r_ab, r_ba) if v is not None]
-            ratio_mean = float(sum(vals) / float(len(vals))) if vals else 0.0
+            ratio_mean: Optional[float] = float(sum(vals) / float(len(vals))) if vals else None
 
             # Aggregate status for styling
             if status_ab == "샘플 실패" or status_ba == "샘플 실패":
@@ -2660,84 +2690,89 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
             extras = {
                 "status_ab": status_ab,
                 "status_ba": status_ba,
-                "vis_ab": int(bool(vis_ab)) if vis_ab is not None else 0,
-                "vis_ba": int(bool(vis_ba)) if vis_ba is not None else 0,
-                "vis_ratio_ab": float(r_ab) if r_ab is not None else 0.0,
-                "vis_ratio_ba": float(r_ba) if r_ba is not None else 0.0,
-                "vis_ratio": float(ratio_mean),
-                "mutual": int(1 if (edge_status == "상호 보임") else 0),
+                "vis_ab": (None if vis_ab is None else int(bool(vis_ab))),
+                "vis_ba": (None if vis_ba is None else int(bool(vis_ba))),
+                "vis_ratio_ab": (None if r_ab is None else float(r_ab)),
+                "vis_ratio_ba": (None if r_ba is None else float(r_ba)),
+                "vis_ratio": ratio_mean,
+                "mutual": (None if edge_status == "샘플 실패" else (1 if (edge_status == "상호 보임") else 0)),
             }
-            return edge_status, float(ratio_mean), extras
+            return edge_status, ratio_mean, extras
 
-        if all_pairs:
-            for i in range(n):
-                if progress.wasCanceled():
-                    push_message(self.iface, "가시성 네트워크", "취소되었습니다.", level=1, duration=4)
-                    restore_ui_focus(self)
-                    return
+        try:
+            if all_pairs:
+                for i in range(n):
+                    if progress.wasCanceled():
+                        push_message(self.iface, "가시성 네트워크", "취소되었습니다.", level=1, duration=4)
+                        restore_ui_focus(self)
+                        return
 
-                xi, yi = nodes[i].x, nodes[i].y
-                for j in range(i + 1, n):
-                    if max_dist_sq > 0:
+                    xi, yi = nodes[i].x, nodes[i].y
+                    for j in range(i + 1, n):
+                        if max_dist_sq > 0:
+                            xj, yj = nodes[j].x, nodes[j].y
+                            dsq = (xi - xj) ** 2 + (yi - yj) ** 2
+                            if dsq > max_dist_sq:
+                                continue
+
+                        tested_pairs += 1
+                        edge_status, ratio_mean, extras = _eval_pair(i, j)
+                        if edge_status == "샘플 실패":
+                            failed_pairs += 1
+
+                        edges.add((i, j))
+                        status_by_edge[(i, j)] = edge_status
+                        if ratio_mean is not None:
+                            ratio_by_edge[(i, j)] = ratio_mean
+                        extra_by_edge[(i, j)] = extras
+
+                        if tested_pairs % 20 == 0:
+                            progress.setValue(min(progress.maximum(), tested_pairs))
+                            QtWidgets.QApplication.processEvents()
+
+                progress.setValue(progress.maximum())
+            else:
+                tested: Set[Tuple[int, int]] = set()
+                for i in range(n):
+                    if progress.wasCanceled():
+                        push_message(self.iface, "가시성 네트워크", "취소되었습니다.", level=1, duration=4)
+                        restore_ui_focus(self)
+                        return
+
+                    # Candidate neighbors by Euclidean distance (in DEM CRS units, meters expected)
+                    xi, yi = nodes[i].x, nodes[i].y
+                    dists = []
+                    for j in range(n):
+                        if i == j:
+                            continue
                         xj, yj = nodes[j].x, nodes[j].y
                         dsq = (xi - xj) ** 2 + (yi - yj) ** 2
-                        if dsq > max_dist_sq:
+                        if max_dist_sq > 0 and dsq > max_dist_sq:
                             continue
+                        dists.append((dsq, j))
 
-                    tested_pairs += 1
-                    edge_status, ratio_mean, extras = _eval_pair(i, j)
-                    if edge_status == "샘플 실패":
-                        failed_pairs += 1
+                    for _dsq, j in heapq.nsmallest(candidate_k, dists, key=lambda t: t[0]):
+                        a, b = (i, j) if i < j else (j, i)
+                        if a == b:
+                            continue
+                        if (a, b) in tested:
+                            continue
+                        tested.add((a, b))
+                        tested_pairs += 1
+                        edge_status, ratio_mean, extras = _eval_pair(a, b)
+                        if edge_status == "샘플 실패":
+                            failed_pairs += 1
 
-                    edges.add((i, j))
-                    status_by_edge[(i, j)] = edge_status
-                    ratio_by_edge[(i, j)] = ratio_mean
-                    extra_by_edge[(i, j)] = extras
+                        edges.add((a, b))
+                        status_by_edge[(a, b)] = edge_status
+                        if ratio_mean is not None:
+                            ratio_by_edge[(a, b)] = ratio_mean
+                        extra_by_edge[(a, b)] = extras
 
-                    if tested_pairs % 20 == 0:
-                        progress.setValue(min(progress.maximum(), tested_pairs))
-                        QtWidgets.QApplication.processEvents()
-
-            progress.setValue(progress.maximum())
-        else:
-            tested: Set[Tuple[int, int]] = set()
-            for i in range(n):
-                if progress.wasCanceled():
-                    push_message(self.iface, "가시성 네트워크", "취소되었습니다.", level=1, duration=4)
-                    restore_ui_focus(self)
-                    return
-
-                # Candidate neighbors by Euclidean distance (in DEM CRS units, meters expected)
-                xi, yi = nodes[i].x, nodes[i].y
-                dists = []
-                for j in range(n):
-                    if i == j:
-                        continue
-                    xj, yj = nodes[j].x, nodes[j].y
-                    dsq = (xi - xj) ** 2 + (yi - yj) ** 2
-                    if max_dist_sq > 0 and dsq > max_dist_sq:
-                        continue
-                    dists.append((dsq, j))
-
-                for _dsq, j in heapq.nsmallest(candidate_k, dists, key=lambda t: t[0]):
-                    a, b = (i, j) if i < j else (j, i)
-                    if a == b:
-                        continue
-                    if (a, b) in tested:
-                        continue
-                    tested.add((a, b))
-                    tested_pairs += 1
-                    edge_status, ratio_mean, extras = _eval_pair(a, b)
-                    if edge_status == "샘플 실패":
-                        failed_pairs += 1
-
-                    edges.add((a, b))
-                    status_by_edge[(a, b)] = edge_status
-                    ratio_by_edge[(a, b)] = ratio_mean
-                    extra_by_edge[(a, b)] = extras
-
-                progress.setValue(i + 1)
-                QtWidgets.QApplication.processEvents()
+                    progress.setValue(i + 1)
+                    QtWidgets.QApplication.processEvents()
+        finally:
+            progress.close()
 
         extra_fields = [
             QgsField("status_ab", FT_STRING),
@@ -2848,12 +2883,17 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
             for (a, b), ex in extra_by_edge.items():
                 _skip_2188 = False
                 try:
-                    va = int(ex.get("vis_ab", 0))
-                    vb = int(ex.get("vis_ba", 0))
+                    raw_va = ex.get("vis_ab")
+                    raw_vb = ex.get("vis_ba")
+                    va = int(raw_va) if raw_va is not None else 0
+                    vb = int(raw_vb) if raw_vb is not None else 0
                     out_deg[int(a)] += va
                     in_deg[int(b)] += va
                     out_deg[int(b)] += vb
                     in_deg[int(a)] += vb
+
+                    if status_by_edge.get((a, b)) == "샘플 실패" or raw_va is None or raw_vb is None:
+                        continue
 
                     if str(vis_edge_rule or VIS_RULE_MUTUAL) == VIS_RULE_EITHER:
                         if va or vb:
@@ -2988,10 +3028,14 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
             if status_by_edge is not None:
                 f["status"] = str(status_by_edge.get((a, b), ""))
             if ratio_by_edge is not None:
-                try:
-                    f["vis_ratio"] = float(ratio_by_edge.get((a, b), 0.0))
-                except Exception:
-                    f["vis_ratio"] = 0.0
+                rv = ratio_by_edge.get((a, b))
+                if rv is None:
+                    f["vis_ratio"] = None
+                else:
+                    try:
+                        f["vis_ratio"] = float(rv)
+                    except Exception:
+                        f["vis_ratio"] = None
             if extra_values_by_edge is not None and (a, b) in extra_values_by_edge:
                 for k, v in (extra_values_by_edge.get((a, b)) or {}).items():
                     try:

@@ -154,23 +154,21 @@ def edge_cost(model_key, horiz_m, dz_m, model_params, *, cost_mode="time_s"):
         M = max(1.5 * W, float(M))
         return (float(M) * float(horiz_m)) / V
 
-    # Isotropic slope-based models (use absolute slope magnitude)
-    slope_abs = abs(float(dz_m)) / float(horiz_m) if horiz_m > 0 else 0.0  # tan(theta)
     min_speed_mps = float(model_params.get("min_speed_mps", 0.05))
 
     if model_key == MODEL_HERZOG_METABOLIC:
-        # Based on the slope_cost implementation in Zoran Čučković's "Movement Analysis" QGIS plugin.
-        # We normalize the factor so that slope=0 keeps the base speed.
-        den = sum(
-            (
-                1337.8 * slope_abs**6,
-                278.19 * slope_abs**5,
-                -517.39 * slope_abs**4,
-                -78.199 * slope_abs**3,
-                93.419 * slope_abs**2,
-                19.825 * slope_abs,
-                1.64,
-            )
+        # Signed-slope 6th-degree metabolic cost polynomial (Herzog 2013 fit to Minetti et al. 2002).
+        # Must receive signed dz_m / horiz_m because odd-power terms (19.825*s, -78.199*s^3, 278.19*s^5)
+        # encode downhill braking vs gentle descent optimum (~ -10.5% grade). Normalized so slope=0 -> base_mps.
+        slope_s = float(dz_m) / float(horiz_m) if horiz_m > 0 else 0.0
+        den = (
+            1337.8 * slope_s**6
+            + 278.19 * slope_s**5
+            - 517.39 * slope_s**4
+            - 78.199 * slope_s**3
+            + 93.419 * slope_s**2
+            + 19.825 * slope_s
+            + 1.64
         )
         rel = 1.0 / max(1e-9, float(den))
         rel0 = 1.0 / 1.64
@@ -178,6 +176,9 @@ def edge_cost(model_key, horiz_m, dz_m, model_params, *, cost_mode="time_s"):
         base_mps = max(min_speed_mps, float(model_params.get("herzog_base_kmh", 5.0)) * 1000.0 / 3600.0)
         speed_mps = max(min_speed_mps, base_mps * rel_norm)
         return float(horiz_m) / speed_mps
+
+    # Isotropic slope-based models (use absolute slope magnitude)
+    slope_abs = abs(float(dz_m)) / float(horiz_m) if horiz_m > 0 else 0.0  # tan(theta)
 
     if model_key == MODEL_CONOLLY_LAKE:
         # PLUGIN-DEFINED relative-slope penalty anchored at a reference slope.

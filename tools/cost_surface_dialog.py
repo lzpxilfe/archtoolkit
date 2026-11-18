@@ -86,6 +86,12 @@ from .cost_models import (
     isoenergy_levels_kcal as _default_isoenergy_levels_kcal,
     wheeled_critical_slope_percent as _wheeled_critical_slope_percent,
 )
+from .cost_engine import (
+    _astar_path,
+    _dijkstra_full,
+    _neighbors,
+    _reconstruct_path,
+)
 from .live_log_dialog import ensure_live_log_dialog
 from .help_dialog import show_help_dialog
 from . import dialog_memory
@@ -136,6 +142,7 @@ class CostTaskResult:
     # reader having the help text open (see _tag_cost_surface_layer).
     allow_diagonal: Optional[bool] = None
     cost_mode: Optional[str] = None
+    create_path: bool = False
     # The DEM layer's CRS object. Result memory layers are built from it, not
     # from dem_authid: a custom CRS has an empty authid, and "Point?crs=" with
     # an empty authid used to skip the LCP/start-end/milestone layers.
@@ -223,7 +230,15 @@ def _window_bounds(win_gt, cols: int, rows: int):
     return min(xs), min(ys), max(xs), max(ys)
 
 
-def _resample_raster_to_window(raster_source: str, *, win_gt, win_proj_wkt: str, cols: int, rows: int):
+def _resample_raster_to_window(
+    raster_source: str,
+    *,
+    win_gt,
+    win_proj_wkt: str,
+    cols: int,
+    rows: int,
+    src_crs_wkt: str = "",
+):
     """Resample the raster to the given window grid (returns float32 array with NaN for nodata)."""
     path = _split_qgis_source_path(raster_source)
     if not path:
@@ -234,19 +249,25 @@ def _resample_raster_to_window(raster_source: str, *, win_gt, win_proj_wkt: str,
 
     minx, miny, maxx, maxy = _window_bounds(win_gt, cols, rows)
     try:
-        warp_opts = gdal.WarpOptions(
+        warp_kwargs = dict(
             format="MEM",
             outputBounds=(minx, miny, maxx, maxy),
             width=int(cols),
             height=int(rows),
             dstSRS=str(win_proj_wkt or ""),
+            dstNodata=float("nan"),
             resampleAlg="near",
             multithread=False,
             outputType=gdal.GDT_Float32,
         )
+        if src_crs_wkt:
+            warp_kwargs["srcSRS"] = str(src_crs_wkt)
+        warp_opts = gdal.WarpOptions(**warp_kwargs)
         out_ds = gdal.Warp("", ds, options=warp_opts)
     except Exception:
         out_ds = None
+    finally:
+        ds = None
     if out_ds is None:
         return None
 
@@ -799,237 +820,6 @@ def _bbox_window(gt, xsize, ysize, minx, miny, maxx, maxy):
     return x0, y0, max(1, x1 - x0 + 1), max(1, y1 - y0 + 1)
 
 
-def _neighbors(allow_diagonal, dx, dy):
-    """Return the (d_row, d_col, step_length) moves available from one cell.
-
-    Known limitation, disclosed rather than fixed: this is an 8-neighbour (or,
-    with the diagonal option off, 4-neighbour) grid walk, so every path is
-    quantised to 45-degree increments. A true straight line at 22.5 degrees can
-    only be approximated by alternating 0/45-degree steps, which overestimates
-    accumulated cost by up to roughly 8% (1/cos(22.5 deg)) against a geodesic -
-    the classic grid metrication error. GRASS r.cost offers knight's moves to
-    reduce it; this tool does not. Switching the diagonal option OFF makes it
-    worse, not better: 4-neighbour paths are quantised to 90 degrees and
-    overestimate by up to about 41% (sqrt(2)). Changing the move set here would
-    change every existing result, so the tool help states the bias instead.
-    """
-    moves = [(-1, 0, dy), (1, 0, dy), (0, -1, dx), (0, 1, dx)]
-    if allow_diagonal:
-        dxy = math.hypot(dx, dy)
-        moves.extend([(-1, -1, dxy), (-1, 1, dxy), (1, -1, dxy), (1, 1, dxy)])
-    return moves
-
-
-def _astar_path(
-    dem,
-    nodata_mask,
-    start_rc,
-    end_rc,
-    dx,
-    dy,
-    allow_diagonal,
-    model_key,
-    model_params,
-    cost_mode="time_s",
-    cancel_check=None,
-    friction=None,
-    friction_min=1.0,
-):
-    rows, cols = dem.shape
-    sr, sc = start_rc
-    er, ec = end_rc
-    start_idx = sr * cols + sc
-    end_idx = er * cols + ec
-
-    gscore = np.full(rows * cols, np.inf, dtype=np.float64)
-    prev = np.full(rows * cols, -1, dtype=np.int32)
-    gscore[start_idx] = 0.0
-
-    if cost_mode != "time_s":
-        # Keep heuristic admissible (0) for non-time costs (e.g. energy).
-        def hfun(_r, _c):
-            return 0.0
-    else:
-        if model_key == MODEL_TOBLER:
-            vmax = float(model_params.get("tobler_base_kmh", 6.0)) * 1000.0 / 3600.0
-        elif model_key == MODEL_NAISMITH:
-            vmax = float(model_params.get("naismith_horizontal_kmh", 5.0)) * 1000.0 / 3600.0
-        elif model_key == MODEL_HERZOG_METABOLIC:
-            vmax = float(model_params.get("herzog_base_kmh", 5.0)) * 1000.0 / 3600.0
-        elif model_key == MODEL_CONOLLY_LAKE:
-            vmax = float(model_params.get("conolly_base_kmh", 5.0)) * 1000.0 / 3600.0
-        elif model_key == MODEL_HERZOG_WHEELED:
-            vmax = float(model_params.get("wheeled_base_kmh", 4.0)) * 1000.0 / 3600.0
-        elif model_key == MODEL_PANDOLF:
-            vmax = float(model_params.get("pandolf_speed_mps", 5.0 * 1000.0 / 3600.0))
-        else:
-            vmax = float(model_params.get("naismith_horizontal_kmh", 5.0)) * 1000.0 / 3600.0
-        vmax = max(0.05, vmax)
-
-        fmin = 1.0
-        try:
-            fmin = max(0.0, float(friction_min))
-        except Exception:
-            fmin = 1.0
-
-        def hfun(r, c):
-            return (math.hypot((ec - c) * dx, (er - r) * dy) / vmax) * fmin
-
-    heap = [(hfun(sr, sc), 0.0, start_idx)]
-    moves = _neighbors(allow_diagonal, dx, dy)
-
-    while heap:
-        if cancel_check and cancel_check():
-            return None, None
-        f, g, idx = heapq.heappop(heap)
-        if g != gscore[idx]:
-            continue
-        if idx == end_idx:
-            return prev, float(g)
-
-        r = idx // cols
-        c = idx % cols
-        if nodata_mask[r, c]:
-            continue
-
-        z0 = float(dem[r, c])
-        for dr, dc, horiz in moves:
-            nr = r + dr
-            nc = c + dc
-            if nr < 0 or nr >= rows or nc < 0 or nc >= cols:
-                continue
-            if nodata_mask[nr, nc]:
-                continue
-            dz = float(dem[nr, nc]) - z0
-            w = _edge_cost(model_key, horiz, dz, model_params, cost_mode=cost_mode)
-            if friction is not None and math.isfinite(w):
-                try:
-                    f0 = float(friction[r, c])
-                    f1 = float(friction[nr, nc])
-                    w *= 0.5 * (f0 + f1)
-                except Exception as _exc:
-                    log_swallowed("cost_surface_dialog._astar_path", _exc)
-
-            nidx = nr * cols + nc
-            ng = g + w
-            if ng < gscore[nidx]:
-                gscore[nidx] = ng
-                prev[nidx] = idx
-                heapq.heappush(heap, (ng + hfun(nr, nc), ng, nidx))
-
-    return prev, None
-
-
-def _dijkstra_full(
-    dem,
-    nodata_mask,
-    start_rc,
-    dx,
-    dy,
-    allow_diagonal,
-    model_key,
-    model_params,
-    cost_mode="time_s",
-    cancel_check=None,
-    progress_cb=None,
-    friction=None,
-    reverse=False,
-):
-    """Single-source shortest costs over the DEM grid.
-
-    reverse=False: dist[x] = cost(start_rc -> x).
-    reverse=True:  dist[x] = cost(x -> start_rc), computed on the reversed
-        graph by negating the elevation delta in the (anisotropic) edge cost.
-        Needed for least-cost corridors: corridor = cost(A->x) + cost(x->B),
-        and cost(x->B) != cost(B->x) for slope-asymmetric models (Tobler,
-        Naismith, Pandolf). For isotropic models the result is identical.
-    """
-    rows, cols = dem.shape
-    sr, sc = start_rc
-    start_idx = sr * cols + sc
-
-    dist = np.full(rows * cols, np.inf, dtype=np.float64)
-    prev = np.full(rows * cols, -1, dtype=np.int32)
-    dist[start_idx] = 0.0
-
-    heap = [(0.0, start_idx)]
-    moves = _neighbors(allow_diagonal, dx, dy)
-    total = rows * cols
-    popped = 0
-
-    while heap:
-        if cancel_check and cancel_check():
-            return None, None
-        d, idx = heapq.heappop(heap)
-        if d != dist[idx]:
-            continue
-
-        popped += 1
-        if progress_cb and popped % 5000 == 0:
-            progress_cb(min(99.0, 100.0 * popped / max(1, total)))
-
-        r = idx // cols
-        c = idx % cols
-        if nodata_mask[r, c]:
-            continue
-
-        z0 = float(dem[r, c])
-        for dr, dc, horiz in moves:
-            nr = r + dr
-            nc = c + dc
-            if nr < 0 or nr >= rows or nc < 0 or nc >= cols:
-                continue
-            if nodata_mask[nr, nc]:
-                continue
-
-            dz = float(dem[nr, nc]) - z0
-            # reverse=True relaxes the predecessor edge (neighbor -> current)
-            # so dist[x] becomes cost(x -> start_rc); its elevation delta is -dz.
-            edge_dz = -dz if reverse else dz
-            w = _edge_cost(model_key, horiz, edge_dz, model_params, cost_mode=cost_mode)
-            if friction is not None and math.isfinite(w):
-                try:
-                    f0 = float(friction[r, c])
-                    f1 = float(friction[nr, nc])
-                    w *= 0.5 * (f0 + f1)
-                except Exception as _exc:
-                    log_swallowed("cost_surface_dialog._dijkstra_full", _exc)
-            nidx = nr * cols + nc
-            nd = d + w
-            if nd < dist[nidx]:
-                dist[nidx] = nd
-                prev[nidx] = idx
-                heapq.heappush(heap, (nd, nidx))
-
-    if progress_cb:
-        progress_cb(100.0)
-    return dist, prev
-
-
-def _reconstruct_path(prev, start_rc, end_rc, cols, rows):
-    start_idx = start_rc[0] * cols + start_rc[1]
-    end_idx = end_rc[0] * cols + end_rc[1]
-    if start_idx == end_idx:
-        return [start_idx]
-    if prev[end_idx] == -1:
-        return []
-
-    path = []
-    cur = end_idx
-    max_steps = rows * cols + 1
-    steps = 0
-    while cur != -1 and steps < max_steps:
-        path.append(cur)
-        if cur == start_idx:
-            break
-        cur = int(prev[cur])
-        steps += 1
-    if not path or path[-1] != start_idx:
-        return []
-    path.reverse()
-    return path
-
-
 class CostSurfaceWorker(QgsTask):
     def __init__(
         self,
@@ -1051,6 +841,7 @@ class CostSurfaceWorker(QgsTask):
         corridor_polygonize=True,
         friction_raster_source=None,
         friction_raster_scale=1.0,
+        friction_raster_crs_wkt="",
         friction_vector_source=None,
         friction_vector_multiplier=1.0,
         on_done,
@@ -1076,6 +867,7 @@ class CostSurfaceWorker(QgsTask):
         self.corridor_polygonize = bool(corridor_polygonize)
         self.friction_raster_source = friction_raster_source
         self.friction_raster_scale = float(friction_raster_scale) if friction_raster_scale is not None else 1.0
+        self.friction_raster_crs_wkt = str(friction_raster_crs_wkt or "")
         self.friction_vector_source = friction_vector_source
         self.friction_vector_multiplier = (
             float(friction_vector_multiplier) if friction_vector_multiplier is not None else 1.0
@@ -1141,6 +933,12 @@ class CostSurfaceWorker(QgsTask):
         ysize = ds.RasterYSize
         gt = ds.GetGeoTransform()
         proj = ds.GetProjection()
+        if not proj and self.dem_crs is not None:
+            try:
+                if self.dem_crs.isValid():
+                    proj = self.dem_crs.toWkt()
+            except Exception as _exc:
+                log_swallowed("cost_surface_dialog._run_impl", _exc)
         nodata = band.GetNoDataValue()
 
         dx = abs(float(gt[1]))
@@ -1281,9 +1079,15 @@ class CostSurfaceWorker(QgsTask):
                     win_proj_wkt=proj,
                     cols=cols,
                     rows=rows,
+                    src_crs_wkt=self.friction_raster_crs_wkt,
                 )
                 if fr is None:
                     return CostTaskResult(ok=False, message="추가 마찰(래스터)을 읽을 수 없습니다.")
+                if not np.any((~nodata_mask) & np.isfinite(fr) & (fr > 0)):
+                    return CostTaskResult(
+                        ok=False,
+                        message="추가 마찰(래스터)이 분석 영역(DEM 유효 셀)과 겹치지 않거나 유효한 양수 값이 없습니다.",
+                    )
                 try:
                     scale = float(self.friction_raster_scale)
                 except Exception:
@@ -1685,6 +1489,15 @@ class CostSurfaceWorker(QgsTask):
 
         msg = "완료" if not msg_parts else " | ".join(msg_parts)
 
+        has_output_product = bool(
+            cost_raster_path
+            or energy_raster_path
+            or corridor_raster_path
+            or (path_coords and len(path_coords) >= 2)
+        )
+        if create_path and (end_cost_for_path is None or not math.isfinite(end_cost_for_path)) and not has_output_product:
+            return CostTaskResult(ok=False, message=msg)
+
         if create_corridor and not corridor_raster_path and (not create_time_raster) and (not create_energy_raster) and (not create_path):
             return CostTaskResult(ok=False, message=msg)
 
@@ -1719,6 +1532,7 @@ class CostSurfaceWorker(QgsTask):
             corridor_percent=(float(corridor_percent) if create_corridor else None),
             allow_diagonal=bool(self.allow_diagonal),
             cost_mode=path_cost_mode,
+            create_path=bool(create_path),
             dem_crs=self.dem_crs,
             run_params=dict(self.run_params or {}),
             lcp_profile=lcp_profile,
@@ -2357,11 +2171,11 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
             elif model_key == MODEL_HERZOG_METABOLIC:
                 self.groupHerzogMetabolicParams.setVisible(True)
                 self.lblModelHelp.setText(
-                    "<b>허조그 메타볼릭(상대속도) (Herzog metabolic, via Čučković)</b><br>"
-                    "경사(절대값)에 따른 이동 저항을 다항식으로 표현한 모델입니다. (상·하행 동일하게 취급)<br>"
+                    "<b>허조그 메타볼릭(부호 경사) (Herzog 2013; Minetti et al. 2002)</b><br>"
+                    "부호 있는 경사(tan θ)에 따른 6차 대사 다항식으로 이동 비용을 계산하는 <b>비등방</b> 모델입니다.<br>"
+                    "(약 -10.5% 완만한 내리막에서 최소 비용, 급경사 오르막·내리막에서 비용 급증)<br>"
                     "<br><b>변수 해석</b><br>"
                     "• 기본속도: 평지 기준 속도. 값↑ → 전체 시간이↓<br>"
-                    "<br><b>참고</b>: 수식은 Zoran Čučković의 QGIS 'Movement Analysis' 플러그인(slope_cost) 구현을 따릅니다.<br>"
                     "<br><b>누적 비용</b>: 출발점→각 셀 최소 이동시간(분)"
                 )
             elif model_key == MODEL_CONOLLY_LAKE:
@@ -2741,6 +2555,11 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
             corridor_polygonize=corridor_polygonize,
             friction_raster_source=(friction_raster_layer.source() if use_friction_raster and friction_raster_layer else None),
             friction_raster_scale=friction_raster_scale,
+            friction_raster_crs_wkt=(
+                friction_raster_layer.crs().toWkt()
+                if use_friction_raster and friction_raster_layer and friction_raster_layer.crs().isValid()
+                else ""
+            ),
             friction_vector_source=(f"{friction_vector_export}|layername=friction" if friction_vector_export else None),
             friction_vector_multiplier=friction_vector_multiplier,
             on_done=on_done,
@@ -3029,7 +2848,7 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
             pt_layer.setRenderer(QgsSingleSymbolRenderer(symbol))
             bottom_to_top.append(pt_layer)
 
-        if res.end_xy and res.start_xy and result_crs.isValid():
+        if (res.create_path or res.path_coords) and res.end_xy and res.start_xy and result_crs.isValid():
             path_name = "경로 비교 (Straight vs LCP)"
             if model_tag:
                 path_name = f"{path_name} - {model_tag}"
@@ -3133,6 +2952,7 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
             self._profile_payloads[path_layer.id()] = {
                 "dem_source": res.dem_source,
                 "dem_authid": res.dem_authid,
+                "dem_crs": result_crs,
                 "model_key": res.model_key,
                 "model_params": res.model_params or {},
                 "model_label": res.model_label or "",
@@ -3198,6 +3018,8 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
                 units = "min"
             elif str(kind) == "energy_raster":
                 units = "kcal"
+            elif str(kind) == "corridor_raster":
+                units = "mask"
             approx_params = {}
             if res is not None:
                 approx_params["model"] = str(getattr(res, "model_key", "") or "")
@@ -3781,6 +3603,10 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
             return coords[-1]
 
         base_coords = lcp_coords_dense if lcp_coords_dense else straight_coords
+        dem_crs_hover = payload.get("dem_crs")
+        if not isinstance(dem_crs_hover, QgsCoordinateReferenceSystem) or not dem_crs_hover.isValid():
+            authid = str(payload.get("dem_authid") or "").strip()
+            dem_crs_hover = QgsCoordinateReferenceSystem(authid) if authid else None
 
         def on_hover(d):
             try:
@@ -3791,8 +3617,20 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
                 pt = point_at_distance(base_coords, float(d))
                 if not pt:
                     return
+                pt_map = QgsPointXY(pt[0], pt[1])
+                try:
+                    canvas_crs = self.canvas.mapSettings().destinationCrs()
+                    if (
+                        dem_crs_hover is not None
+                        and dem_crs_hover.isValid()
+                        and canvas_crs.isValid()
+                        and dem_crs_hover != canvas_crs
+                    ):
+                        pt_map = transform_point(pt_map, dem_crs_hover, canvas_crs)
+                except Exception as _exc:
+                    log_swallowed("cost_surface_dialog.on_hover.transform", _exc)
                 rb.reset(Qgis.GeometryType.Point)
-                rb.addPoint(QgsPointXY(pt[0], pt[1]))
+                rb.addPoint(pt_map)
                 rb.show()
             except Exception as _exc:
                 log_swallowed("cost_surface_dialog.on_hover", _exc)

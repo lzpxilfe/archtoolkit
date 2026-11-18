@@ -83,9 +83,13 @@ from .help_dialog import show_help_dialog
 from . import dialog_memory
 from .icons import icon as plugin_icon
 from .i18n import get_output_group_name
+from .mst import UnionFind as _UnionFind, kruskal_mst as _kruskal_mst
 from .network_metrics import (
     betweenness_centrality_weighted as _sna_betweenness_centrality_weighted,
     closeness_centrality_weighted as _sna_closeness_centrality_weighted,
+    graph_summary as _sna_graph_summary,
+    harmonic_centrality_weighted as _sna_harmonic_centrality_weighted,
+    local_clustering_coefficients as _sna_local_clustering_coefficients,
 )
 
 
@@ -138,17 +142,34 @@ def _sign(v: float, eps: float = 1e-12) -> int:
 
 
 def _simplify_turn_points(coords: Optional[List[Tuple[float, float]]]) -> Optional[List[Tuple[float, float]]]:
-    """Grid 기반 경로는 직선 구간이 길기 때문에 방향 전환점만 남겨서 가볍게 만듭니다."""
+    """Grid 기반 경로의 연속 직선 구간(방향 회전 무관)을 단순화하고 실제 굴절점만 남깁니다."""
     if not coords or len(coords) < 3:
         return coords
     out = [coords[0]]
-    prev_dir = (_sign(coords[1][0] - coords[0][0]), _sign(coords[1][1] - coords[0][1]))
     for i in range(1, len(coords) - 1):
-        cur_dir = (_sign(coords[i + 1][0] - coords[i][0]), _sign(coords[i + 1][1] - coords[i][1]))
-        if cur_dir != prev_dir:
-            out.append(coords[i])
-            prev_dir = cur_dir
-    out.append(coords[-1])
+        ax, ay = out[-1]
+        bx, by = coords[i]
+        cx, cy = coords[i + 1]
+        dx1 = bx - ax
+        dy1 = by - ay
+        dx2 = cx - bx
+        dy2 = cy - by
+        len1 = math.hypot(dx1, dy1)
+        len2 = math.hypot(dx2, dy2)
+        if len1 <= 1e-12:
+            continue
+        if len2 <= 1e-12:
+            continue
+        cross = abs(dx1 * dy2 - dy1 * dx2)
+        dot = dx1 * dx2 + dy1 * dy2
+        if cross <= 1e-6 * len1 * len2 and dot > 0.0:
+            # Strictly collinear and continuing forward: intermediate vertex is redundant.
+            continue
+        out.append(coords[i])
+    if len(out) == 1 or math.hypot(coords[-1][0] - out[-1][0], coords[-1][1] - out[-1][1]) > 1e-12:
+        out.append(coords[-1])
+    elif len(out) < 2:
+        out.append(coords[-1])
     return out
 
 
@@ -217,33 +238,12 @@ class NetworkTaskResult:
     # Site pairs that fall in the same DEM cell: joined by a straight line at
     # the model's flat-ground cost instead of a 0-cost, 1-vertex grid path.
     same_cell_pairs: int = 0
-
-
-class _UnionFind:
-    def __init__(self, n: int):
-        self.parent = list(range(int(n)))
-        self.rank = [0] * int(n)
-
-    def find(self, a: int) -> int:
-        a = int(a)
-        while self.parent[a] != a:
-            self.parent[a] = self.parent[self.parent[a]]
-            a = self.parent[a]
-        return a
-
-    def union(self, a: int, b: int) -> bool:
-        ra = self.find(a)
-        rb = self.find(b)
-        if ra == rb:
-            return False
-        if self.rank[ra] < self.rank[rb]:
-            self.parent[ra] = rb
-        elif self.rank[ra] > self.rank[rb]:
-            self.parent[rb] = ra
-        else:
-            self.parent[rb] = ra
-            self.rank[ra] += 1
-        return True
+    model_params: Optional[dict] = None
+    pair_buffer_m: float = 0.0
+    skipped_features: int = 0
+    hub_mst_incomplete: bool = False
+    hub_mst_components: int = 0
+    cancelled: bool = False
 
 
 class CostNetworkWorker(QgsTask):
@@ -267,6 +267,7 @@ class CostNetworkWorker(QgsTask):
         cost_mode: str,
         on_done,
         dem_crs=None,
+        skipped_features: int = 0,
     ):
         super().__init__("최소비용 네트워크 (Least-cost Network)", QgsTask.Flag.CanCancel)
         self._cancel_event = threading.Event()
@@ -290,6 +291,7 @@ class CostNetworkWorker(QgsTask):
         self.cost_mode = str(cost_mode or COST_TIME)
         self.on_done = on_done
         self.dem_crs = dem_crs
+        self.skipped_features = int(skipped_features or 0)
         self.result_obj = NetworkTaskResult(ok=False)
 
     def cancel(self):
@@ -355,7 +357,7 @@ class CostNetworkWorker(QgsTask):
         removed = 0
         for n in self.nodes:
             if self._is_cancelled():
-                return NetworkTaskResult(ok=False, message="취소됨")
+                return NetworkTaskResult(ok=False, message="작업이 취소되었습니다.", cancelled=True)
             try:
                 px, py = gdal.ApplyGeoTransform(inv, float(n.x), float(n.y))
                 col = int(math.floor(px))
@@ -481,6 +483,7 @@ class CostNetworkWorker(QgsTask):
         # Directed results keyed by (i, j)
         cost_dir: Dict[Tuple[int, int], float] = {}
         path_dir: Dict[Tuple[int, int], List[Tuple[float, float]]] = {}
+        dist_dir: Dict[Tuple[int, int], float] = {}
 
         # One accumulation per directed pair, so memory is per-window but time
         # is cumulative - the reason this cannot simply inherit the cost
@@ -587,7 +590,7 @@ class CostNetworkWorker(QgsTask):
 
         for (a, b), (xoff, yoff, win_xsize, win_ysize) in zip(candidate_pairs, windows):
             if self._is_cancelled():
-                return NetworkTaskResult(ok=False, message="취소됨")
+                return NetworkTaskResult(ok=False, message="작업이 취소되었습니다.", cancelled=True)
             ax, ay = coords[a, 0], coords[a, 1]
             bx, by = coords[b, 0], coords[b, 1]
 
@@ -619,8 +622,11 @@ class CostNetworkWorker(QgsTask):
 
             if start_rc == end_rc:
                 c_same, line_ab = _same_cell_edge(a, b)
+                d_same = float(_polyline_length(line_ab) or 0.0)
                 cost_dir[(a, b)] = c_same
                 cost_dir[(b, a)] = c_same
+                dist_dir[(a, b)] = d_same
+                dist_dir[(b, a)] = d_same
                 if want_paths_for_pairs:
                     path_dir[(a, b)] = list(line_ab)
                     path_dir[(b, a)] = list(reversed(line_ab))
@@ -646,6 +652,8 @@ class CostNetworkWorker(QgsTask):
                 cost_mode=solver_cost_mode,
                 cancel_check=cancel_check,
             )
+            if self._is_cancelled():
+                return NetworkTaskResult(ok=False, message="작업이 취소되었습니다.", cancelled=True)
             if prev_ab is not None and cost_ab is not None and math.isfinite(float(cost_ab)):
                 cost_dir[(a, b)] = float(cost_ab)
                 if want_paths_for_pairs:
@@ -654,6 +662,7 @@ class CostNetworkWorker(QgsTask):
                         pts = [_cell_center(win_gt, (idx % cols), (idx // cols)) for idx in idxs]
                         pts = _simplify_turn_points(pts) or pts
                         path_dir[(a, b)] = pts
+                        dist_dir[(a, b)] = float(_polyline_length(pts) or 0.0)
             done_dir += 1
             update_progress()
 
@@ -671,6 +680,8 @@ class CostNetworkWorker(QgsTask):
                 cost_mode=solver_cost_mode,
                 cancel_check=cancel_check,
             )
+            if self._is_cancelled():
+                return NetworkTaskResult(ok=False, message="작업이 취소되었습니다.", cancelled=True)
             if prev_ba is not None and cost_ba is not None and math.isfinite(float(cost_ba)):
                 cost_dir[(b, a)] = float(cost_ba)
                 if want_paths_for_pairs:
@@ -679,6 +690,7 @@ class CostNetworkWorker(QgsTask):
                         pts = [_cell_center(win_gt, (idx % cols), (idx // cols)) for idx in idxs]
                         pts = _simplify_turn_points(pts) or pts
                         path_dir[(b, a)] = pts
+                        dist_dir[(b, a)] = float(_polyline_length(pts) or 0.0)
             done_dir += 1
             update_progress()
 
@@ -694,6 +706,33 @@ class CostNetworkWorker(QgsTask):
             if self.sym_method == SYMMETRY_MAX:
                 return float(max(cab, cba))
             return float(0.5 * (float(cab) + float(cba)))
+
+        def choose_sym_path(a: int, b: int) -> Optional[List[Tuple[float, float]]]:
+            p_ab = path_dir.get((a, b))
+            p_ba = path_dir.get((b, a))
+            cab = cost_dir.get((a, b))
+            cba = cost_dir.get((b, a))
+            if (
+                self.sym_method == SYMMETRY_MIN
+                and cab is not None
+                and cba is not None
+                and float(cba) < float(cab)
+                and p_ba
+            ):
+                return list(reversed(p_ba))
+            if (
+                self.sym_method == SYMMETRY_MAX
+                and cab is not None
+                and cba is not None
+                and float(cba) > float(cab)
+                and p_ba
+            ):
+                return list(reversed(p_ba))
+            if p_ab:
+                return list(p_ab)
+            if p_ba:
+                return list(reversed(p_ba))
+            return None
 
         edges_out: List[NetworkEdge] = []
 
@@ -718,16 +757,15 @@ class CostNetworkWorker(QgsTask):
                     )
                 )
             else:
-                # Energy mode: only the energy_kcal_* values come out of the
-                # slope-aware accumulation. The solver minimises joules and
-                # never produces a travel time, so time_min_* here is nothing
-                # but dist_m / (the fixed Pandolf speed) - it has NO slope
-                # response: a steep edge and a flat edge of the same length
-                # get the same "time". Kept because a rough distance-based
-                # scale is still useful for labels and ordering, but it must
-                # not be read as a modelled travel time. The field aliases,
-                # the help text and a run-time message all say so.
                 v = max(0.05, float(self.model_params.get("pandolf_speed_mps", 5.0 * 1000.0 / 3600.0)))
+                d_ab = float(dist_dir.get((a, b), dist_m))
+                d_ba = float(dist_dir.get((b, a), dist_m))
+                if self.sym_method == SYMMETRY_MIN:
+                    d_sym = min(d_ab, d_ba)
+                elif self.sym_method == SYMMETRY_MAX:
+                    d_sym = max(d_ab, d_ba)
+                else:
+                    d_sym = 0.5 * (d_ab + d_ba)
                 edges_out.append(
                     NetworkEdge(
                         a=a,
@@ -735,14 +773,17 @@ class CostNetworkWorker(QgsTask):
                         kind=kind,
                         coords=geom,
                         dist_m=dist_m,
-                        time_min_ab=float(dist_m) / v / 60.0,
-                        time_min_ba=float(dist_m) / v / 60.0,
-                        time_min_sym=float(dist_m) / v / 60.0,
+                        time_min_ab=d_ab / v / 60.0,
+                        time_min_ba=d_ba / v / 60.0,
+                        time_min_sym=d_sym / v / 60.0,
                         energy_kcal_ab=(float(cab) / 4184.0) if cab is not None else None,
                         energy_kcal_ba=(float(cba) / 4184.0) if cba is not None else None,
                         energy_kcal_sym=(float(sym) / 4184.0) if sym is not None else None,
                     )
                 )
+
+        hub_mst_incomplete = False
+        hub_mst_components = 0
 
         # --- A) MST ---
         if self.network_mode == NETWORK_MST:
@@ -752,16 +793,9 @@ class CostNetworkWorker(QgsTask):
                 if w is None:
                     continue
                 weighted.append((w, a, b))
-            weighted.sort(key=lambda t: t[0])
-
-            uf = _UnionFind(n_nodes)
-            chosen: List[Tuple[int, int]] = []
-            for w, a, b in weighted:
-                if uf.union(a, b):
-                    chosen.append((a, b))
-                    if len(chosen) >= n_nodes - 1:
-                        break
-            if len(chosen) < n_nodes - 1:
+            mst_res = _kruskal_mst(n_nodes, weighted)
+            chosen: List[Tuple[int, int]] = list(mst_res["edges"])
+            if not mst_res["complete"]:
                 return NetworkTaskResult(
                     ok=False,
                     message=(
@@ -781,7 +815,7 @@ class CostNetworkWorker(QgsTask):
             # MST는 선택된 간선만 경로를 다시 계산(메모리 절약)
             for a, b in chosen:
                 if self._is_cancelled():
-                    return NetworkTaskResult(ok=False, message="취소됨")
+                    return NetworkTaskResult(ok=False, message="작업이 취소되었습니다.", cancelled=True)
 
                 mst_done += 1
                 try:
@@ -923,48 +957,11 @@ class CostNetworkWorker(QgsTask):
                 undirected.add((a, b))
 
             for a, b in sorted(undirected):
-                geom = path_dir.get((a, b)) or path_dir.get((b, a))
-                if not geom:
-                    continue
-                dist_m = float(_polyline_length(geom) or 0.0)
-                cab = cost_dir.get((a, b))
-                cba = cost_dir.get((b, a))
-                sym = sym_cost(a, b)
-                if solver_cost_mode == "time_s":
-                    edges_out.append(
-                        NetworkEdge(
-                            a=a,
-                            b=b,
-                            kind="knn",
-                            coords=geom,
-                            dist_m=dist_m,
-                            time_min_ab=(float(cab) / 60.0) if cab is not None else None,
-                            time_min_ba=(float(cba) / 60.0) if cba is not None else None,
-                            time_min_sym=(float(sym) / 60.0) if sym is not None else None,
-                        )
-                    )
-                else:
-                    # Same caveat as add_edge(): in energy mode time_min_* is
-                    # dist / fixed speed, not a modelled (slope-aware) time.
-                    v = max(
-                        0.05,
-                        float(self.model_params.get("pandolf_speed_mps", 5.0 * 1000.0 / 3600.0)),
-                    )
-                    edges_out.append(
-                        NetworkEdge(
-                            a=a,
-                            b=b,
-                            kind="knn",
-                            coords=geom,
-                            dist_m=dist_m,
-                            time_min_ab=float(dist_m) / v / 60.0,
-                            time_min_ba=float(dist_m) / v / 60.0,
-                            time_min_sym=float(dist_m) / v / 60.0,
-                            energy_kcal_ab=(float(cab) / 4184.0) if cab is not None else None,
-                            energy_kcal_ba=(float(cba) / 4184.0) if cba is not None else None,
-                            energy_kcal_sym=(float(sym) / 4184.0) if sym is not None else None,
-                        )
-                    )
+                if self._is_cancelled():
+                    return NetworkTaskResult(ok=False, message="작업이 취소되었습니다.", cancelled=True)
+                geom = choose_sym_path(a, b)
+                if geom:
+                    add_edge("knn", a, b, geom)
 
         # --- A+B+C (All) ---
         elif self.network_mode == NETWORK_ALL:
@@ -975,16 +972,9 @@ class CostNetworkWorker(QgsTask):
                 if w is None:
                     continue
                 weighted.append((w, a, b))
-            weighted.sort(key=lambda t: t[0])
-
-            uf = _UnionFind(n_nodes)
-            chosen: List[Tuple[int, int]] = []
-            for w, a, b in weighted:
-                if uf.union(a, b):
-                    chosen.append((a, b))
-                    if len(chosen) >= n_nodes - 1:
-                        break
-            if len(chosen) < n_nodes - 1:
+            mst_res = _kruskal_mst(n_nodes, weighted)
+            chosen: List[Tuple[int, int]] = list(mst_res["edges"])
+            if not mst_res["complete"]:
                 return NetworkTaskResult(
                     ok=False,
                     message=(
@@ -994,7 +984,9 @@ class CostNetworkWorker(QgsTask):
                 )
 
             for a, b in chosen:
-                geom = path_dir.get((a, b)) or path_dir.get((b, a))
+                if self._is_cancelled():
+                    return NetworkTaskResult(ok=False, message="작업이 취소되었습니다.", cancelled=True)
+                geom = choose_sym_path(a, b)
                 if geom:
                     add_edge("mst", a, b, geom)
 
@@ -1024,14 +1016,16 @@ class CostNetworkWorker(QgsTask):
                 undirected.add((a, b))
 
             for a, b in sorted(undirected):
-                geom = path_dir.get((a, b)) or path_dir.get((b, a))
+                if self._is_cancelled():
+                    return NetworkTaskResult(ok=False, message="작업이 취소되었습니다.", cancelled=True)
+                geom = choose_sym_path(a, b)
                 if geom:
                     add_edge("knn", a, b, geom)
 
             # C) Hub (optional)
             hubs = {idx for idx, n in enumerate(nodes) if bool(n.is_hub)}
             if hubs:
-                hub_links = set()
+                hub_links = []
                 for i in range(n_nodes):
                     if i in hubs:
                         continue
@@ -1046,8 +1040,7 @@ class CostNetworkWorker(QgsTask):
                             best_h = int(h)
                     if best_h is None:
                         continue
-                    a, b = (i, best_h) if i < best_h else (best_h, i)
-                    hub_links.add((a, b))
+                    hub_links.append((i, best_h))
 
                 hub_mst = set()
                 if self.hub_connect_mst and len(hubs) >= 2:
@@ -1058,22 +1051,29 @@ class CostNetworkWorker(QgsTask):
                         if a in hubs and b in hubs:
                             w = sym_cost(a, b)
                             if w is not None:
-                                weighted.append((w, a, b))
-                    weighted.sort(key=lambda t: t[0])
-                    uf = _UnionFind(len(hub_list))
-                    for w, a, b in weighted:
-                        if uf.union(hub_index[a], hub_index[b]):
-                            aa, bb = (a, b) if a < b else (b, a)
-                            hub_mst.add((aa, bb))
-                            if len(hub_mst) >= len(hub_list) - 1:
-                                break
+                                weighted.append((w, hub_index[a], hub_index[b]))
+                    hub_res = _kruskal_mst(len(hub_list), weighted)
+                    for ia, ib in hub_res["edges"]:
+                        ha, hb = hub_list[ia], hub_list[ib]
+                        hub_mst.add((ha, hb) if ha < hb else (hb, ha))
+                    if not hub_res["complete"]:
+                        hub_mst_incomplete = True
+                        hub_mst_components = int(hub_res["components"])
+                        log_message(
+                            f"CostNetwork: Hub MST incomplete ({hub_mst_components} components among {len(hub_list)} hubs)",
+                            level=Qgis.MessageLevel.Warning,
+                        )
 
                 for a, b in sorted(hub_links):
-                    geom = path_dir.get((a, b)) or path_dir.get((b, a))
+                    if self._is_cancelled():
+                        return NetworkTaskResult(ok=False, message="작업이 취소되었습니다.", cancelled=True)
+                    geom = choose_sym_path(a, b)
                     if geom:
                         add_edge("hub_link", a, b, geom)
                 for a, b in sorted(hub_mst):
-                    geom = path_dir.get((a, b)) or path_dir.get((b, a))
+                    if self._is_cancelled():
+                        return NetworkTaskResult(ok=False, message="작업이 취소되었습니다.", cancelled=True)
+                    geom = choose_sym_path(a, b)
                     if geom:
                         add_edge("hub_mst", a, b, geom)
 
@@ -1083,7 +1083,7 @@ class CostNetworkWorker(QgsTask):
             if not hubs:
                 return NetworkTaskResult(ok=False, message="허브가 없습니다. 허브 필드/값을 확인하세요.")
 
-            hub_links = set()
+            hub_links = []
             for i in range(n_nodes):
                 if i in hubs:
                     continue
@@ -1098,8 +1098,7 @@ class CostNetworkWorker(QgsTask):
                         best_h = int(h)
                 if best_h is None:
                     continue
-                a, b = (i, best_h) if i < best_h else (best_h, i)
-                hub_links.add((a, b))
+                hub_links.append((i, best_h))
 
             hub_mst = set()
             if self.hub_connect_mst and len(hubs) >= 2:
@@ -1110,15 +1109,18 @@ class CostNetworkWorker(QgsTask):
                     if a in hubs and b in hubs:
                         w = sym_cost(a, b)
                         if w is not None:
-                            weighted.append((w, a, b))
-                weighted.sort(key=lambda t: t[0])
-                uf = _UnionFind(len(hub_list))
-                for w, a, b in weighted:
-                    if uf.union(hub_index[a], hub_index[b]):
-                        aa, bb = (a, b) if a < b else (b, a)
-                        hub_mst.add((aa, bb))
-                        if len(hub_mst) >= len(hub_list) - 1:
-                            break
+                            weighted.append((w, hub_index[a], hub_index[b]))
+                hub_res = _kruskal_mst(len(hub_list), weighted)
+                for ia, ib in hub_res["edges"]:
+                    ha, hb = hub_list[ia], hub_list[ib]
+                    hub_mst.add((ha, hb) if ha < hb else (hb, ha))
+                if not hub_res["complete"]:
+                    hub_mst_incomplete = True
+                    hub_mst_components = int(hub_res["components"])
+                    log_message(
+                        f"CostNetwork: Hub MST incomplete ({hub_mst_components} components among {len(hub_list)} hubs)",
+                        level=Qgis.MessageLevel.Warning,
+                    )
 
             all_edges = []
             for a, b in sorted(hub_links):
@@ -1127,48 +1129,11 @@ class CostNetworkWorker(QgsTask):
                 all_edges.append((a, b, "hub_mst"))
 
             for a, b, kind in all_edges:
-                geom = path_dir.get((a, b)) or path_dir.get((b, a))
-                if not geom:
-                    continue
-                dist_m = float(_polyline_length(geom) or 0.0)
-                cab = cost_dir.get((a, b))
-                cba = cost_dir.get((b, a))
-                sym = sym_cost(a, b)
-                if solver_cost_mode == "time_s":
-                    edges_out.append(
-                        NetworkEdge(
-                            a=a,
-                            b=b,
-                            kind=kind,
-                            coords=geom,
-                            dist_m=dist_m,
-                            time_min_ab=(float(cab) / 60.0) if cab is not None else None,
-                            time_min_ba=(float(cba) / 60.0) if cba is not None else None,
-                            time_min_sym=(float(sym) / 60.0) if sym is not None else None,
-                        )
-                    )
-                else:
-                    # Same caveat as add_edge(): in energy mode time_min_* is
-                    # dist / fixed speed, not a modelled (slope-aware) time.
-                    v = max(
-                        0.05,
-                        float(self.model_params.get("pandolf_speed_mps", 5.0 * 1000.0 / 3600.0)),
-                    )
-                    edges_out.append(
-                        NetworkEdge(
-                            a=a,
-                            b=b,
-                            kind=kind,
-                            coords=geom,
-                            dist_m=dist_m,
-                            time_min_ab=float(dist_m) / v / 60.0,
-                            time_min_ba=float(dist_m) / v / 60.0,
-                            time_min_sym=float(dist_m) / v / 60.0,
-                            energy_kcal_ab=(float(cab) / 4184.0) if cab is not None else None,
-                            energy_kcal_ba=(float(cba) / 4184.0) if cba is not None else None,
-                            energy_kcal_sym=(float(sym) / 4184.0) if sym is not None else None,
-                        )
-                    )
+                if self._is_cancelled():
+                    return NetworkTaskResult(ok=False, message="작업이 취소되었습니다.", cancelled=True)
+                geom = choose_sym_path(a, b)
+                if geom:
+                    add_edge(kind, a, b, geom)
 
         # The count reported must be the count drawn: the line layer can only
         # hold edges with >= 2 vertices.
@@ -1181,6 +1146,11 @@ class CostNetworkWorker(QgsTask):
         if same_cell_pairs:
             msg = f"{msg} (같은 DEM 셀의 유적 쌍 {same_cell_pairs}개: 직선거리·평지 비용으로 연결)"
 
+        if hub_mst_incomplete:
+            msg = f"{msg} (주의: 허브 MST가 {hub_mst_components}개 컴포넌트로 분리됨)"
+
+        if self.skipped_features:
+            msg = f"{msg} (입력 피처 {self.skipped_features}개 건너뜀)"
         try:
             self.setProgress(100.0)
         except Exception as _exc:
@@ -1204,6 +1174,11 @@ class CostNetworkWorker(QgsTask):
             candidate_k_requested=int(k_requested),
             knn_k=int(self.knn_k),
             same_cell_pairs=int(same_cell_pairs),
+            model_params=dict(self.model_params or {}),
+            pair_buffer_m=float(self.pair_buffer_m),
+            skipped_features=int(self.skipped_features),
+            hub_mst_incomplete=bool(hub_mst_incomplete),
+            hub_mst_components=int(hub_mst_components),
         )
 
 
@@ -1244,6 +1219,7 @@ class CostNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
 
         self._task = None
         self._task_running = False
+        self._closing_tasks = []
 
         self.cmbDemLayer.setFilters(Qgis.LayerFilter.RasterLayer)
         self.cmbSiteLayer.setFilters(Qgis.LayerFilter.VectorLayer)
@@ -1455,15 +1431,22 @@ MST/k-NN/Hub 네트워크를 생성합니다.
     def _cleanup_for_close(self):
         # Best-effort: cancel background task so it can't outlive the dialog.
         try:
-            if self._task_running and self._task is not None:
+            task = self._task
+            if self._task_running and task is not None:
+                if task not in self._closing_tasks:
+                    self._closing_tasks.append(task)
                 try:
-                    self._task.cancel()
+                    task.cancel()
                 except Exception as _exc:
                     log_swallowed("tools/cost_network_dialog.py:1318 (_cleanup_for_close)", _exc)
         except Exception as _exc:
             log_swallowed("tools/cost_network_dialog.py:1320 (_cleanup_for_close)", _exc)
         self._task_running = False
         self._task = None
+        try:
+            self._set_running_ui(False)
+        except Exception as _exc:
+            log_swallowed("cost_network_dialog._cleanup_for_close.ui", _exc)
 
     def _wrap_in_scroll_area(self):
         # Keep bottom buttons always visible, and make the long form scrollable.
@@ -1981,8 +1964,9 @@ MST/k-NN/Hub 네트워크를 생성합니다.
             )
         if model_key == MODEL_HERZOG_METABOLIC:
             return (
-                "Herzog metabolic (via Čučković)\n"
-                "- 경사에 따른 이동 비용을 경험적으로 모델링합니다.\n"
+                "Herzog metabolic (Minetti et al. 2002; Herzog 2013)\n"
+                "- 부호 있는 경사에 따른 6차 대사 다항식 비용 모델입니다(비등방).\n"
+                "- 약 -10.5% 완만한 내리막에서 최소 비용, 급경사 오르막·내리막에서 비용 증가.\n"
                 "- 기본속도↑ → 전체 시간↓"
             )
         if model_key == MODEL_CONOLLY_LAKE:
@@ -2339,6 +2323,7 @@ MST/k-NN/Hub 네트워크를 생성합니다.
         # MultiPoint features with 2+ points have no single site location;
         # taking the first part silently moved the node. Refused below.
         multi_part_fids: List[str] = []
+        transform_error: Optional[str] = None
         for ft in feats:
             try:
                 geom = ft.geometry()
@@ -2352,6 +2337,7 @@ MST/k-NN/Hub 네트워크를 생성합니다.
                         mp = geom.asMultiPoint()
                         if len(mp) > 1:
                             multi_part_fids.append(str(ft.id()))
+                            continue
                         elif mp:
                             pt = QgsPointXY(mp[0])
                     else:
@@ -2368,7 +2354,14 @@ MST/k-NN/Hub 네트워크를 생성합니다.
                     skipped += 1
                     continue
 
-                pt_dem = transform_point(pt, site_layer.crs(), dem_layer.crs())
+                try:
+                    pt_dem = transform_point(pt, site_layer.crs(), dem_layer.crs())
+                except Exception as _exc:
+                    transform_error = f"fid={ft.id()}: {_exc}"
+                    break
+                if pt_dem is None or (not math.isfinite(float(pt_dem.x()))) or (not math.isfinite(float(pt_dem.y()))):
+                    transform_error = f"fid={ft.id()}: 좌표 변환 결과가 유효하지 않습니다."
+                    break
 
                 fid = str(ft.id())
                 name = fid
@@ -2398,8 +2391,20 @@ MST/k-NN/Hub 네트워크를 생성합니다.
                         is_hub=is_hub,
                     )
                 )
-            except Exception:
+            except Exception as _exc:
+                log_swallowed("cost_network_dialog.run_analysis.feature", _exc)
                 skipped += 1
+
+        if transform_error:
+            push_message(
+                self.iface,
+                "오류",
+                f"유적 레이어 좌표 변환 실패 — 분석을 중단합니다 ({transform_error}).",
+                level=2,
+                duration=10,
+            )
+            restore_ui_focus(self)
+            return
 
         if multi_part_fids:
             shown = ", ".join(multi_part_fids[:5]) + (" …" if len(multi_part_fids) > 5 else "")
@@ -2416,6 +2421,19 @@ MST/k-NN/Hub 네트워크를 생성합니다.
             )
             restore_ui_focus(self)
             return
+
+        if skipped:
+            log_message(
+                f"CostNetwork: skipped {skipped} input feature(s) (empty geometry or unsupported type)",
+                level=Qgis.MessageLevel.Warning,
+            )
+            push_message(
+                self.iface,
+                "유적 입력 경고",
+                f"빈 지오메트리 또는 미지원 도형 피처 {skipped}개를 제외했습니다.",
+                level=1,
+                duration=7,
+            )
 
         if len(nodes) < 2:
             push_message(self.iface, "오류", "유효한 노드가 2개 이상 필요합니다.", level=2)
@@ -2458,10 +2476,17 @@ MST/k-NN/Hub 네트워크를 생성합니다.
         self._task_running = True
         self._set_running_ui(True)
 
+        holder = {}
+
         def on_done(res: NetworkTaskResult):
-            self._task_running = False
-            self._task = None
-            self._set_running_ui(False)
+            task_obj = holder.get("task")
+            if task_obj in self._closing_tasks:
+                self._closing_tasks.remove(task_obj)
+            if self._task is task_obj:
+                self._task_running = False
+                self._task = None
+            if not self._task_running:
+                self._set_running_ui(False)
             self._handle_task_result(res)
 
         task = CostNetworkWorker(
@@ -2481,7 +2506,9 @@ MST/k-NN/Hub 네트워크를 생성합니다.
             cost_mode=cost_mode,
             on_done=on_done,
             dem_crs=QgsCoordinateReferenceSystem(dem_layer.crs()),
+            skipped_features=skipped,
         )
+        holder["task"] = task
         self._task = task
         QgsApplication.taskManager().addTask(task)
         push_message(self.iface, "최소비용 네트워크", "분석을 시작했습니다. (QGIS 작업 관리자 확인)", level=0, duration=6)
@@ -2518,6 +2545,9 @@ MST/k-NN/Hub 네트워크를 생성합니다.
             )
 
     def _handle_task_result(self, res: NetworkTaskResult):
+        if isinstance(res, NetworkTaskResult) and res.cancelled:
+            push_message(self.iface, "최소비용 네트워크", "작업이 취소되었습니다(취소됨).", level=1, duration=8)
+            return
         if not isinstance(res, NetworkTaskResult) or not res.ok:
             msg = getattr(res, "message", "") or "분석 실패"
             push_message(self.iface, "오류", msg, level=2, duration=9)
@@ -2565,7 +2595,10 @@ MST/k-NN/Hub 네트워크를 생성합니다.
         comp_id: List[int] = [0] * int(len(nodes))
         comp_size: List[int] = [1] * int(len(nodes))
         closeness: Optional[List[float]] = None
+        harmonic: Optional[List[float]] = None
         betweenness: Optional[List[float]] = None
+        clustering: Optional[List[float]] = None
+        graph_sum: Optional[dict] = None
         try:
             do_sna = bool(getattr(getattr(self, "chkSnaEnable", None), "isChecked", lambda: False)())
             do_close = do_sna and bool(getattr(getattr(self, "chkSnaCloseness", None), "isChecked", lambda: False)())
@@ -2643,6 +2676,13 @@ MST/k-NN/Hub 네트워크를 생성합니다.
                     comp_sizes[int(cid)] += 1
                 comp_size = [int(comp_sizes[int(cid)]) for cid in comp_id]
 
+                unweighted_adj: List[List[int]] = [[] for _ in range(int(n_nodes))]
+                for a, b in sorted(pairs):
+                    unweighted_adj[a].append(b)
+                    unweighted_adj[b].append(a)
+                clustering = _sna_local_clustering_coefficients(n=int(n_nodes), adj=unweighted_adj)
+                graph_sum = _sna_graph_summary(n=int(n_nodes), adj=unweighted_adj)
+
                 if int(n_nodes) > 500 and (do_close or do_betw):
                     log_message(
                         f"CostNetwork: SNA closeness/betweenness skipped (n={int(n_nodes)} > 500)",
@@ -2671,6 +2711,7 @@ MST/k-NN/Hub 네트워크를 생성합니다.
 
                     if do_close:
                         closeness = _sna_closeness_centrality_weighted(n=int(n_nodes), adj=adj)
+                        harmonic = _sna_harmonic_centrality_weighted(n=int(n_nodes), adj=adj)
                     if do_betw:
                         betweenness = _sna_betweenness_centrality_weighted(n=int(n_nodes), adj=adj)
             except Exception as e:
@@ -2689,12 +2730,15 @@ MST/k-NN/Hub 네트워크를 생성합니다.
                     QgsField("degree", FT_INT),
                     QgsField("component", FT_INT),
                     QgsField("comp_size", FT_INT),
+                    QgsField("clustering", FT_DOUBLE),
                 ]
             )
             if do_close:
                 fields.append(QgsField("closeness", FT_DOUBLE))
+                fields.append(QgsField("harmonic", FT_DOUBLE))
             if do_betw:
                 fields.append(QgsField("betweenness", FT_DOUBLE))
+                fields.append(QgsField("betw_norm", FT_DOUBLE))
         pr.addAttributes(fields)
         pt_layer.updateFields()
 
@@ -2710,13 +2754,18 @@ MST/k-NN/Hub 네트워크를 생성합니다.
                 _set_alias("degree", f"연결 수(degree{union_tag})")
                 _set_alias("component", f"컴포넌트ID(component{union_tag})")
                 _set_alias("comp_size", f"컴포넌트 크기(comp_size{union_tag})")
+                _set_alias("clustering", f"국소 군집계수(clustering{union_tag})")
                 if do_close:
                     _set_alias("closeness", f"근접 중심성(closeness{union_tag})")
+                    _set_alias("harmonic", f"조화 중심성(harmonic{union_tag})")
                 if do_betw:
                     _set_alias("betweenness", f"매개 중심성(betweenness{union_tag})")
+                    _set_alias("betw_norm", f"정규화 매개 중심성(betw_norm{union_tag})")
         except Exception as _exc:
             log_swallowed("cost_network_dialog._add_result_layers", _exc)
 
+        n_total = len(nodes)
+        betw_denom = ((n_total - 1) * (n_total - 2) / 2.0) if n_total > 2 else 0.0
         feats = []
         for i, n in enumerate(nodes):
             f = QgsFeature(pt_layer.fields())
@@ -2725,16 +2774,23 @@ MST/k-NN/Hub 네트워크를 생성합니다.
             if do_sna:
                 attrs.extend([int(deg[i]) if i < len(deg) else 0, int(comp_id[i]) if i < len(comp_id) else 0])
                 attrs.append(int(comp_size[i]) if i < len(comp_size) else 1)
+                attrs.append(float(clustering[i]) if clustering is not None and i < len(clustering) else 0.0)
                 if do_close:
                     try:
                         attrs.append(float(closeness[i]) if closeness is not None else 0.0)
                     except Exception:
                         attrs.append(0.0)
-                if do_betw:
                     try:
-                        attrs.append(float(betweenness[i]) if betweenness is not None else 0.0)
+                        attrs.append(float(harmonic[i]) if harmonic is not None else 0.0)
                     except Exception:
                         attrs.append(0.0)
+                if do_betw:
+                    try:
+                        raw_b = float(betweenness[i]) if betweenness is not None else 0.0
+                    except Exception:
+                        raw_b = 0.0
+                    attrs.append(raw_b)
+                    attrs.append((raw_b / betw_denom) if betw_denom > 0.0 else 0.0)
             f.setAttributes(attrs)
             feats.append(f)
         pr.addFeatures(feats)
@@ -2912,9 +2968,22 @@ MST/k-NN/Hub 네트워크를 생성합니다.
             approx_params["same_cell_rule"] = (
                 "straight line between the two sites at the model's flat-ground cost (half a cell if identical)"
             )
+        if int(res.skipped_features):
+            approx_params["skipped_features"] = int(res.skipped_features)
+        if res.model_params:
+            approx_params["model_params"] = dict(res.model_params)
+        approx_params["pair_buffer_m"] = float(res.pair_buffer_m)
+        if bool(res.hub_mst_incomplete):
+            approx_params["hub_mst_incomplete"] = True
+            approx_params["hub_mst_components"] = int(res.hub_mst_components)
+            notes.append(
+                f"(경고: 허브 MST가 {int(res.hub_mst_components)}개 컴포넌트로 분리되어 완전 연결되지 않았습니다)"
+            )
         node_params = dict(approx_params)
         if do_sna:
             node_params["sna_weight"] = ("kcal_sym" if res.cost_mode == COST_ENERGY else "time_sym") + f" ({sym_meta})"
+            if graph_sum is not None:
+                node_params["graph_summary"] = graph_sum
             if res.network_mode == NETWORK_ALL:
                 node_params["sna_graph"] = "union of mst, knn and hub edges"
                 notes.append("(SNA 지표는 MST+k-NN+Hub 간선의 합집합 하나로 계산했습니다)")
@@ -2929,6 +2998,7 @@ MST/k-NN/Hub 네트워크를 생성합니다.
                 kind="edges",
                 units="m/min/kcal",
                 params={
+                    "model": str(res.model_key or ""),
                     "network_mode": str(res.network_mode or ""),
                     "cost_mode": str(res.cost_mode or ""),
                     "model_label": str(res.model_label or ""),
@@ -2942,6 +3012,7 @@ MST/k-NN/Hub 네트워크를 생성합니다.
                 kind="nodes",
                 units="",
                 params={
+                    "model": str(res.model_key or ""),
                     "network_mode": str(res.network_mode or ""),
                     "cost_mode": str(res.cost_mode or ""),
                     "model_label": str(res.model_label or ""),

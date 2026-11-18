@@ -824,7 +824,11 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
             pts = [QgsPointXY(p) for p in line]
             distinct = {(round(p.x(), 9), round(p.y(), 9)) for p in pts}
             part_polys = []
-            if len(distinct) >= 3:
+            # Require explicit ring closure before treating a polyline as a polygon
+            # footprint so open 3-vertex walls fall through to thin line buffering.
+            close_tol = MapStylingDialog._metres_to_layer_units(0.05, crs) or 1e-6
+            is_closed = len(pts) >= 4 and pts[0].distance(pts[-1]) <= close_tol
+            if is_closed and len(distinct) >= 3:
                 cand = QgsGeometry.fromPolygonXY([pts])
                 if cand.isGeosValid() and cand.area() > 0:
                     part_polys = [cand]

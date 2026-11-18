@@ -200,6 +200,8 @@ def mask_colour_halo(
     max_rgb_distance: float = 16.0,
     min_alpha: float = 0.08,
     max_alpha: float = 0.92,
+    palette=None,
+    stop_protect_distance: float = 10.0,
 ) -> np.ndarray:
     """Anti-aliased edge pixels of dark linework drawn over a colour.
 
@@ -213,14 +215,28 @@ def mask_colour_halo(
     alpha <= max_alpha``, RGB distance to that blend line at most
     ``max_rgb_distance``). Testing against the NEIGHBOUR's colour, not any
     legend colour, keeps legitimately dark legend areas (navy is 0.45 x the
-    blue stop) from being flagged next to a line. Returns the edge mask only
-    (``core`` excluded). Without a neutral dark core nearby nothing is
-    flagged: a darkened colour on its own is indistinguishable from data.
+    blue stop) from being flagged next to a line. When ``palette`` is given,
+    pixels matching any active legend stop within ``stop_protect_distance``
+    are also protected so exact dark endpoint stops (e.g. (115, 12, 12) or
+    (0, 38, 115)) adjacent to linework are never overwritten as halos.
+    Returns the edge mask only (``core`` excluded). Without a neutral dark
+    core nearby nothing is flagged: a darkened colour on its own is
+    indistinguishable from data.
     """
     core = np.asarray(core, dtype=bool)
     region = core.copy()
     if not np.any(core) or rings <= 0:
         return np.zeros(core.shape, dtype=bool)
+    stop_rgbs = None
+    if palette is not None:
+        raw_stops = []
+        for item in palette:
+            rgb_item = getattr(item, "rgb", item)
+            if rgb_item is not None and len(rgb_item) >= 3:
+                raw_stops.append((float(rgb_item[0]), float(rgb_item[1]), float(rgb_item[2])))
+        if raw_stops:
+            stop_rgbs = np.asarray(raw_stops, dtype=np.float64)
+    protect_sq = float(stop_protect_distance) ** 2
     h, w = core.shape
     chans = (np.asarray(r), np.asarray(g), np.asarray(b))
     tol_sq = float(max_rgb_distance) ** 2
@@ -233,6 +249,11 @@ def mask_colour_halo(
         # float RGB stack of a 12 Mpx export would cost ~300 MB.
         px = np.stack([c[ys, xs] for c in chans], axis=-1).astype(np.float64)
         pp = np.einsum("ij,ij->i", px, px)
+        near_stop = np.zeros(ys.size, dtype=bool)
+        if stop_rgbs is not None:
+            diff = px[:, None, :] - stop_rgbs[None, :, :]
+            min_stop_sq = np.min(np.einsum("ijk,ijk->ij", diff, diff), axis=1)
+            near_stop = min_stop_sq <= protect_sq
         is_blend = np.zeros(ys.size, dtype=bool)
         for dy, dx in _NEIGHBOURS:
             ny = ys + dy
@@ -247,6 +268,7 @@ def mask_colour_halo(
             a = np.where(nn > 1.0, pn / np.maximum(nn, 1.0), -1.0)
             d_sq = pp - 2.0 * a * pn + a * a * nn
             is_blend |= n_ok & (nn > 1.0) & (a >= min_alpha) & (a <= max_alpha) & (d_sq <= tol_sq)
+        is_blend &= ~near_stop
         if not np.any(is_blend):
             break
         region[ys[is_blend], xs[is_blend]] = True

@@ -172,5 +172,69 @@ class TriRadiusTests(unittest.TestCase):
             tri_radius(np.zeros((5, 5)), 3)   # window wider than the array
 
 
+class ZtCurvatureCrossTermTests(unittest.TestCase):
+    """Cross-term F = d^2z/(dx dy) pin on north-up grids (V5)."""
+
+    def test_cross_term_north_up_square_and_nonsquare_pixels(self):
+        from tools.terrain_math import zt_curvature
+
+        rows, cols = 12, 14
+        for dx, dy in ((10.0, 10.0), (10.0, 5.0)):
+            # North-up grid: row 0 is northernmost (largest y), increasing row goes south.
+            xc = (np.arange(cols, dtype=float) + 0.5) * dx
+            yc = -(np.arange(rows, dtype=float) + 0.5) * dy
+            gx, gy = np.meshgrid(xc, yc)
+            # z(x, y) = 0.01*x*y + 0.5*x - 0.3*y -> D=0, E=0, F=0.01
+            f_true = 0.01
+            z = f_true * gx * gy + 0.5 * gx - 0.3 * gy
+            prof, plan = zt_curvature(z, dx, cell_y=dy)
+
+            sl = (slice(2, rows - 2), slice(2, cols - 2))
+            g_exact = f_true * gy[sl] + 0.5
+            h_exact = f_true * gx[sl] - 0.3
+            denom = g_exact * g_exact + h_exact * h_exact
+            expected_prof = 2.0 * (f_true * g_exact * h_exact) / denom
+            expected_plan = 2.0 * (f_true * g_exact * h_exact) / denom
+
+            np.testing.assert_allclose(prof[sl], expected_prof, atol=1e-11, err_msg=f"dx={dx}, dy={dy}")
+            np.testing.assert_allclose(plan[sl], expected_plan, atol=1e-11, err_msg=f"dx={dx}, dy={dy}")
+            # Confirm curvature actually reflects cross-term sign (not F=0 or -F).
+            self.assertGreater(float(np.max(np.abs(prof[sl]))), 1e-4)
+
+
+class FocalTpiStripsTests(unittest.TestCase):
+    def test_strip_processing_matches_full_grid_with_nodata(self):
+        from tools.terrain_math import focal_tpi, focal_tpi_strips
+
+        rng = np.random.default_rng(19)
+        grid = 100.0 + 10.0 * rng.standard_normal((15, 17))
+        nodata_val = -9999.0
+        grid[3, 5] = nodata_val
+        grid[8, 9] = nodata_val
+
+        out = np.empty_like(grid)
+        calls = []
+
+        def read_rows(lo, hi):
+            return grid[lo:hi, :]
+
+        def write_rows(first, block):
+            out[first:first + block.shape[0], :] = block
+
+        focal_tpi_strips(
+            grid.shape[0],
+            grid.shape[1],
+            2,
+            read_rows,
+            write_rows,
+            nodata=nodata_val,
+            block_rows=3,
+            progress_cb=lambda d, tot: calls.append((d, tot)),
+        )
+        expected = focal_tpi(grid, 2, nodata_mask=(grid == nodata_val))
+        np.testing.assert_allclose(out, expected, rtol=1e-12, atol=1e-12, equal_nan=True)
+        self.assertEqual(calls[-1], (grid.shape[0], grid.shape[0]))
+
+
 if __name__ == "__main__":
     unittest.main()

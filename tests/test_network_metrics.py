@@ -174,5 +174,81 @@ class SymmetryValidationTests(unittest.TestCase):
         self.assertAlmostEqual(bc_w[1], 1.0)
 
 
+class TiedShortestPathAndExtendedMetricTests(unittest.TestCase):
+    """V6 tied shortest paths plus clustering, transitivity, harmonic centrality & summary."""
+
+    def test_tied_shortest_paths_c4_and_weighted_diamond(self):
+        # 4-cycle C4: 0-1-2-3-0. Opposite pairs (0,2) and (1,3) have 2 equal paths each.
+        c4 = [[1, 3], [0, 2], [1, 3], [0, 2]]
+        bc_u = betweenness_centrality_unweighted(n=4, adj=c4)
+        for v in bc_u:
+            self.assertAlmostEqual(v, 0.5, places=12)
+
+        bc_w = betweenness_centrality_weighted(n=4, adj=_unit(c4))
+        for v in bc_w:
+            self.assertAlmostEqual(v, 0.5, places=12)
+
+        # Weighted diamond: 0-1 (1.0), 1-2 (1.0), 0-3 (1.0), 3-2 (1.0); pairs (0,2) split 0.5 each.
+        # Plus distinct asymmetry (weights 1.0+1.0 vs 1.0+1.001) puts 100% of (0,2) through node 1.
+        asym_diamond = [
+            [(1, 1.0), (3, 1.0)],
+            [(0, 1.0), (2, 1.0)],
+            [(1, 1.0), (3, 1.001)],
+            [(0, 1.0), (2, 1.001)],
+        ]
+        bc_asym = betweenness_centrality_weighted(n=4, adj=asym_diamond)
+        self.assertGreater(bc_asym[1], bc_asym[3])
+        self.assertAlmostEqual(bc_asym[1], 1.0, places=9)
+
+    def test_clustering_and_transitivity_on_bowtie_and_star(self):
+        from tools.network_metrics import global_transitivity, local_clustering_coefficients
+
+        # Star 0 connected to {1, 2, 3}: zero triangles.
+        star = [[1, 2, 3], [0], [0], [0]]
+        self.assertEqual(local_clustering_coefficients(n=4, adj=star), [0.0, 0.0, 0.0, 0.0])
+        self.assertEqual(global_transitivity(n=4, adj=star), 0.0)
+
+        # Bow-tie: triangle {0,1,2} + triangle {2,3,4} sharing node 2.
+        # Nodes 0,1,3,4 have k=2 with 1 edge -> C=1.0; node 2 has k=4 with 2 edges / 6 pairs -> C=1/3.
+        # Total wedges = 1+1+6+1+1 = 10; closed wedges = 1+1+2+1+1 = 6 -> transitivity = 0.6.
+        bowtie = [[1, 2], [0, 2], [0, 1, 3, 4], [2, 4], [2, 3]]
+        cc = local_clustering_coefficients(n=5, adj=bowtie)
+        self.assertAlmostEqual(cc[0], 1.0, places=12)
+        self.assertAlmostEqual(cc[1], 1.0, places=12)
+        self.assertAlmostEqual(cc[2], 1.0 / 3.0, places=12)
+        self.assertAlmostEqual(cc[3], 1.0, places=12)
+        self.assertAlmostEqual(cc[4], 1.0, places=12)
+        self.assertAlmostEqual(global_transitivity(n=5, adj=bowtie), 0.6, places=12)
+
+    def test_harmonic_centrality_unweighted_weighted_and_graph_summary(self):
+        from tools.network_metrics import (
+            graph_summary,
+            harmonic_centrality_unweighted,
+            harmonic_centrality_weighted,
+        )
+
+        # Disconnected: triangle {0,1,2} + isolate {3}.
+        # For nodes in triangle: 1/d=1 to two nodes, inf to node 3 -> sum=2, norm=(2/3). Isolate -> 0.0.
+        adj = [[1, 2], [0, 2], [0, 1], []]
+        hc_u = harmonic_centrality_unweighted(n=4, adj=adj)
+        self.assertAlmostEqual(hc_u[0], 2.0 / 3.0, places=12)
+        self.assertAlmostEqual(hc_u[3], 0.0, places=12)
+
+        w_adj = [[(1, 2.0), (2, 2.0)], [(0, 2.0), (2, 2.0)], [(0, 2.0), (1, 2.0)], []]
+        hc_w = harmonic_centrality_weighted(n=4, adj=w_adj)
+        # sum of 1/2 + 1/2 = 1.0 divided by (4 - 1) = 1/3
+        self.assertAlmostEqual(hc_w[0], 1.0 / 3.0, places=12)
+        self.assertAlmostEqual(hc_w[3], 0.0, places=12)
+
+        summary = graph_summary(n=4, adj=adj)
+        self.assertEqual(summary["n_nodes"], 4)
+        self.assertEqual(summary["n_edges"], 3)
+        self.assertAlmostEqual(summary["density"], 0.5, places=12)
+        self.assertEqual(summary["n_components"], 2)
+        self.assertEqual(summary["largest_component_size"], 3)
+        self.assertAlmostEqual(summary["avg_clustering"], 0.75, places=12)
+        self.assertAlmostEqual(summary["transitivity"], 1.0, places=12)
+
+
 if __name__ == "__main__":
     unittest.main()

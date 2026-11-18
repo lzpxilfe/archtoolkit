@@ -400,6 +400,21 @@ class TrenchReviewQgisTests(unittest.TestCase):
         self.assertTrue(all(is_null_value(r["ref_dist_m"]) for r in self._rows(poly)))
         self.assertTrue(math.isclose(meta["weights_effective"]["ref"], 0.0))
 
+    def test_trench_aoi_coverage_pct_is_recorded_and_bounded(self):
+        flat = np.full((300, 300), 100.0)
+        dem = self._raster_layer(self._write_raster("flat_cov.tif", flat), "FLAT")
+        aoi = self._rect_layer("AOI", 200050, 499850, 200250, 499950)  # 200 x 100 = 20000 m^2
+        poly, msgs = self._run(aoi, dem, count=6, grid=10.0, spacing=5.0)
+        self.assertIsNotNone(poly, msgs)
+        meta = self._meta(poly)
+        self.assertAlmostEqual(float(meta["aoi_area_m2"]), 20000.0, places=3)
+        self.assertGreater(float(meta["trench_area_inside_aoi_m2"]), 0.0)
+        self.assertGreater(float(meta["trench_coverage_pct"]), 0.0)
+        self.assertLessEqual(float(meta["trench_coverage_pct"]), 100.0)
+        expected_pct = 100.0 * float(meta["trench_area_inside_aoi_m2"]) / float(meta["aoi_area_m2"])
+        self.assertAlmostEqual(float(meta["trench_coverage_pct"]), expected_pct, places=6)
+        self.assertIn("면적비", msgs[-1])
+
 
 if __name__ == "__main__":
     unittest.main()

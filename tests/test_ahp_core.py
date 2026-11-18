@@ -10,7 +10,9 @@ from tools.ahp_core import (
     ahp_weights_from_matrix,
     clamp01,
     compute_hierarchy_summary,
+    format_ahp_methodology_report,
     matrix_from_pairs,
+    oat_weight_sensitivity,
     sanitize_pair_values,
     score_formula,
     validated_score_ranges,
@@ -393,6 +395,24 @@ class ScoreFormulaTests(unittest.TestCase):
         self.assertAlmostEqual(out[0], 0.2, places=9)
         self.assertAlmostEqual(out[1], 0.9, places=9)
 
+    def test_reclass_integer_classes_keep_closed_upper_bound(self):
+        rows = [
+            {"min": 1.0, "max": 2.0, "score": 0.8},
+            {"min": 3.0, "max": 4.0, "score": 0.2},
+        ]
+        f = score_formula(direction="reclass", mn=1.0, mx=4.0, score_ranges=rows)
+        out = _evaluate(f, [1.0, 2.0, 3.0, 4.0])
+        for got, exp in zip(out, [0.8, 0.8, 0.2, 0.2]):
+            self.assertAlmostEqual(got, exp, places=9)
+
+    def test_reclass_abutting_boundary_belongs_to_one_row(self):
+        rows = [
+            {"min": 0.0, "max": 50.0, "score": 0.2},
+            {"min": 50.0, "max": 100.0, "score": 0.9},
+        ]
+        f = score_formula(direction="reclass", mn=0.0, mx=100.0, score_ranges=rows)
+        self.assertAlmostEqual(_evaluate(f, [50.0])[0], 0.9, places=9)
+
     def test_reclass_without_rows_scores_zero(self):
         f = score_formula(direction="reclass", mn=self.MN, mx=self.MX, score_ranges=[])
         self.assertAlmostEqual(_evaluate(f, [42.0])[0], 0.0, places=9)
@@ -453,6 +473,89 @@ class ValidatedScoreRangesTests(unittest.TestCase):
 class Clamp01Tests(unittest.TestCase):
     def test_wraps_expression_in_min_max(self):
         self.assertEqual(clamp01("A"), "minimum(maximum((A), 0.0), 1.0)")
+
+
+class ClosedFormAndRiPinTests(unittest.TestCase):
+    """V7 closed-form 3x3 reciprocal eigenproblem + full 15-entry Saaty RI pin."""
+
+    def test_all_fifteen_saaty_ri_entries(self):
+        expected = {
+            1: 0.00,
+            2: 0.00,
+            3: 0.58,
+            4: 0.90,
+            5: 1.12,
+            6: 1.24,
+            7: 1.32,
+            8: 1.41,
+            9: 1.45,
+            10: 1.49,
+            11: 1.51,
+            12: 1.54,
+            13: 1.56,
+            14: 1.57,
+            15: 1.58,
+        }
+        self.assertEqual(RI_TABLE, expected)
+
+    def test_three_by_three_closed_form_eigenvalue_and_weights(self):
+        # For reciprocal 3x3 [[1, a, b], [1/a, 1, c], [1/b, 1/c, 1]]:
+        # exact Perron root is 1 + k + 1/k where k = (a*c/b)^(1/3).
+        for a, b, c in ((2.0, 5.0, 3.0), (4.0, 9.0, 1.0 / 2.0), (3.0, 6.0, 2.0)):
+            mat = np.array(
+                [
+                    [1.0, a, b],
+                    [1.0 / a, 1.0, c],
+                    [1.0 / b, 1.0 / c, 1.0],
+                ],
+                dtype=float,
+            )
+            k = (a * c / b) ** (1.0 / 3.0)
+            lam_exact = 1.0 + k + 1.0 / k
+            ci_exact = (lam_exact - 3.0) / 2.0
+            cr_exact = ci_exact / 0.58
+            raw = np.array([(a * b) ** (1.0 / 3.0), (c / a) ** (1.0 / 3.0), (1.0 / (b * c)) ** (1.0 / 3.0)])
+            w_exact = raw / np.sum(raw)
+
+            w, lam, cr = ahp_weights_from_matrix(mat)
+            self.assertAlmostEqual(lam, lam_exact, places=10)
+            self.assertAlmostEqual(cr, cr_exact, places=10)
+            np.testing.assert_allclose(w, w_exact, atol=1e-10)
+
+
+class OatSensitivityAndReportTests(unittest.TestCase):
+    def test_oat_sensitivity_conserves_weight_sum_and_detects_rank_swaps(self):
+        # Separated weights -> 10% perturbation keeps ordering intact.
+        sep = oat_weight_sensitivity([0.60, 0.30, 0.10], delta=0.10)
+        self.assertEqual(len(sep), 3)
+        for row in sep:
+            self.assertAlmostEqual(sum(row["plus_weights"]), 1.0, places=12)
+            self.assertAlmostEqual(sum(row["minus_weights"]), 1.0, places=12)
+            self.assertFalse(row["rank_changed"])
+            self.assertTrue(all(x >= 0.0 for x in row["plus_weights"]))
+            self.assertTrue(all(x >= 0.0 for x in row["minus_weights"]))
+
+        # Nearly tied top weights [0.51, 0.49] -> +-10% reverses ranks.
+        close = oat_weight_sensitivity([0.51, 0.49], delta=0.10)
+        self.assertTrue(any(row["rank_changed"] for row in close))
+
+    def test_methodology_report_markdown_contains_audit_sections(self):
+        mat = matrix_from_pairs(["Slope", "River", "Aspect"], {("Slope", "River"): 2.0, ("Slope", "Aspect"): 4.0, ("River", "Aspect"): 2.0})
+        w, lam, cr = ahp_weights_from_matrix(mat)
+        ci = (lam - 3.0) / 2.0
+        md = format_ahp_methodology_report(
+            criteria=["Slope", "River", "Aspect"],
+            weights=w,
+            matrix=mat,
+            cr=cr,
+            ci=ci,
+            ri=RI_TABLE[3],
+            lambda_max=lam,
+        )
+        self.assertIn("# AHP", md)
+        self.assertIn("OAT ±10%", md)
+        self.assertIn("Slope", md)
+        self.assertIn("Verhagen & Whitley 2012", md)
 
 
 if __name__ == "__main__":

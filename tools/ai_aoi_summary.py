@@ -42,8 +42,17 @@ from qgis.core import (
 )
 from .qtcompat import FT_INT, FT_UINT, FT_LONGLONG, FT_ULONGLONG, FT_DOUBLE, FT_STRING
 
-from .utils import is_null_value, log_swallowed, get_archtoolkit_layer_metadata, is_metric_crs, log_message
-from .utils import split_qgis_source_path, is_categorical_raster_meta
+from .utils import (
+    is_null_value,
+    log_swallowed,
+    get_archtoolkit_layer_metadata,
+    is_metric_crs,
+    log_message,
+    split_qgis_source_path,
+    is_categorical_raster_meta,
+    transform_geometry,
+)
+from .raster_semantics import CLASS_CODE_TYPES, looks_like_class_codes, undeclared_nodata_mask
 
 # Every per-layer figure in `layers[].stats` is computed over the AOI + radius
 # buffer, not the AOI polygon; the string travels in context.json, the CSV and
@@ -499,12 +508,9 @@ def _transform_geom(geom: QgsGeometry, src_crs, dst_crs) -> Optional[QgsGeometry
         log_swallowed("tools/ai_aoi_summary.py:322 (_transform_geom)", _exc)
     try:
         tr = QgsCoordinateTransform(src_crs, dst_crs, QgsProject.instance())
-    except Exception:
-        return None
-    out = QgsGeometry(geom)
-    try:
-        out.transform(tr)
-    except Exception:
+        out = transform_geometry(geom, tr)
+    except Exception as _exc:
+        log_swallowed("tools/ai_aoi_summary.py (_transform_geom)", _exc)
         return None
     if out.isEmpty():
         return None
@@ -1044,16 +1050,30 @@ def _reference_sites_summary(
                 log_swallowed("ai_aoi_summary._reference_sites_summary", _exc)
 
         try:
-            dist_to_aoi = 0.0 if intersects_aoi else float(g.distance(aoi_geom))
-            if not math.isfinite(dist_to_aoi):
+            if intersects_aoi:
+                dist_to_aoi = 0.0
+            elif is_metric_crs(aoi_crs):
+                dist_to_aoi = float(g.distance(aoi_geom))
+            else:
+                sl_aoi = g.shortestLine(aoi_geom)
+                dist_to_aoi = _length_m(da, sl_aoi, aoi_crs) if (sl_aoi is not None and not sl_aoi.isEmpty()) else None
+            if dist_to_aoi is not None and not math.isfinite(float(dist_to_aoi)):
                 dist_to_aoi = None
-        except Exception:
+        except Exception as _exc:
+            log_swallowed("ai_aoi_summary._reference_sites_summary (dist_to_aoi)", _exc)
             dist_to_aoi = None
         try:
-            dist_to_buffer = 0.0 if intersects_buf else float(g.distance(buffer_geom))
-            if not math.isfinite(dist_to_buffer):
+            if intersects_buf:
+                dist_to_buffer = 0.0
+            elif is_metric_crs(aoi_crs):
+                dist_to_buffer = float(g.distance(buffer_geom))
+            else:
+                sl_buf = g.shortestLine(buffer_geom)
+                dist_to_buffer = _length_m(da, sl_buf, aoi_crs) if (sl_buf is not None and not sl_buf.isEmpty()) else None
+            if dist_to_buffer is not None and not math.isfinite(float(dist_to_buffer)):
                 dist_to_buffer = None
-        except Exception:
+        except Exception as _exc:
+            log_swallowed("ai_aoi_summary._reference_sites_summary (dist_to_buffer)", _exc)
             dist_to_buffer = None
 
         rec: Dict[str, Any] = {
@@ -1361,6 +1381,10 @@ def _raster_stats_in_geom(
     gt = ds.GetGeoTransform()
     proj = ds.GetProjection() or ""
     nodata = band.GetNoDataValue()
+    try:
+        dtype_name = str(gdal.GetDataTypeName(band.DataType) or "")
+    except Exception:
+        dtype_name = ""
 
     try:
         inv_gt = gdal.InvGeoTransform(gt)
@@ -1381,10 +1405,10 @@ def _raster_stats_in_geom(
         ds = None
         return None
 
-    x0 = int(math.floor(min(px0, px1)))
-    x1 = int(math.ceil(max(px0, px1)))
-    y0 = int(math.floor(min(py0, py1)))
-    y1 = int(math.ceil(max(py0, py1)))
+    x0 = int(math.floor(min(px0, px1) + 1e-9))
+    x1 = int(math.ceil(max(px0, px1) - 1e-9))
+    y0 = int(math.floor(min(py0, py1) + 1e-9))
+    y1 = int(math.ceil(max(py0, py1) - 1e-9))
 
     x0 = max(0, min(ds.RasterXSize - 1, x0))
     y0 = max(0, min(ds.RasterYSize - 1, y0))
@@ -1417,8 +1441,8 @@ def _raster_stats_in_geom(
         ds = None
         return None
 
+    ds = None
     if arr is None:
-        ds = None
         return None
 
     try:
@@ -1495,9 +1519,26 @@ def _raster_stats_in_geom(
     valid = mask & np.isfinite(arr)
     if nodata is not None:
         try:
-            valid &= arr != float(nodata)
+            nd_f = float(nodata)
+            if math.isfinite(nd_f):
+                arr_f64 = arr.astype(np.float64, copy=False)
+                if abs(nd_f) < 1.0:
+                    valid &= np.abs(arr_f64 - nd_f) > 1e-6
+                else:
+                    valid &= ~np.isclose(arr_f64, nd_f, rtol=1e-5, atol=0.0)
         except Exception as _exc:
             log_swallowed("ai_aoi_summary._raster_stats_in_geom", _exc)
+    else:
+        try:
+            nd_mask, guessed_nd = undeclared_nodata_mask(arr, None)
+            if guessed_nd > 0:
+                log_message(
+                    f"AI 요약: NoData 미선언 래스터({os.path.basename(str(raster_path))})에서 센티널 값 {guessed_nd:,}셀을 NoData로 제외했습니다.",
+                    level=Qgis.MessageLevel.Warning,
+                )
+            valid &= ~nd_mask
+        except Exception as _exc:
+            log_swallowed("ai_aoi_summary._raster_stats_in_geom (undeclared nodata)", _exc)
 
     if not np.any(valid):
         return None
@@ -1517,11 +1558,11 @@ def _raster_stats_in_geom(
         # EXACTLY two distinct valid values. The old ">= 98 % of cells are 0 or
         # max" gate also admitted three-class rasters (the viewshed asymmetry
         # coding 0/1/2) and zero-padded continuous rasters.
+        sample = vals
+        if int(sample.size) > 200_000:
+            step0 = int(max(1, sample.size // 200_000))
+            sample = sample[::step0]
         try:
-            sample = vals
-            if int(sample.size) > 200_000:
-                step0 = int(max(1, sample.size // 200_000))
-                sample = sample[::step0]
             vmin = float(out.get("min"))
             vmax = float(out.get("max"))
             if math.isfinite(vmin) and math.isfinite(vmax) and vmax > 0 and vmin >= -1e-6 and sample.size > 0:
@@ -1543,6 +1584,17 @@ def _raster_stats_in_geom(
                     out["gt_0_5_pct"] = float(pct)
         except Exception as _exc:
             log_swallowed("ai_aoi_summary._raster_stats_in_geom", _exc)
+        # Integer GeoTIFFs without ArchToolkit metadata that hold <=32 distinct
+        # integral values (e.g. reloaded geology or external landcover codes) are
+        # auto-promoted to categorical so their min/mean/max is replaced with a
+        # class histogram; Float32 layers without metadata stay continuous.
+        if (not categorical) and (dtype_name in CLASS_CODE_TYPES) and sample.size > 0:
+            try:
+                if looks_like_class_codes(dtype_name, sample):
+                    categorical = True
+                    out["auto_categorical"] = True
+            except Exception as _exc:
+                log_swallowed("ai_aoi_summary._raster_stats_in_geom (looks_like_class_codes)", _exc)
         if categorical:
             out = _categorical_raster_stats(out, vals)
         return out

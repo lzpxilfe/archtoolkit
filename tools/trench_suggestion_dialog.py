@@ -33,7 +33,7 @@ from qgis.core import (
 from .qtcompat import FT_INT, FT_DOUBLE, FT_STRING, RBS_MIN, RBS_MAX
 from qgis.gui import QgsMapLayerComboBox
 
-from .processing_task import ProcessingCancelled, run_alg_blocking
+from .processing_task import ProcessingCancelled, ProcessingTaskError, run_alg_blocking
 
 from .help_dialog import show_help_dialog
 from . import dialog_memory
@@ -119,7 +119,19 @@ _GRAVE_KO_FALSE = (
     "엽총",  # shotgun
     "기관총",  # machine gun
     "구릉",  # hill
+    "구릉지",  # hilly terrain
     "강릉",  # Gangneung (city)
+    "남릉",  # south ridge
+    "북릉",  # north ridge
+    "동릉",  # east ridge
+    "서릉",  # west ridge
+    "주릉",  # main ridge
+    "지릉",  # branch ridge
+    "산릉",  # mountain ridge
+    "사면릉",  # slope ridge
+    "정상릉",  # summit ridge
+    "세장릉",  # narrow ridge
+    "능지",  # ridge terrain
     "능선",  # ridge
     "릉선",  # ridge (variant spelling)
 )
@@ -2051,8 +2063,13 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
 
             self._set_busy("결과 레이어 생성 중…")
             crs_authid = aoi_layer.crs().authid()
-            trench_layer = QgsVectorLayer(f"Polygon?crs={crs_authid}", f"Trench_Suggestions_{run_id}", "memory")
-            center_layer = QgsVectorLayer(f"Point?crs={crs_authid}", f"Trench_Centers_{run_id}", "memory")
+            trench_uri = f"Polygon?crs={crs_authid}" if crs_authid else "Polygon"
+            center_uri = f"Point?crs={crs_authid}" if crs_authid else "Point"
+            trench_layer = QgsVectorLayer(trench_uri, f"Trench_Suggestions_{run_id}", "memory")
+            center_layer = QgsVectorLayer(center_uri, f"Trench_Centers_{run_id}", "memory")
+            if aoi_layer.crs().isValid():
+                trench_layer.setCrs(aoi_layer.crs())
+                center_layer.setCrs(aoi_layer.crs())
 
             t_pr = trench_layer.dataProvider()
             c_pr = center_layer.dataProvider()
@@ -2128,6 +2145,27 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
             except Exception as _exc:
                 log_swallowed("tools/trench_suggestion_dialog.py:1511 (_run)", _exc)
 
+            aoi_area_m2 = 0.0
+            trench_area_inside_aoi_m2 = 0.0
+            trench_coverage_pct = 0.0
+            try:
+                aoi_area_m2 = float(aoi_geom.area()) if (aoi_geom is not None and not aoi_geom.isEmpty()) else 0.0
+                trench_geoms = [
+                    d.get("geom")
+                    for d in selected
+                    if d.get("geom") is not None and not d.get("geom").isEmpty()
+                ]
+                if trench_geoms and aoi_geom is not None and not aoi_geom.isEmpty():
+                    trench_union = trench_geoms[0] if len(trench_geoms) == 1 else QgsGeometry.unaryUnion(trench_geoms)
+                    if trench_union is not None and not trench_union.isEmpty():
+                        inter = trench_union.intersection(aoi_geom)
+                        if inter is not None and not inter.isEmpty():
+                            trench_area_inside_aoi_m2 = float(inter.area())
+                if aoi_area_m2 > 0.0:
+                    trench_coverage_pct = max(0.0, min(100.0, 100.0 * trench_area_inside_aoi_m2 / aoi_area_m2))
+            except Exception as _exc:
+                log_swallowed("tools/trench_suggestion_dialog.py (coverage_pct)", _exc)
+
             set_archtoolkit_layer_metadata(
                 trench_layer,
                 tool_id="trench_suggestion",
@@ -2181,6 +2219,9 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
                     "skipped_ahp_nodata": int(skipped_ahp_nodata),
                     "ref_layer_given": bool(ref_layer is not None),
                     "hidden_xls_loaded": bool(len(self._load_grave_codes_from_hidden()) > 0),
+                    "aoi_area_m2": float(aoi_area_m2),
+                    "trench_area_inside_aoi_m2": float(trench_area_inside_aoi_m2),
+                    "trench_coverage_pct": float(trench_coverage_pct),
                 },
             )
             set_archtoolkit_layer_metadata(
@@ -2219,7 +2260,8 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
                 self.iface,
                 "완료",
                 (
-                    f"트렌치 후보 {len(selected)}개를 생성했습니다.{shortfall}{skip_note}{avoid_note} "
+                    f"트렌치 후보 {len(selected)}개를 생성했습니다(AOI 면적비 {trench_coverage_pct:.2f}%)."
+                    f"{shortfall}{skip_note}{avoid_note} "
                     "선별은 AOI 전체에 분산하는 커버리지 우선 방식이며 rank=점수순, pick_order=선별순입니다. "
                     "결과는 조사 보조용 제안이며, 최종 판단은 현장 조사자가 수행해야 합니다."
                 ),
@@ -2227,12 +2269,19 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
                 duration=8,
             )
             log_message(
-                f"TrenchSuggestion done: selected={len(selected)} scanned={scanned} kept={kept} "
-                f"skipped_no_dem={skipped_no_dem} skipped_ahp_nodata={skipped_ahp_nodata} "
-                f"grave_matched={grave_count} truncated={truncated} run_id={run_id}",
+                f"TrenchSuggestion done: selected={len(selected)} coverage_pct={trench_coverage_pct:.3f}% "
+                f"scanned={scanned} kept={kept} skipped_no_dem={skipped_no_dem} "
+                f"skipped_ahp_nodata={skipped_ahp_nodata} grave_matched={grave_count} "
+                f"truncated={truncated} run_id={run_id}",
                 level=Qgis.MessageLevel.Info,
             )
             self.accept()
+        except ProcessingCancelled as exc:
+            push_message(self.iface, "트렌치 제안", str(exc) or "트렌치 후보 생성이 취소되었습니다.", level=1, duration=6)
+            restore_ui_focus(self)
+        except ProcessingTaskError as exc:
+            push_message(self.iface, "오류", f"처리 작업 실패: {exc}", level=2, duration=10)
+            restore_ui_focus(self)
         except Exception as e:
             log_exception("Trench suggestion error", e)
             push_message(self.iface, "오류", f"트렌치 후보 생성 실패: {e}", level=2, duration=10)

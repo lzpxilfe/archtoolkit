@@ -260,13 +260,25 @@ def _categorical_output_nodata(layer: QgsRasterLayer):
 
     source_values = []
     for band in range(1, band_count + 1):
+        band_vals = []
         try:
-            if provider.sourceHasNoDataValue(band):
-                source_values.append(float(provider.sourceNoDataValue(band)))
-            else:
-                source_values.append(None)
-        except Exception:
-            source_values.append(None)
+            use_src = True if not hasattr(provider, "useSourceNoDataValue") else bool(provider.useSourceNoDataValue(band))
+            if provider.sourceHasNoDataValue(band) and use_src:
+                band_vals.append(float(provider.sourceNoDataValue(band)))
+        except Exception as _exc:
+            log_swallowed("align_export_dialog._categorical_output_nodata", _exc)
+        try:
+            ranges = list(provider.userNoDataValues(band) or [])
+        except Exception as _exc:
+            log_swallowed("align_export_dialog._categorical_output_nodata.user_nd", _exc)
+            ranges = []
+        for vr in ranges:
+            low, high = float(vr.min()), float(vr.max())
+            if _nodata_equal(low, high) and not any(_nodata_equal(low, v) for v in band_vals):
+                band_vals.append(low)
+        if len(band_vals) > 1:
+            return None, "multiple_nodata"
+        source_values.append(band_vals[0] if band_vals else None)
 
     if source_values and all(v is not None for v in source_values):
         first = source_values[0]

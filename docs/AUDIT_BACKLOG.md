@@ -86,7 +86,21 @@
 ### `verhagen-whitley-2012` (3차 판정)
 - - 교정: Verhagen, P., & Whitley, T. G. (2012). Integrating Archaeological Theory and Predictive Modeling: a Live Report from the Scene. *Journal of Archaeological Method and Theory* 19, 49-100. — suggested annotation: 귀납적(통계) 모델과 연역적(전문가 판단) 모델의 관계, 그리고 예측모델 검증(관측 편향·테스트 데이터 독립성)의 문제. [Only two changes are actually required: restore the dropped subtitle, a …
 
-## 4. 검증 하네스 계획 (14건)
+## 4. 검증 하네스 계획 (14건) — 모두 구현 및 검증 완료
+
+> 상태 업데이트: V1–V14 검증 하네스 항목이 모두 독립 테스트 및 QGIS-free 수학 코어로 구현되었습니다:
+> - V1–V2: `tools/cost_engine.py`, `tests/test_cost_engine.py`
+> - V3: `tools/kriging_math.py`, `tests/test_kriging_math.py`, `tests/test_kriging_exactness.py`
+> - V4: `tests/test_cost_models.py::HerzogMetabolicTests`
+> - V5: `tests/test_terrain_math.py::ZtCurvatureCrossTermTests`, `FocalTpiStripsTests`
+> - V6: `tests/test_network_metrics.py::TiedShortestPathAndExtendedMetricTests`
+> - V7–V8: `tests/test_ahp_core.py`, `tests/test_ahp_guide_examples.py`
+> - V9: `tests/test_gdal_enums.py`
+> - V10: `tools/covariate_stats.py`, `tests/test_covariate_stats.py`
+> - V11: `tools/ppa_filters.py`, `tests/test_ppa_filters.py`
+> - V12: `tools/viewshed_math.py`, `tests/test_viewshed_math.py`
+> - V13: `tools/mst.py`, `tests/test_mst.py`
+> - V14: `tests/test_ci_wiring.py`
 
 테스트가 지키지 못하는 영역과, **출판값으로 고정할 수 있는 구체적 단언** 목록입니다. "맞다고 믿는다"를 "맞다는 걸 보인다"로 바꾸는 작업이며, 이 장은 QGIS 없이도 바로 착수할 수 있습니다.
 

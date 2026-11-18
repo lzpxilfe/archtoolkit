@@ -282,7 +282,26 @@ def _build_stubs(driver):
 
     gdal = types.ModuleType("osgeo.gdal")
     gdal.GDT_Float32 = 6
+    gdal.CE_Failure = 3
     gdal.GetDriverByName = lambda _name: driver
+    gdal.ErrorReset = lambda: None
+    gdal.GetLastErrorType = lambda: 0
+    gdal.GetLastErrorMsg = lambda: ""
+
+    class _ReopenedDataset:
+        def __init__(self, width, height):
+            self.RasterCount = 1
+            self.RasterXSize = int(width)
+            self.RasterYSize = int(height)
+
+    def _open(path):
+        sink = driver.written.get(str(path))
+        if sink is None:
+            return None
+        w, h = sink["size"]
+        return _ReopenedDataset(w, h)
+
+    gdal.Open = _open
     osgeo = types.ModuleType("osgeo")
     osgeo.__path__ = []
     osgeo.gdal = gdal
@@ -377,6 +396,36 @@ class KrigingExactnessTests(unittest.TestCase):
 
         explicit, _, _ = self._run(layer, "HEIGHT", "explicit")
         self.assertEqual(explicit["params"]["value_field"], "HEIGHT")
+        self.assertEqual(explicit["params"]["variogram_source"], "heuristic_lite")
+        self.assertIsNotNone(explicit.get("loocv"))
+
+    def test_fit_variogram_and_loocv_reported(self):
+        rng = np.random.default_rng(11)
+        samples = []
+        for x in range(0, 61, 10):
+            for y in range(0, 61, 10):
+                z = 10.0 + 0.2 * float(x) + 0.1 * float(y) + float(rng.normal(0.0, 0.2))
+                samples.append((float(x), float(y), {"Elevation": z}))
+        layer = _Layer(samples, ["Elevation", "id"])
+        tmp = tempfile.mkdtemp(prefix="archtoolkit_krig_wls_")
+        out = os.path.join(tmp, "wls.tif")
+        var = os.path.join(tmp, "wls_variance.tif")
+        info = self.kl.ordinary_kriging_lite_to_geotiff(
+            layer=layer,
+            value_field="Elevation",
+            extent=_Rectangle(-2.5, -2.5, 62.5, 62.5),
+            pixel_size=5.0,
+            out_path=out,
+            variance_path=var,
+            neighbors=16,
+            fit_variogram=True,
+            compute_loocv=True,
+        )
+        self.assertEqual(info["params"]["variogram_source"], "empirical_wls")
+        self.assertIn(info["params"]["model"], ("exponential", "spherical", "gaussian"))
+        loocv = info["loocv"]
+        self.assertEqual(loocv["n_evaluated"], len(samples))
+        self.assertLess(loocv["rmse"], 1.5)
 
     def test_resolution_is_case_insensitive_and_honours_geom_sentinel(self):
         layer = _Layer([], ["Height", "id"])

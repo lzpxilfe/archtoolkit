@@ -270,7 +270,7 @@ class DistanceRasterQgisTests(unittest.TestCase):
         # branch could never fire: every cell counted as valid.
         reference = self._reference()
         point = self._vector("Point", "onept", [QgsGeometry.fromPointXY(self._cell_centre(30, 29))])
-        real_run = distance_raster_dialog.processing.run
+        real_run = distance_raster_dialog.run_alg_blocking
 
         def all_nodata_run(algorithm, parameters, *args, **kwargs):
             result = real_run(algorithm, parameters, *args, **kwargs)
@@ -283,7 +283,7 @@ class DistanceRasterQgisTests(unittest.TestCase):
                 dataset = None
             return result
 
-        with mock.patch.object(distance_raster_dialog.processing, "run", side_effect=all_nodata_run):
+        with mock.patch.object(distance_raster_dialog, "run_alg_blocking", side_effect=all_nodata_run):
             added, messages = self._run(point, reference, "allnd", max_distance=5.0)
         self.assertEqual(added, [], messages)
         errors = [text for title, text, level in messages if level == 2]

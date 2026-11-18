@@ -148,13 +148,31 @@ class FakeIface:
 def boot(repo_root: str):
     """Start QgsApplication (once), init Processing, import the plugin package."""
     global _APP
+    mac_bundle = "/Applications/QGIS.app/Contents"
+    use_mac_bundle = sys.platform == "darwin" and os.path.isdir(mac_bundle) and not os.path.isdir("/usr/share/qgis")
+    if use_mac_bundle:
+        os.environ.setdefault("GDAL_DATA", f"{mac_bundle}/Resources/qgis/gdal")
+        os.environ.setdefault("PROJ_DATA", f"{mac_bundle}/Resources/qgis/proj")
+        os.environ.setdefault("PROJ_LIB", f"{mac_bundle}/Resources/qgis/proj")
+        mac_bin = f"{mac_bundle}/MacOS"
+        path_parts = os.environ.get("PATH", "").split(os.pathsep) if os.environ.get("PATH") else []
+        if mac_bin not in path_parts:
+            os.environ["PATH"] = os.pathsep.join([mac_bin] + path_parts)
+        for p in (f"{mac_bundle}/Resources/qgis/python", f"{mac_bundle}/Resources/qgis/python/plugins"):
+            if os.path.isdir(p) and p not in sys.path:
+                sys.path.insert(0, p)
+
     from qgis.core import QgsApplication
     from qgis.gui import QgsMapCanvas
     if _APP is None:
-        QgsApplication.setPrefixPath("/usr", True)
+        default_prefix = f"{mac_bundle}/MacOS" if use_mac_bundle else "/usr"
+        prefix = os.environ.get("QGIS_PREFIX_PATH") or default_prefix
+        QgsApplication.setPrefixPath(prefix, True)
         _APP = QgsApplication([], False)
         _APP.initQgis()
-        sys.path.insert(0, "/usr/share/qgis/python/plugins")
+        plugin_root = f"{mac_bundle}/Resources/qgis/python/plugins" if use_mac_bundle else "/usr/share/qgis/python/plugins"
+        if plugin_root not in sys.path:
+            sys.path.insert(0, plugin_root)
         from processing.core.Processing import Processing
         Processing.initialize()
         # The plugin is a package named after its directory; import it as `tools`

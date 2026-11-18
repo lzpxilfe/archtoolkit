@@ -1455,12 +1455,14 @@ class GeologyZipDialog(QtWidgets.QDialog):
             return mapping, labels, labels_all, conflicts
         if numeric is None:
             numeric = self._field_numeric_across(layers, field_name)[0]
-        label_field = self._suggest_label_field(layers[0], field_name) if numeric else None
         keys: set = set()
+        unlabelled: set = set()
         for lyr in layers:
             if lyr.fields().indexOf(field_name) < 0:
                 continue
-            lf = label_field if (label_field and lyr.fields().indexOf(label_field) >= 0) else None
+            lf = self._suggest_label_field(lyr, field_name) if numeric else None
+            if lf and lyr.fields().indexOf(lf) < 0:
+                lf = None
             for f in lyr.getFeatures():
                 try:
                     val = f[field_name]
@@ -1478,25 +1480,49 @@ class GeologyZipDialog(QtWidgets.QDialog):
                     if code is None:
                         continue
                     keys.add(code)
+                    has_lbl = False
                     if lf:
                         try:
                             lbl = f[lf]
                             if not _is_blank(lbl):
+                                lbl_s = str(lbl).strip()
+                                has_lbl = True
                                 seen = labels_all.setdefault(code, [])
-                                if str(lbl).strip() not in seen:
-                                    seen.append(str(lbl).strip())
+                                if lbl_s not in seen:
+                                    seen.append(lbl_s)
                         except Exception as _exc:
                             log_swallowed("geology_zip_dialog._build_shared_code_mapping", _exc)
+                    if not has_lbl:
+                        unlabelled.add(code)
                 else:
                     keys.add(_code_key(val))
         if numeric:
+            raw_ints = {int(c) for c in keys}
+            used_ints = set(raw_ints)
+            next_alloc = (max(raw_ints) + 1) if raw_ints else 1
+            if next_alloc < 1:
+                next_alloc = 1
             for code in sorted(keys, key=lambda c: int(c)):
-                mapping[code] = int(code)
                 seen = labels_all.get(code) or []
-                if seen:
-                    labels[code] = seen[0]
                 if len(seen) > 1:
                     conflicts.append((code, list(seen)))
+                    # Disambiguate colliding numeric codes across sheets by allocating
+                    # distinct non-colliding integer burn values per (code, label) pair.
+                    for lbl_s in seen:
+                        comp_key = f"{code}::{lbl_s}"
+                        while next_alloc in used_ints:
+                            next_alloc += 1
+                        mapping[comp_key] = next_alloc
+                        used_ints.add(next_alloc)
+                        next_alloc += 1
+                        labels[comp_key] = lbl_s
+                        labels_all[comp_key] = list(seen)
+                    if code in unlabelled:
+                        mapping[code] = int(code)
+                else:
+                    mapping[code] = int(code)
+                    if seen:
+                        labels[code] = seen[0]
         else:
             for i, key in enumerate(sorted(keys), start=1):
                 mapping[key] = i
@@ -1564,7 +1590,11 @@ class GeologyZipDialog(QtWidgets.QDialog):
         # the completion message can say how much of the sheet is missing
         # instead of reporting an unqualified success (GEO-07).
         drops: Dict[str, int] = {k: 0 for k in DROP_REASON_LABELS}
-        next_id = (max(int(v) for v in mapping.values()) + 1) if mapping else 1
+        used_vals = {int(v) for v in mapping.values()}
+        conflict_codes = {str(k).split("::", 1)[0] for k in mapping if "::" in str(k)}
+        next_id = (max(used_vals) + 1) if used_vals else 1
+        if next_id < 1:
+            next_id = 1
         if numeric is None:
             numeric, num_names, text_names, _dbl = self._field_numeric_across(layers, field_name)
             if num_names and text_names:
@@ -1573,9 +1603,11 @@ class GeologyZipDialog(QtWidgets.QDialog):
                     "문자 코드로 처리합니다.",
                     level=Qgis.MessageLevel.Warning,
                 )
-        label_field = self._suggest_label_field(layers[0], field_name) if numeric else None
 
         for lyr in layers:
+            lf = self._suggest_label_field(lyr, field_name) if numeric else None
+            if lf and lyr.fields().indexOf(lf) < 0:
+                lf = None
             if lyr.geometryType() != layers[0].geometryType():
                 log_message(f"지오메트리 타입 불일치: {lyr.name()} (skip)", level=Qgis.MessageLevel.Warning)
                 drops["layer_geometry_mismatch"] += 1
@@ -1639,19 +1671,44 @@ class GeologyZipDialog(QtWidgets.QDialog):
                             drops["non_numeric"] += 1
                             continue
                         code = str(out_int)
-                        mapping[code] = out_int
-                        if label_field and code not in labels:
+                        lbl_txt = ""
+                        if lf:
                             try:
-                                lbl = f[label_field]
+                                lbl = f[lf]
                                 if not _is_blank(lbl):
-                                    labels[code] = str(lbl).strip()
+                                    lbl_txt = str(lbl).strip()
                             except Exception as _exc:
                                 log_swallowed("tools/geology_zip_dialog.py:1085 (_build_numeric_merge_layer)", _exc)
-                        out_val = float(out_int)
+                        comp_key = f"{code}::{lbl_txt}" if lbl_txt else ""
+                        if comp_key and comp_key in mapping:
+                            mapped_int = int(mapping[comp_key])
+                            if comp_key not in labels:
+                                labels[comp_key] = lbl_txt
+                            out_val = float(mapped_int)
+                        elif code in conflict_codes and lbl_txt:
+                            while next_id in used_vals:
+                                next_id += 1
+                            mapped_int = next_id
+                            used_vals.add(mapped_int)
+                            next_id += 1
+                            mapping[comp_key] = mapped_int
+                            labels[comp_key] = lbl_txt
+                            out_val = float(mapped_int)
+                        else:
+                            if code not in mapping:
+                                mapping[code] = out_int
+                                used_vals.add(out_int)
+                            mapped_int = int(mapping[code])
+                            if lbl_txt and code not in labels:
+                                labels[code] = lbl_txt
+                            out_val = float(mapped_int)
                     else:
                         key = _code_key(val)
                         if key not in mapping:
+                            while next_id in used_vals:
+                                next_id += 1
                             mapping[key] = next_id
+                            used_vals.add(next_id)
                             next_id += 1
                         if key not in labels:
                             labels[key] = key
@@ -1727,8 +1784,12 @@ class GeologyZipDialog(QtWidgets.QDialog):
                 for code, v in (mapping or {}).items():
                     vv = int(v)
                     cc = "" if cell_counts is None else int(cell_counts.get(vv, 0))
-                    rows.append((vv, str(code), str(labels.get(str(code), "") or ""), int(counts.get(vv, 0)),
-                                 cc, "|".join(labels_all.get(str(code), []) or [])))
+                    code_s = str(code)
+                    lall_list = labels_all.get(code_s)
+                    if not lall_list and "::" in code_s:
+                        lall_list = labels_all.get(code_s.split("::", 1)[0])
+                    rows.append((vv, code_s, str(labels.get(code_s, "") or ""), int(counts.get(vv, 0)),
+                                 cc, "|".join(lall_list or [])))
                 rows.sort(key=lambda x: (x[0], x[1]))
                 for vv, code, label, cnt, cc, lall in rows:
                     w.writerow([code, vv, label, cnt, cc, lall])
@@ -2076,6 +2137,27 @@ class GeologyZipDialog(QtWidgets.QDialog):
         log_message(f"KIGAM rasterize: {text}", level=Qgis.MessageLevel.Warning)
         push_message(self.iface, "NoData 값 변경", text, level=1, duration=12)
 
+    def _warn_code_conflicts(self, conflicts: List[Tuple[str, List[str]]], *, field: str = "") -> None:
+        """Warn when a numeric lithology/age code denotes multiple labels across features/sheets."""
+        if not conflicts:
+            return
+        txt = "; ".join(f"{c}: {' / '.join(ls)}" for c, ls in conflicts[:6])
+        prefix = f"[{field}] " if field else ""
+        log_message(
+            f"KIGAM: {prefix}같은 코드가 도엽마다 다른 암상명을 가집니다 — {txt}",
+            level=Qgis.MessageLevel.Warning,
+        )
+        push_message(
+            self.iface,
+            "지질도 코드 충돌",
+            (
+                f"{prefix}코드 {len(conflicts)}개가 도엽/피처별로 다른 이름을 가져 별도 정수(ATK_VAL)로 분리 매핑했습니다. "
+                "mapping.csv의 code/labels_all 열을 확인하세요."
+            ),
+            level=1,
+            duration=10,
+        )
+
     def _run_rasterize(self):
         layers = self._selected_vector_layers()
         if not layers:
@@ -2147,11 +2229,7 @@ class GeologyZipDialog(QtWidgets.QDialog):
                 self._warn_field_types(field, num_names, text_names, double_names)
                 shared_map, shared_labels, labels_all, conflicts = self._build_shared_code_mapping(layers, field, numeric=numeric)
                 if conflicts:
-                    txt = "; ".join(f"{c}: {' / '.join(ls)}" for c, ls in conflicts[:6])
-                    log_message(f"KIGAM: 같은 코드가 도엽마다 다른 암상명을 가집니다 — {txt}", level=Qgis.MessageLevel.Warning)
-                    push_message(self.iface, "지질도 코드 충돌",
-                                 f"코드 {len(conflicts)}개가 도엽별로 다른 이름을 가집니다. mapping.csv의 labels_all 열을 확인하세요.",
-                                 level=1, duration=10)
+                    self._warn_code_conflicts(conflicts, field=field)
                 merged_layer, mapping, labels, counts, drops = self._build_numeric_merge_layer(
                     layers, field, mapping=shared_map, labels=shared_labels, numeric=numeric)
                 if merged_layer is None or not merged_layer.isValid():
@@ -2212,6 +2290,8 @@ class GeologyZipDialog(QtWidgets.QDialog):
                             "double_truncated": bool(double_names),
                             "dropped": {k: int(v) for k, v in drops.items() if v},
                             "unburned_codes": len(unburned),
+                            "code_conflicts": len(conflicts),
+                            "conflict_codes": [str(c) for c, _ls in (conflicts or [])[:20]],
                             "mapping_csv": csv_path or "",
                         },
                     )
@@ -2290,12 +2370,15 @@ class GeologyZipDialog(QtWidgets.QDialog):
                     same_field = [l0 for l0 in layers if l0.fields().indexOf(field) >= 0]
                     numeric, num_names, text_names, double_names = self._field_numeric_across(same_field, field)
                     self._warn_field_types(field, num_names, text_names, double_names)
+                    shared_res = self._build_shared_code_mapping(same_field, field, numeric=numeric)
+                    if shared_res[3]:
+                        self._warn_code_conflicts(shared_res[3], field=field)
                     shared_by_field[field] = (
-                        self._build_shared_code_mapping(same_field, field, numeric=numeric),
+                        shared_res,
                         bool(numeric),
                         bool(double_names),
                     )
-                (shared_map, shared_labels, labels_all, _conf), numeric, double_trunc = shared_by_field[field]
+                (shared_map, shared_labels, labels_all, conflicts), numeric, double_trunc = shared_by_field[field]
                 merged_layer, mapping, labels, counts, drops = self._build_numeric_merge_layer(
                     [lyr], field, mapping=shared_map, labels=shared_labels, numeric=numeric)
                 for k, v in (drops or {}).items():
@@ -2379,6 +2462,8 @@ class GeologyZipDialog(QtWidgets.QDialog):
                             "double_truncated": bool(double_trunc),
                             "dropped": {k: int(v) for k, v in (drops or {}).items() if v},
                             "unburned_codes": len(unburned),
+                            "code_conflicts": len(conflicts),
+                            "conflict_codes": [str(c) for c, _ls in (conflicts or [])[:20]],
                             "mapping_csv": csv_path or "",
                         },
                     )

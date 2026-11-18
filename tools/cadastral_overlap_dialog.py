@@ -948,7 +948,7 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
 
             parcel_m2 = self._area_m2(da, g, crs=cad_crs)
             if parcel_m2 > 0.0 and math.isfinite(float(parcel_m2)):
-                pct = float(in_m2) / float(parcel_m2) * 100.0
+                pct = min(100.0, max(0.0, float(in_m2) / float(parcel_m2) * 100.0))
             else:
                 pct = 0.0
 

@@ -31,6 +31,7 @@ from qgis.PyQt.QtGui import QColor
 from qgis.core import (
     Qgis,
     QgsColorRampShader,
+    QgsCoordinateReferenceSystem,
     QgsCoordinateTransform,
     QgsPointXY,
     QgsProject,
@@ -61,8 +62,11 @@ from .utils import (
 )
 from .aoi_extent import resolve_aoi_extent
 from .ahp_core import (
+    RI_TABLE as _RI_TABLE,
     ahp_weights_from_matrix as _ahp_weights_from_matrix,
     compute_hierarchy_summary as _compute_hierarchy_summary,
+    format_ahp_methodology_report as _format_ahp_methodology_report,
+    oat_weight_sensitivity as _oat_weight_sensitivity,
     sanitize_pair_values as _sanitize_pair_values,
     score_formula,
 )
@@ -868,17 +872,86 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
         btn_row = QtWidgets.QHBoxLayout()
         self.btnRun = QtWidgets.QPushButton("실행")
         self.btnRun.clicked.connect(self._on_run)
+        self.btnSaveReport = QtWidgets.QPushButton("방법론 보고서 저장 (.md)")
+        self.btnSaveReport.clicked.connect(self._on_save_methodology_report)
         self.btnHelp = QtWidgets.QPushButton("도움말")
         self.btnHelp.clicked.connect(self._on_help)
         self.btnClose = QtWidgets.QPushButton("닫기")
         self.btnClose.clicked.connect(self.reject)
         btn_row.addWidget(self.btnRun)
+        btn_row.addWidget(self.btnSaveReport)
         btn_row.addStretch(1)
         btn_row.addWidget(self.btnHelp)
         btn_row.addWidget(self.btnClose)
         layout.addLayout(btn_row)
 
         self.resize(920, 720)
+
+    def _on_save_methodology_report(self):
+        if not self._criteria:
+            push_message(self.iface, "주의", "먼저 기준 래스터를 1개 이상 추가하세요.", level=1, duration=6)
+            return
+        names = [
+            (self._criterion_layer(c).name() if self._criterion_layer(c) is not None else c.layer_id)
+            for c in self._criteria
+        ]
+        n = len(self._criteria)
+        mat = None
+        lam = None
+        ci = None
+        ri = None
+        cr = 0.0 if n == 1 else None
+        weights_source = "equal"
+        weights = [1.0 / float(n)] * n
+
+        if n == 1:
+            weights = [1.0]
+            lam = 1.0
+            ci = 0.0
+            ri = _RI_TABLE.get(1)
+            cr = 0.0
+            weights_source = "single_criterion"
+        else:
+            mat = self._build_pairwise_matrix()
+            if mat is not None:
+                weights, lam, cr0 = _ahp_weights_from_matrix(mat)
+                ci = ((float(lam) - float(n)) / float(n - 1)) if math.isfinite(float(lam)) and n > 1 else None
+                ri = _RI_TABLE.get(n)
+                cr = float(cr0) if math.isfinite(float(cr0)) else None
+                weights_source = "pairwise_matrix"
+                hier_w = self._hierarchy_global_weight_vector()
+                if hier_w is not None:
+                    weights = [float(x) for x in hier_w]
+                    weights_source = "hierarchy_global"
+
+        hier_meta = self._hierarchy_metadata_params() if hasattr(self, "_hierarchy_metadata_params") else None
+        sens = _oat_weight_sensitivity(weights, delta=0.10) if n >= 2 else []
+        report_md = _format_ahp_methodology_report(
+            criteria=names,
+            weights=weights,
+            matrix=mat,
+            cr=cr,
+            ci=ci,
+            ri=ri,
+            lambda_max=lam,
+            weights_source=weights_source,
+            hierarchy=hier_meta,
+            sensitivity=sens,
+        )
+        path, _flt = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "AHP 방법론 보고서 저장",
+            "ahp_methodology_report.md",
+            "Markdown (*.md)",
+        )
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(report_md)
+            push_message(self.iface, "완료", f"AHP 방법론 보고서를 저장했습니다: {path}", level=0, duration=6)
+        except Exception as e:
+            push_message(self.iface, "오류", f"보고서 저장 실패: {e}", level=2, duration=8)
 
     def _on_help(self):
         html = """
@@ -1459,6 +1532,24 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
         crit.target_v = float(values.get("target_v")) if values.get("target_v") is not None else None
         crit.prefer_min = float(values.get("prefer_min")) if values.get("prefer_min") is not None else None
         crit.prefer_max = float(values.get("prefer_max")) if values.get("prefer_max") is not None else None
+        if crit.direction == "reclass":
+            # The preference dialog promises "확인 후 구간 점수표 편집 창이 열립니다";
+            # without this a criterion switched to reclass kept no table and
+            # scored 0 everywhere.
+            rdlg = _CriterionReclassDialog(
+                layer_name=str(lyr.name() if lyr is not None else "(레이어 없음)"),
+                criterion=crit,
+                parent=self,
+            )
+            rres = rdlg.exec()
+            if rres == QtWidgets.QDialog.DialogCode.Accepted:
+                crit.score_ranges = rdlg.values()
+            elif not crit.score_ranges:
+                push_message(
+                    self.iface, "주의",
+                    "구간 점수표가 비어 있습니다. 실행 전에 '선호 설정'에서 점수표를 입력하세요.",
+                    level=1, duration=8,
+                )
         self._notify_preference_adjustments(crit, self._ensure_criterion_preference_defaults(crit))
         self._refresh_criteria_table()
 
@@ -2181,6 +2272,7 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
         out_path: str,
         extent_str: Optional[str],
         extent_crs_authid: Optional[str],
+        source_crs=None,
         resampling: int = 1,  # 1=bilinear (continuous); use 0=nearest for categorical/reclass
         nodata: Optional[float] = -9999.0,
     ) -> str:
@@ -2192,10 +2284,30 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
         if pixel is None or (not math.isfinite(pixel)) or pixel <= 0:
             pixel = None
 
+        src_crs_param = (
+            QgsCoordinateReferenceSystem(source_crs)
+            if source_crs is not None and source_crs.isValid()
+            else None
+        )
+        dst_crs_param = (
+            QgsCoordinateReferenceSystem(ref_layer.crs())
+            if ref_layer.crs().isValid()
+            else str(ref_layer.crs().authid() or "")
+        )
+        ext_crs_param = (
+            QgsCoordinateReferenceSystem(extent_crs_authid)
+            if isinstance(extent_crs_authid, QgsCoordinateReferenceSystem) and extent_crs_authid.isValid()
+            else (
+                QgsCoordinateReferenceSystem(ref_layer.crs())
+                if (extent_crs_authid and extent_crs_authid == ref_layer.crs().authid() and ref_layer.crs().isValid())
+                else extent_crs_authid
+            )
+        )
+
         params = {
             "INPUT": str(input_path),
-            "SOURCE_CRS": None,
-            "TARGET_CRS": str(ref_layer.crs().authid() or ""),
+            "SOURCE_CRS": src_crs_param,
+            "TARGET_CRS": dst_crs_param,
             "RESAMPLING": int(resampling),
             # Declare an output NoData so extent-fill areas are flagged invalid
             # instead of silently becoming value 0.
@@ -2204,7 +2316,7 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
             "OPTIONS": "",
             "DATA_TYPE": 6,  # Float32: avoid integer truncation of source values
             "TARGET_EXTENT": extent_str,
-            "TARGET_EXTENT_CRS": extent_crs_authid,
+            "TARGET_EXTENT_CRS": ext_crs_param,
             "MULTITHREADING": False,
             "EXTRA": "",
             "OUTPUT": str(out_path),
@@ -2347,6 +2459,11 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
                 "aoi_extent": aoi_extent,
                 "align_to_first": bool(self.chkAlignToFirst.isChecked()),
                 "scale_0_100": bool(self.chkScale100.isChecked()),
+                "oat_sensitivity_10pct": (
+                    _oat_weight_sensitivity([float(c.weight or 0.0) for c in self._criteria], delta=0.10)
+                    if len(self._criteria) >= 2
+                    else []
+                ),
                 **self._hierarchy_metadata_params(),
             }
             if str(getattr(self, "_last_weights_source", "") or "") == "pairwise_matrix":
@@ -2637,7 +2754,8 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
                         ref_layer=ref_layer,
                         out_path=warped,
                         extent_str=extent_str,
-                        extent_crs_authid=extent_crs,
+                        extent_crs_authid=(QgsCoordinateReferenceSystem(ref_layer.crs()) if not extent_crs and ref_layer.crs().isValid() else extent_crs),
+                        source_crs=lyr.crs(),
                         # Reclass criteria are categorical: bilinear would blend
                         # class codes into values between the score intervals.
                         resampling=0 if is_reclass else 1,

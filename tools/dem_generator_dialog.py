@@ -130,13 +130,13 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
     
     # DXF Layer definitions for Korean digital topographic maps (DXF/NGI 표준코드 + 구(숫자) 코드 혼재)
     DXF_LAYER_INFO = {
-        # --- 현행 수치지형도(일반적으로 많이 쓰이는 F*** 코드) ---
-        # 주요 활용 코드(예시): 등고선 F0017111/F0017114, 표고점 F0027217, 기준점 H0027311/H0027312
-        'F0017110': {'name': '등고선(기타/확인필요)', 'desc': '데이터셋에 따라 존재할 수 있는 등고선 코드(확인 필요). 보통 F0017111/F0017114를 주로 사용', 'category': '현행(등고선)', 'default': False},
+        # --- 현행 수치지형도(국토지리정보원 지형지물 표준코드 F***) ---
+        # 주요 등고선 코드: F0017111(주곡선), F0017112(계곡선), F0017113(간곡선), F0017114(조곡선)
+        'F0017110': {'name': '등고선(미분류)', 'desc': '데이터셋에 따라 존재하는 등고선 미분류 코드', 'category': '현행(등고선)', 'default': True},
         'F0017111': {'name': '주곡선', 'desc': '등고선(주곡선). DEM 생성의 기본 입력', 'category': '현행(등고선)', 'default': True},
-        'F0017112': {'name': '등고선(보조)', 'desc': '등고선 보조 코드(데이터셋별 상이). 필요 시 선택', 'category': '현행(등고선)', 'default': False},
-        'F0017113': {'name': '등고선(보조)', 'desc': '등고선 보조 코드(데이터셋별 상이). 필요 시 선택', 'category': '현행(등고선)', 'default': False},
-        'F0017114': {'name': '간곡선', 'desc': '등고선(간곡선/보조). 주곡선 사이를 보완', 'category': '현행(등고선)', 'default': True},
+        'F0017112': {'name': '계곡선', 'desc': '등고선(계곡선, 5번째 주등고선). DEM 생성의 기본 입력', 'category': '현행(등고선)', 'default': True},
+        'F0017113': {'name': '간곡선', 'desc': '등고선(간곡선, 1/2 간격 보조 등고선)', 'category': '현행(등고선)', 'default': True},
+        'F0017114': {'name': '조곡선', 'desc': '등고선(조곡선, 1/4 간격 보조 등고선)', 'category': '현행(등고선)', 'default': True},
         'F0017115': {'name': '지형선(보조)', 'desc': '지형 굴곡 보조선(데이터셋별 상이). DEM 보간에는 보통 선택적', 'category': '현행(지형)', 'default': False},
         'F0017120': {'name': '등고선 수치', 'desc': '등고선 숫자(텍스트). DEM 보간에는 보통 불필요', 'category': '현행(텍스트)', 'default': False},
         'F0027217': {'name': '표고점', 'desc': '표고점(Spot height). 등고선만으로 부족한 지점 보완(권장)', 'category': '현행(포인트)', 'default': True},
@@ -148,16 +148,28 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
         ,
         # --- 구(2000년대 등) 수치지형도: 숫자 레이어 코드 ---
         # 주로 71XX(등고선), 7217(표고점), 73XX(기준점/수치) 형태로 등장합니다.
-        # (예) "Layer" IN ('7111','7114','2121','2122')
+        # (예) "Layer" IN ('7111','7112','7113','7114','2121','2122')
         "7111": {
             "name": "주곡선(구)",
             "desc": "구 수치지도(숫자 코드) 주곡선(등고선)",
             "category": "구수치(등고선)",
             "default": False,
         },
-        "7114": {
+        "7112": {
             "name": "계곡선(구)",
             "desc": "구 수치지도(숫자 코드) 계곡선(등고선)",
+            "category": "구수치(등고선)",
+            "default": False,
+        },
+        "7113": {
+            "name": "간곡선(구)",
+            "desc": "구 수치지도(숫자 코드) 간곡선(등고선)",
+            "category": "구수치(등고선)",
+            "default": False,
+        },
+        "7114": {
+            "name": "조곡선(구)",
+            "desc": "구 수치지도(숫자 코드) 조곡선(등고선)",
             "category": "구수치(등고선)",
             "default": False,
         },
@@ -191,10 +203,10 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
         "modern_f": {
             "label": "현행 수치지형도 (F/H 코드)",
             "era": "modern",
-            "codes": ["F0017111", "F0017114", "F0027217"],
+            "codes": ["F0017110", "F0017111", "F0017112", "F0017113", "F0017114", "F0027217"],
             "tooltip": (
                 "현행 수치지형도(DXF)에서 많이 쓰는 프리셋입니다.\n"
-                "- 등고선(F0017111, F0017114) + 표고점(F0027217)\n"
+                "- 등고선(F0017111 주곡선, F0017112 계곡선, F0017113 간곡선, F0017114 조곡선) + 표고점(F0027217)\n"
                 "- (선택) 기준점: 삼각점(H0027311), 수준점(H0027312)\n"
                 "- DEM 보간에 불필요한 텍스트(등고선 수치 등)는 기본 제외"
             ),
@@ -202,11 +214,11 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
         "legacy_numeric": {
             "label": "구 수치지형도 (숫자 레이어)",
             "era": "legacy",
-            "codes": ["7111", "7114", "2121", "2122"],
+            "codes": ["7111", "7112", "7113", "7114", "2121", "2122"],
             "tooltip": (
                 "구(2000년대 등) 수치지형도에서 레이어 이름이 숫자로 들어오는 경우가 있습니다.\n"
-                "예) \"Layer\" IN ('7111','7114','2121','2122')\n"
-                "- 71XX: 등고선(주곡선/계곡선)\n"
+                "예) \"Layer\" IN ('7111','7112','7113','7114','2121','2122')\n"
+                "- 71XX: 등고선(주곡선/계곡선/간곡선/조곡선)\n"
                 "- (선택) 7217: 표고점(Spot height)\n"
                 "- 2121/2122(해안선)은 필요할 때만: 해안/수면을 0m 기준으로 강제할 수 있습니다(주의)"
             ),
@@ -358,30 +370,41 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
             except Exception as _exc:
                 log_swallowed("tools/dem_generator_dialog.py:276 (_setup_kriging_controls)", _exc)
 
+            self.chkKrigingFitVariogram = QtWidgets.QCheckBox(
+                "경험 베리오그램 자동 적합 (Cressie WLS: Exponential/Spherical/Gaussian)",
+                self,
+            )
+            self.chkKrigingFitVariogram.setChecked(False)
+            try:
+                self.chkKrigingFitVariogram.setToolTip(
+                    "해제 시(Lite 기본): 지수형 고정·표본분산 5% 너깃·최근린 3배 레인지 휴리스틱을 사용합니다.\n"
+                    "선택 시: Matheron(1963) 경험 베리오그램과 Cressie(1985) WLS 적합을 통해 최적 모델/파라미터를 추정합니다."
+                )
+            except Exception as _exc:
+                log_swallowed("tools/dem_generator_dialog.py (_setup_kriging_controls fit chk)", _exc)
+
             # Place below interpolation method rows (existing rows: 0..3)
             layout.addWidget(self.lblZField, 4, 0)
             layout.addWidget(self.cmbZField, 4, 1)
             layout.addWidget(self.lblKrigingNeighbors, 5, 0)
             layout.addWidget(self.spinKrigingNeighbors, 5, 1)
+            layout.addWidget(self.chkKrigingFitVariogram, 6, 0, 1, 2)
 
             self.lblKrigingHint = QtWidgets.QLabel(
                 "<b>Kriging(Lite) 안내</b><br>"
                 "- 포인트 값(표고점 등) 기반 보간입니다. 등고선(선)에는 적합하지 않습니다"
                 "(선·면을 넣으면 정점을 표본점으로 씁니다).<br>"
-                "- 출력은 DEM과 함께 <code>_variance.tif</code>도 생성됩니다.<br>"
-                # This banner sits right next to the method combo, so it is the
-                # last thing read before running. It has to carry the same
-                # caveat as README.md rather than just the word "불확실성".
-                "- <b>Lite</b>는 경험 베리오그램을 적합하지 않습니다(지수형 모델 고정, 너깃=표본분산의 5%, "
-                "레인지=최근린 간격 중앙값의 3배, 이방성 미고려).<br>"
-                "- 그러므로 <code>_variance.tif</code>는 보정된 예측분산이 아니라 <b>상대 불확실성 지도</b>입니다."
+                "- 출력은 DEM과 함께 <code>_variance.tif</code> 및 LOOCV(교차검증 RMSE/MSDR) 진단이 생성됩니다.<br>"
+                "- <b>기본(Lite)</b>은 경험 베리오그램을 적합하지 않으며(지수형 고정, 너깃=표본분산의 5%, "
+                "레인지=최근린 간격 중앙값의 3배, 이방성 미고려) "
+                "<code>_variance.tif</code>는 <b>상대 불확실성 지도</b>입니다. 경험 베리오그램 적합을 원하면 위 옵션을 선택하세요."
             )
             self.lblKrigingHint.setWordWrap(True)
             try:
                 self.lblKrigingHint.setStyleSheet("background:#fff3e0; padding:8px; border-radius:3px;")
             except Exception as _exc:
                 log_swallowed("tools/dem_generator_dialog.py:293 (_setup_kriging_controls)", _exc)
-            layout.addWidget(self.lblKrigingHint, 6, 0, 1, 2)
+            layout.addWidget(self.lblKrigingHint, 7, 0, 1, 2)
 
             # Fill initial items. The Z-field row applies to every method
             # (TIN/IDW used to guess from a short name list with no way to
@@ -389,6 +412,7 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
             self._refresh_kriging_value_fields()
             self.lblKrigingNeighbors.hide()
             self.spinKrigingNeighbors.hide()
+            self.chkKrigingFitVariogram.hide()
             self.lblKrigingHint.hide()
         except Exception as _exc:
             # Never block dialog load due to optional UI widgets.
@@ -825,10 +849,15 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
         for dxf_path in dxf_paths:
             base = os.path.basename(dxf_path)
             try:
+                raw_uri = dxf_path + "|layername=entities"
                 layer_name = os.path.splitext(base)[0] + "_DEM용"
-                layer = QgsVectorLayer(dxf_path + "|layername=entities", layer_name, "ogr")
+                layer = QgsVectorLayer(raw_uri, layer_name, "ogr")
 
                 if layer.isValid():
+                    try:
+                        layer.setCustomProperty("archtoolkit/dxf_raw_source", raw_uri)
+                    except Exception as _exc:
+                        log_swallowed("dem_generator_dialog.load_dxf_file (prop)", _exc)
                     layer.setSubsetString(query)
                     QgsProject.instance().addMapLayer(layer)
                     self.loaded_dxf_layers.append(layer)
@@ -911,7 +940,7 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
                 w.setVisible(True)
             except Exception as _exc:
                 log_swallowed("tools/dem_generator_dialog.py:760 (on_interpolation_changed)", _exc)
-        for w_name in ("lblKrigingNeighbors", "spinKrigingNeighbors", "lblKrigingHint"):
+        for w_name in ("lblKrigingNeighbors", "spinKrigingNeighbors", "chkKrigingFitVariogram", "lblKrigingHint"):
             w = getattr(self, w_name, None)
             if w is None:
                 continue
@@ -1294,7 +1323,10 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
             handle = src
             if query and self._is_plugin_dxf_layer(src):
                 try:
-                    dxf = QgsVectorLayer(src.source(), src.name(), src.providerType())
+                    raw_src = str(src.customProperty("archtoolkit/dxf_raw_source", "") or "").strip()
+                    if not raw_src:
+                        raw_src = str(src.source() or "").split("|subset=", 1)[0]
+                    dxf = QgsVectorLayer(raw_src, src.name(), src.providerType())
                     if dxf.isValid() and dxf.fields().indexFromName("Layer") >= 0:
                         info["filter_before"] += int(dxf.featureCount())
                         dxf.setSubsetString(query)
@@ -1412,7 +1444,12 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
         with varying values could hold the real elevations.
         """
         z_min, z_max = info.get("z_min"), info.get("z_max")
-        if z_min is None or z_max is None or z_max != z_min:
+        if z_min is None or z_max is None:
+            return (
+                "3D 형식이지만 유효한(유한한) Z 좌표가 하나도 없습니다(전부 NaN). "
+                "값 필드(Z)에서 표고 필드를 선택하거나 유효한 Z 좌표가 있는 레이어를 사용하세요."
+            )
+        if z_max != z_min:
             return ""
         candidates = [(name, lo, hi) for name, (lo, hi) in (info.get("numeric_ranges") or {}).items() if hi > lo]
         if z_min != 0.0 and not candidates:
@@ -1617,22 +1654,21 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
         # dropped its contours (DEMGEN-03). Apply the filter only when every
         # checked layer is a plugin-loaded DXF layer.
         dxf_layer_names = [lyr.name() for lyr in selected_layers if self._is_plugin_dxf_layer(lyr)]
-        other_layer_names = [lyr.name() for lyr in selected_layers if not self._is_plugin_dxf_layer(lyr)]
-        if selected_codes and dxf_layer_names and not other_layer_names:
+        if dxf_layer_names and not selected_codes:
+            push_message(
+                self.iface,
+                "오류",
+                "DXF 레이어가 선택되었으나 레이어 코드 표에서 추출할 코드가 하나도 선택되지 않았습니다.",
+                level=2,
+                duration=9,
+            )
+            restore_ui_focus(self)
+            return
+        if selected_codes and dxf_layer_names:
             query = '"Layer" IN (' + ','.join([f"'{code}'" for code in selected_codes]) + ')'
         else:
             query = None
-            if selected_codes and dxf_layer_names and other_layer_names:
-                push_message(
-                    self.iface,
-                    "안내",
-                    "레이어 코드 필터는 DXF 로드 시 적용된 상태를 그대로 쓰고, 일반 레이어("
-                    + ", ".join(other_layer_names[:3])
-                    + ")가 함께 선택되어 실행 시 재적용하지 않습니다.",
-                    level=1,
-                    duration=8,
-                )
-            elif selected_codes and not dxf_layer_names:
+            if selected_codes and not dxf_layer_names:
                 # A DXF opened through the QGIS browser owns a "Layer" column
                 # too, but the table is not applied to it; say so instead of
                 # letting the ticked codes look active.
@@ -1906,6 +1942,8 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
                             return False
 
                     push_message(self.iface, "처리 중", f"{method_name} 보간 실행 중...", level=0)
+                    chk_fit = getattr(self, "chkKrigingFitVariogram", None)
+                    fit_variogram = bool(chk_fit is not None and chk_fit.isChecked())
                     info = ordinary_kriging_lite_to_geotiff(
                         layer=krig_layer,
                         value_field=value_field,
@@ -1916,6 +1954,8 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
                         neighbors=int(neighbors),
                         progress_cb=progress_cb,
                         is_cancelled=is_cancelled,
+                        fit_variogram=fit_variogram,
+                        compute_loocv=True,
                     )
 
                     try:
@@ -1923,6 +1963,18 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
                         progress.close()
                     except Exception as _exc:
                         log_swallowed("tools/dem_generator_dialog.py:965 (run_process)", _exc)
+
+                    if os.path.exists(staging_pred) and self._raster_has_valid_cells(staging_pred) is False:
+                        push_message(
+                            self.iface,
+                            "오류",
+                            "Kriging 보간 결과에 유효한 셀이 없습니다(전부 NoData). "
+                            "출력 파일은 갱신하지 않았습니다.",
+                            level=2,
+                            duration=10,
+                        )
+                        restore_ui_focus(self)
+                        return
 
                     # Both rasters finished writing: publish them together.
                     atomic_publish_files([
@@ -1960,6 +2012,7 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
                                         "inputs": dict(input_counts),
                                         "kriging_samples_from_line_vertices": int(krig_from_lines),
                                         "kriging": dict(info.get("params") or {}),
+                                        "loocv": info.get("loocv"),
                                         "n_points": int(info.get("n_points") or 0),
                                         "grid": {
                                             "ncols": int(info.get("ncols") or 0),
@@ -1990,12 +2043,25 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
                                             "value_source": value_source,
                                             "working_crs": self._crs_label(working_crs),
                                             "kriging": dict(info.get("params") or {}),
+                                            "loocv": info.get("loocv"),
                                         },
                                     )
                         except Exception as _exc:
                             log_swallowed("dem_generator_dialog.run_process", _exc)
 
-                        push_message(self.iface, "완료", f"Kriging 보간 완료! (값 필드: {value_label})", level=0, duration=6)
+                        loocv = info.get("loocv") or {}
+                        loocv_note = ""
+                        if int(loocv.get("n_evaluated") or 0) > 0 and loocv.get("rmse") is not None:
+                            msdr_val = loocv.get("msdr")
+                            msdr_part = f", MSDR={float(msdr_val):.2f}" if msdr_val is not None else ""
+                            loocv_note = f", LOOCV RMSE={float(loocv['rmse']):.3f}m{msdr_part}"
+                        push_message(
+                            self.iface,
+                            "완료",
+                            f"Kriging 보간 완료! (값 필드: {value_label}{loocv_note})",
+                            level=0,
+                            duration=6,
+                        )
                         self.accept()
                     else:
                         push_message(self.iface, "오류", "Kriging 출력이 생성되지 않았습니다.", level=2)
@@ -2007,7 +2073,10 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
                             progress.close()
                     except Exception as _exc:
                         log_swallowed("tools/dem_generator_dialog.py:1033 (run_process)", _exc)
-                    push_message(self.iface, "오류", f"Kriging 처리 중 오류: {str(e)}", level=2, duration=10)
+                    if isinstance(e, ProcessingCancelled) or str(e).strip() == "Cancelled":
+                        push_message(self.iface, "DEM 생성", "Kriging 보간이 취소되었습니다.", level=1, duration=6)
+                    else:
+                        push_message(self.iface, "오류", f"Kriging 처리 중 오류: {str(e)}", level=2, duration=10)
                     restore_ui_focus(self)
                     return
                 finally:

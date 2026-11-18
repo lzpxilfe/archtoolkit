@@ -27,7 +27,7 @@ from qgis.core import (
     QgsCoordinateTransform,
     QgsProject,
 )
-from .utils import log_swallowed
+from .utils import log_swallowed, transform_geometry
 
 STATUS_OK = "ok"
 STATUS_NO_LAYER = "no_layer"
@@ -168,8 +168,7 @@ def resolve_aoi_extent(aoi_layer, *, selected_only: bool, dst_crs) -> AoiExtentR
     try:
         if aoi_layer.crs() != dst_crs:
             transform = QgsCoordinateTransform(aoi_layer.crs(), dst_crs, QgsProject.instance())
-            reprojected = type(geom)(geom)
-            reprojected.transform(transform)
+            reprojected = transform_geometry(geom, transform)
             if not _is_usable(reprojected):
                 return AoiExtentResult(status=STATUS_TRANSFORM_FAILED, used=used, skipped=skipped)
             geom = reprojected

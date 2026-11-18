@@ -101,7 +101,7 @@
         <item row="0" column="0">
          <widget class="QCheckBox" name="chkContour1">
           <property name="text">
-           <string>주곡선 (F0017110) - 기본 등고선</string>
+           <string>주곡선 (F0017111 / 7111) - 기본 등고선</string>
           </property>
           <property name="checked">
            <bool>true</bool>
@@ -111,7 +111,7 @@
         <item row="0" column="1">
          <widget class="QCheckBox" name="chkContour2">
           <property name="text">
-           <string>계곡선 (F0017111) - 굵은 선</string>
+           <string>계곡선 (F0017112 / 7112) - 5번째 주등고선</string>
           </property>
           <property name="checked">
            <bool>true</bool>
@@ -121,14 +121,14 @@
         <item row="1" column="0">
          <widget class="QCheckBox" name="chkContour3">
           <property name="text">
-           <string>간곡선 (F0017112) - 파선</string>
+           <string>간곡선 (F0017113 / 7113) - 1/2 보조 등고선</string>
           </property>
          </widget>
         </item>
         <item row="1" column="1">
          <widget class="QCheckBox" name="chkContour4">
           <property name="text">
-           <string>조곡선 (F0017113) - 점선</string>
+           <string>조곡선 (F0017114 / 7114) - 1/4 보조 등고선</string>
           </property>
          </widget>
         </item>

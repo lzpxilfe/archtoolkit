@@ -771,16 +771,25 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                 f"TPI 반경 {int(radius)}셀: {2 * int(radius) + 1}x{2 * int(radius) + 1} 창 정확 초점평균"
                 f" ({cols}x{rows}셀, {block_rows}행 단위)"
             )
+            gdal.ErrorReset()
             focal_tpi_strips(rows, cols, int(radius), _read, _write, nodata=nodata,
                              block_rows=block_rows, progress_cb=_progress)
             out_band.FlushCache()
             out_ds.FlushCache()
+            if int(gdal.GetLastErrorType() or 0) != 0:
+                raise RuntimeError(f"TPI 래스터 쓰기 오류: {gdal.GetLastErrorMsg()}")
+            out_ds = None
+            chk_ds = gdal.Open(output, gdal.GA_ReadOnly)
+            if chk_ds is None or int(chk_ds.RasterXSize) != int(cols) or int(chk_ds.RasterYSize) != int(rows):
+                chk_ds = None
+                raise RuntimeError("TPI 래스터 검증 실패: 출력 파일 손상 또는 크기 불일치")
+            chk_ds = None
             ok = True
         finally:
             out_ds = None
             ds = None
             if not ok and os.path.exists(output):
-                cleanup_files([output])
+                cleanup_files([output, f"{output}.aux.xml"])
         return output, scratch, int(radius)
 
     @staticmethod
@@ -885,7 +894,7 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
         except Exception as e:
             self.iface.messageBar().pushMessage("경고", f"TPI 분석 오류: {str(e)}", level=1)
         finally:
-            cleanup_files(scratch)
+            cleanup_files([p for s in scratch for p in (s, f"{s}.aux.xml")])
     
     def run_slope_position_analysis(self, dem_layer, dem_source, tpi_radius, slope_thresh,
                                     tpi_low, tpi_high, results, run_id):
@@ -936,17 +945,30 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
             threshold_mode = "manual"
             if use_auto_sd:
                 sd_stats = self._tpi_auto_sd(tpi_path)
-                if sd_stats is not None:
+                if sd_stats is not None and np is not None and np.isfinite(sd_stats[1]) and sd_stats[1] > 0:
                     tpi_mean, tpi_sd = sd_stats
                     threshold_mode = "auto_sd"
                     # Weiss (2001): use 1 SD as threshold
                     tpi_low = -tpi_sd
                     tpi_high = tpi_sd
                     self.iface.messageBar().pushMessage(
-                        "자동 SD", 
+                        "자동 SD",
                         f"TPI 통계: 평균={tpi_mean:.2f}, 표준편차={tpi_sd:.2f} → 임계값 ±{tpi_sd:.2f} 적용",
                         level=0
                     )
+                else:
+                    threshold_mode = "manual_fallback"
+                    push_message(
+                        self.iface, "알림",
+                        f"TPI 표준편차를 구할 수 없어 수동 임계값 ({tpi_low:.2f} ~ {tpi_high:.2f})을 사용했습니다.",
+                        level=1, duration=8,
+                    )
+            if float(tpi_low) >= float(tpi_high):
+                lo_v, hi_v = min(float(tpi_low), float(tpi_high)), max(float(tpi_low), float(tpi_high))
+                if lo_v >= hi_v:
+                    push_message(self.iface, "경고", "지형분류 TPI 상/하한 임계값이 같아 분류할 수 없습니다.", level=1)
+                    return
+                tpi_low, tpi_high = lo_v, hi_v
             
             # 4. Use gdal_calc.py for classification with thresholds
             output_path = os.path.join(tempfile.gettempdir(), f'archtoolkit_landform_{run_id}.tif')
@@ -992,6 +1014,7 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                 'INPUT_A': tpi_path, 'BAND_A': 1,
                 'INPUT_B': slope_path, 'BAND_B': 1,
                 'FORMULA': calc_expr,
+                'NO_DATA': 0,
                 'OUTPUT': output_path,
                 'RTYPE': 1  # Int16
             }, owner=self)
@@ -1040,7 +1063,8 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
         except Exception as e:
             self.iface.messageBar().pushMessage("경고", f"지형분류 분석 오류: {str(e)}", level=1)
         finally:
-            cleanup_files([tpi_path, slope_path] + list(tpi_scratch))
+            to_clean = [p for s in ([tpi_path, slope_path] + list(tpi_scratch)) if s for p in (s, f"{s}.aux.xml")]
+            cleanup_files(to_clean)
 
     def run_tri_radius_analysis(self, dem_layer, dem_source, radius, tri_max, results, run_id):
         """Ruggedness over a (2r+1)x(2r+1) window, for landscape-scale questions.
@@ -1055,7 +1079,8 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
         look comparable when they are not.
         """
         try:
-            ds = gdal.Open(dem_source, gdal.GA_ReadOnly)
+            src_dem = str(dem_source or "").split("|", 1)[0].strip()
+            ds = gdal.Open(src_dem, gdal.GA_ReadOnly)
             if ds is None:
                 push_message(self.iface, "경고", "DEM을 열 수 없습니다(TRI 반경).", level=1)
                 return
@@ -1134,7 +1159,7 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
             # responding".
             progress = QtWidgets.QProgressDialog(
                 f"TRI 반경 {radius}셀 계산 중…", "취소", 0, window_cells - 1, self)
-            progress.setWindowModality(QtCore.QtCore.Qt.WindowModality.WindowModal)
+            progress.setWindowModality(QtCore.Qt.WindowModality.WindowModal)
             progress.setMinimumDuration(500)
 
             def _progress(done, total):
@@ -1149,9 +1174,7 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
             finally:
                 progress.close()
             if result is None:
-                push_message(self.iface, "TRI 반경", "취소됨: 결과를 만들지 않았습니다.",
-                             level=1, duration=6)
-                return
+                raise ProcessingCancelled("TRI 반경 계산이 취소되었습니다.")
 
             nd = -9999.0
             out = np.where(np.isfinite(result), result, nd).astype("float32")
@@ -1190,6 +1213,8 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                     "평탄 smooth", "험준 rugged",
                 )
             results.append(f"TRI(반경 {radius}셀)")
+        except ProcessingCancelled:
+            raise
         except Exception as e:
             push_message(self.iface, "경고", f"TRI 반경 분석 오류: {str(e)}", level=1)
 
@@ -1494,15 +1519,12 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
         try:
             src = str(dem_source or "").split("|", 1)[0].strip()
             aspect_path = os.path.join(tempfile.gettempdir(), f'archtoolkit_aspderiv_asp_{run_id}.tif')
-            # COMPUTE_EDGES=True overrides the QGIS toolbox default (False): with
-            # the default the 1-px border returns as 'undefined aspect', and the
-            # flat/NoData split below would read it as a true flat and fabricate
-            # neutral 0 / 0.5 values all around the DEM. ZERO_FLAT stays at the
-            # toolbox default (False) because flats must stay distinguishable to
-            # get the neutral value, not 0 deg (= due north).
+            # COMPUTE_EDGES stays False so the 1-px border and 3x3 NoData-adjacent
+            # cells stay NoData (matching run_aspect_analysis and mark_flat_aspect).
+            # ZERO_FLAT stays False so true interior flats are separated from 0 deg (= due north).
             run_alg_blocking("gdal:aspect", {
                 'INPUT': src, 'BAND': 1, 'TRIG_ANGLE': False, 'ZERO_FLAT': False,
-                'COMPUTE_EDGES': True, 'ZEVENBERGEN': False, 'OUTPUT': aspect_path,
+                'COMPUTE_EDGES': False, 'ZEVENBERGEN': False, 'OUTPUT': aspect_path,
             }, owner=self)
             ads = gdal.Open(aspect_path, gdal.GA_ReadOnly)
             if ads is None:
@@ -1542,37 +1564,34 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                 aspect = aspect.astype("float32")
                 set_progress(15)
 
-                # gdaldem aspect (ZERO_FLAT=False) writes the same sentinel for
-                # true flats AND for DEM NoData. Read the source DEM's validity so
-                # NoData stays NoData instead of being fabricated as "neutral".
-                dem_valid = None
+                # gdaldem aspect (ZERO_FLAT=False, COMPUTE_EDGES=False) writes the same
+                # NoData sentinel for interior true flats AND for 3x3 border/DEM NoData cells.
+                # Separate them with the 3x3 window check mark_flat_aspect so NoData and
+                # partial-window cells stay NoData instead of fabricating neutral 0 / 0.5.
+                dds = gdal.Open(src, gdal.GA_ReadOnly)
+                if dds is None:
+                    raise RuntimeError("원본 DEM을 열 수 없습니다(사면 파생).")
                 try:
-                    dds = gdal.Open(src, gdal.GA_ReadOnly)
-                    if dds is not None:
-                        dband = dds.GetRasterBand(1)
-                        d_nd = dband.GetNoDataValue()
-                        zarr = dband.ReadAsArray()
-                        if zarr is not None and zarr.shape == aspect.shape:
-                            dem_valid = np.isfinite(zarr)
-                            if d_nd is not None:
-                                dem_valid &= (zarr != d_nd)
-                        del zarr
-                        dds = None
-                except Exception:
-                    dem_valid = None
+                    dband = dds.GetRasterBand(1)
+                    d_nd = dband.GetNoDataValue()
+                    zarr = dband.ReadAsArray()
+                finally:
+                    dds = None
+                if zarr is None or zarr.shape != aspect.shape:
+                    raise RuntimeError("원본 DEM 배열을 읽을 수 없습니다(사면 파생).")
+                dem_valid = np.isfinite(zarr)
+                if d_nd is not None:
+                    dem_valid &= (zarr != d_nd)
+                del zarr
 
-                undefined_aspect = (aspect < 0)
-                if a_nd is not None:
-                    undefined_aspect |= (aspect == a_nd)
-                if dem_valid is not None:
-                    invalid = ~dem_valid                    # DEM NoData → output NoData
-                    flat = undefined_aspect & dem_valid     # true flats → neutral value
-                else:
-                    invalid = np.zeros(aspect.shape, dtype=bool)
-                    flat = undefined_aspect
-                defined = ~(undefined_aspect | invalid)
                 nd = -9999.0
-                rad = np.radians(aspect)
+                marked = mark_flat_aspect(
+                    aspect, dem_valid, a_nd, flat_value=ASPECT_FLAT_VALUE, out_nodata=nd
+                )
+                flat = (marked == ASPECT_FLAT_VALUE)
+                invalid = (marked == nd) | ~np.isfinite(marked)
+                defined = ~(flat | invalid)
+                rad = np.radians(marked)
 
                 def _make(fn, flat_value):
                     arr = np.full(aspect.shape, nd, dtype="float32")
@@ -1583,7 +1602,7 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                 north = _make(np.cos, 0.0)
                 east = _make(np.sin, 0.0)
                 trasp = np.full(aspect.shape, nd, dtype="float32")
-                trasp[defined] = ((1.0 - np.cos(np.radians(aspect[defined] - 30.0))) / 2.0).astype("float32")
+                trasp[defined] = ((1.0 - np.cos(np.radians(marked[defined] - 30.0))) / 2.0).astype("float32")
                 trasp[flat] = 0.5
                 set_progress(65)
 
@@ -1618,7 +1637,7 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                         params={
                             "source": "aspect",
                             "flat_handling": "north/east=0, TRASP=0.5",
-                            "compute_edges": True,
+                            "compute_edges": False,
                             "zero_flat": False,
                         },
                     )

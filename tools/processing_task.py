@@ -13,9 +13,11 @@ from __future__ import annotations
 import time
 from typing import List, Optional
 
-from qgis.PyQt.QtCore import QEventLoop, QTimer
+from qgis.PyQt.QtCore import QCoreApplication, QEventLoop, QTimer
 from qgis.core import (
     QgsApplication,
+    QgsMapLayer,
+    QgsProcessing,
     QgsProcessingAlgRunnerTask,
     QgsProcessingContext,
     QgsProcessingFeedback,
@@ -29,6 +31,62 @@ from .utils import log_swallowed
 # starved task), not slow: healthy algorithms report progress regularly.
 STALL_TIMEOUT_S = 180.0
 _WATCHDOG_POLL_MS = 5000
+
+# Keep references to timed-out tasks/contexts/feedback until the C++ task
+# manager signals completion/termination so Python GC never frees them mid-run.
+_PENDING_TASKS: dict = {}
+
+
+def _is_memory_param_value(val) -> bool:
+    if isinstance(val, QgsMapLayer):
+        try:
+            if str(val.providerType() or "").lower() == "memory":
+                return True
+        except Exception:
+            return True
+        try:
+            if hasattr(val, "isEditable") and val.isEditable():
+                return True
+        except Exception as _exc:
+            log_swallowed("tools/processing_task.py (_is_memory_param_value)", _exc)
+        return False
+    if isinstance(val, (list, tuple)):
+        return any(_is_memory_param_value(item) for item in val)
+    if isinstance(val, str):
+        s = val.strip().lower()
+        temp_out = str(getattr(QgsProcessing, "TEMPORARY_OUTPUT", "TEMPORARY_OUTPUT")).strip().lower()
+        if s.startswith("memory:") or (temp_out and s == temp_out):
+            return True
+    return False
+
+
+def _uses_memory_layers(params: dict) -> bool:
+    if not isinstance(params, dict):
+        return False
+    return any(_is_memory_param_value(v) for v in params.values())
+
+
+def _take_temporary_result_layers(results: dict, context: QgsProcessingContext) -> dict:
+    """Resolve temporaryLayerStore IDs to owned QgsMapLayer objects before context drops."""
+    if not isinstance(results, dict) or context is None:
+        return dict(results or {})
+    out = dict(results)
+    try:
+        store = context.temporaryLayerStore()
+    except Exception:
+        return out
+    if store is None:
+        return out
+    for key, val in list(out.items()):
+        if isinstance(val, str) and val:
+            try:
+                if store.mapLayer(val) is not None:
+                    taken = context.takeResultLayer(val)
+                    if taken is not None:
+                        out[key] = taken
+            except Exception as _exc:
+                log_swallowed("tools/processing_task.py (_take_temporary_result_layers)", _exc)
+    return out
 
 
 class ProcessingCancelled(Exception):
@@ -74,6 +132,76 @@ class ActivityFeedback(QgsProcessingFeedback):
         super().pushInfo(info)
 
 
+def _run_alg_inline(
+    alg_id: str,
+    params: dict,
+    *,
+    context: QgsProcessingContext,
+    fb: QgsProcessingFeedback,
+    progress=None,
+) -> dict:
+    """Run ``alg_id`` on the main thread when memory layers are involved.
+
+    QGIS memory vector layers carry main-thread QObject affinity, and
+    ``QgsProcessingAlgRunnerTask`` returns ``context.temporaryLayerStore()`` IDs
+    rather than owned layer objects. Running inline via ``processing.run`` with
+    periodic ``processEvents`` and taking ownership via
+    ``context.takeResultLayer`` keeps memory-layer algorithms safe and valid.
+    """
+    import processing  # lazy import inside QGIS session
+
+    last_pump = [0.0]
+
+    def _pump(_value=None):
+        now = time.monotonic()
+        if now - last_pump[0] >= 0.05:
+            last_pump[0] = now
+            try:
+                QCoreApplication.processEvents()
+            except Exception as _exc:
+                log_swallowed("tools/processing_task.py (_pump)", _exc)
+
+    def _cancel():
+        try:
+            fb.cancel()
+        except Exception as _exc:
+            log_swallowed("tools/processing_task.py (_cancel inline)", _exc)
+
+    fb.progressChanged.connect(_pump)
+    if progress is not None:
+        progress.canceled.connect(_cancel)
+    try:
+        results = processing.run(str(alg_id), params, context=context, feedback=fb)
+    except Exception as exc:
+        if progress is not None and progress.wasCanceled() or fb.isCanceled():
+            raise ProcessingCancelled(f"{alg_id} 작업이 취소되었습니다.") from exc
+        raise ProcessingTaskError(
+            alg_id,
+            f"처리 작업({alg_id})이(가) 정상적으로 완료되지 않았습니다: {exc}",
+            errors=list(getattr(fb, "errors", []) or []),
+        ) from exc
+    finally:
+        try:
+            fb.progressChanged.disconnect(_pump)
+        except Exception as _exc:
+            log_swallowed("tools/processing_task.py (_pump disconnect)", _exc)
+        if progress is not None:
+            try:
+                progress.canceled.disconnect(_cancel)
+            except Exception as _exc:
+                log_swallowed("tools/processing_task.py (_cancel inline disconnect)", _exc)
+
+    cancelled = False
+    try:
+        cancelled = bool(progress is not None and progress.wasCanceled()) or bool(fb.isCanceled())
+    except Exception as _exc:
+        log_swallowed("tools/processing_task.py (inline cancel check)", _exc)
+    if cancelled:
+        raise ProcessingCancelled(f"{alg_id} 작업이 취소되었습니다.")
+
+    return _take_temporary_result_layers(results, context)
+
+
 def run_alg_blocking(
     alg_id: str,
     params: dict,
@@ -103,14 +231,23 @@ def run_alg_blocking(
     fb = feedback if feedback is not None else ActivityFeedback()
     context = QgsProcessingContext()
     context.setProject(QgsProject.instance())
+
+    if _uses_memory_layers(params):
+        return _run_alg_inline(alg_id, params, context=context, fb=fb, progress=progress)
+
     task = QgsProcessingAlgRunnerTask(algorithm, params, context, fb)
+    task_key = id(task)
+    _PENDING_TASKS[task_key] = (task, context, fb)
     loop = QEventLoop()
     state = {"finished": False, "successful": False, "results": {}, "stalled": False}
 
     def _finished(successful, results):
+        _PENDING_TASKS.pop(task_key, None)
+        if state["stalled"]:
+            return
         state["finished"] = True
         state["successful"] = bool(successful)
-        state["results"] = dict(results or {})
+        state["results"] = _take_temporary_result_layers(dict(results or {}), context)
         loop.quit()
 
     def _cancel():
@@ -143,6 +280,7 @@ def run_alg_blocking(
         progress.canceled.connect(_cancel)
     try:
         if not QgsApplication.taskManager().addTask(task):
+            _PENDING_TASKS.pop(task_key, None)
             raise ProcessingTaskError(
                 alg_id, f"처리 작업({alg_id})을 QGIS 작업 관리자에 등록하지 못했습니다."
             )
@@ -154,6 +292,12 @@ def run_alg_blocking(
             watchdog.timeout.disconnect(_check_stall)
         except Exception as _exc:
             log_swallowed("tools/processing_task.py (watchdog)", _exc)
+        if state["finished"]:
+            try:
+                task.executed.disconnect(_finished)
+            except Exception as _exc:
+                log_swallowed("tools/processing_task.py (executed)", _exc)
+            _PENDING_TASKS.pop(task_key, None)
         if progress is not None:
             try:
                 progress.canceled.disconnect(_cancel)
@@ -203,15 +347,26 @@ def run_task_blocking(
     """
     if progress is None and owner is not None:
         progress = getattr(owner, "_run_progress", None)
+    task_key = id(task)
+    _PENDING_TASKS[task_key] = task
     loop = QEventLoop()
     state = {"done": False, "ok": False, "stalled": False, "touch": time.monotonic()}
 
+    def _cleanup_refs():
+        _PENDING_TASKS.pop(task_key, None)
+
     def _completed():
+        _cleanup_refs()
+        if state["stalled"]:
+            return
         state["done"] = True
         state["ok"] = True
         loop.quit()
 
     def _terminated():
+        _cleanup_refs()
+        if state["stalled"]:
+            return
         state["done"] = True
         state["ok"] = False
         loop.quit()
@@ -246,6 +401,7 @@ def run_task_blocking(
         progress.canceled.connect(_cancel)
     try:
         if not QgsApplication.taskManager().addTask(task):
+            _cleanup_refs()
             raise ProcessingTaskError(
                 str(task.description() or "task"), "작업을 QGIS 작업 관리자에 등록하지 못했습니다."
             )
@@ -258,14 +414,6 @@ def run_task_blocking(
         except Exception as _exc:
             log_swallowed("tools/processing_task.py (watchdog)", _exc)
         try:
-            task.taskCompleted.disconnect(_completed)
-        except Exception as _exc:
-            log_swallowed("tools/processing_task.py (taskCompleted)", _exc)
-        try:
-            task.taskTerminated.disconnect(_terminated)
-        except Exception as _exc:
-            log_swallowed("tools/processing_task.py (taskTerminated)", _exc)
-        try:
             task.progressChanged.disconnect(_touched)
         except Exception as _exc:
             log_swallowed("tools/processing_task.py (progressChanged)", _exc)
@@ -274,6 +422,16 @@ def run_task_blocking(
                 progress.canceled.disconnect(_cancel)
             except Exception as _exc:
                 log_swallowed("tools/processing_task.py (progress)", _exc)
+        if state["done"]:
+            try:
+                task.taskCompleted.disconnect(_completed)
+            except Exception as _exc:
+                log_swallowed("tools/processing_task.py (taskCompleted)", _exc)
+            try:
+                task.taskTerminated.disconnect(_terminated)
+            except Exception as _exc:
+                log_swallowed("tools/processing_task.py (taskTerminated)", _exc)
+            _cleanup_refs()
 
     label = str(task.description() or "작업")
     if state["stalled"]:

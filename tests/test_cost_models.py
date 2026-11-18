@@ -178,6 +178,51 @@ class PandolfTests(unittest.TestCase):
         self.assertGreater(cost, 0.0)
 
 
+class HerzogMetabolicTests(unittest.TestCase):
+    """Pin Herzog (2013) / Minetti et al. (2002) 6th-order polynomial values."""
+
+    # Literal published denominator sums evaluated independently at each signed grade s:
+    # 1337.8*s^6 + 278.19*s^5 - 517.39*s^4 - 78.199*s^3 + 93.419*s^2 + 19.825*s + 1.64
+    UPHILL_DENOMS = (
+        (0.05, 2.8518967750),
+        (0.10, 4.4308717000),
+        (0.20, 8.0629840000),
+        (0.30, 11.3442359000),
+        (0.50, 22.3920625000),
+    )
+    DOWNHILL_DENOMS = (
+        (-0.10, 0.6167059000),
+        (-0.20, 1.2061264000),
+        (-0.30, 2.3199785000),
+        (-0.45, 3.5211474312),
+    )
+
+    @staticmethod
+    def _recovered_denominator(s: float) -> float:
+        base_mps = 5.0 * 1000.0 / 3600.0
+        cost = edge_cost(MODEL_HERZOG_METABOLIC, 100.0, 100.0 * s, {"herzog_base_kmh": 5.0})
+        return 1.64 * base_mps * cost / 100.0
+
+    def test_uphill_polynomial_values_match_published_coefficients(self):
+        for s, expected_den in self.UPHILL_DENOMS:
+            self.assertAlmostEqual(self._recovered_denominator(s), expected_den, places=6, msg=f"s={s}")
+
+    def test_downhill_polynomial_values_are_signed_and_anisotropic(self):
+        for s, expected_den in self.DOWNHILL_DENOMS:
+            self.assertAlmostEqual(self._recovered_denominator(s), expected_den, places=6, msg=f"s={s}")
+        # Gentle descent (-10.5%) is faster/cheaper than flat and equivalent +10.5% climb
+        c_down = edge_cost(MODEL_HERZOG_METABOLIC, 100.0, -10.5, {})
+        c_flat = edge_cost(MODEL_HERZOG_METABOLIC, 100.0, 0.0, {})
+        c_up = edge_cost(MODEL_HERZOG_METABOLIC, 100.0, +10.5, {})
+        self.assertLess(c_down, c_flat)
+        self.assertLess(c_flat, c_up)
+
+    def test_steep_downhill_beyond_minus_45pct_is_unclamped(self):
+        c_45 = edge_cost(MODEL_HERZOG_METABOLIC, 100.0, -45.0, {})
+        c_60 = edge_cost(MODEL_HERZOG_METABOLIC, 100.0, -60.0, {})
+        self.assertGreater(c_60, c_45)
+
+
 class LevelGeneratorTests(unittest.TestCase):
     def test_isochrone_tiers(self):
         self.assertEqual(isochrone_levels_minutes(50), [15.0, 30.0, 45.0])

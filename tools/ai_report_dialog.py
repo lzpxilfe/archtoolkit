@@ -156,6 +156,7 @@ class AiAoiReportDialog(QtWidgets.QDialog):
         self._last_ctx: Optional[dict] = None
         self._last_ctx_key = None
         self._last_report_text: str = ""
+        self._last_report_ctx_key = None
         self._last_provider: str = ""
         self._last_model: str = ""
         self._last_generated_at: str = ""
@@ -1234,6 +1235,7 @@ class AiAoiReportDialog(QtWidgets.QDialog):
 
                 self.txtOutput.setPlainText(text or "")
                 self._last_report_text = str(text or "")
+                self._last_report_ctx_key = self._last_ctx_key
                 push_message(self.iface, "AI 요약", "완료 (로컬)", level=0, duration=4)
                 return
 
@@ -1324,6 +1326,7 @@ class AiAoiReportDialog(QtWidgets.QDialog):
                             "※ Gemini 호출 실패로 로컬 요약으로 대체했습니다.\n\n" + str(fallback)
                         )
                         self._last_report_text = str(fallback or "")
+                        self._last_report_ctx_key = self._last_ctx_key
                         # Provider now reflects reality: local, not gemini.
                         self._last_provider = "local"
                         push_message(self.iface, "AI 요약", "로컬 요약으로 대체 완료", level=1, duration=6)
@@ -1345,6 +1348,7 @@ class AiAoiReportDialog(QtWidgets.QDialog):
                 text = f"{finish_warning}\n\n{text or ''}"
                 self.txtOutput.setPlainText(text)
                 self._last_report_text = str(text)
+                self._last_report_ctx_key = self._last_ctx_key
                 log_message(f"Gemini 응답 불완전(finishReason={finish_reason}): 출력에 경고를 표시했습니다.", level=1)
                 push_message(
                     self.iface,
@@ -1357,6 +1361,7 @@ class AiAoiReportDialog(QtWidgets.QDialog):
 
             self.txtOutput.setPlainText(text or "")
             self._last_report_text = str(text or "")
+            self._last_report_ctx_key = self._last_ctx_key
             push_message(self.iface, "AI 요약", "완료", level=0, duration=4)
         finally:
             self._set_busy_state(False)
@@ -1521,19 +1526,33 @@ class AiAoiReportDialog(QtWidgets.QDialog):
             push_message(self.iface, "오류", f"폴더 생성 실패: {e}", level=2, duration=8)
             return
 
-        # Report text: use current UI text first, then last cached, else generate local.
+        # Ensure report.md matches the exported context.json: if the user changed
+        # AOI/layers/buffer or has not generated a report for this context key yet,
+        # regenerate locally rather than pairing stale report text with fresh stats.
+        report_stale = self._last_report_ctx_key != self._last_ctx_key
         report_text = ""
-        try:
-            report_text = str(self.txtOutput.toPlainText() or "")
-        except Exception:
-            report_text = ""
-        if not report_text.strip():
-            report_text = str(self._last_report_text or "")
-        if not report_text.strip():
+        if not report_stale:
+            try:
+                report_text = str(self.txtOutput.toPlainText() or "")
+            except Exception as _exc:
+                log_swallowed("ai_report_dialog._on_export_bundle", _exc)
+                report_text = ""
+            if not report_text.strip():
+                report_text = str(self._last_report_text or "")
+        if report_stale or not report_text.strip():
             try:
                 report_text = str(ai_local_summarizer.generate_report(ctx) or "")
-            except Exception:
+            except Exception as _exc:
+                log_swallowed("ai_report_dialog._on_export_bundle", _exc)
                 report_text = ""
+            if report_text.strip():
+                self._last_report_text = report_text
+                self._last_report_ctx_key = self._last_ctx_key
+                self._last_provider = "local"
+                try:
+                    self.txtOutput.setPlainText(report_text)
+                except Exception as _exc:
+                    log_swallowed("ai_report_dialog._on_export_bundle", _exc)
 
         warnings: List[str] = []
 

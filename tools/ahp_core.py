@@ -12,7 +12,7 @@ raster work to itself.
 from __future__ import annotations
 
 import math
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 from .swallow_log import log_swallowed
 
 try:
@@ -421,10 +421,191 @@ def score_formula(*, direction, mn, mx, target_v=None, prefer_min=None, prefer_m
             if abs(hi - lo) <= 1e-12:
                 parts.append(f"((A == {lo}) * {score})")
                 continue
-            is_last = idx == (len(rows) - 1)
-            if is_last:
-                parts.append(f"(((A >= {lo}) * (A <= {hi})) * {score})")
-            else:
+            # Half-open [lo, hi) only when the next interval starts exactly at hi
+            # (so a shared boundary belongs to one row). A row followed by a gap
+            # - integer class tables like [1,2],[3,4] - keeps its closed upper
+            # bound; with "<" class 2 silently scored 0.0.
+            abuts_next = idx + 1 < len(rows) and float(rows[idx + 1]["min"]) <= hi + 1e-12
+            if abuts_next:
                 parts.append(f"(((A >= {lo}) * (A < {hi})) * {score})")
+            else:
+                parts.append(f"(((A >= {lo}) * (A <= {hi})) * {score})")
         return " + ".join(parts) if parts else "A*0"
     return clamp01(f"(A - {mn}) / ({mx} - {mn})")
+
+
+def _strict_rank_order(weights: Sequence[float], *, tol: float = 1e-12) -> List[int]:
+    return sorted(range(len(weights)), key=lambda i: (-round(float(weights[i]) / max(tol, 1e-15)), i))
+
+
+def _has_rank_swap(base_w: Sequence[float], pert_w: Sequence[float], *, tie_tol: float = 1e-9) -> bool:
+    n = len(base_w)
+    for a in range(n):
+        for b in range(a + 1, n):
+            diff_base = float(base_w[a]) - float(base_w[b])
+            if abs(diff_base) <= tie_tol:
+                continue
+            diff_pert = float(pert_w[a]) - float(pert_w[b])
+            if (diff_base > 0.0 and diff_pert < -tie_tol) or (diff_base < 0.0 and diff_pert > tie_tol):
+                return True
+    return False
+
+
+def oat_weight_sensitivity(
+    weights: Sequence[float],
+    *,
+    delta: float = 0.10,
+) -> List[Dict[str, Any]]:
+    """One-at-a-Time (OAT) multiplicative criterion weight sensitivity (Chen et al. 2010).
+
+    Perturbs each criterion weight by ``(1 +/- delta)`` and rescales remaining
+    weights proportionally so ``sum(w) == 1.0`` is conserved.
+    """
+    raw = [max(0.0, float(x)) for x in (weights or [])]
+    n = len(raw)
+    if n == 0:
+        return []
+    total = sum(raw)
+    base = [x / total for x in raw] if total > 0.0 else [1.0 / float(n)] * n
+    d = max(0.0, min(0.95, float(delta)))
+
+    def _rescale(idx: int, new_wi: float) -> List[float]:
+        wi = max(0.0, min(1.0, float(new_wi)))
+        rem_target = max(0.0, 1.0 - wi)
+        rem_base = sum(base[j] for j in range(n) if j != idx)
+        out = [0.0] * n
+        out[idx] = wi
+        if rem_base > 0.0:
+            scale = rem_target / rem_base
+            for j in range(n):
+                if j != idx:
+                    out[j] = base[j] * scale
+        elif n > 1:
+            each = rem_target / float(n - 1)
+            for j in range(n):
+                if j != idx:
+                    out[j] = each
+        return out
+
+    results: List[Dict[str, Any]] = []
+    for i in range(n):
+        plus_w = _rescale(i, base[i] * (1.0 + d))
+        minus_w = _rescale(i, base[i] * (1.0 - d))
+        shifts = [
+            abs(cand[j] - base[j])
+            for cand in (plus_w, minus_w)
+            for j in range(n)
+            if j != i
+        ]
+        max_other = max(shifts) if shifts else 0.0
+        rank_changed = _has_rank_swap(base, plus_w) or _has_rank_swap(base, minus_w)
+        results.append(
+            {
+                "index": int(i),
+                "base_weight": float(base[i]),
+                "delta": float(d),
+                "plus_weights": [float(x) for x in plus_w],
+                "minus_weights": [float(x) for x in minus_w],
+                "max_other_shift": float(max_other),
+                "rank_changed": bool(rank_changed),
+            }
+        )
+    return results
+
+
+def format_ahp_methodology_report(
+    *,
+    criteria: Sequence[str],
+    weights: Sequence[float],
+    matrix: Any = None,
+    cr: Optional[float] = None,
+    ci: Optional[float] = None,
+    ri: Optional[float] = None,
+    lambda_max: Optional[float] = None,
+    weights_source: str = "pairwise_matrix",
+    hierarchy: Optional[Dict[str, Any]] = None,
+    sensitivity: Optional[List[Dict[str, Any]]] = None,
+    notes: Optional[Sequence[str]] = None,
+) -> str:
+    """Format a reproducible Markdown methodology and sensitivity report for AHP."""
+    names = [str(c) for c in (criteria or [])]
+    w_list = [float(w) for w in (weights or [])]
+    sens = sensitivity if sensitivity is not None else (oat_weight_sensitivity(w_list, delta=0.10) if len(w_list) >= 2 else [])
+    sens_by_idx = {int(row["index"]): row for row in sens if isinstance(row, dict) and "index" in row}
+
+    lines = [
+        "# AHP 다기준 적합도 분석 방법론 보고서",
+        "",
+        f"- 가중치 산출 경로 (`weights_source`): `{weights_source}`",
+        f"- 기준 수 (`n`): {len(names)}",
+        "",
+        "## 1. 기준 가중치 및 OAT ±10% 민감도 분석",
+        "",
+        "| # | 기준 (Criterion) | 가중치 | 비율 (%) | OAT -10% 본인 가중치 | OAT +10% 본인 가중치 | 최대 타 기준 변동폭 | 순위 역전 |",
+        "|---:|---|---:|---:|---:|---:|---:|:---:|",
+    ]
+    for i, name in enumerate(names):
+        wi = w_list[i] if i < len(w_list) else 0.0
+        row = sens_by_idx.get(i)
+        if row:
+            w_min = float(row["minus_weights"][i])
+            w_max = float(row["plus_weights"][i])
+            max_sh = float(row["max_other_shift"])
+            swapped = "예 (주의)" if row.get("rank_changed") else "안정"
+            lines.append(
+                f"| {i + 1} | {name} | {wi:.4f} | {100.0 * wi:.2f}% | "
+                f"{100.0 * w_min:.2f}% | {100.0 * w_max:.2f}% | {100.0 * max_sh:.2f}%p | {swapped} |"
+            )
+        else:
+            lines.append(f"| {i + 1} | {name} | {wi:.4f} | {100.0 * wi:.2f}% | - | - | - | - |")
+
+    lines.extend(["", "## 2. 일관성 검증 (Saaty 1980; Alonso & Lamata 2006)", ""])
+    lam_txt = f"{float(lambda_max):.6f}" if lambda_max is not None and math.isfinite(float(lambda_max)) else "N/A"
+    ci_txt = f"{float(ci):.6f}" if ci is not None and math.isfinite(float(ci)) else "N/A"
+    ri_txt = f"{float(ri):.4f}" if ri is not None and math.isfinite(float(ri)) else "N/A"
+    cr_txt = f"{float(cr):.4f}" if cr is not None and math.isfinite(float(cr)) else "N/A"
+    lines.extend(
+        [
+            f"- 최대 고유값 (lambda_max): `{lam_txt}`",
+            f"- 일관성지수 (CI = (lambda_max - n)/(n - 1)): `{ci_txt}`",
+            f"- 무작위지수 (RI): `{ri_txt}`",
+            f"- 일관성비율 (CR = CI / RI): `{cr_txt}` (권장 ≤ 0.10)",
+        ]
+    )
+
+    if hierarchy:
+        lines.extend(["", "## 3. 계층형 AHP 요약", ""])
+        cr_g = hierarchy.get("consistency_ratio_group")
+        cr_l = hierarchy.get("consistency_ratio_local_max")
+        if cr_g is not None:
+            lines.append(f"- 그룹 간 CR: `{float(cr_g):.4f}`")
+        if cr_l is not None:
+            lines.append(f"- 그룹 내 최대 CR: `{float(cr_l):.4f}`")
+
+    if matrix is not None and np is not None:
+        mat = np.asarray(matrix, dtype=float)
+        if mat.ndim == 2 and mat.shape == (len(names), len(names)) and len(names) > 0:
+            lines.extend(["", "## 쌍대비교 행렬", ""])
+            header = "| 기준 | " + " | ".join(names) + " |"
+            sep = "|---|" + "|".join(["---:"] * len(names)) + "|"
+            lines.append(header)
+            lines.append(sep)
+            for i, nm in enumerate(names):
+                cells = " | ".join(f"{float(mat[i, j]):.4g}" for j in range(len(names)))
+                lines.append(f"| {nm} | {cells} |")
+
+    lines.extend(
+        [
+            "",
+            "## 참고문헌 및 주의사항",
+            "- Saaty, T. L. (1980). *The Analytic Hierarchy Process*. McGraw-Hill.",
+            "- Alonso, J. A., & Lamata, M. T. (2006). *IJUFKS* 14(4), 445-459.",
+            "- Chen, Y., Yu, J., & Khan, S. (2010). Spatial sensitivity analysis of multi-criteria weights in GIS-based land suitability evaluation. *Environmental Modelling & Software*, 25(12), 1582-1591.",
+            "- AHP 가중치는 전문가 판단에 근거한 규범적 모형이며(Verhagen & Whitley 2012), 통계적 빈도/회귀 적합도가 아닙니다.",
+        ]
+    )
+    if notes:
+        for note in notes:
+            lines.append(f"- {note}")
+    lines.append("")
+    return "\n".join(lines)

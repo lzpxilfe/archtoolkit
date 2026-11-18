@@ -561,10 +561,19 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
                         _skip_446 = True
                     if _skip_446:
                         continue
-                    if not math.isfinite(slope):
-                        continue
-                    if slope <= -9000:
-                        continue
+                    if (not math.isfinite(slope)) or (slope <= -9000):
+                        # Center pixel fell outside AOI or on NoData: average valid pixels in block
+                        blk_sum = 0.0
+                        blk_cnt = 0
+                        for br in range(dr, dr + (row2 - row)):
+                            for bc in range(col, col2):
+                                v = float(arr[br, bc])
+                                if math.isfinite(v) and v > -9000:
+                                    blk_sum += v
+                                    blk_cnt += 1
+                        if blk_cnt <= 0:
+                            continue
+                        slope = blk_sum / float(blk_cnt)
 
                     slope_deg = int(round(slope))
                     if slope_deg < 0:
@@ -630,7 +639,10 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
 
             if hasattr(out_layer, "setName"):
                 out_layer.setName(f"경사도_구역({max(1, int(slope_class_step))}°) (Slope zones)")
-        except Exception:
+        except ProcessingCancelled:
+            raise
+        except Exception as _exc:
+            log_swallowed("slope_aspect_drafting_dialog._build_slope_grid_layer (dissolve)", _exc)
             out_layer = layer
 
         try:
@@ -858,11 +870,19 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
 
             for dr in range(0, rows_to_read, step_cells):
                 row = row0 + dr
+                row2 = min(row + step_cells, row0 + rows_to_read)
+                if row2 <= row:
+                    continue
                 for col in range(0, xsize, step_cells):
+                    col2 = min(col + step_cells, xsize)
+                    if col2 <= col:
+                        continue
                     _skip_757 = False
                     try:
-                        slope = float(slope_arr[dr, col])
-                        aspect = float(aspect_arr[dr, col])
+                        sample_r = dr + ((row2 - row) // 2)
+                        sample_c = col + ((col2 - col) // 2)
+                        slope = float(slope_arr[sample_r, sample_c])
+                        aspect = float(aspect_arr[sample_r, sample_c])
                     except Exception as _exc:
                         log_swallowed("slope_aspect_drafting_dialog._build_aspect_arrow_layer", _exc)
                         log_swallowed("tools/slope_aspect_drafting_dialog.py:760 (_build_aspect_arrow_layer)", _exc)
@@ -870,6 +890,8 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
                     if _skip_757:
                         continue
                     if not math.isfinite(slope) or not math.isfinite(aspect):
+                        continue
+                    if slope <= -9000 or aspect < 0 or aspect <= -9000:
                         continue
                     if slope <= float(flat_thresh_deg):
                         continue
@@ -879,8 +901,10 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
                     aspect_45 = int(bin_idx * 45)
                     dir8 = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"][bin_idx]
 
-                    x = gt[0] + (col + 0.5) * gt[1] + (row + 0.5) * gt[2]
-                    y = gt[3] + (col + 0.5) * gt[4] + (row + 0.5) * gt[5]
+                    gc = col + 0.5 * (col2 - col)
+                    gr = row + 0.5 * (row2 - row)
+                    x = gt[0] + gc * gt[1] + gr * gt[2]
+                    y = gt[3] + gc * gt[4] + gr * gt[5]
 
                     f = QgsFeature(layer.fields())
                     f.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(x, y)))

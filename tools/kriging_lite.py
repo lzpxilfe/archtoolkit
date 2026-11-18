@@ -33,6 +33,15 @@ import math
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
+from .kriging_math import (
+    build_ok_system,
+    exponential_cov,
+    fit_variogram_wls,
+    invert_ok_system,
+    loocv_ordinary_kriging,
+    solve_ok,
+)
+
 from qgis.core import (
     Qgis,
     QgsFeature,
@@ -44,6 +53,7 @@ from qgis.core import (
 )
 
 from .utils import log_swallowed, is_metric_crs, log_message
+from .raster_io import write_single_band_geotiff
 
 
 # Sentinel (from the DEM generator UI) meaning "use the geometry's Z
@@ -339,11 +349,9 @@ def auto_params(
 def _cov_exponential(dist, *, partial_sill: float, rng: float):
     # C(h) = partial_sill * exp(-h / range)
     try:
-        import numpy as np
+        return exponential_cov(dist, partial_sill=partial_sill, rng=rng)
     except Exception:
         raise RuntimeError("numpy is required")
-    rng0 = float(max(1e-12, rng))
-    return float(partial_sill) * np.exp(-dist / rng0)
 
 
 def _write_geotiff(
@@ -355,7 +363,7 @@ def _write_geotiff(
     crs_wkt: str,
     nodata: float,
 ) -> None:
-    """Write a single-band Float32 GeoTIFF (requires GDAL python bindings)."""
+    """Write a single-band Float32 GeoTIFF with GDAL write verification."""
     try:
         import numpy as np
     except Exception as e:
@@ -374,39 +382,18 @@ def _write_geotiff(
     if width <= 0 or height <= 0:
         raise ValueError("Invalid raster shape")
 
-    driver = gdal.GetDriverByName("GTiff")
-    if driver is None:
-        raise RuntimeError("GDAL GTiff driver unavailable")
-
-    ds = driver.Create(
-        str(out_path),
-        int(width),
-        int(height),
-        1,
-        gdal.GDT_Float32,
-        options=["TILED=YES", "COMPRESS=LZW"],
-    )
-    if ds is None:
-        raise RuntimeError("GDAL Create() failed")
-
-    # GeoTransform: top-left corner + pixel sizes (north-up)
     xmin = float(extent.xMinimum())
     ymax = float(extent.yMaximum())
     px = float(pixel_size)
-    ds.SetGeoTransform((xmin, px, 0.0, ymax, 0.0, -px))
-
-    if crs_wkt:
-        try:
-            ds.SetProjection(str(crs_wkt))
-        except Exception as _exc:
-            log_swallowed("kriging_lite._write_geotiff", _exc)
-
-    band = ds.GetRasterBand(1)
-    band.SetNoDataValue(float(nodata))
-    band.WriteArray(arr)
-    band.FlushCache()
-    ds.FlushCache()
-    ds = None
+    write_single_band_geotiff(
+        str(out_path),
+        arr,
+        geotransform=(xmin, px, 0.0, ymax, 0.0, -px),
+        projection=str(crs_wkt or ""),
+        nodata=float(nodata),
+        gdal_type=gdal.GDT_Float32,
+        options=("TILED=YES", "COMPRESS=LZW"),
+    )
 
 
 def ordinary_kriging_lite_to_geotiff(
@@ -421,13 +408,15 @@ def ordinary_kriging_lite_to_geotiff(
     max_cells: int = 250_000,
     progress_cb: Optional[Callable[[int, str], None]] = None,
     is_cancelled: Optional[Callable[[], bool]] = None,
+    fit_variogram: bool = False,
+    compute_loocv: bool = True,
 ) -> Dict[str, object]:
-    """Run Ordinary Kriging (Lite) and write GeoTIFF(s).
+    """Run Ordinary Kriging and write GeoTIFF(s).
 
     Returns a dict with keys:
     - out_path, variance_path
-    - params (KrigingParams as dict, plus "neighbors" and "value_field": the
-      attribute actually read, or GEOM_Z_SENTINEL for geometry Z)
+    - params (KrigingParams as dict, plus "neighbors", "value_field", and "variogram_source")
+    - loocv (leave-one-out cross-validation dict when compute_loocv=True, else None)
     - ncols, nrows, n_points
     """
     if layer is None or not layer.isValid():
@@ -461,12 +450,6 @@ def ordinary_kriging_lite_to_geotiff(
             f"Increase pixel size (≈ {rec_px:.2f}m+) or reduce extent."
         )
 
-    params = auto_params(points_xy=points_xy, values=values, extent=extent, index=index)
-    log_message(
-        f"[kriging] auto params: model={params.model}, nugget={params.nugget:.6g}, "
-        f"partial_sill={params.partial_sill:.6g}, range={params.range:.6g}"
-    )
-
     try:
         import numpy as np
     except Exception as e:
@@ -474,6 +457,37 @@ def ordinary_kriging_lite_to_geotiff(
 
     pts = np.array(points_xy, dtype=float)
     zs = np.array(values, dtype=float)
+
+    variogram_source = "heuristic_lite"
+    if fit_variogram:
+        fit = fit_variogram_wls(pts, zs)
+        if fit.get("fitted"):
+            params = KrigingParams(
+                model=str(fit["model"]),
+                nugget=float(fit["nugget"]),
+                partial_sill=float(fit["partial_sill"]),
+                range=float(fit["range"]),
+            )
+            variogram_source = "empirical_wls"
+            log_message(
+                f"[kriging] fitted WLS variogram: model={params.model}, nugget={params.nugget:.6g}, "
+                f"partial_sill={params.partial_sill:.6g}, range={params.range:.6g}, "
+                f"wls_loss={float(fit.get('wls_loss', 0.0)):.6g}"
+            )
+        else:
+            params = auto_params(points_xy=points_xy, values=values, extent=extent, index=index)
+            variogram_source = str(fit.get("variogram_source") or "heuristic_fallback")
+            log_message(
+                f"[kriging] WLS variogram fallback ({fit.get('reason')}): "
+                f"model={params.model}, nugget={params.nugget:.6g}, "
+                f"partial_sill={params.partial_sill:.6g}, range={params.range:.6g}"
+            )
+    else:
+        params = auto_params(points_xy=points_xy, values=values, extent=extent, index=index)
+        log_message(
+            f"[kriging] auto params: model={params.model}, nugget={params.nugget:.6g}, "
+            f"partial_sill={params.partial_sill:.6g}, range={params.range:.6g}"
+        )
 
     neighbor_n = int(max(3, min(int(neighbors), len(points_xy))))
     nodata = -9999.0
@@ -497,33 +511,14 @@ def ordinary_kriging_lite_to_geotiff(
             return inv_cache[key]
 
         coords = pts[list(key), :]
-        dx = coords[:, 0][:, None] - coords[:, 0][None, :]
-        dy = coords[:, 1][:, None] - coords[:, 1][None, :]
-        dist = np.sqrt(dx * dx + dy * dy)
-        C = _cov_exponential(dist, partial_sill=params.partial_sill, rng=params.range)
-
-        # Add nugget on diagonal as measurement noise / stabilization.
-        np.fill_diagonal(C, float(params.partial_sill + params.nugget))
-
-        n = int(len(key))
-        A = np.empty((n + 1, n + 1), dtype=float)
-        A[:n, :n] = C
-        A[:n, n] = 1.0
-        A[n, :n] = 1.0
-        A[n, n] = 0.0
-
-        # Regularize if singular (duplicates / near-duplicates)
-        try:
-            inv = np.linalg.inv(A)
-        except Exception:
-            eps = float(max(1e-12, params.partial_sill * 1e-10))
-            for i in range(n):
-                A[i, i] += eps
-            try:
-                inv = np.linalg.inv(A)
-            except Exception as _exc:
-                log_swallowed("tools/kriging_lite.py (regularized inverse)", _exc)
-                inv = None
+        A = build_ok_system(
+            coords,
+            partial_sill=params.partial_sill,
+            rng=params.range,
+            nugget=params.nugget,
+            model=params.model,
+        )
+        inv = invert_ok_system(A, partial_sill=params.partial_sill, nugget=params.nugget)
 
         if len(inv_cache) >= inv_cache_max:
             inv_cache.clear()
@@ -559,38 +554,20 @@ def ordinary_kriging_lite_to_geotiff(
                 continue
             coords = pts[key, :]
             dz = zs[key]
-
-            dx0 = coords[:, 0] - float(x)
-            dy0 = coords[:, 1] - float(y)
-            dist0 = np.sqrt(dx0 * dx0 + dy0 * dy0)
-            cvec = _cov_exponential(dist0, partial_sill=params.partial_sill, rng=params.range)
-            # Exact interpolation: where the grid node coincides with a sample
-            # the right-hand side must carry the same C(0) = partial_sill +
-            # nugget that fill_diagonal put on the matrix. With the continuous
-            # value (partial_sill only) the solver treated every sample as
-            # noisy and smoothed the surveyed values away (DEMGEN-02).
-            # Tolerance scales with the cell size: an absolute 1e-9 is below
-            # float64 rounding at large map coordinates (Web Mercator x ~ 1e7).
-            cvec = np.where(dist0 <= max(_EXACT_TOL, 1e-6 * px), float(params.partial_sill + params.nugget), cvec)
-
-            b = np.empty((len(key) + 1,), dtype=float)
-            b[:-1] = cvec
-            b[-1] = 1.0
-
-            w = inv.dot(b)
-            lam = w[:-1]
-            mu = float(w[-1])
-
-            zhat = float(lam.dot(dz))
+            zhat, vv = solve_ok(
+                inv,
+                coords,
+                dz,
+                (float(x), float(y)),
+                partial_sill=params.partial_sill,
+                rng=params.range,
+                nugget=params.nugget,
+                model=params.model,
+                exact_tol=max(_EXACT_TOL, 1e-6 * px),
+            )
+            if (not math.isfinite(zhat)) or (not math.isfinite(vv)):
+                continue
             pred[r, c] = float(zhat)
-
-            # OK variance: sigma^2 = C(0) - lam.c - mu for the augmented system
-            # [C 1; 1' 0][lam; mu] = [c; 1] assembled above (Cressie 1993).
-            # C(0) here matches both the diagonal and the exact-hit cvec, so
-            # at a sample location lam = e_i, mu = 0 and the variance is 0.
-            vv = float(params.partial_sill + params.nugget) - float(lam.dot(cvec)) - float(mu)
-            if vv < 0:
-                vv = 0.0
             varr[r, c] = float(vv)
 
         if progress_cb:
@@ -617,6 +594,30 @@ def ordinary_kriging_lite_to_geotiff(
             nodata=nodata,
         )
 
+    loocv: Optional[Dict[str, object]] = None
+    if compute_loocv:
+        try:
+            loocv = loocv_ordinary_kriging(
+                pts,
+                zs,
+                model=params.model,
+                nugget=params.nugget,
+                partial_sill=params.partial_sill,
+                rng=params.range,
+                neighbors=neighbor_n,
+            )
+            if int(loocv.get("n_evaluated") or 0) > 0:
+                msdr_val = loocv.get("msdr")
+                msdr_txt = f", MSDR={float(msdr_val):.3f}" if msdr_val is not None else ""
+                log_message(
+                    f"[kriging] LOOCV (n={loocv['n_evaluated']}): "
+                    f"RMSE={float(loocv['rmse']):.4f}m, MAE={float(loocv['mae']):.4f}m"
+                    f"{msdr_txt}"
+                )
+        except Exception as _exc:
+            log_swallowed("kriging_lite.loocv", _exc)
+            loocv = None
+
     return {
         "out_path": out_path,
         "variance_path": variance_path,
@@ -627,7 +628,9 @@ def ordinary_kriging_lite_to_geotiff(
             "range": params.range,
             "neighbors": neighbor_n,
             "value_field": resolved_field,
+            "variogram_source": variogram_source,
         },
+        "loocv": loocv,
         "ncols": ncols,
         "nrows": nrows,
         "n_points": len(points_xy),

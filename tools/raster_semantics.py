@@ -38,7 +38,9 @@ CATEGORICAL_TOOL_HINTS = ("geology", "kigam")
 
 # Units that mean "nominal" on their own. "mask" is a binary visible/not-visible
 # grid: interpolating it yields fractions that are neither class nor count.
-CATEGORICAL_UNITS = ("class", "classes", "category", "mask")
+# "bitmask" encodes observer subsets as bit flags (2^i): averaging bit flags is
+# numerically meaningless.
+CATEGORICAL_UNITS = ("class", "classes", "category", "mask", "bitmask")
 
 
 def is_categorical_meta(meta) -> bool:

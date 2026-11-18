@@ -46,6 +46,13 @@ try:
 except Exception:  # pragma: no cover
     np = None
 
+from .covariate_stats import (
+    circular_linear_r2 as _stats_circular_linear_r2,
+    compute_pearson_matrix as _stats_pearson_matrix,
+    compute_spearman_matrix as _stats_spearman_matrix,
+    compute_vif as _stats_compute_vif,
+)
+
 from qgis.PyQt import QtWidgets
 from qgis.PyQt.QtCore import Qt
 from qgis.core import (
@@ -64,6 +71,7 @@ from .help_dialog import show_help_dialog
 from . import dialog_memory
 from .icons import icon as plugin_icon
 from .aoi_extent import resolve_aoi_extent
+from .raster_semantics import is_circular_meta, undeclared_nodata_mask
 from .utils import (
     log_swallowed,
     get_archtoolkit_layer_metadata,
@@ -72,6 +80,7 @@ from .utils import (
     log_message,
     push_message,
     restore_ui_focus,
+    transform_geometry,
 )
 
 # Deterministic sampling grid params (Date/random are unavailable/undesired here;
@@ -164,7 +173,7 @@ def _aoi_union_geometry(aoi_layer, *, selected_only: bool, dst_crs) -> Optional[
         if geom is None or geom.isNull() or geom.isEmpty():
             return None
         if aoi_layer.crs() != dst_crs:
-            geom.transform(QgsCoordinateTransform(aoi_layer.crs(), dst_crs, QgsProject.instance()))
+            geom = transform_geometry(geom, QgsCoordinateTransform(aoi_layer.crs(), dst_crs, QgsProject.instance()))
             if geom.isNull() or geom.isEmpty():
                 return None
         return geom
@@ -246,33 +255,28 @@ def _scope_lines(scope) -> list:
         lines.append(f"요청 {int(scope.get('target') or 0):,}점 > 셀 {cells:,}개, 전수 {cells:,}점")
     if scope.get("categorical"):
         lines.append("범주형 래스터 포함, 클래스 코드로 계산됨: " + ", ".join(str(s) for s in scope["categorical"]))
+    if scope.get("circular"):
+        lines.append(
+            "순환 각도(방향 0-360°) 변수 포함 — 0°/360° 불연속으로 선형 Pearson r / VIF가 왜곡될 수 있으므로 "
+            "동향·북향(sin/cos) 변환을 권장합니다: " + ", ".join(str(s) for s in scope["circular"])
+        )
     return lines
 
 
 def _compute_vif(matrix):
     """VIF per column: 1/(1-R^2) from OLS of each column on the others (+intercept)."""
-    n, k = matrix.shape
-    vifs = []
-    ones = np.ones((n, 1))
-    for i in range(k):
-        y = matrix[:, i]
-        # A (near-)constant column has no variance to explain: VIF is
-        # undefined, not "1.0 = fine". NaN renders as "계산불가" downstream.
-        if float(np.std(y)) < 1e-12:
-            vifs.append(float("nan"))
-            continue
-        cols = [ones] + [matrix[:, j:j + 1] for j in range(k) if j != i]
-        others = np.hstack(cols)
-        try:
-            beta, *_ = np.linalg.lstsq(others, y, rcond=None)
-            pred = others @ beta
-            ss_res = float(np.sum((y - pred) ** 2))
-            ss_tot = float(np.sum((y - np.mean(y)) ** 2))
-            r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
-            vifs.append(1.0 / (1.0 - r2) if r2 < 0.999999 else float("inf"))
-        except Exception:
-            vifs.append(float("nan"))
-    return vifs
+    return _stats_compute_vif(matrix, min_extra_obs=3, constant_value=float("nan"))
+
+
+def _is_aspect_covariate(meta: dict, name: str, raw_name: str) -> bool:
+    if is_circular_meta(meta):
+        return True
+    kind = str((meta or {}).get("kind") or "").strip().lower()
+    if kind == "aspect":
+        return True
+    units = str((meta or {}).get("units") or "").strip().lower()
+    low = f"{name} {raw_name}".lower()
+    return units in ("deg", "degree", "degrees") and ("aspect" in low or "향" in raw_name or "향" in name)
 
 
 class CovariateReportDialog(QtWidgets.QDialog):
@@ -366,19 +370,27 @@ class CovariateReportDialog(QtWidgets.QDialog):
             if not isinstance(lyr, QgsRasterLayer) or not lyr.isValid():
                 continue
             meta = get_archtoolkit_layer_metadata(lyr) or {}
-            is_arch = bool(meta.get("tool_id") or meta.get("kind"))
-            # Pearson/VIF on nominal class codes is statistically meaningless —
-            # don't auto-check categorical rasters (geology, slope-position,
-            # geochem class), and say why in the label.
+            tool_id = str(meta.get("tool_id") or "")
+            is_arch = bool(tool_id or meta.get("kind"))
+            # Pearson/VIF on nominal class codes, circular angles (aspect 0-360),
+            # or styling-only render clones (map_styling / multi-band RGB) is
+            # statistically meaningless or misleading — never auto-check them.
             is_categorical = is_categorical_raster_meta(meta)
+            is_circular = is_circular_meta(meta)
+            is_render_clone = (tool_id == "map_styling") or (int(lyr.bandCount()) >= 3 and not is_arch)
+            auto_check = is_arch and (not is_categorical) and (not is_circular) and (not is_render_clone)
             label = lyr.name() + (f"   [{meta.get('tool_id')}/{meta.get('kind')}]" if is_arch else "")
-            if is_categorical:
+            if is_render_clone:
+                label += "  (도면용 사본 — 상관/VIF 부적합)"
+            elif is_categorical:
                 label += "  (범주형 — 상관/VIF 부적합)"
+            elif is_circular:
+                label += "  (순환 각도 0–360° — 선형 상관 주의)"
             item = QtWidgets.QListWidgetItem(label)
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            item.setCheckState(Qt.CheckState.Checked if (is_arch and not is_categorical) else Qt.CheckState.Unchecked)
+            item.setCheckState(Qt.CheckState.Checked if auto_check else Qt.CheckState.Unchecked)
             item.setData(Qt.ItemDataRole.UserRole, lyr.id())
-            item.setData(Qt.ItemDataRole.UserRole + 1, bool(is_arch and not is_categorical))
+            item.setData(Qt.ItemDataRole.UserRole + 1, bool(auto_check))
             self.listLayers.addItem(item)
         if self.listLayers.count() == 0:
             item = QtWidgets.QListWidgetItem("(프로젝트에 래스터 레이어가 없습니다)")
@@ -463,18 +475,25 @@ class CovariateReportDialog(QtWidgets.QDialog):
             push_message(self.iface, "취소됨", "표본 추출이 취소되어 리포트를 만들지 않았습니다(부분 표본은 사용하지 않음).",
                          level=1, duration=6)
             return
-        if matrix is None or matrix.shape[0] < 10:
+        min_samples = max(10, len(layers) + 3)
+        if matrix is None or matrix.shape[0] < min_samples:
             n_ok = 0 if matrix is None else int(matrix.shape[0])
             push_message(self.iface, "오류",
-                         f"유효 표본이 부족합니다(검사한 점 {int(info.get('scanned') or 0):,}개 중 모든 변수가 유효한 점 {n_ok:,}개).",
+                         f"유효 표본이 부족합니다(검사한 점 {int(info.get('scanned') or 0):,}개 중 모든 변수가 유효한 점 {n_ok:,}개, 최소 {min_samples}개 필요).",
                          level=2, duration=8)
             return
 
         categorical = []
-        for name, lyr in zip(names, layers):
+        circular = []
+        circular_indices = []
+        for idx_col, (name, lyr) in enumerate(zip(names, layers)):
             try:
-                if is_categorical_raster_meta(get_archtoolkit_layer_metadata(lyr) or {}):
+                meta0 = get_archtoolkit_layer_metadata(lyr) or {}
+                if is_categorical_raster_meta(meta0):
                     categorical.append(name)
+                if _is_aspect_covariate(meta0, name, lyr.name()):
+                    circular.append(name)
+                    circular_indices.append(idx_col)
             except Exception as _exc:
                 log_swallowed("tools/covariate_report_dialog.py (_on_run categorical)", _exc)
         try:
@@ -488,12 +507,33 @@ class CovariateReportDialog(QtWidgets.QDialog):
             "polygon": aoi_geom is not None, "grid": info.get("grid"), "scanned": info.get("scanned"),
             "n": int(matrix.shape[0]), "target": target, "cells": info.get("cells"), "capped": info.get("capped"),
             "categorical": categorical,
+            "circular": circular,
         }
         self._last_scope = scope
 
-        corr = np.corrcoef(matrix, rowvar=False)
+        corr = _stats_pearson_matrix(matrix)
         vifs = _compute_vif(matrix)
-        html = self._build_report_html(names, corr, vifs, matrix.shape[0], scope=scope)
+        spearman = _stats_spearman_matrix(matrix)
+        circular_rows = []
+        circ_set = set(circular_indices)
+        for ci in circular_indices:
+            for oj in range(len(names)):
+                if oj in circ_set or oj == ci:
+                    continue
+                res_cl = _stats_circular_linear_r2(matrix[:, ci], matrix[:, oj])
+                circular_rows.append({"circular": names[ci], "linear": names[oj], **res_cl})
+
+        self._last_spearman = spearman
+        self._last_circular_rows = circular_rows
+        html = self._build_report_html(
+            names,
+            corr,
+            vifs,
+            matrix.shape[0],
+            scope=scope,
+            spearman=spearman,
+            circular_rows=circular_rows,
+        )
         log_message(f"Covariate report: {len(names)} vars, {matrix.shape[0]} samples", level=0)
         self._show_report(html, names, corr, vifs, matrix.shape[0])
         restore_ui_focus(self)
@@ -523,8 +563,18 @@ class CovariateReportDialog(QtWidgets.QDialog):
                 ny = max(2, int(round(math.sqrt(max(1, target) / max(aspect, 1e-9)))))
                 nx = max(2, int(round(target / ny)))
                 if centres is not None:
-                    nx = min(nx, len(centres[0]))
-                    ny = min(ny, len(centres[1]))
+                    nx = max(1, min(nx, len(centres[0])))
+                    ny = max(1, min(ny, len(centres[1])))
+                else:
+                    try:
+                        w0 = int(layers[0].width())
+                        h0 = int(layers[0].height())
+                        if w0 > 0:
+                            nx = max(1, min(nx, w0))
+                        if h0 > 0:
+                            ny = max(1, min(ny, h0))
+                    except Exception as _exc:
+                        log_swallowed("covariate_report_dialog._sample_matrix.grid_clamp", _exc)
                 xs = [extent.xMinimum() + (i + 0.5) * extent.width() / nx for i in range(nx)]
                 ys = [extent.yMinimum() + (j + 0.5) * extent.height() / ny for j in range(ny)]
             info["grid"] = (len(xs), len(ys))
@@ -539,6 +589,25 @@ class CovariateReportDialog(QtWidgets.QDialog):
                     engine = None
 
             providers = [lyr.dataProvider() for lyr in layers]
+            nodata_cfg = []
+            for prov in providers:
+                decl_nd = None
+                user_ranges = []
+                try:
+                    use_src = True if not hasattr(prov, "useSourceNoDataValue") else bool(prov.useSourceNoDataValue(1))
+                    if hasattr(prov, "sourceHasNoDataValue") and prov.sourceHasNoDataValue(1) and use_src:
+                        vnd = float(prov.sourceNoDataValue(1))
+                        if math.isfinite(vnd):
+                            decl_nd = vnd
+                except Exception as _exc:
+                    log_swallowed("covariate_report_dialog._sample_matrix.nodata", _exc)
+                try:
+                    if hasattr(prov, "userNoDataValues"):
+                        user_ranges = [(float(r.min()), float(r.max())) for r in (prov.userNoDataValues(1) or [])]
+                except Exception as _exc:
+                    log_swallowed("covariate_report_dialog._sample_matrix.user_nodata", _exc)
+                nodata_cfg.append((decl_nd, user_ranges))
+
             transforms = []
             for lyr in layers:
                 if lyr.crs() != dst_crs:
@@ -550,41 +619,56 @@ class CovariateReportDialog(QtWidgets.QDialog):
             progress = QtWidgets.QProgressDialog("표본 추출 중…", "취소", 0, len(ys), self)
             progress.setWindowModality(Qt.WindowModality.WindowModal)
             progress.setMinimumDuration(0)
-            for jy, y in enumerate(ys):
-                if progress.wasCanceled():
-                    info["cancelled"] = True
-                    break
-                progress.setValue(jy)
-                QtWidgets.QApplication.processEvents()
-                for x in xs:
-                    if aoi_geom is not None and not _point_inside(engine, aoi_geom, x, y):
-                        continue
-                    info["scanned"] += 1
-                    vals = []
-                    ok = True
-                    for pi, prov in enumerate(providers):
-                        pt = QgsPointXY(x, y)
-                        ct = transforms[pi]
-                        if ct is not None:
+            try:
+                for jy, y in enumerate(ys):
+                    if progress.wasCanceled():
+                        info["cancelled"] = True
+                        break
+                    progress.setValue(jy)
+                    QtWidgets.QApplication.processEvents()
+                    for x in xs:
+                        if aoi_geom is not None and not _point_inside(engine, aoi_geom, x, y):
+                            continue
+                        info["scanned"] += 1
+                        vals = []
+                        ok = True
+                        for pi, prov in enumerate(providers):
+                            pt = QgsPointXY(x, y)
+                            ct = transforms[pi]
+                            if ct is not None:
+                                try:
+                                    pt = ct.transform(pt)
+                                except Exception:
+                                    ok = False
+                                    break
                             try:
-                                pt = ct.transform(pt)
+                                val, res = prov.sample(pt, 1)
                             except Exception:
                                 ok = False
                                 break
-                        try:
-                            val, res = prov.sample(pt, 1)
-                        except Exception:
-                            ok = False
-                            break
-                        if not res or val is None or not np.isfinite(val):
-                            ok = False
-                            break
-                        vals.append(float(val))
-                    if ok:
-                        rows.append(vals)
-            if progress.wasCanceled():
-                info["cancelled"] = True
-            progress.close()
+                            if not res or val is None or not np.isfinite(val):
+                                ok = False
+                                break
+                            fv = float(val)
+                            decl_nd, user_ranges = nodata_cfg[pi]
+                            if decl_nd is not None and math.isclose(fv, decl_nd, rel_tol=1e-5, abs_tol=1e-5):
+                                ok = False
+                                break
+                            if any(lo <= fv <= hi for lo, hi in user_ranges):
+                                ok = False
+                                break
+                            if decl_nd is None and not user_ranges:
+                                nd_m, _ = undeclared_nodata_mask([fv], None)
+                                if bool(nd_m[0]):
+                                    ok = False
+                                    break
+                            vals.append(fv)
+                        if ok:
+                            rows.append(vals)
+                if progress.wasCanceled():
+                    info["cancelled"] = True
+            finally:
+                progress.close()
             if info["cancelled"] or not rows:
                 return None
             return np.asarray(rows, dtype="float64")
@@ -592,7 +676,7 @@ class CovariateReportDialog(QtWidgets.QDialog):
             log_exception("Covariate sampling error", e)
             return None
 
-    def _build_report_html(self, names, corr, vifs, n_samples, scope=None):
+    def _build_report_html(self, names, corr, vifs, n_samples, scope=None, spearman=None, circular_rows=None):
         def esc(s):
             return (str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
                     .replace("'", "&#39;").replace('"', "&quot;"))
@@ -606,7 +690,7 @@ class CovariateReportDialog(QtWidgets.QDialog):
             f"<h3>변수 상관/다중공선성 리포트</h3><p>변수 {k}개 · 유효 표본 {n_samples:,}점</p>",
         ]
         for line in _scope_lines(scope):
-            color = "#b2182b" if line.startswith("범주형") else "#455a64"
+            color = "#b2182b" if (line.startswith("범주형") or line.startswith("순환")) else "#455a64"
             parts.append(f"<p style='color:{color};margin:2px 0;'>{esc(line)}</p>")
         parts += [
             "<h4>VIF (분산팽창계수)</h4>",
@@ -644,6 +728,51 @@ class CovariateReportDialog(QtWidgets.QDialog):
                 parts.append(cell)
             parts.append("</tr>")
         parts.append("</table>")
+        if spearman is not None and np is not None:
+            sp_arr = np.asarray(spearman, dtype=float)
+            if sp_arr.shape == (k, k):
+                parts.append("<h4>순위 상관행렬 (Spearman &rho;)</h4>")
+                parts.append(
+                    "<table border='1' cellspacing='0' cellpadding='3'><tr><th></th>"
+                    + "".join(f"<th title='{esc(n)}'>{esc(short(n))}</th>" for n in names)
+                    + "</tr>"
+                )
+                for i in range(k):
+                    parts.append(f"<tr><th align='left'>{esc(names[i])}</th>")
+                    for j in range(k):
+                        rho = float(sp_arr[i, j])
+                        if i == j:
+                            cell = "<td align='center'>1</td>"
+                        elif rho != rho:
+                            cell = "<td align='center' style='color:#999'>계산불가</td>"
+                        else:
+                            hot = abs(rho) >= _HIGH_CORR
+                            style = "background:#fddbc7;font-weight:bold;" if hot else ""
+                            cell = f"<td align='right' style='{style}'>{rho:+.2f}</td>"
+                        parts.append(cell)
+                    parts.append("</tr>")
+                parts.append("</table>")
+        if circular_rows:
+            parts.append("<h4>순환-선형 상관 (Mardia 1976 R²)</h4>")
+            parts.append(
+                "<table border='1' cellspacing='0' cellpadding='4'>"
+                "<tr><th>순환 변수</th><th>선형 변수</th><th>R²</th><th>R</th><th>유효 표본 (평지 제외)</th></tr>"
+            )
+            for row in circular_rows:
+                r2v = row.get("r2", float("nan"))
+                rv = row.get("r", float("nan"))
+                r2txt = f"{float(r2v):.3f}" if (r2v == r2v) else "계산불가"
+                rtxt = f"{float(rv):.3f}" if (rv == rv) else "-"
+                ntxt = f"{int(row.get('n_valid') or 0):,} (제외 {int(row.get('n_flat_excluded') or 0):,})"
+                parts.append(
+                    f"<tr><td>{esc(row.get('circular', ''))}</td><td>{esc(row.get('linear', ''))}</td>"
+                    f"<td align='right'>{r2txt}</td><td align='right'>{rtxt}</td><td align='right'>{ntxt}</td></tr>"
+                )
+            parts.append("</table>")
+            parts.append(
+                "<p style='color:#455a64'>향(Aspect) 등 순환 각도 변수는 선형 Pearson r 대신 "
+                "(cos θ, sin θ) 투영 기반 Mardia(1976) 순환-선형 R²로 평가하며 평지(-1) 표본은 제외합니다.</p>"
+            )
         parts.append(
             "<p style='color:#455a64'>|r| ≥ 0.7(음영), VIF 5·10은 참고선입니다(O'Brien 2007). "
             "임계값만으로 변수를 빼지 말고 표본 크기·효과 크기·해석 가능성과 함께 판단하세요. "
@@ -697,6 +826,33 @@ class CovariateReportDialog(QtWidgets.QDialog):
                 w.writerow([""] + list(names))
                 for i, name in enumerate(names):
                     w.writerow([name] + [f"{float(corr[i, j]):.4f}" for j in range(len(names))])
+                sp = getattr(self, "_last_spearman", None)
+                if sp is not None and np is not None:
+                    sp_arr = np.asarray(sp, dtype=float)
+                    if sp_arr.shape == (len(names), len(names)):
+                        w.writerow([])
+                        w.writerow(["# Spearman rank correlation"])
+                        w.writerow([""] + list(names))
+                        for i, name in enumerate(names):
+                            w.writerow([name] + [f"{float(sp_arr[i, j]):.4f}" for j in range(len(names))])
+                c_rows = getattr(self, "_last_circular_rows", None)
+                if c_rows:
+                    w.writerow([])
+                    w.writerow(["# Circular-linear R^2 (Mardia 1976)"])
+                    w.writerow(["circular", "linear", "r2", "r", "n_valid", "n_flat_excluded"])
+                    for row in c_rows:
+                        r2v = row.get("r2", float("nan"))
+                        rv = row.get("r", float("nan"))
+                        w.writerow(
+                            [
+                                row.get("circular", ""),
+                                row.get("linear", ""),
+                                f"{float(r2v):.6f}" if r2v == r2v else "",
+                                f"{float(rv):.6f}" if rv == rv else "",
+                                int(row.get("n_valid") or 0),
+                                int(row.get("n_flat_excluded") or 0),
+                            ]
+                        )
             push_message(self.iface, "완료", f"저장했습니다: {path}", level=0, duration=6)
         except Exception as e:
             push_message(self.iface, "오류", f"CSV 저장 실패: {e}", level=2, duration=7)

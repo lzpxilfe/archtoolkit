@@ -75,7 +75,10 @@ from .utils import (
     push_message,
     restore_ui_focus,
     set_archtoolkit_layer_metadata,
+    split_qgis_source_path,
+    stamp_layer_temp_outputs,
 )
+from .raster_semantics import undeclared_nodata_mask
 
 PARENT_GROUP_NAME = "ArchToolkit - 거리 래스터 (Distance)"
 DISTANCE_NODATA = -9999.0
@@ -441,12 +444,14 @@ class DistanceRasterDialog(QtWidgets.QDialog):
             # wants every touched cell (-at); points are unaffected by -at and
             # always land in the cell that contains them.
             burn_rule = self._burn_rule(source)
+            ref_w = int(ref.width())
+            ref_h = int(ref.height())
             run_alg_blocking("gdal:rasterize", {
                 "INPUT": prepared,
                 "BURN": 1,
-                "UNITS": 1,          # georeferenced units
-                "WIDTH": px_x,
-                "HEIGHT": px_y,
+                "UNITS": 0,          # pixels (exact reference width x height)
+                "WIDTH": float(ref_w),
+                "HEIGHT": float(ref_h),
                 "EXTENT": extent_str,
                 "NODATA": 0,
                 "DATA_TYPE": 0,      # Byte: this is a presence mask, not a measurement
@@ -524,6 +529,7 @@ class DistanceRasterDialog(QtWidgets.QDialog):
             # NoData cell. A raster that cannot take the flag is not a result.
             try:
                 self._stamp_nodata(output, DISTANCE_NODATA)
+                self._apply_reference_nodata_mask(output, ref, DISTANCE_NODATA)
             except Exception:
                 temp_files.append(output)
                 raise
@@ -579,6 +585,7 @@ class DistanceRasterDialog(QtWidgets.QDialog):
                     "target_cells": target_cells,
                 },
             )
+            stamp_layer_temp_outputs(layer, [output])
             self._add_to_group(layer, run_id)
 
             push_message(
@@ -655,6 +662,52 @@ class DistanceRasterDialog(QtWidgets.QDialog):
         finally:
             band = None
             dataset = None
+
+    @staticmethod
+    def _apply_reference_nodata_mask(output_path, ref_layer, nodata_value) -> None:
+        """Mask distance output cells to ``nodata_value`` wherever ``ref_layer`` is NoData."""
+        ref_path = split_qgis_source_path(ref_layer.source())
+        if not ref_path:
+            return
+        ref_ds = gdal.Open(ref_path, gdal.GA_ReadOnly)
+        if ref_ds is None:
+            return
+        out_ds = None
+        try:
+            ref_band = ref_ds.GetRasterBand(1)
+            if ref_band is None:
+                return
+            out_ds = gdal.Open(str(output_path), gdal.GA_Update)
+            if out_ds is None:
+                return
+            if (
+                int(ref_ds.RasterXSize) != int(out_ds.RasterXSize)
+                or int(ref_ds.RasterYSize) != int(out_ds.RasterYSize)
+            ):
+                return
+            ref_arr = ref_band.ReadAsArray()
+            out_band = out_ds.GetRasterBand(1)
+            out_arr = out_band.ReadAsArray() if out_band is not None else None
+            if ref_arr is None or out_arr is None:
+                return
+            ref_nd = ref_band.GetNoDataValue()
+            nd_mask, _ = undeclared_nodata_mask(ref_arr, ref_nd)
+            # Also apply QGIS user-defined NoData ranges when declared on provider.
+            try:
+                prov = ref_layer.dataProvider()
+                if hasattr(prov, "userNoDataValues"):
+                    for rng in prov.userNoDataValues(1) or []:
+                        nd_mask |= (ref_arr >= float(rng.min())) & (ref_arr <= float(rng.max()))
+            except Exception as _exc:
+                log_swallowed("distance_raster_dialog._apply_reference_nodata_mask.user_nd", _exc)
+            if nd_mask.any():
+                out_arr[nd_mask] = float(nodata_value)
+                out_band.WriteArray(out_arr)
+                out_band.FlushCache()
+                out_ds.FlushCache()
+        finally:
+            out_ds = None
+            ref_ds = None
 
     @staticmethod
     def _burn_rule(layer) -> str:

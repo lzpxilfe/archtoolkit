@@ -37,13 +37,15 @@
 
 ## 크리깅 보간 (Kriging / Geostatistical Interpolation)
 
-**(B) 지오통계/변동함수(variogram) 기반 보간** — `tools/kriging_lite.py`에 Ordinary Kriging을 직접 구현:
+**(B) 지오통계/변동함수(variogram) 기반 보간 및 가중최소제곱(WLS) 베리오그램 적합·LOOCV** — `tools/kriging_math.py` + `tools/kriging_lite.py`:
 > Matheron, G. (1963). "Principles of geostatistics." *Economic Geology*, 58(8), pp. 1246–1266.
+> Cressie, N. (1985). "Fitting variogram models by weighted least squares." *Mathematical Geology*, 17(5), pp. 563–586. DOI: 10.1007/BF01032109
 
-**(C) 표준 참고서:**
+**(C) 표준 참고서 (교차검증 RMSE / MSDR 포함):**
 > Cressie, N. (1993). *Statistics for Spatial Data*. Wiley.
+> Webster, R., & Oliver, M.A. (2007). *Geostatistics for Environmental Scientists* (2nd ed.). Wiley.
 
-주: "Lite"는 경험 변동함수를 적합(fitting)하지 않습니다. 모델은 지수형(exponential) 고정, 너깃은 표본분산의 5%, 레인지는 최근린 간격 중앙값의 3배, 이방성은 고려하지 않습니다. 따라서 분산 래스터는 보정된 불확실성이 아니라 **상대적** 불확실성 지도로 읽어야 합니다.
+주: 기본 "Lite" 설정은 경험 변동함수를 적합하지 않습니다(지수형 모델 고정, 너깃은 표본분산의 5%, 레인지는 최근린 간격 중앙값의 3배, 이방성 미고려). 옵션("경험 베리오그램 자동 적합")을 켜면 Cressie(1985) WLS로 지수형·구형·가우스형 모델을 선택·적합하며, 모든 실행에서 LOOCV(RMSE, MAE, MSDR)를 보고합니다.
 
 ## 등고선 생성 (Contour Generation)
 
@@ -86,7 +88,7 @@
 
 > Herzog, I. (2013). "The potential and limits of Optimal Path Analysis." In: Bevan, A., & Lake, M. (eds), *Computational Approaches to Archaeological Spaces*, Left Coast Press, pp. 179-211.
 
-주(원식과의 차이): 이 다항식은 Minetti 등(2002)이 측정한 경사별 에너지 소비 자료를 Herzog가 비용함수 형태로 재정리한 것입니다. 원식은 **부호 있는 경사(오르막/내리막을 구분하는 이방성)** 를 전제하지만, 본 플러그인은 `abs(dz) / 수평거리`, 즉 **경사의 절대값(등방성)** 에 적용합니다. 따라서 같은 기울기의 내리막과 오르막 비용이 같아지며, 이는 원 모델과의 의도적인 차이입니다.
+주(비등방 부호 경사): 이 다항식은 Minetti 등(2002)이 측정한 경사별 에너지 소비 자료를 Herzog(2013)가 비용함수 형태로 재정리한 것입니다. 본 플러그인은 원식대로 **부호 있는 경사(`s = dz / 수평거리`)** 를 그대로 적용해 오르막과 내리막을 구분하는 비등방 비용을 계산합니다(최저 비용 약 -10.5% 내리막; 실험 검증 구간 ±45%, 초과 구간은 다항식 외삽).
 
 **(B) Herzog 차량/수레 모델(임계 경사)** — 속도계수 `1 / (1 + (경사% / 임계경사%)^2)`와 최대 경사 초과 시 통행 불가 처리. 출처는 위 Herzog (2013)이며, 구현 형태(정규화·임계경사 파라미터화)는 아래 Čučković의 구현을 따랐습니다. 임계경사는 경사도(%)입니다(기본 12%, 이 경사에서 비용이 평지의 2배). Čučković 코드도 경사를 %로 바꿔 나누며, 그 화면 표기만 'degree'입니다. 0.1.4까지의 ArchToolkit은 이 값을 도(°)로 읽어 수레의 경사 민감도를 절반 가까이 낮게 계산했습니다.
 
@@ -119,6 +121,9 @@
 **(C) GIS 기반 입지적합도 분석 개관 (WLC/AHP의 적용과 한계):**
 > Malczewski, J. (2004). "GIS-based land-use suitability analysis: a critical overview." *Progress in Planning*, 62(1), pp. 3-65. DOI: 10.1016/j.progress.2003.09.002
 
+**(B) 일대일(OAT ±10%) 기준 가중치 민감도 분석** — `tools/ahp_core.py`의 `oat_weight_sensitivity`:
+> Chen, Y., Yu, J., & Khan, S. (2010). "Spatial sensitivity analysis of multi-criteria weights in GIS-based land suitability evaluation." *Environmental Modelling & Software*, 25(12), pp. 1582–1591. DOI: 10.1016/j.envsoft.2010.06.001
+
 주: 표에 없는 크기(n>15)의 행렬에서는 CR이 정의되지 않으므로, `ahp_core.py`는 0.0이 아니라 **NaN**을 반환하고, 대화상자는 이를 `CR=-`로 표시합니다. 0.0을 보고하면 일관적이라고 잘못 인증하는 셈이기 때문입니다(그런 경우에는 계층형으로 나누어 기준 수를 줄이십시오).
 
 ## 최소비용경로 / 비용-거리 (Least-cost path / Cost-distance)
@@ -149,6 +154,12 @@
 
 **(B) Betweenness 계산(Brandes 알고리즘)** — 무향 그래프 0.5 정규화 포함:
 > Brandes, U. (2001). "A faster algorithm for betweenness centrality." *Journal of Mathematical Sociology*, 25(2), pp. 163–177.
+
+**(B) 국소 군집계수(Local Clustering Coefficient) 및 전이성(Transitivity):**
+> Watts, D.J., & Strogatz, S.H. (1998). "Collective dynamics of 'small-world' networks." *Nature*, 393(6684), pp. 440–442. DOI: 10.1038/30918
+
+**(B) 조화 중심성(Harmonic Centrality, 단절 그래프 대응):**
+> Boldi, P., & Vigna, S. (2014). "Axioms for centrality." *Internet Mathematics*, 10(3-4), pp. 222–262. DOI: 10.1080/15427951.2013.865686
 
 **(C) SNA 개론/표준 참고서:**
 > Newman, M.E.J. (2010). *Networks: An Introduction*. Oxford University Press.
@@ -258,7 +269,10 @@
 
 ## 공변량 상관 / VIF (Covariate report)
 
-**(B) 분산팽창지수 VIF = 1 / (1 - R²)** — `tools/covariate_report_dialog.py`가 직접 계산. 임계값 5·10은 경험 규칙이며 특정 문헌의 규정이 아닙니다.
+**(B) 분산팽창지수 VIF = 1 / (1 - R²) 및 Pearson/Spearman 상관계수** — `tools/covariate_stats.py` + `tools/covariate_report_dialog.py`. 임계값 5·10은 경험 규칙이며 특정 문헌의 규정이 아닙니다.
+
+**(B) 순환-선형 상관 R² (사면방향 Aspect 등 순환 각도 변수)** — `tools/covariate_stats.py`의 `circular_linear_r2`:
+> Mardia, K.V. (1976). "Linear-circular correlation coefficients and rhythmometry." *Biometrika*, 63(2), pp. 403–405. DOI: 10.1093/biomet/63.2.403
 
 **(C) VIF 경험 규칙의 한계에 관한 경고:**
 > O'Brien, R.M. (2007). "A caution regarding rules of thumb for variance inflation factors." *Quality & Quantity*, 41(5), pp. 673-690. DOI: 10.1007/s11135-006-9018-6

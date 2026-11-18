@@ -310,7 +310,7 @@ class ProfileChartWidget(QWidget):
         self.margin_right = 30
         self.margin_bottom = 40
 
-    def set_data(self, data):
+    def set_data(self, data, total_distance_m: Optional[float] = None):
         self.data = data
         self.zoom_level = 1.0
         self.pan_offset = 0
@@ -331,7 +331,10 @@ class ProfileChartWidget(QWidget):
 
         self.min_e = min(elevations)
         self.max_e = max(elevations)
-        self.total_d = data[-1]['distance']
+        if total_distance_m is not None and math.isfinite(float(total_distance_m)) and float(total_distance_m) > 0:
+            self.total_d = float(total_distance_m)
+        else:
+            self.total_d = data[-1]['distance']
         
         # Add some margin to elevation range
         margin = (self.max_e - self.min_e) * 0.1
@@ -815,15 +818,27 @@ class ProfileChartWidget(QWidget):
                     # Vertical reference line
                     painter.drawLine(int(x), top, int(x), top + h)
 
-                    # Marker on profile (nearest smoothed point)
+                    # Marker on profile (nearest smoothed point), omitted if marker sits inside a NoData gap
                     try:
-                        closest = min(self.smooth_data, key=lambda p: abs(float(p["distance"]) - float(dist)))
-                        elev = float(closest.get("elevation"))
-                        if math.isfinite(elev):
-                            y = top + h - ((elev - self.min_e) / (self.max_e - self.min_e)) * h
-                            painter.setPen(QPen(self.overlay_marker_color, 2))
-                            painter.setBrush(QBrush(QColor(255, 255, 255)))
-                            painter.drawEllipse(QPointF(x, y), 4, 4)
+                        in_gap = False
+                        if self.data:
+                            d_val = float(dist)
+                            if d_val < float(self.data[0]["distance"]) - 1e-6 or d_val > float(self.data[-1]["distance"]) + 1e-6:
+                                in_gap = True
+                            else:
+                                for gi in range(1, len(self.data)):
+                                    if float(self.data[gi - 1]["distance"]) < d_val < float(self.data[gi]["distance"]):
+                                        if self.data[gi].get("gap_before"):
+                                            in_gap = True
+                                        break
+                        if not in_gap:
+                            closest = min(self.smooth_data, key=lambda p: abs(float(p["distance"]) - float(dist)))
+                            elev = float(closest.get("elevation"))
+                            if math.isfinite(elev):
+                                y = top + h - ((elev - self.min_e) / (self.max_e - self.min_e)) * h
+                                painter.setPen(QPen(self.overlay_marker_color, 2))
+                                painter.setBrush(QBrush(QColor(255, 255, 255)))
+                                painter.drawEllipse(QPointF(x, y), 4, 4)
                     except Exception as _exc:
                         log_swallowed("terrain_profile_dialog.draw_chart", _exc)
 
@@ -1879,43 +1894,19 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
                     if inter is None or inter.isEmpty():
                         continue
 
-                    # Segment ranges (line geometry)
+                    # Segment ranges (handles Line, MultiLine, and GeometryCollection)
                     _skip_1503 = False
                     try:
-                        if inter.type() == Qgis.GeometryType.Line:
-                            segs = []
-                            if inter.isMultipart():
-                                segs = inter.asMultiPolyline() or []
-                            else:
-                                seg = inter.asPolyline() or []
-                                if seg:
-                                    segs = [seg]
-                            for seg in segs:
-                                if not seg or len(seg) < 2:
-                                    continue
-                                t_vals = []
-                                for p in (seg[0], seg[-1]):
-                                    _skip_1517 = False
-                                    try:
-                                        t_vals.append(_fraction_for_xy(float(p.x()), float(p.y())))
-                                    except Exception as _exc:
-                                        log_swallowed("terrain_profile_dialog._refresh_overlay", _exc)
-                                        log_swallowed("tools/terrain_profile_dialog.py:1519 (_refresh_overlay)", _exc)
-                                        _skip_1517 = True
-                                    if _skip_1517:
-                                        continue
-                                if len(t_vals) < 2:
-                                    continue
-                                a = min(t_vals) * total_distance_m
-                                b = max(t_vals) * total_distance_m
-                                if math.isfinite(a) and math.isfinite(b) and b > a:
-                                    ranges.append((a, b))
-                        elif inter.type() == Qgis.GeometryType.Point:
-                            pts = []
-                            if inter.isMultipart():
-                                pts = inter.asMultiPoint() or []
-                            else:
-                                pts = [inter.asPoint()]
+                        ranges.extend(_intersection_ranges_m(inter, start_canvas, end_canvas, total_distance_m))
+                        pt_geoms = []
+                        if inter.type() == Qgis.GeometryType.Point:
+                            pt_geoms = [inter]
+                        elif inter.isMultipart():
+                            for sub_g in inter.asGeometryCollection():
+                                if sub_g.type() == Qgis.GeometryType.Point:
+                                    pt_geoms.append(sub_g)
+                        for pg_part in pt_geoms:
+                            pts = pg_part.asMultiPoint() or [] if pg_part.isMultipart() else [pg_part.asPoint()]
                             for p in pts:
                                 _skip_1535 = False
                                 try:
@@ -2391,7 +2382,7 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
                     except Exception as _exc:
                         log_swallowed("tools/terrain_profile_dialog.py:1849 (calculate_profile)", _exc)
 
-                self.chart.set_data(self.profile_data)
+                self.chart.set_data(self.profile_data, total_distance_m=total_distance_m)
                 self._refresh_aoi_highlight()
                 self._refresh_overlay()
                 self.btnExportCsv.setEnabled(True)
@@ -2589,7 +2580,7 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
         self.points = [start_canvas, end_canvas]
         try:
             # Keep an on-top visual cue even when the line already exists in a layer.
-            self._show_profile_line_on_map(start=start_canvas, end=end_canvas)
+            self._show_profile_line_on_map(start=start_canvas, end=end_canvas, color=self.chart.profile_color)
         except Exception as _exc:
             log_swallowed("tools/terrain_profile_dialog.py:2019 (_open_profile_from_feature)", _exc)
         self._compute_profile_for_points(dem_layer=dem_layer, start_canvas=start_canvas, end_canvas=end_canvas, num_samples=num_samples)
@@ -2691,13 +2682,13 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
         self._last_num_samples = int(num_samples)
 
         if self.profile_data:
-            self.chart.set_data(self.profile_data)
+            self.chart.set_data(self.profile_data, total_distance_m=total_distance_m)
             self._refresh_aoi_highlight()
             self._refresh_overlay()
             self.btnExportCsv.setEnabled(True)
             self.btnExportImage.setEnabled(True)
             try:
-                self._show_profile_line_on_map(start=start_canvas, end=end_canvas)
+                self._show_profile_line_on_map(start=start_canvas, end=end_canvas, color=self.chart.profile_color)
             except Exception as _exc:
                 log_swallowed("tools/terrain_profile_dialog.py:2104 (_compute_profile_for_points)", _exc)
             push_message(self.iface, "단면 완료", self._samples_done_text(valid_samples, num_samples), level=0)
@@ -3109,7 +3100,11 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
         st = _gap_aware_profile_stats(self.profile_data)
         elevs = st["elevs"]
         dists = st["dists"]
-        total_d = float(dists[-1]) if dists else 0.0
+        total_d = (
+            float(self._last_profile_length_m)
+            if (self._last_profile_length_m is not None and math.isfinite(float(self._last_profile_length_m)) and float(self._last_profile_length_m) > 0)
+            else (float(dists[-1]) if dists else 0.0)
+        )
         min_e = min(elevs)
         max_e = max(elevs)
         ascent = st["ascent"]
@@ -3180,7 +3175,11 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
                 cum_up = st["cum_up"]
                 cum_dn = st["cum_dn"]
 
-                total_d = float(dists[-1]) if dists else 0.0
+                total_d = (
+                    float(self._last_profile_length_m)
+                    if (self._last_profile_length_m is not None and math.isfinite(float(self._last_profile_length_m)) and float(self._last_profile_length_m) > 0)
+                    else (float(dists[-1]) if dists else 0.0)
+                )
                 min_e = float(min(elevs)) if elevs else 0.0
                 max_e = float(max(elevs)) if elevs else 0.0
                 ascent = float(st["ascent"])

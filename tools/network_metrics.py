@@ -47,7 +47,7 @@ def validate_positive_weights(adj: List[List[Tuple[int, float]]]) -> None:
 
 
 def validate_symmetric_adjacency(adj) -> None:
-    """Raise ValueError unless every edge v-w is also present as w-v.
+    """Raise ValueError unless every edge v-w has a reciprocal w-v (with matching weight when weighted).
 
     Betweenness normalizes by 0.5 because each shortest path is counted twice
     on an undirected graph; on a directed (asymmetric) adjacency that factor
@@ -55,16 +55,47 @@ def validate_symmetric_adjacency(adj) -> None:
     instead of trusting the caller.
     """
     seen = set()
+    weights = {}
     for v, nbrs in enumerate(adj):
         for entry in nbrs:
-            w = entry[0] if isinstance(entry, tuple) else entry
-            seen.add((int(v), int(w)))
+            if isinstance(entry, tuple):
+                w = int(entry[0])
+                ww = float(entry[1])
+                weights.setdefault((int(v), w), []).append(ww)
+            else:
+                w = int(entry)
+            seen.add((int(v), w))
     for v, w in seen:
         if (w, v) not in seen:
             raise ValueError(
                 f"adjacency is not symmetric: edge {v}-{w} has no {w}-{v} "
                 "(betweenness assumes undirected edges)"
             )
+        w_vw = weights.get((v, w))
+        w_wv = weights.get((w, v))
+        if w_vw and w_wv and (min(w_vw) != min(w_wv) and not math.isclose(min(w_vw), min(w_wv), rel_tol=1e-9, abs_tol=1e-12)):
+            raise ValueError(
+                f"adjacency weights are not symmetric: edge {v}-{w} ({min(w_vw)!r}) != {w}-{v} ({min(w_wv)!r})"
+            )
+
+
+def _dedupe_weighted_adj(adj: List[List[Tuple[int, float]]]) -> List[List[Tuple[int, float]]]:
+    """Collapse parallel edges (v, w) keeping the minimum finite positive weight."""
+    out: List[List[Tuple[int, float]]] = []
+    for _v, nbrs in enumerate(adj):
+        best = {}
+        for w, weight in nbrs:
+            wi = int(w)
+            ww = float(weight)
+            if wi not in best or ww < best[wi]:
+                best[wi] = ww
+        out.append([(w, best[w]) for w in sorted(best)])
+    return out
+
+
+def _dedupe_unweighted_adj(adj: List[List[int]]) -> List[List[int]]:
+    """Collapse parallel neighbor entries in unweighted adjacency lists."""
+    return [sorted({int(w) for w in nbrs}) for nbrs in adj]
 
 
 def dijkstra_weighted(*, start: int, adj: List[List[Tuple[int, float]]], strict: bool = False) -> List[float]:
@@ -140,6 +171,7 @@ def betweenness_centrality_weighted(*, n: int, adj: List[List[Tuple[int, float]]
     """
     validate_positive_weights(adj)
     validate_symmetric_adjacency(adj)
+    adj = _dedupe_weighted_adj(adj)
     bc = [0.0] * int(n)
     eps = 1e-12
     for s in range(int(n)):
@@ -225,6 +257,7 @@ def betweenness_centrality_unweighted(*, n: int, adj: List[List[int]]) -> List[f
     normalization would silently halve every score on a directed graph.
     """
     validate_symmetric_adjacency(adj)
+    adj = _dedupe_unweighted_adj(adj)
     bc = [0.0] * int(n)
     for s in range(int(n)):
         stack: List[int] = []
@@ -259,3 +292,185 @@ def betweenness_centrality_unweighted(*, n: int, adj: List[List[int]]) -> List[f
     for i in range(int(n)):
         bc[i] = bc[i] * 0.5
     return bc
+
+
+def _clean_simple_nbr_sets(*, n: int, adj: List[List[int]]) -> List[set]:
+    validate_symmetric_adjacency(adj)
+    clean = _dedupe_unweighted_adj(adj)
+    return [{int(v) for v in clean[i] if int(v) != i and 0 <= int(v) < int(n)} for i in range(int(n))]
+
+
+def local_clustering_coefficients(*, n: int, adj: List[List[int]]) -> List[float]:
+    """Watts & Strogatz (1998) local clustering coefficient per node: C_i = 2 e_i / (k_i (k_i - 1))."""
+    nn = int(n)
+    if nn <= 0:
+        return []
+    nbr_sets = _clean_simple_nbr_sets(n=nn, adj=adj)
+    out = [0.0] * nn
+    for i in range(nn):
+        nbrs = nbr_sets[i]
+        k = len(nbrs)
+        if k < 2:
+            continue
+        doubled_edges = 0
+        for u in nbrs:
+            doubled_edges += len(nbrs & nbr_sets[u])
+        out[i] = float(doubled_edges) / float(k * (k - 1))
+    return out
+
+
+def global_transitivity(*, n: int, adj: List[List[int]]) -> float:
+    """Global graph transitivity: 3 * triangles / connected_triples."""
+    nn = int(n)
+    if nn <= 2:
+        return 0.0
+    nbr_sets = _clean_simple_nbr_sets(n=nn, adj=adj)
+    wedges = 0
+    closed_wedges = 0
+    for i in range(nn):
+        nbrs = nbr_sets[i]
+        k = len(nbrs)
+        if k < 2:
+            continue
+        wedges += (k * (k - 1)) // 2
+        doubled_edges = 0
+        for u in nbrs:
+            doubled_edges += len(nbrs & nbr_sets[u])
+        closed_wedges += doubled_edges // 2
+    if wedges <= 0:
+        return 0.0
+    return float(closed_wedges) / float(wedges)
+
+
+def harmonic_centrality_unweighted(*, n: int, adj: List[List[int]]) -> List[float]:
+    """Boldi & Vigna (2014) normalized harmonic centrality: (1/(n-1)) * sum_{j != i} 1/d(i, j)."""
+    nn = int(n)
+    if nn <= 0:
+        return []
+    if nn == 1:
+        return [0.0]
+    clean = _dedupe_unweighted_adj(adj)
+    out = [0.0] * nn
+    denom = float(nn - 1)
+    for s in range(nn):
+        dist = [-1] * nn
+        dist[s] = 0
+        q = deque([s])
+        while q:
+            v = q.popleft()
+            dv = dist[v] + 1
+            for w in clean[v]:
+                if dist[w] < 0:
+                    dist[w] = dv
+                    q.append(w)
+        inv_sum = 0.0
+        for t in range(nn):
+            if t != s and dist[t] > 0:
+                inv_sum += 1.0 / float(dist[t])
+        out[s] = inv_sum / denom
+    return out
+
+
+def harmonic_centrality_weighted(*, n: int, adj: List[List[tuple]]) -> List[float]:
+    """Weighted normalized harmonic centrality (Boldi & Vigna 2014) via Dijkstra distances."""
+    import heapq
+    import math
+
+    nn = int(n)
+    if nn <= 0:
+        return []
+    if len(adj) != nn:
+        raise ValueError(f"Adjacency length {len(adj)} does not match n={nn}")
+
+    dedup = []
+    for u in range(nn):
+        best_map = {}
+        for item in adj[u]:
+            v, raw_w = int(item[0]), float(item[1])
+            if (not math.isfinite(raw_w)) or raw_w <= 0.0:
+                raise ValueError(f"Weighted harmonic centrality requires positive finite weights (edge {u}->{v}: {raw_w})")
+            if v == u:
+                continue
+            prev = best_map.get(v)
+            if prev is None or raw_w < prev:
+                best_map[v] = raw_w
+        dedup.append(best_map)
+
+    for u in range(nn):
+        for v, w in dedup[u].items():
+            rev = dedup[v].get(u)
+            if rev is None or not math.isclose(w, rev, rel_tol=1e-9, abs_tol=1e-12):
+                raise ValueError(f"Asymmetric weighted adjacency for edge ({u}, {v})")
+
+    if nn == 1:
+        return [0.0]
+
+    out = [0.0] * nn
+    denom = float(nn - 1)
+    for s in range(nn):
+        dist = [math.inf] * nn
+        dist[s] = 0.0
+        pq = [(0.0, s)]
+        while pq:
+            d, u = heapq.heappop(pq)
+            if d > dist[u]:
+                continue
+            for v, w in dedup[u].items():
+                nd = d + w
+                if nd < dist[v]:
+                    dist[v] = nd
+                    heapq.heappush(pq, (nd, v))
+        inv_sum = 0.0
+        for t in range(nn):
+            if t != s and math.isfinite(dist[t]) and dist[t] > 0.0:
+                inv_sum += 1.0 / float(dist[t])
+        out[s] = inv_sum / denom
+    return out
+
+
+def graph_summary(*, n: int, adj: List[List[int]]) -> dict:
+    """Summarize undirected graph topology (components, density, Watts-Strogatz clustering)."""
+    nn = int(n)
+    if nn <= 0:
+        return {
+            "n_nodes": 0,
+            "n_edges": 0,
+            "density": 0.0,
+            "n_components": 0,
+            "largest_component_size": 0,
+            "avg_clustering": 0.0,
+            "transitivity": 0.0,
+        }
+    nbr_sets = _clean_simple_nbr_sets(n=nn, adj=adj)
+    n_edges = sum(len(s) for s in nbr_sets) // 2
+    density = (2.0 * float(n_edges)) / float(nn * (nn - 1)) if nn > 1 else 0.0
+
+    visited = [False] * nn
+    comp_sizes = []
+    for s in range(nn):
+        if visited[s]:
+            continue
+        visited[s] = True
+        q = deque([s])
+        sz = 0
+        while q:
+            u = q.popleft()
+            sz += 1
+            for v in nbr_sets[u]:
+                if not visited[v]:
+                    visited[v] = True
+                    q.append(v)
+        comp_sizes.append(sz)
+
+    clean = [sorted(s) for s in nbr_sets]
+    cc = local_clustering_coefficients(n=nn, adj=clean)
+    trans = global_transitivity(n=nn, adj=clean)
+    return {
+        "n_nodes": nn,
+        "n_edges": int(n_edges),
+        "density": float(density),
+        "n_components": int(len(comp_sizes)),
+        "largest_component_size": int(max(comp_sizes) if comp_sizes else 0),
+        "avg_clustering": float(sum(cc) / float(nn)),
+        "transitivity": float(trans),
+    }
