@@ -31,15 +31,27 @@ class ScholarNotesTests(unittest.TestCase):
                 self.assertIn(m["label"], ("A", "B", "C"), msg=tool)
                 self.assertTrue(m["origin"].strip() and m["intent"].strip(), msg=f"{tool}: empty text")
 
-    def test_every_cited_author_appears_in_references_md(self):
+    def test_every_tool_has_at_least_one_reference(self):
+        used = set()
+        for tool, note in scholar_notes.NOTES.items():
+            refs = [k for m in note["methods"] for k in m["refs"]]
+            self.assertTrue(refs, msg=f"{tool}: has no verified references")
+            used.update(refs)
+        unused = sorted(set(scholar_notes._R.keys()) - used)
+        self.assertEqual(unused, [], msg=f"unused _R entries: {unused}")
+
+    def test_every_cited_author_and_doi_appears_in_references_md(self):
         # The notes may not cite anything REFERENCES.md does not carry.
-        refs_md = open(os.path.join(ROOT, "REFERENCES.md"), encoding="utf-8").read()
+        with open(os.path.join(ROOT, "REFERENCES.md"), encoding="utf-8") as _f:
+            refs_md = _f.read()
         for key, line in scholar_notes._R.items():
-            surname = re.split(r"[,(]", line, maxsplit=1)[0].strip()
-            surname = surname.split()[0] if surname else ""
-            if not surname or not surname.isascii():
-                continue
-            self.assertIn(surname, refs_md, msg=f"{key}: {surname} not in REFERENCES.md")
+            lead = re.split(r"[,(.\s]", line.strip(), maxsplit=1)[0].strip()
+            self.assertTrue(lead, msg=f"{key}: empty citation line")
+            self.assertIn(lead, refs_md, msg=f"{key}: {lead!r} not in REFERENCES.md")
+            for tag_re in (r"DOI:\s*(\S+)", r"PMID:\s*(\d+)"):
+                m = re.search(tag_re, line)
+                if m:
+                    self.assertIn(m.group(1), refs_md, msg=f"{key}: {m.group(0)} not in REFERENCES.md")
 
     def test_html_is_well_formed_and_escaped(self):
         for tool in scholar_notes.available_tools():
