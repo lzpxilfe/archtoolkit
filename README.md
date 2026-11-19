@@ -256,7 +256,7 @@ $qgis = "C:\Program Files\QGIS 3.40.5"
   publisher = {Zenodo},
   version   = {0.1.7},
   doi       = {10.5281/zenodo.24363820},
-  url       = {https://doi.org/10.5281/zenodo.24363820}
+  url       = {https://github.com/lzpxilfe/archtoolkit}
 }
 ```
 
