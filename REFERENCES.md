@@ -110,7 +110,7 @@
 **(B) 원형 평균 방위($\bar{\theta}$), 집중도($\bar{R}$), 대칭 능선 축방향 $2\theta$ 변환** — `tools/slope_aspect_drafting_dialog.py`(경사 가중 블록 평균 방위), `tools/trench_suggestion_dialog.py`(능선 축방향 $2\theta$ 폴백), `tools/ai_aoi_summary.py`(사면방향 래스터 원형 통계):
 > Mardia, K.V., & Jupp, P.E. (2000). *Directional Statistics*. John Wiley & Sons. DOI: 10.1002/9780470316979
 
-주: 각도(0–360°)에 산술 평균을 적용하면 355°(북서)와 5°(북동)의 평균이 180°(정남)가 되는 오류가 발생합니다. 본 플러그인은 방향 통계의 표준 벡터 평균 $\bar{\theta} = \operatorname{atan2}(\sum w_i \sin\theta_i, \sum w_i \cos\theta_i) \bmod 360°$와 평균합벡터 길이 $\bar{R}$을 사용하며, 양측 사면이 대칭으로 상쇄되는 능선에서는 $2\theta$ 배각 축방향 통계를 보조로 적용합니다.
+주: 각도(0–360°)에 산술 평균을 적용하면 355°(북서)와 5°(북동)의 평균이 180°(정남)가 되는 오류가 발생합니다. 본 플러그인은 방향 통계의 표준 벡터 평균 $\bar{\theta} = \mathrm{atan2}\left(\sum w_i \sin\theta_i, \sum w_i \cos\theta_i\right) \;\mathrm{mod}\; 360^\circ$와 평균합벡터 길이 $\bar{R}$을 사용하며, 양측 사면이 대칭으로 상쇄되는 능선에서는 $2\theta$ 배각 축방향 통계를 보조로 적용합니다.
 
 ### 지형 거칠기 지수 TRI (Terrain Ruggedness Index)
 
@@ -120,7 +120,7 @@
 주(등급 구분은 플러그인 정의): Riley 등(1999)이 제시한 것은 **절대 미터 값 기준의 7등급**(0–80 level, 81–116 nearly level, 117–161 slightly rugged, 162–239 intermediately rugged, 240–497 moderately rugged, 498–958 highly rugged, 959–4367 extremely rugged)입니다. 본 플러그인의 5등급은 사용자가 입력한 `험준기준`에 비례 배분한 표시 구분입니다.
 
 **(B) 반경 확장 TRI (정규화 RMS 형태)** — `tools/terrain_math.py`의 `tri_radius`:
-> 반경 2셀 이상에서는 $\sqrt{\operatorname{mean}((z_{\text{center}} - z_{\text{neighbor}})^2)}$, 즉 Riley 지수를 $\sqrt{N}$으로 나눈 평균제곱근(RMS) 형태를 직접 계산합니다(3x3 전체 창에서는 $\sqrt{8}$배 차이). 단위가 3x3 Riley 지수와 다르므로 별도 지표로 해석해야 합니다.
+> 반경 2셀 이상에서는 $\sqrt{\frac{1}{N}\sum (z_{\text{center}} - z_{\text{neighbor}})^2}$, 즉 Riley 지수를 $\sqrt{N}$으로 나눈 평균제곱근(RMS) 형태를 직접 계산합니다(3x3 전체 창에서는 $\sqrt{8}$배 차이). 단위가 3x3 Riley 지수와 다르므로 별도 지표로 해석해야 합니다.
 
 ### 지형 위치 지수 TPI 및 지형 위치 6분류 (TPI & Landform Classification)
 
@@ -310,7 +310,7 @@
 **(B) 쌍대비교 주고유벡터 가중치 및 일관성비율(CR)** — `tools/ahp_core.py`:
 > Saaty, T.L. (1980). *The Analytic Hierarchy Process*. McGraw-Hill.
 
-**(B) 무작위 지수(RI) 확장 표 ($n = 11\text{–}15$):**
+**(B) 무작위 지수(RI) 확장 표 ($11 \le n \le 15$):**
 > Alonso, J.A., & Lamata, M.T. (2006). "Consistency in the Analytic Hierarchy Process: a new approach." *International Journal of Uncertainty, Fuzziness and Knowledge-Based Systems*, 14(4), pp. 445–459. DOI: 10.1142/S0218488506004114
 
 **(B) 일대일(OAT) 기준 가중치 민감도 분석** — `tools/ahp_core.py`의 `oat_weight_sensitivity`:
