@@ -35,19 +35,19 @@ ArchToolkit은 한국 고고학·문화유산 조사와 연구에서 반복되�
 
 | 원칙 | 내용 |
 | --- | --- |
-| **전 도구 1차 출처 검증** | 19개 도구 모두 도움말 끝에 **학술 근거와 권장 절차**가 붙습니다. 논문·DOI·지도학 표준·국내 법령 86건을 검증해 [REFERENCES.md](REFERENCES.md)에 수록했고, 테스트(`tests/test_scholar_notes.py`)로 동기화를 강제합니다. |
+| **전 도구 1차 출처 검증** | 19개 도구 모두 도움말 끝에 **학술 근거와 권장 절차**가 붙습니다. 논문·DOI·지도학 표준·국내 법령 88건을 검증해 [REFERENCES.md](REFERENCES.md)에 수록했고, 테스트(`tests/test_scholar_notes.py`)로 동기화를 강제합니다. |
 | **출처 분리 (A / B / C)** | `(A)` QGIS·GDAL 호출, `(B)` 직접 구현 수식, `(C)` 맥락·표준·후속 참고를 명확히 구분합니다. 표시 등급이나 트렌치 점수식처럼 플러그인이 정한 규칙은 "플러그인 정의"·"휴리스틱"이라고 밝힙니다. |
 | **좌표계·수치 왜곡 차단** | 지리좌표계(도)뿐 아니라 한반도에서 거리 약 25%·면적 약 60%를 과대 계산하는 웹 메르카토르(`EPSG:3857`)의 미터 오인을 차단하고, 정밀 NoData·북향 격자·원형 방위 통계·2D SAT 교차 판정을 적용합니다. |
-| **재현성과 원자적 출력** | 모든 결과 레이어에 도구·실행 ID·단위·전체 실행 파라미터(`params_json`)를 기록하고, 다중 파일 출력은 스테이징 후 원자적으로 게시(실패 시 롤백)합니다. |
-| **조용히 넘어가지 않음** | 좌표변환 실패, 쓰기 오류, NoData, 위상 오류, 스캔 한도 절단, 색 매칭 실패, 도엽 간 코드 충돌, 검사 불가 가시선 쌍을 경고·필드·로그로 드러내며, 긴 연산은 작업 관리자에서 취소할 수 있습니다. |
-| **자동 테스트와 회귀 검증** | 단위·통합 테스트 667건(실제 QGIS 3.40 LTR + Processing 검증), 정적·PyQt6 검사, 27개 시나리오 [회귀 하네스](tests/regression/README.md)로 변경을 검증합니다. |
+| **재현성과 원자적 출력** | 모든 결과 레이어에 도구·실행 ID·단위·연구 활용 등급(`research_scope`)·해석 유의사항(`caveat`)·전체 실행 파라미터(`params_json`)를 기록하고, 다중 파일 출력은 스테이징 후 원자적으로 게시합니다. |
+| **조용히 넘어가지 않음** | 좌표변환 실패, 쓰기 오류, NoData, 위상 오류, 스캔 한도 절단, 색 매칭 실패, 도엽 간 코드 충돌, Kriging 이방성·추세 이탈, 검사 불가 가시선 쌍을 경고·필드·로그로 드러내며, 긴 연산은 작업 관리자에서 취소할 수 있습니다. |
+| **외부 교차 벤치마크 & 자동 검증** | 단위·통합 테스트 674건(실제 QGIS 3.40 LTR + Processing 검증)과 GRASS GIS 8.4·R 4.5(`igraph`/`terra`/`stats`)·GDAL·SciPy·NetworkX·Shapely 대비 실측 오차표([docs/BENCHMARK.md](docs/BENCHMARK.md))를 공개합니다. |
 
 ### 0.1.7 주요 업데이트
 
 - **좌표계·파일 무결성**: 웹 메르카토르(`EPSG:3857`) 미터 오인 전면 차단, 네이티브 자료형 정밀 NoData 비교, 북향 격자 검증, GDAL 쓰기 오류 검증 및 다중 파일 원자적 롤백.
-- **물리·통계·네트워크 정교화**: Herzog 에너지 모드 실제 대사 `kcal` 산출, 보행 70° 절벽 차단·대각 장벽 관통 방지, Kriging 고기복 행렬 스케일링·Cressie WLS 직접 적합, 스케일 불변 매개중심성·RNG, VIF z-표준화·원형-선형 정확 F-검정, 계층형 AHP 그룹·하위 CR 분리 보고.
-- **도구별 정직성**: 트렌치 2D SAT 발자국 경사 검사·대칭 능선 `2θ` 방위, 가시권 비정사각 DEM 역변환·다중 누적 카운트 보존, 사면방향 원형 평균 통계, 지구화학도 프리멀티플라이 알파 제외, 지질도 ZIP CP949/UTF-8 한글 복원, AI 조사요약 범위 변경 시 전송 재확인.
-- **전 도구 출처 완비**: 19개 전 도구와 공통 공간 기반에 검증된 레퍼런스 86건(DOI·표준·법령)을 연결했습니다. 자세한 이력은 [CHANGELOG.md](CHANGELOG.md)에 있습니다.
+- **물리·통계·네트워크 정교화**: **16방향 나이트 이동(최대 격자 신장오차 8.24% -> 2.75%)**, Herzog 실제 대사 `kcal`, 보행 70° 절벽 차단·장벽 관통 방지, Kriging 고기복 스케일링·Cressie WLS·Gaussian 너겟 안정화·**4방위 이방성/평면 추세 자동 진단**, 스케일 불변 매개중심성·RNG, VIF z-표준화·원형-선형 정확 F-검정, 계층형 AHP 그룹·하위 CR 분리 보고.
+- **도구별 정직성과 연구 유의 안내**: Tier 2·Tier 3 대화상자 상단 안내 배너 및 `research_scope`/`caveat` 메타데이터 자동 기록, 트렌치 2D SAT 발자국 경사·대칭 능선 `2θ` 방위, 가시권 비정사각 DEM 역변환·다중 누적 카운트 보존, 사면방향 원형 통계, 지구화학도 프리멀티플라이 알파 제외, 지질도 ZIP CP949/UTF-8 복원.
+- **전 도구 출처·외부 교차 벤치마크·연구 가이드**: 19개 전 도구 검증 레퍼런스 88건, 외부 기준 소프트웨어 교차 벤치마크([docs/BENCHMARK.md](docs/BENCHMARK.md)), 학술 논문 활용 가이드([docs/RESEARCH_GUIDE.md](docs/RESEARCH_GUIDE.md)), Zenodo DOI 메타데이터(`.zenodo.json`). 자세한 이력은 [CHANGELOG.md](CHANGELOG.md)에 있습니다.
 
 ---
 
@@ -72,7 +72,7 @@ ArchToolkit은 한국 고고학·문화유산 조사와 연구에서 반복되�
 | <img src="icons/terrain.png" width="48" alt="지형 분석"> | **지형 분석** | 경사·사면방향·TPI(누적합표)·지형 위치 6분류·TRI·거칠기·곡률·사면 파생(TRASP) | Horn 1981; Weiss 2001; Crow 1984; Riley et al. 1999; Wilson et al. 2007; Zevenbergen & Thorne 1987; Roberts & Cooper 1989; 산림청 예규 |
 | <img src="icons/slope_aspect.png" width="48" alt="경사도/사면방향 도면화"> | **경사·사면 도면화** | AOI 기준 인쇄용 경사 래스터와 경사 가중 원형 평균 방위 화살표 | Horn 1981; Mardia & Jupp 2000; Imhof 1982 |
 | <img src="icons/viewshed.png" width="48" alt="가시권 분석"> | **가시권 분석** | 단일·누적·가중 누적·역·선형 가시권, LOS 단면, 히구치 거리대, 곡률·굴절 보정 | Wang et al. 2000; Yoeli 1985; Fisher 1993; Higuchi 1975/1983; Wheatley 1995; Čučković 2016 |
-| <img src="icons/cost.png" width="48" alt="비용표면/최소비용경로"> | **비용표면 / LCP** | 시간·에너지 비용표면(절벽 차단·대각 장벽 보호), 최소비용경로, 회랑, 등시선 | Tobler 1993; Naismith 1892; Pandolf et al. 1977 (Santee et al. 2001); Minetti et al. 2002; Herzog 2013; Dijkstra 1959; Hart et al. 1968 |
+| <img src="icons/cost.png" width="48" alt="비용표면/최소비용경로"> | **비용표면 / LCP** | 시간·에너지 비용표면(16방향 나이트 이동·절벽/장벽 보호), 최소비용경로, 회랑, 등시선 | Tobler 1993; Naismith 1892; Pandolf et al. 1977 (Santee et al. 2001); Minetti et al. 2002; Herzog 2013; Huber & Church 1985; Dijkstra 1959; Hart et al. 1968 |
 | <img src="icons/network.png" width="48" alt="최소비용 네트워크"> | **최소비용 네트워크** | 유적 간 최소비용경로 기반 MST·k-NN·허브 네트워크와 중심성·군집계수 | Kruskal 1956; Freeman 1979; Brandes 2001; Wasserman & Faust 1994; Watts & Strogatz 1998; Boldi & Vigna 2014 |
 | <img src="icons/spatial_network.png" width="48" alt="근접/가시성 네트워크"> | **근접·가시성 네트워크** | PPA(k-NN·반경·Delaunay·Gabriel·RNG)와 곡률 보정 상호가시성 네트워크·SNA | Terrell 1977; Delaunay 1934; Gabriel & Sokal 1969; Toussaint 1980; Yoeli 1985; Van Dyke et al. 2016 |
 
@@ -94,7 +94,7 @@ ArchToolkit은 한국 고고학·문화유산 조사와 연구에서 반복되�
 | <img src="icons/styling.png" width="48" alt="도면 시각화"> | **도면 시각화** | 수치지형도 DXF 표준코드 스타일·DEM 음영기복/그레이/고도색상·프리셋 내보내기 | Horn 1981; 국토지리정보원 Ver 5.1.1; Imhof 1982; Harrower & Brewer 2003 |
 | <img src="icons/ai_report.png" width="48" alt="AI 조사요약"> | **AI 조사요약** | AOI·버퍼 주변 벡터/래스터(원형 통계 포함) 로컬 번들 생성 및 동의 기반 Gemini 초안 | Karney 2013; Mardia & Jupp 2000; OWASP CSV; Wilkinson et al. 2016 (FAIR); Carroll et al. 2020 (CARE); 매장유산법 |
 
-> 공통 측지·투영·소프트웨어 기반(`Karney 2013`, `Snyder 1987`, `Battersby et al. 2014`, `GDAL/OGR 2026`, `OGC SFA`)과 전체 86건의 검증된 서지·DOI는 [REFERENCES.md](REFERENCES.md)에 있습니다.
+> 공통 측지·투영·소프트웨어 기반(`Karney 2013`, `Snyder 1987`, `Battersby et al. 2014`, `GDAL/OGR 2026`, `OGC SFA`)과 전체 88건의 검증된 서지·DOI는 [REFERENCES.md](REFERENCES.md)에 있습니다.
 
 <p align="center">
   <img src="docs/images/viewshed.png" alt="가시권 분석" width="31%">
@@ -148,7 +148,8 @@ Linux:   ~/.local/share/QGIS/QGIS3/profiles/default/python/plugins/ArchToolkit
 | `archtoolkit/tool_id` | 생성 도구 식별자 |
 | `archtoolkit/run_id` | 같은 실행의 레이어를 묶는 실행 ID |
 | `archtoolkit/kind`, `archtoolkit/units` | 변수 유형(연속·범주·방향)과 단위(`deg`, `m`, `s`, `kcal`, `index` 등) |
-| `archtoolkit/params_json` | 반경·임계값·모델·좌표계·면적 방식 등 전체 실행 파라미터 |
+| `archtoolkit/research_scope`, `archtoolkit/caveat` | 연구 활용 등급(`tier1_standard` / `tier2_conditional` / `tier3_exploratory_aid`)과 해석 유의사항 |
+| `archtoolkit/params_json` | 반경·임계값·모델·좌표계·연결성·면적 방식 등 전체 실행 파라미터 |
 
 `정렬/내보내기`, `변수 상관/VIF`, `AHP 입지적합도`, `AI 조사요약`은 이 메타데이터를 읽어 범주형·방향 변수를 올바르게 처리합니다.
 
@@ -162,7 +163,7 @@ Linux:   ~/.local/share/QGIS/QGIS3/profiles/default/python/plugins/ArchToolkit
 - **추정값·휴리스틱·비법정 참고**: Kriging 분산은 국소 모형 가정에 의존하고, 지구화학도 값은 WMS 색상 역추정값입니다. 트렌치 제안은 현장 보조 휴리스틱이며, 지적도 중첩 면적은 법적 공부 면적을 대체하지 않습니다.
 - **AI 외부 전송 주의**: 로컬 요약 모드는 외부 전송이 없습니다. Gemini 모드는 사전 동의 후 AOI 요약 통계와 유적 거리·방위를 외부 API로 보내므로, 민감한 매장유산 위치정보는 검토 후 사용하세요.
 
-전체 목록은 [docs/TOOLS.md](docs/TOOLS.md#해석-주의)에 있습니다.
+전체 목록과 도구별 논문 기술 가이드는 [docs/RESEARCH_GUIDE.md](docs/RESEARCH_GUIDE.md) 및 [docs/TOOLS.md](docs/TOOLS.md#해석-주의)에 있습니다.
 
 ---
 
@@ -199,7 +200,9 @@ CI(`.github/workflows/ci.yml`)는 push마다 순수 테스트·정적 검사·fl
 
 | 문서 | 내용 |
 | --- | --- |
-| [REFERENCES.md](REFERENCES.md) | 19개 도구·공통 공간 기반 학술·표준·법령 출처 86건 (A/B/C 표기, DOI 검증) |
+| [REFERENCES.md](REFERENCES.md) | 19개 도구·공통 공간 기반 학술·표준·법령 출처 88건 (A/B/C 표기, DOI 검증) |
+| [docs/BENCHMARK.md](docs/BENCHMARK.md) | 외부 기준 소프트웨어(GRASS 8.4 · R 4.5 · GDAL · SciPy · NetworkX · Shapely) 실측 교차 벤치마크 |
+| [docs/RESEARCH_GUIDE.md](docs/RESEARCH_GUIDE.md) | 학술 연구 활용 등급(Tier 1–3), 논문 Methods 절 기재 체크리스트, 심사 대응 가이드 |
 | [docs/TOOLS.md](docs/TOOLS.md) | 19개 도구별 상세 기능과 해석 주의 |
 | [docs/GALLERY.md](docs/GALLERY.md) | 모든 도구 실행 화면 |
 | [docs/AHP_GUIDE.md](docs/AHP_GUIDE.md) | AHP 입지적합도 사용 설명서 |

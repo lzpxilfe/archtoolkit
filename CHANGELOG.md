@@ -13,8 +13,8 @@
 - **범주형 메타데이터 정교화**: `distance_geology` 같은 연속 거리 래스터가 범주형으로 오분류되지 않도록 보호하고, 환경부 세분류 토지피복(41클래스) 등을 포괄하도록 `CLASS_CODE_MAX_DISTINCT`를 64로 확장했습니다.
 
 ### 핵심 수학·통계·알고리즘 정직성
-- **이동비용 모델·엔진**: Herzog 메타볼릭 모드가 에너지 모드(`energy_j`)에서 실제 대사 줄(`body_kg * C(s) * horiz_m`, `kcal` 표시)을 반환하도록 교정. 보행 모델에 70° 절벽 차단과 급경사 3D 표면거리 보정을 적용. Pandolf 내리막 하한을 하중 포함 기립 대사율(`1.5·W + 2.0·(W+L)·(L/W)²`)로 교정. A*/Dijkstra에서 1픽셀 대각선 NoData 장벽·고마찰 하천 관통(터널링)을 차단. 비용표면 `+inf` 장벽 보존, Corridor 0% 상대 오차 허용, 버퍼 경계 접촉 경고 추가.
-- **크리깅(Lite)**: 고기복 산지 DEM의 고실(sill) 행렬에 대각 유사 스케일링(equilibration)을 적용해 조건수 붕괴를 해소. 너겟>0 동일 좌표 중복점의 예측분산 및 LOOCV 계산 교정. `fit_variogram_wls`가 Cressie(1985) WLS 목적함수를 직접 최소화하도록 개선.
+- **이동비용 모델·엔진**: **16방향 나이트 이동(Knight's Move; Huber & Church 1985; GRASS `r.walk -k` 대응)** 연결성 옵션을 추가해 평지 최대 격자 신장오차를 8.24%에서 **2.75%** 로 축소(2개 중간 셀 NoData·절벽·마찰 관통 차단 포함). Herzog 메타볼릭 모드가 에너지 모드(`energy_j`)에서 실제 대사 줄(`body_kg * C(s) * horiz_m`, `kcal` 표시)을 반환하도록 교정. 보행 모델에 70° 절벽 차단과 급경사 3D 표면거리 보정을 적용. Pandolf 내리막 하한을 하중 포함 기립 대사율(`1.5·W + 2.0·(W+L)·(L/W)²`)로 교정. A*/Dijkstra에서 1픽셀 대각선 NoData 장벽·고마찰 하천 관통(터널링)을 차단. 비용표면 `+inf` 장벽 보존, Corridor 0% 상대 오차 허용, 버퍼 경계 접촉 경고 추가.
+- **크리깅(Lite)**: 고기복 산지 DEM의 고실(sill) 행렬에 대각 유사 스케일링(equilibration)을 적용해 조건수 붕괴를 해소. 너겟>0 동일 좌표 중복점의 예측분산 및 LOOCV 계산 교정. `fit_variogram_wls`가 Cressie(1985) WLS 목적함수를 직접 최소화하고 Gaussian 모델 무너겟 특이성 방지를 위한 0.5% 실무 너겟 하한(Chilès & Delfiner 2012 §2.5.1)을 적용. **4방위 방향성 이방성 비(GSLIB 대역폭 제한) 및 1차 평면 추세 $R^2$ 가정 자동 진단·경고**(`diagnose_kriging_assumptions`)를 추가.
 - **네트워크·PPA**: 가중 매개중심성(`betweenness_centrality_weighted`)에 settled 가드와 스케일 불변 상대 동점 허용오차를 적용해 30 km 동점 누락·극소 가중치 오판정·중복 팝을 제거. PPA RNG 필터에 스케일 불변 `rel_tol` 적용(5 km 정삼각형 72회전 100% 보존). 가시성 네트워크 LOS 비율 분모를 유효 표본 수로 정정하고 중심성 계산에 하모닉 중심성·취소 검사를 통합.
 - **변수 상관/VIF 리포트**: 상수·이동 상수 열의 피어슨 `r=-1.0` 오산출 차단, 혼합 스케일(`1e-3` vs `1e8`) 공선성 탐지를 위한 VIF z-표준화, 범주형/원형(사면방향) 열의 연속 상관·VIF 행렬 제외, 원형-선형 $R^2$ 자유도($n \ge 4$) 검증 및 정확한 F-검정 $p$-값 산출.
 - **AHP 입지적합도**: 계층형 방법론 보고서에서 평면 시드 행렬/CR 혼입을 제거하고 그룹·하위 CR 표 및 실제 `±delta%` 민감도 범위를 정확히 출력. 연속 구간표의 소수 갭 거부, 그룹명 공백 정규화, OAT 가중치 경계 보호, 사면방향(원형) 래스터의 최근접 리샘플링 강제.
@@ -25,8 +25,11 @@
 - **지구화학도·지질도 ZIP**: 반투명 프리멀티플라이 알파(`<250`) 픽셀의 고농도 오매칭 제거, 회색 무자료(Stop 0) 합성 보간 제거(JPEG 노이즈 Navy 보존·무관 회색 거부), 어두운 사용자 범례 색 보호, CP949 범례 CSV·빈 셀 열 밀림 수정, GeoPackage 저장 후 분류 스타일·한글 별칭 보존, 음수 가중 중심 발산 방지. 지질도 ZIP의 UTF-8 플래그 없는 CP949 한글 도엽명(`화천`/`홍천` 등) 오디코딩 수정, CRS 없는 레이어의 `RuntimeError` 삼킴 제거, 문자열 지질코드(`LITHO`) 라벨·도엽 간 충돌 검출, OOM 셀 한도 및 ZIP 경로 탈출 검사.
 - **AI 조사요약·지적도·거리 래스터·도면 시각화**: AI 요약에서 사면방향(원형) 래스터에 원형 평균 방위·집중도 $R$ 적용, 2클래스 범주형 래스터의 가시비율 오표시 제거, 레이어 이름·CRS·필터 변경 시 캐시 무효화, 범위 변경 시 Gemini 전송 재확인 및 `top_values` 고지, 로컬 폴백 시 모델명 초기화, 이미 완료된 네트워크 응답 데드락 해소, UTF-8 BOM CSV 출력. 지적도 중첩 분할 모드 100% 클램프·위상 오류 건수 경고·합계 동기화. 거리 래스터 `EPSG:3857` 거부 및 남향(South-Up) 기준 래스터 NoData 마스크 정렬. 도면 시각화 `aggregate_features`의 혼합 지오메트리 필터링 및 음영기복 단위(`index`) 정정.
 
-### 검증
-- 신규 회귀 테스트 `tests/test_v017_honest_data.py`(V15–V24, 32건), 강화된 `tests/test_gdal_enums.py`(RTYPE 및 알고리즘별 DATA_TYPE 검증), Windows CI 작업(`.github/workflows/ci.yml`), stdlib `symtable` 미정의 이름 폴백(`tests/check_static.py`) 추가.
+### 검증·학술 투명성·외부 교차 벤치마크
+- **전 도구 연구 활용 등급·유의 배너·메타데이터**: 19개 전 도구에 연구 활용 등급(`tier1_standard` / `tier2_conditional` / `tier3_exploratory_aid`)과 해석 유의사항을 `archtoolkit/research_scope`·`archtoolkit/caveat` 레이어 메타데이터로 자동 기록하고, Tier 2·Tier 3 대화상자 상단에 안내 배너를 표시합니다.
+- **외부 기준 소프트웨어 교차 벤치마크 (`docs/BENCHMARK.md`, `scripts/run_benchmarks.py`)**: 동일 입력에서 GRASS GIS 8.4.1(`r.slope.aspect`, `r.neighbors`, `r.viewshed`, `r.walk`, `r.walk -k`), R 4.5.2(`igraph`, `terra`, `stats`), GDAL 3.10.2, SciPy 1.16.3, NetworkX 3.6.1, Shapely 2.1.2와 교차 비교한 실측 오차표와 재현 스크립트를 수록했습니다.
+- **학술 연구 가이드 및 Zenodo DOI 준비**: [docs/RESEARCH_GUIDE.md](docs/RESEARCH_GUIDE.md)와 `.zenodo.json`을 추가하고 `docs/PUBLISHING.md`에 Zenodo 영구 DOI 발급 절차를 정리했습니다.
+- 신규 회귀 테스트 `tests/test_v017_honest_data.py`(V15–V27, 39건), 강화된 `tests/test_scholar_notes.py`(19개 전 도구 출처·비ASCII 저자·DOI/PMID 동기화), `tests/test_gdal_enums.py`, Windows CI 작업(`.github/workflows/ci.yml`), stdlib `symtable` 미정의 이름 폴백(`tests/check_static.py`) 추가.
 - 실제 QGIS 3.40.5 LTR(GDAL 3.10.2, Processing 활성)과 시스템 Python 3.12에서 전체 단위·통합 테스트, `check_static.py`, `check_release_identity.py`, `build_plugin_zip.py --check` 통과.
 
 ## 0.1.6 (2026-10-08)

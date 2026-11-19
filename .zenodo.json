@@ -1,0 +1,31 @@
+{
+  "title": "ArchToolkit: Archaeology Toolkit for QGIS",
+  "upload_type": "software",
+  "description": "Comprehensive QGIS plugin for Korean archaeology and cultural heritage GIS workflows (19 tools: DEM generation with TIN/IDW/Ordinary Kriging, terrain derivatives, viewshed/LOS, 4/8/16-neighbor least-cost surface & network, PPA/intervisibility network, AHP suitability with OAT sensitivity, covariate correlation/VIF, KIGAM geology & geochem helpers, cadastral overlap, terrain profile, trench suggestion, map styling, and AOI reporting). Verified against 667+ automated tests and external cross-benchmarks (GRASS GIS 8.4, R 4.5 igraph/terra/stats, GDAL 3.10, SciPy, NetworkX, Shapely).",
+  "creators": [
+    {
+      "name": "Hwang, Jinseo"
+    }
+  ],
+  "license": "GPL-3.0-or-later",
+  "access_right": "open",
+  "keywords": [
+    "archaeology",
+    "digital archaeology",
+    "cultural heritage",
+    "QGIS",
+    "GIS",
+    "spatial analysis",
+    "least-cost path",
+    "viewshed",
+    "archaeological network analysis",
+    "research software"
+  ],
+  "related_identifiers": [
+    {
+      "identifier": "https://github.com/lzpxilfe/archtoolkit",
+      "relation": "isSupplementTo",
+      "scheme": "url"
+    }
+  ]
+}

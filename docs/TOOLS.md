@@ -8,7 +8,7 @@
 - 등고선·표고점·3D 포인트에서 `TIN - Linear`(Delaunay 1934), `TIN - Clough-Tocher`(Clough & Tocher 1965), `IDW`(Shepard 1968), `Kriging (Lite, Ordinary)`(Matheron 1963; Cressie 1985)로 DEM을 만듭니다.
 - 표고 필드(ELEV·표고·고도·Elevation 등)를 자동 인식하고, 필드도 3D 좌표도 없는 2D 레이어는 실행을 거부합니다(빈 DEM을 "완료"로 보고하지 않음).
 - 출력 격자는 픽셀 크기의 정수배로 스냅되며, 실제 x/y 픽셀 크기가 메타데이터에 기록됩니다.
-- Kriging은 측점에서 입력값을 정확히 재현하며(너겟>0 동일 좌표 중복점 분산 구분 포함, Chilès & Delfiner 2012), 대각 유사 스케일링(Golub & Van Loan 2013)으로 고기복 행렬 조건수를 안정화합니다. 수동 지정 또는 Cressie(1985) WLS 직접 최소화 자동 베리오그램 적합과 LOOCV(RMSE, MAE, MSDR)를 지원합니다. 다만 경량화된 국소 Ordinary Kriging(Lite)이므로 `_variance.tif`는 모델 가정에 의존하는 상대적 불확실성 지도로 해석하십시오.
+- Kriging은 측점에서 입력값을 정확히 재현하며(너겟>0 동일 좌표 중복점 분산 구분 포함, Chilès & Delfiner 2012), 대각 유사 스케일링(Golub & Van Loan 2013)과 Gaussian 무너겟 특이성 방지(0.5% 실무 너겟 하한)로 수치 안정성을 확보합니다. 수동 지정 또는 Cressie(1985) WLS 직접 최소화 자동 베리오그램 적합, LOOCV(RMSE, MAE, MSDR), **4방위 이방성 비·1차 평면 추세 $R^2$ 가정 자동 진단·경고**를 제공합니다. 다만 경량화된 등방성 국소 Ordinary Kriging(Lite)이므로 강한 이방성·추세 경고 시 R(`gstat`) 교차 검증을 권장합니다.
 - 수치지형도 DXF 코드 프리셋은 이 대화상자에서 DXF로 불러온 레이어에만 적용됩니다.
 - 등고선과 표고점을 다른 레이어로 함께 넣을 수 있습니다(점은 점, 선·면은 구조선). 지리 좌표계(도), 웹 메르카토르(`EPSG:3857`), Z가 모두 0인 3D 자료는 거부합니다.
 
@@ -40,7 +40,7 @@
 ### <img src="../icons/cost.png" width="48" alt="" align="absmiddle"> 비용표면/최소비용경로 (Cost Surface / LCP)
 - Tobler(1993; Imhof 1950)·Naismith(1892)·Pandolf(Pandolf et al. 1977; Santee et al. 2001)·Herzog(Minetti et al. 2002; Herzog 2013; Čučković 2025) 모델과 플러그인 정의 상대 경사 비용(Conolly & Lake 2006 논의 참고), 추가 마찰, Dijkstra(1959)·A*(Hart et al. 1968) LCP·회랑·등시선.
 - Herzog 메타볼릭 에너지 모드는 실제 대사 에너지(`body_kg * C(s) * horiz_m`, `kcal` 표시)를 산출하고, Pandolf 내리막은 하중 포함 기립 대사율(`1.5·W + 2.0·(W+L)·(L/W)²`)로 하한 처리합니다. 보행 모델은 70° 초과 절벽을 통행 불가(`+inf`)로 차단하며, A*/Dijkstra는 1픽셀 대각선 NoData·고마찰 장벽 관통(터널링)을 차단합니다.
-- 8방향 격자 누적이라 누적 비용이 측지선 대비 최대 약 8% 과대평가될 수 있습니다(4방향은 약 41%; Goodchild 1977; Douglas 1994). 절대값보다 상대 비교로 해석하십시오(White & Surface-Evans 2012).
+- **16방향 나이트 이동(Knight's Move; Huber & Church 1985; GRASS `r.walk -k` 대응)** 옵션을 켜면 평지 최대 격자 신장오차를 8방향 8.24%에서 **2.75%** 까지 줄일 수 있으며(4방향은 41.4%), 나이트 이동이 가로지르는 2개 중간 셀의 NoData·절벽·마찰을 함께 검사해 1픽셀 장벽 관통을 차단합니다. 그래도 격자 모형이므로 절대 수치보다 상대 비교로 해석하십시오(Goodchild 1977; Douglas 1994; White & Surface-Evans 2012).
 - Pandolf 시간 모드는 경사에 반응하지 않습니다. 상대 경사 비용은 기준 경사(기본 5°)에 따라 결과가 달라지므로 기준 경사를 함께 보고하십시오. 차량/수레(Herzog 2013) 임계경사는 경사도 %입니다(기본 12%: 이 경사에서 비용이 평지의 2배). 마일스톤·프로파일 시간에도 마찰이 반영되고, 모든 모델 변수가 메타데이터에 남습니다.
 
 ### <img src="../icons/network.png" width="48" alt="" align="absmiddle"> 최소비용 네트워크 (Least-cost Network)

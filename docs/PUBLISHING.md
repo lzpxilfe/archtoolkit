@@ -77,3 +77,16 @@ QGIS 4는 PyQt6 위에서 돌고, PyQt6는 스코프 없는 열거형(`Qt.AlignC
 
 - 플러그인 페이지의 다운로드 수·평점·이슈 링크를 확인합니다.
 - 사용자 제보는 GitHub Issues(`tracker`)로 옵니다.
+
+## 8. Zenodo 영구 DOI 발급 (학술 인용용)
+
+저장소 루트에 `.zenodo.json`과 `CITATION.cff`가 준비되어 있으므로 아래 순서로 영구 DOI를 발급할 수 있습니다.
+
+1. https://zenodo.org 에 GitHub 계정으로 로그인하고 **Account → GitHub**에서 `lzpxilfe/archtoolkit` 저장소 스위치를 **ON**으로 켭니다.
+2. GitHub에서 `v0.1.7` 릴리스를 발행합니다(또는 아래 명령으로 태그를 푸시하면 `.github/workflows/release.yml`이 ZIP을 첨부한 릴리스를 자동 생성합니다).
+   ```bash
+   git tag -a v0.1.7 -m "ArchToolkit 0.1.7"
+   git push origin v0.1.7
+   ```
+3. Zenodo가 릴리스 웹훅을 받아 `.zenodo.json` 메타데이터로 **버전 DOI**와 **전체 버전 통합 Concept DOI**를 자동 발급합니다.
+4. 발급된 DOI를 `CITATION.cff`의 `doi:` 필드와 `README.md`의 인용 절에 반영합니다.

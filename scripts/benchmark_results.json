@@ -1,0 +1,216 @@
+{
+  "environment": {
+    "python": "3.12.7",
+    "numpy": "2.3.4",
+    "os": "Windows 10 (AMD64)",
+    "scipy": "1.16.3",
+    "networkx": "3.6.1",
+    "shapely": "2.1.2",
+    "grass": "GRASS GIS 8.4.1",
+    "r": "R version 4.5.2 (2025-10-31 ucrt) | igraph 2.3.3 | terra 1.8.70",
+    "qgis_gdal": "QGIS 3.40.5-Bratislava / GDAL 3.10.2"
+  },
+  "terrain": {
+    "slope_vs_grass_r_slope_aspect": {
+      "n": 9409,
+      "max_abs_diff": 0.00010403422887961256,
+      "rmse": 2.1253666809112e-05,
+      "pearson_r": 0.9999999999918965
+    },
+    "slope_vs_r_terra": {
+      "n": 9409,
+      "max_abs_diff": 0.00010403422876592572,
+      "rmse": 2.125366680924319e-05,
+      "pearson_r": 0.9999999999918968
+    },
+    "aspect_vs_grass_max_deg": 0.003477520765045483,
+    "aspect_vs_grass_rmse_deg": 0.0001115201821595267,
+    "aspect_vs_r_terra_max_deg": 0.0034775207677739672,
+    "aspect_vs_r_terra_rmse_deg": 0.00011152018217716364,
+    "tpi_r1_vs_gdal": {
+      "n": 9409,
+      "max_abs_diff": 3.139714128863602e-05,
+      "rmse": 7.839148312800313e-06,
+      "pearson_r": 0.9999999991111634
+    },
+    "tpi_r1_vs_r_terra": {
+      "n": 9409,
+      "max_abs_diff": 1.6697754290362354e-13,
+      "rmse": 3.0675269114170635e-14,
+      "pearson_r": 1.0
+    },
+    "tpi_r3_vs_grass_r_neighbors": {
+      "n": 8649,
+      "max_abs_diff": 1.2789769243681803e-13,
+      "rmse": 3.295142075877939e-14,
+      "pearson_r": 1.0
+    },
+    "tri_vs_r_terra_riley": {
+      "n": 9409,
+      "max_abs_diff": 2.490342934247103e-05,
+      "rmse": 3.916664211587899e-06,
+      "pearson_r": 0.9999999999986959
+    },
+    "roughness_vs_r_terra": {
+      "n": 9409,
+      "max_abs_diff": 1.5082496105378596e-05,
+      "rmse": 5.349538691816474e-06,
+      "pearson_r": 0.9999999999970955
+    },
+    "zt_profile_curv_vs_exact_calculus": {
+      "n": 9409,
+      "max_abs_diff": 1.0132580809552733e-15,
+      "rmse": 3.1654814275088994e-16,
+      "pearson_r": 1.0
+    },
+    "zt_plan_curv_vs_exact_calculus": {
+      "n": 9409,
+      "max_abs_diff": 1.0246794732160502e-15,
+      "rmse": 2.9348217382151773e-16,
+      "pearson_r": 0.9999999999999997
+    },
+    "profile_curv_sign_and_metric_vs_grass": {
+      "n": 9399,
+      "max_abs_diff": 7.950086343155535e-05,
+      "rmse": 4.583990017109348e-06,
+      "pearson_r": 0.9999985865151654
+    },
+    "raw_profile_curv_corr_with_grass_pcurv": -0.9974108628695627
+  },
+  "viewshed": {
+    "n_cells_in_radius": 6360,
+    "agreement_pct": 99.827,
+    "visible_iou_pct": 99.2829,
+    "cohens_kappa": 0.99526,
+    "tp": 1523,
+    "fp": 10,
+    "fn": 1,
+    "tn": 4826,
+    "at_visible_pct": 24.1,
+    "grass_visible_pct": 23.96
+  },
+  "cost": {
+    "flat_max_elongation_pct": {
+      "archtoolkit_4dir": 41.4214,
+      "archtoolkit_8dir": 8.2392,
+      "archtoolkit_16dir_knight": 2.7486,
+      "grass_rwalk_8dir": 8.2392,
+      "grass_rwalk_16dir_knight": 2.7486
+    },
+    "hilly_naismith_8dir_vs_grass_rwalk": {
+      "n": 10200,
+      "max_abs_diff_s": 1.0231815394945443e-12,
+      "rmse_s": 1.606140484409927e-13,
+      "median_rel_diff_pct": 0.0,
+      "max_rel_diff_pct": 1.2095066523790044e-13,
+      "pearson_r": 1.0
+    },
+    "hilly_naismith_16dir_vs_grass_rwalk_k": {
+      "n": 10200,
+      "max_abs_diff_s": 4.765732938542101,
+      "rmse_s": 1.301180131534236,
+      "median_rel_diff_pct": 0.20833198545173603,
+      "max_rel_diff_pct": 1.9469045126552902,
+      "pearson_r": 0.9999899582812783
+    },
+    "flat_8dir_vs_grass_rwalk": {
+      "n": 4612,
+      "max_abs_diff_s": 0.0,
+      "rmse_s": 0.0,
+      "median_rel_diff_pct": 0.0,
+      "max_rel_diff_pct": 0.0,
+      "pearson_r": 0.9999999999999999
+    },
+    "flat_16dir_vs_grass_rwalk_k": {
+      "n": 4612,
+      "max_abs_diff_s": 1.1368683772161603e-13,
+      "rmse_s": 5.955203571163664e-14,
+      "median_rel_diff_pct": 1.2626336437596826e-14,
+      "max_rel_diff_pct": 3.812459695663461e-14,
+      "pearson_r": 1.0
+    }
+  },
+  "network": {
+    "n_nodes": 25,
+    "n_edges": 48,
+    "vs_networkx": {
+      "betweenness_unweighted_max_diff": 1.7763568394002505e-15,
+      "betweenness_weighted_max_diff": 0.0,
+      "closeness_unweighted_max_diff": 0.0,
+      "closeness_weighted_max_diff": 0.0,
+      "harmonic_unweighted_max_diff": 0.0,
+      "harmonic_weighted_max_diff": 0.0,
+      "clustering_max_diff": 0.0,
+      "mst_total_weight_diff": 0.0
+    },
+    "vs_r_igraph": {
+      "betweenness_unweighted_max_diff": 4.32542890393961e-13,
+      "betweenness_weighted_max_diff": 0.0,
+      "harmonic_unweighted_max_diff": 4.444777879086814e-13,
+      "harmonic_weighted_max_diff": 4.793387908819113e-13,
+      "clustering_max_diff": 3.3334446314370325e-13,
+      "mst_total_weight_diff": 0.0
+    },
+    "mst_total_weight": 176.05
+  },
+  "ppa": {
+    "n_sites": 40,
+    "gabriel_edges": 66,
+    "gabriel_exact_match": true,
+    "rng_edges": 46,
+    "rng_exact_match": true,
+    "equilateral_5km_72rot_preserved": "72/72"
+  },
+  "kriging": {
+    "n_obs": 45,
+    "n_targets": 100,
+    "fitted_model": "gaussian",
+    "pred_max_abs_diff_vs_r": 5.4996007747831754e-11,
+    "var_max_abs_diff_vs_r": 8.659739592076221e-11,
+    "pred0_diff_vs_scipy": 2.3305801732931286e-12,
+    "loocv_rmse_diff_vs_r": 2.5934809855243657e-12,
+    "loocv_msdr_diff_vs_r": 1.698086116164177e-12,
+    "exact_interp_max_residual": 2.1827872842550278e-11,
+    "exact_interp_max_variance": 4.6213699533836916e-11,
+    "loocv_rmse": 2.3348,
+    "loocv_msdr": 0.8553
+  },
+  "covariate_stats": {
+    "n_samples": 500,
+    "pearson_max_diff_vs_r": 5.407896352949138e-13,
+    "pearson_max_diff_vs_scipy": 8.881784197001252e-16,
+    "spearman_max_diff_vs_r": 4.718447854656915e-16,
+    "spearman_max_diff_vs_scipy": 5.551115123125783e-17,
+    "vif_max_rel_diff_vs_r_lm": 3.5536559211005947e-11,
+    "vif_values": [
+      1501.8541,
+      134.6595,
+      2087.3933,
+      1.0133
+    ],
+    "circular_linear_r2_diff_vs_r": 8.482103908136196e-13,
+    "circular_linear_p_diff_vs_r": 1.2551777398438127e-121
+  },
+  "ahp_and_trench": {
+    "ahp": {
+      "5x5": {
+        "weights_max_abs_diff_vs_scipy": 0.0,
+        "lambda_max_diff_vs_scipy": 0.0,
+        "cr_diff_vs_scipy": 0.0,
+        "cr": 0.05301
+      },
+      "12x12": {
+        "weights_max_abs_diff_vs_scipy": 0.0,
+        "lambda_max_diff_vs_scipy": 0.0,
+        "cr_diff_vs_scipy": 0.0,
+        "cr": 0.05918
+      }
+    },
+    "trench_2d_sat_vs_shapely_geos": {
+      "n_trenches": 500,
+      "n_cell_tests": 2726,
+      "exact_matches": 2726,
+      "agreement_pct": 100.0
+    }
+  }
+}

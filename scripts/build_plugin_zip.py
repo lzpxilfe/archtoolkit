@@ -25,7 +25,7 @@ PACKAGE = "ArchToolkit"
 INCLUDE_FILES = (
     "metadata.txt", "__init__.py", "arch_toolkit.py", "LICENSE", "README.md", "REFERENCES.md", "CHANGELOG.md", "CITATION.cff",
     # Text guides the in-plugin help points to (docs/AHP_GUIDE.md is cited by the AHP help).
-    "docs/AHP_GUIDE.md", "docs/TOOLS.md",
+    "docs/AHP_GUIDE.md", "docs/TOOLS.md", "docs/RESEARCH_GUIDE.md", "docs/BENCHMARK.md",
 )
 INCLUDE_DIRS = ("tools", "icons")
 EXCLUDE_DIR_NAMES = {"__pycache__", ".git", ".github", ".agent", "tests", "docs", "scripts", "dist"}
