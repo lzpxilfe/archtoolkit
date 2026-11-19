@@ -105,11 +105,13 @@ class CovariateReportQgisTests(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.tmp, True)
         self.addCleanup(QgsProject.instance().removeAllMapLayers)
         QgsProject.instance().removeAllMapLayers()
+        self._raster_seq = 0
         self.iface = _Iface()
 
     # ------------------------------------------------------------ helpers
     def _raster(self, name, arr, nodata=-9999.0):
-        path = os.path.join(self.tmp, f"{name}.tif")
+        self._raster_seq += 1
+        path = os.path.join(self.tmp, f"{name}_{self._raster_seq}.tif")
         ds = gdal.GetDriverByName("GTiff").Create(path, arr.shape[1], arr.shape[0], 1, gdal.GDT_Float32)
         ds.SetGeoTransform((XMIN, PX, 0.0, YMAX, 0.0, -PX))
         srs = osr.SpatialReference()
@@ -119,6 +121,7 @@ class CovariateReportQgisTests(unittest.TestCase):
         band.SetNoDataValue(nodata)
         band.WriteArray(arr.astype(np.float32))
         band.FlushCache()
+        band = None
         ds = None
         layer = QgsRasterLayer(path, name, "gdal")
         self.assertTrue(layer.isValid(), path)

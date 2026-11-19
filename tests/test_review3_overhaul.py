@@ -380,7 +380,15 @@ class Review3OverhaulTests(unittest.TestCase):
         ]
         self.assertEqual(len(out_lyrs), 1)
         out_tif = out_lyrs[0].source().split("|", 1)[0]
-        self.addCleanup(lambda p=out_tif: os.path.exists(p) and os.remove(p))
+        out_id = out_lyrs[0].id()
+
+        def _cleanup_out(p=out_tif, lid=out_id):
+            if QgsProject.instance().mapLayer(lid) is not None:
+                QgsProject.instance().removeMapLayer(lid)
+            if os.path.exists(p):
+                os.remove(p)
+
+        self.addCleanup(_cleanup_out)
         ds = gdal.Open(out_tif)
         self.assertEqual((ds.RasterXSize, ds.RasterYSize), (30, 25))
         dist = ds.GetRasterBand(1).ReadAsArray()

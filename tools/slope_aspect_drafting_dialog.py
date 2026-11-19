@@ -550,30 +550,20 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
                     col2 = min(col + step_cells, xsize)
                     if col2 <= col:
                         continue
-                    _skip_446 = False
-                    try:
-                        sample_r = dr + ((row2 - row) // 2)
-                        sample_c = col + ((col2 - col) // 2)
-                        slope = float(arr[sample_r, sample_c])
-                    except Exception as _exc:
-                        log_swallowed("slope_aspect_drafting_dialog._build_slope_grid_layer", _exc)
-                        log_swallowed("tools/slope_aspect_drafting_dialog.py:450 (_build_slope_grid_layer)", _exc)
-                        _skip_446 = True
-                    if _skip_446:
+                    # Block-average all valid slope cells (not just one centre
+                    # pixel) so micro-spikes or a NoData centre cell do not
+                    # distort or drop an otherwise valid drafting block.
+                    blk_sum = 0.0
+                    blk_cnt = 0
+                    for br in range(dr, dr + (row2 - row)):
+                        for bc in range(col, col2):
+                            v = float(arr[br, bc])
+                            if math.isfinite(v) and v > -9000 and 0.0 <= v <= 90.0:
+                                blk_sum += v
+                                blk_cnt += 1
+                    if blk_cnt <= 0:
                         continue
-                    if (not math.isfinite(slope)) or (slope <= -9000):
-                        # Center pixel fell outside AOI or on NoData: average valid pixels in block
-                        blk_sum = 0.0
-                        blk_cnt = 0
-                        for br in range(dr, dr + (row2 - row)):
-                            for bc in range(col, col2):
-                                v = float(arr[br, bc])
-                                if math.isfinite(v) and v > -9000:
-                                    blk_sum += v
-                                    blk_cnt += 1
-                        if blk_cnt <= 0:
-                            continue
-                        slope = blk_sum / float(blk_cnt)
+                    slope = blk_sum / float(blk_cnt)
 
                     slope_deg = int(round(slope))
                     if slope_deg < 0:
@@ -877,24 +867,36 @@ class SlopeAspectDraftingDialog(QtWidgets.QDialog, FORM_CLASS):
                     col2 = min(col + step_cells, xsize)
                     if col2 <= col:
                         continue
-                    _skip_757 = False
-                    try:
-                        sample_r = dr + ((row2 - row) // 2)
-                        sample_c = col + ((col2 - col) // 2)
-                        slope = float(slope_arr[sample_r, sample_c])
-                        aspect = float(aspect_arr[sample_r, sample_c])
-                    except Exception as _exc:
-                        log_swallowed("slope_aspect_drafting_dialog._build_aspect_arrow_layer", _exc)
-                        log_swallowed("tools/slope_aspect_drafting_dialog.py:760 (_build_aspect_arrow_layer)", _exc)
-                        _skip_757 = True
-                    if _skip_757:
+                    # Slope-weighted circular mean of aspect over all valid
+                    # sloped cells in the block (prevents 355/5 wraparound
+                    # errors and single-pixel noise).
+                    sum_sin = 0.0
+                    sum_cos = 0.0
+                    w_sum = 0.0
+                    s_sum = 0.0
+                    s_cnt = 0
+                    for br in range(dr, dr + (row2 - row)):
+                        for bc in range(col, col2):
+                            sv = float(slope_arr[br, bc])
+                            av = float(aspect_arr[br, bc])
+                            if (not math.isfinite(sv)) or (not math.isfinite(av)):
+                                continue
+                            if sv <= -9000 or sv < 0.0 or sv > 90.0:
+                                continue
+                            s_sum += sv
+                            s_cnt += 1
+                            if av < 0.0 or av > 360.0 or sv <= float(flat_thresh_deg):
+                                continue
+                            rad_a = math.radians(av)
+                            sum_sin += sv * math.sin(rad_a)
+                            sum_cos += sv * math.cos(rad_a)
+                            w_sum += sv
+                    if s_cnt <= 0 or w_sum <= 0.0:
                         continue
-                    if not math.isfinite(slope) or not math.isfinite(aspect):
+                    slope = s_sum / float(s_cnt)
+                    if slope <= float(flat_thresh_deg) or math.hypot(sum_sin, sum_cos) <= 1e-9:
                         continue
-                    if slope <= -9000 or aspect < 0 or aspect <= -9000:
-                        continue
-                    if slope <= float(flat_thresh_deg):
-                        continue
+                    aspect = math.degrees(math.atan2(sum_sin, sum_cos)) % 360.0
 
                     aspect_deg = int(round(aspect)) % 360
                     bin_idx = int(((aspect_deg + 22.5) // 45) % 8)

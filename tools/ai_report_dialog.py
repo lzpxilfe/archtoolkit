@@ -807,21 +807,29 @@ class AiAoiReportDialog(QtWidgets.QDialog):
                     f"- 주의: 레이어 한도({opts.get('max_layers')}개)에 도달해 후보 {ctx.get('layers_candidates')}개 중 "
                     f"{len(layers)}개만 JSON에 포함되었습니다. 포함되지 않은 레이어에 대해 단정하지 마세요."
                 )
+            def _clean_label(raw) -> str:
+                s = str(raw or "")
+                s = "".join(" " if ord(ch) < 32 else ch for ch in s)
+                return " ".join(s.split())
+
             trunc = []
             sampled = []
             categorical = []
+            circular = []
             invalid = []
             for lyr in layers:
                 st = lyr.get("stats") or {}
                 if not isinstance(st, dict):
                     continue
-                nm = str(lyr.get("name") or "")
+                nm = _clean_label(lyr.get("name"))
                 if bool(st.get("truncated")):
                     trunc.append(f"{nm}(스캔 한도 {st.get('scan_cap')}개)")
                 if bool(st.get("sampled")):
                     sampled.append(f"{nm}(표본 step {st.get('sample_step')})")
                 if bool(st.get("categorical")):
                     categorical.append(f"{nm}(클래스 {st.get('class_count')}개)")
+                if bool(st.get("circular")):
+                    circular.append(f"{nm}(원형 평균 {st.get('circular_mean_deg')}°)")
                 if int(st.get("invalid_geometries") or 0) > 0:
                     invalid.append(f"{nm}({st.get('invalid_geometries')}개)")
             if trunc:
@@ -841,6 +849,12 @@ class AiAoiReportDialog(QtWidgets.QDialog):
                     "- 주의: 다음 래스터는 범주형(클래스 코드)입니다(`stats.categorical=true`). `classes`(클래스별 셀 수)와 "
                     "`class_count`만 사용하고 평균/최솟값/최댓값을 계산하거나 서술하지 마세요: " + ", ".join(categorical[:20])
                 )
+            if circular:
+                lines.append(
+                    "- 주의: 다음 래스터는 방향/방위(원형 각도)입니다(`stats.circular=true`). "
+                    "`circular_mean_deg`, `resultant_length_R`, `flat_pct`만 사용하고 산술 평균을 계산하지 마세요: "
+                    + ", ".join(circular[:20])
+                )
             if invalid:
                 lines.append(
                     "- 주의: 다음 레이어는 복구되지 않은 지오메트리가 있어 `features`에는 포함되지만 "
@@ -850,7 +864,7 @@ class AiAoiReportDialog(QtWidgets.QDialog):
             if skipped:
                 lines.append(
                     "- 참고: 사용자가 선택했지만 요약되지 않은 레이어(`skipped_selected_layers`, 버퍼 범위 밖 등): "
-                    + ", ".join(str(d.get("name") or "") for d in skipped[:20])
+                    + ", ".join(_clean_label(d.get("name")) for d in skipped[:20])
                     + ". 이 레이어들에 대해 단정하지 마세요."
                 )
             ref = ctx.get("reference_sites") or {}
@@ -928,14 +942,56 @@ class AiAoiReportDialog(QtWidgets.QDialog):
 
     @staticmethod
     def _layer_content_signature(lyr):
-        """(feature count for a vector layer, source file mtime for a file-backed
-        layer): changes when a layer's content changes under the same id."""
+        """Signature of layer identity, CRS, filter/edit state, NoData, and content.
+
+        Includes layer name, group path, CRS, vector subsetString/editable state,
+        and raster NoData configuration so renaming a sensitive layer, changing
+        CRS/filter/NoData, or editing features immediately invalidates cached
+        contexts (and never leaks a stale layer name to Gemini).
+        """
+        name = ""
+        try:
+            name = str(lyr.name() or "")
+        except Exception as _exc:
+            log_swallowed("ai_report_dialog._layer_content_signature (name)", _exc)
+        crs_sig = ""
+        try:
+            crs = lyr.crs()
+            if crs is not None and crs.isValid():
+                crs_sig = str(crs.authid() or crs.toWkt() or "")
+        except Exception as _exc:
+            log_swallowed("ai_report_dialog._layer_content_signature (crs)", _exc)
+        group_path = ""
+        try:
+            group_path = str(ai_aoi_summary._layer_group_path(lyr.id()) or "")
+        except Exception as _exc:
+            log_swallowed("ai_report_dialog._layer_content_signature (group)", _exc)
         count = -1
+        subset = ""
+        editable = False
+        nodata_sig = None
         if isinstance(lyr, QgsVectorLayer):
             try:
                 count = int(lyr.featureCount())
             except Exception as _exc:
                 log_swallowed("ai_report_dialog._layer_content_signature", _exc)
+            try:
+                subset = str(lyr.subsetString() or "")
+            except Exception as _exc:
+                log_swallowed("ai_report_dialog._layer_content_signature (subset)", _exc)
+            try:
+                editable = bool(lyr.isEditable())
+            except Exception as _exc:
+                log_swallowed("ai_report_dialog._layer_content_signature (editable)", _exc)
+        elif hasattr(lyr, "dataProvider") and lyr.dataProvider() is not None:
+            try:
+                prov = lyr.dataProvider()
+                if hasattr(prov, "useSourceNoDataValue") and hasattr(prov, "userNoDataValues"):
+                    use_src = bool(prov.useSourceNoDataValue(1))
+                    user_nd = tuple((float(r.min()), float(r.max())) for r in (prov.userNoDataValues(1) or []))
+                    nodata_sig = (use_src, user_nd)
+            except Exception as _exc:
+                log_swallowed("ai_report_dialog._layer_content_signature (nodata)", _exc)
         mtime = None
         try:
             path = split_qgis_source_path(lyr.source())
@@ -943,18 +999,21 @@ class AiAoiReportDialog(QtWidgets.QDialog):
                 mtime = float(os.path.getmtime(path))
         except Exception as _exc:
             log_swallowed("ai_report_dialog._layer_content_signature", _exc)
-        return (count, mtime)
+        return (name, group_path, crs_sig, count, subset, editable, nodata_sig, mtime)
 
     def _project_layers_signature(self):
-        """Sorted (layer id, content signature) of all project layers. Invalidates
-        the context cache when layers are added/removed (e.g. after running a new
-        analysis) and when a layer's features or source file change under the
-        same id, so the summary never silently reflects a stale project state."""
+        """Project ellipsoid + sorted (layer id, content signature) of all project layers.
+
+        Invalidates the context cache whenever layers are added/removed, renamed,
+        re-grouped, re-filtered, re-projected, or edited under the same id.
+        """
         try:
-            items = list(QgsProject.instance().mapLayers().items())
+            proj = QgsProject.instance()
+            ell = str(proj.ellipsoid() or "")
+            items = list(proj.mapLayers().items())
         except Exception:
             return ()
-        return tuple(sorted((str(k), self._layer_content_signature(v)) for k, v in items))
+        return (ell, tuple(sorted((str(k), self._layer_content_signature(v)) for k, v in items)))
 
     def _aoi_signature(self, aoi_layer):
         """Feature count + rounded extent of the AOI layer. Invalidates the cache
@@ -1240,24 +1299,27 @@ class AiAoiReportDialog(QtWidgets.QDialog):
                 return
 
             prompt = self._build_prompt(ctx)
-            # Explicit consent before any external transmission. The context JSON
-            # is not "layer names only": it carries per-layer statistics, group
-            # paths, file basenames and each reference site's distance + bearing
-            # from the AOI centroid - which together reconstruct that site's
-            # position (see the help dialog). A 7-second toast is not an
-            # acknowledgement; ask once per dialog session.
-            if not getattr(self, "_ai_send_confirmed", False):
+            # Explicit consent before any external transmission. Re-prompt whenever
+            # the AOI, included layer set, or reference site scope changes so a
+            # consent given for one innocuous layer cannot silently cover a newly
+            # added sensitive heritage layer.
+            send_scope_sig = (
+                str((ctx.get("aoi") or {}).get("layer_name") or ""),
+                tuple(sorted(str(l.get("id") or "") for l in (ctx.get("layers") or []) if isinstance(l, dict))),
+                str((ctx.get("reference_sites") or {}).get("layer_name") or ""),
+            )
+            if getattr(self, "_ai_send_confirmed_scope", None) != send_scope_sig:
                 res = QtWidgets.QMessageBox.question(
                     self,
                     "외부 전송 확인",
                     (
                         "Gemini(외부 서버)로 다음 컨텍스트를 전송합니다.\n\n"
                         "· AOI 이름/면적/반경\n"
-                        "· 레이어 이름·통계·CRS·그룹 경로·파일명\n"
+                        "· 레이어 이름·통계·상위 속성값(top_values)·CRS·그룹 경로·파일명\n"
                         "· 도구 실행 파라미터\n"
                         "· 추가 유적의 이름과 AOI 중심 기준 거리/방위 (위치 역산 가능)\n\n"
-                        "매장문화재 위치정보가 포함될 수 있습니다. 전송을 허용할까요?\n"
-                        "(이 대화상자 세션에서 한 번만 확인합니다)"
+                        "매장문화재 위치정보 또는 민감 속성값이 포함될 수 있습니다. 전송을 허용할까요?\n"
+                        "(대상 AOI·레이어 범위가 바뀌면 다시 확인합니다)"
                     ),
                     QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
                     QtWidgets.QMessageBox.StandardButton.No,
@@ -1271,6 +1333,7 @@ class AiAoiReportDialog(QtWidgets.QDialog):
                         duration=6,
                     )
                     return
+                self._ai_send_confirmed_scope = send_scope_sig
                 self._ai_send_confirmed = True
             self._set_busy_message("Gemini 호출 중… (최대 약 45초)")
             # The context JSON is not "layer names only": on top of the AOI name/area
@@ -1327,8 +1390,9 @@ class AiAoiReportDialog(QtWidgets.QDialog):
                         )
                         self._last_report_text = str(fallback or "")
                         self._last_report_ctx_key = self._last_ctx_key
-                        # Provider now reflects reality: local, not gemini.
+                        # Provider & model now reflect reality: local, not gemini.
                         self._last_provider = "local"
+                        self._last_model = ""
                         push_message(self.iface, "AI 요약", "로컬 요약으로 대체 완료", level=1, duration=6)
                 except Exception as _exc:
                     log_swallowed("ai_report_dialog._on_generate", _exc)

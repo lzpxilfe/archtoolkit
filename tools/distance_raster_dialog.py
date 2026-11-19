@@ -67,6 +67,8 @@ from .icons import icon as plugin_icon
 from .live_log_dialog import ensure_live_log_dialog
 from .predictor_naming import distance_variable_key, sanitize_key
 from .utils import (
+    describe_non_metric_crs,
+    is_pseudo_mercator,
     log_swallowed,
     cleanup_files,
     log_exception,
@@ -272,6 +274,14 @@ class DistanceRasterDialog(QtWidgets.QDialog):
                 "기준 래스터가 지리좌표계(도)입니다. 거리 단위가 미터가 되도록 "
                 "투영 CRS(예: EPSG:5179) 래스터를 기준으로 쓰세요.",
                 level=2, duration=10,
+            )
+            return
+        if is_pseudo_mercator(ref_crs):
+            push_message(
+                self.iface, "오류",
+                f"기준 래스터 CRS가 {describe_non_metric_crs(ref_crs)}입니다. "
+                "유클리드 거리가 위도별로 과대 왜곡되므로 미터 단위 투영 CRS(예: EPSG:5179/5186) 래스터를 기준으로 쓰세요.",
+                level=2, duration=11,
             )
             return
         # A projected CRS in feet (or any non-metre unit) passes the geographic
@@ -673,6 +683,8 @@ class DistanceRasterDialog(QtWidgets.QDialog):
         if ref_ds is None:
             return
         out_ds = None
+        ref_band = None
+        out_band = None
         try:
             ref_band = ref_ds.GetRasterBand(1)
             if ref_band is None:
@@ -685,6 +697,46 @@ class DistanceRasterDialog(QtWidgets.QDialog):
                 or int(ref_ds.RasterYSize) != int(out_ds.RasterYSize)
             ):
                 return
+            ref_gt = ref_ds.GetGeoTransform()
+            out_gt = out_ds.GetGeoTransform()
+            if ref_gt is not None and out_gt is not None and len(ref_gt) == 6 and len(out_gt) == 6:
+                if (
+                    abs(float(ref_gt[2])) > 1e-9
+                    or abs(float(ref_gt[4])) > 1e-9
+                    or abs(float(out_gt[2])) > 1e-9
+                    or abs(float(out_gt[4])) > 1e-9
+                ):
+                    log_message(
+                        "거리 래스터: 기준 래스터가 회전/기울임 격자여서 NoData 마스크 복사를 건너뜁니다.",
+                        level=Qgis.MessageLevel.Warning,
+                    )
+                    return
+                flip_y = (float(ref_gt[5]) > 0) != (float(out_gt[5]) > 0)
+                tol_x = max(1e-6, abs(float(out_gt[1])) * 0.5)
+                tol_y = max(1e-6, abs(float(out_gt[5])) * 0.5)
+                ref_y_top = (
+                    float(ref_gt[3]) + float(ref_gt[5]) * int(ref_ds.RasterYSize)
+                    if float(ref_gt[5]) > 0
+                    else float(ref_gt[3])
+                )
+                out_y_top = (
+                    float(out_gt[3]) + float(out_gt[5]) * int(out_ds.RasterYSize)
+                    if float(out_gt[5]) > 0
+                    else float(out_gt[3])
+                )
+                if (
+                    abs(float(ref_gt[0]) - float(out_gt[0])) > tol_x
+                    or abs(ref_y_top - out_y_top) > tol_y
+                    or abs(abs(float(ref_gt[1])) - abs(float(out_gt[1]))) > max(1e-6, abs(float(out_gt[1])) * 1e-3)
+                    or abs(abs(float(ref_gt[5])) - abs(float(out_gt[5]))) > max(1e-6, abs(float(out_gt[5])) * 1e-3)
+                ):
+                    log_message(
+                        "거리 래스터: 기준 래스터와 출력 래스터의 GeoTransform이 일치하지 않아 NoData 마스크 복사를 건너뜁니다.",
+                        level=Qgis.MessageLevel.Warning,
+                    )
+                    return
+            else:
+                flip_y = False
             ref_arr = ref_band.ReadAsArray()
             out_band = out_ds.GetRasterBand(1)
             out_arr = out_band.ReadAsArray() if out_band is not None else None
@@ -700,12 +752,16 @@ class DistanceRasterDialog(QtWidgets.QDialog):
                         nd_mask |= (ref_arr >= float(rng.min())) & (ref_arr <= float(rng.max()))
             except Exception as _exc:
                 log_swallowed("distance_raster_dialog._apply_reference_nodata_mask.user_nd", _exc)
+            if flip_y:
+                nd_mask = nd_mask[::-1, :]
             if nd_mask.any():
                 out_arr[nd_mask] = float(nodata_value)
                 out_band.WriteArray(out_arr)
                 out_band.FlushCache()
                 out_ds.FlushCache()
         finally:
+            out_band = None
+            ref_band = None
             out_ds = None
             ref_ds = None
 

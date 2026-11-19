@@ -43,6 +43,16 @@ CATEGORICAL_TOOL_HINTS = ("geology", "kigam")
 CATEGORICAL_UNITS = ("class", "classes", "category", "mask", "bitmask")
 
 
+# Units that unambiguously denote continuous physical measurements.
+# Checked so a distance raster whose kind contains a categorical substring
+# (e.g. "distance_geology", "distance_class1_road") is not misclassified as
+# nominal class codes.
+CONTINUOUS_UNITS = (
+    "m", "deg", "1/m", "s", "min", "kcal", "j", "j/kg", "m^2", "m2",
+    "ppm", "%", "percent", "count", "weight", "index",
+)
+
+
 def is_categorical_meta(meta) -> bool:
     """True when the layer metadata describes a raster of nominal class codes."""
     try:
@@ -55,6 +65,10 @@ def is_categorical_meta(meta) -> bool:
         return True
     if any(hint in tool_id for hint in CATEGORICAL_TOOL_HINTS):
         return True
+    if kind.startswith("distance_") or tool_id == "distance_raster":
+        return False
+    if units in CONTINUOUS_UNITS:
+        return False
     return any(hint in kind for hint in CATEGORICAL_KIND_HINTS)
 
 
@@ -90,10 +104,11 @@ def is_circular_meta(meta) -> bool:
 # codes as Int32, and a GeoTIFF opened in a fresh project has no metadata.
 CLASS_CODE_TYPES = ("Byte", "Int8", "Int16", "UInt16", "Int32", "UInt32")
 
-# Distinct values a sample may hold and still read as class codes. Land cover,
-# soil, lithology and suitability classes all sit well below this; a Byte
-# measurement (hillshade, scaled index) blows through it in any real sample.
-CLASS_CODE_MAX_DISTINCT = 32
+# Distinct values a sample may hold and still read as class codes. Korea's
+# detailed Ministry of Environment land-cover map has 41 classes and KIGAM
+# 1:50,000 geology sheets commonly have 30-55 units; a Byte continuous
+# measurement (hillshade, scaled index) still exceeds 64 in any real sample.
+CLASS_CODE_MAX_DISTINCT = 64
 
 
 def looks_like_class_codes(type_name, values) -> bool:
@@ -146,32 +161,85 @@ UNDECLARED_NODATA_SENTINELS = (-9999.0, -9999.9, -32768.0, -2147483648.0)
 _UNDECLARED_NODATA_MAGNITUDE = 1e30
 
 
+def nodata_equals(values, nodata):
+    """Precision-safe elementwise equality test between ``values`` and ``nodata``.
+
+    GDAL's ``GetNoDataValue()`` always returns a 64-bit Python float, whereas
+    rasters are commonly Float32 or Int32/UInt32. Comparing a Float32 array
+    against a float64 sentinel in NumPy 1.x (or after casting to float64) fails
+    for non-binary-exact values like ``-9999.9`` or ``-3.402823e+38`` because
+    ``float(np.float32(-9999.9)) == -9999.900390625 != -9999.9``. Likewise
+    casting Int32/UInt32 to Float32 corrupts ``-2147483647`` / ``4294967295``.
+
+    Comparing in the array's native dtype avoids both failure modes cleanly.
+    """
+    import numpy as np
+
+    v = np.asarray(values)
+    if nodata is None:
+        return np.zeros(v.shape, dtype=bool)
+    try:
+        nd_f = float(nodata)
+    except (TypeError, ValueError):
+        return np.zeros(v.shape, dtype=bool)
+    if math.isnan(nd_f):
+        return np.isnan(v) if np.issubdtype(v.dtype, np.floating) else np.zeros(v.shape, dtype=bool)
+
+    if np.issubdtype(v.dtype, np.integer):
+        if not math.isfinite(nd_f) or nd_f != math.floor(nd_f):
+            return np.zeros(v.shape, dtype=bool)
+        info = np.iinfo(v.dtype)
+        nd_i = int(nd_f)
+        if nd_i < info.min or nd_i > info.max:
+            return np.zeros(v.shape, dtype=bool)
+        return v == v.dtype.type(nd_i)
+
+    if np.issubdtype(v.dtype, np.floating):
+        with np.errstate(over="ignore", invalid="ignore"):
+            nd_native = v.dtype.type(nd_f)
+        if not np.isfinite(nd_native):
+            return np.zeros(v.shape, dtype=bool)
+        eq = v == nd_native
+        # If a caller already upcast a Float32 raster to Float64 before calling
+        # us, a Float32 sentinel like -3.402823e+38 or -9999.9 lives in float64
+        # as float(np.float32(nd_f)). Catch that representation for well-known
+        # extreme/sentinel magnitudes without loosening equality for ordinary
+        # measurement values.
+        if v.dtype == np.float64 and (
+            abs(nd_f) >= _UNDECLARED_NODATA_MAGNITUDE
+            or any(math.isclose(nd_f, s, rel_tol=0.0, abs_tol=1e-9) for s in UNDECLARED_NODATA_SENTINELS)
+        ):
+            with np.errstate(over="ignore", invalid="ignore"):
+                nd32_as64 = float(np.float32(nd_f))
+            if math.isfinite(nd32_as64):
+                eq = eq | (v == nd32_as64)
+        return eq
+
+    return v == nodata
+
+
 def undeclared_nodata_mask(values, declared_nodata):
     """Build the NoData mask of a band, guessing undeclared sentinels.
 
     Returns ``(mask, guessed_count)``.  Cells equal to the declared NoData value
     and non-finite cells are always NoData.  When the metadata declares NO
-    NoData value, cells that match a common sentinel (-9999, -32768, the
-    Float32 extremes, ...) are treated as NoData as well and counted in
-    ``guessed_count``: a DEM that uses -9999 without declaring it otherwise
-    reads as a valid -9999 m elevation and turns every neighbouring slope into
-    a cliff.  ``guessed_count`` lets the caller report the reinterpretation
-    instead of applying it silently; it is always 0 when NoData is declared.
-
-    ``values`` is any numpy array; ``declared_nodata`` may be ``None``.
+    NoData value, cells that match a common sentinel (-9999, -9999.9, -32768,
+    the Float32 extremes, ...) are treated as NoData as well and counted in
+    ``guessed_count``.
     """
     import numpy as np
 
     v = np.asarray(values)
-    mask = ~np.isfinite(v)
+    mask = ~np.isfinite(v) if np.issubdtype(v.dtype, np.floating) else np.zeros(v.shape, dtype=bool)
     if declared_nodata is not None:
-        mask |= v == declared_nodata
+        mask |= nodata_equals(v, declared_nodata)
         return mask, 0
     guessed = np.zeros(v.shape, dtype=bool)
     for sentinel in UNDECLARED_NODATA_SENTINELS:
-        guessed |= v == sentinel
-    guessed |= v <= -_UNDECLARED_NODATA_MAGNITUDE
-    guessed |= v >= _UNDECLARED_NODATA_MAGNITUDE
+        guessed |= nodata_equals(v, sentinel)
+    if np.issubdtype(v.dtype, np.floating):
+        guessed |= v <= v.dtype.type(-_UNDECLARED_NODATA_MAGNITUDE)
+        guessed |= v >= v.dtype.type(_UNDECLARED_NODATA_MAGNITUDE)
     count = int(np.count_nonzero(guessed))
     mask |= guessed
     return mask, count
@@ -227,11 +295,13 @@ __all__ = [
     "CIRCULAR_KIND_HINTS",
     "CLASS_CODE_MAX_DISTINCT",
     "CLASS_CODE_TYPES",
+    "CONTINUOUS_UNITS",
     "INTEGER_TYPE_RANGES",
     "UNDECLARED_NODATA_SENTINELS",
     "choose_nodata_sentinel",
     "is_categorical_meta",
     "is_circular_meta",
     "looks_like_class_codes",
+    "nodata_equals",
     "undeclared_nodata_mask",
 ]

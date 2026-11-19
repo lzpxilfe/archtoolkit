@@ -77,6 +77,7 @@ def interp_rgb_to_value(
     min_dist = np.full(rr.shape, np.float32(np.inf), dtype=np.float32)
 
     pts = list(points)
+    skip_seg0_interp = legend_first_stop_is_absent_grey(pts)
     last_seg_idx = len(pts) - 2
     snap_last = None
     if snap_last_t is not None:
@@ -96,6 +97,20 @@ def interp_rgb_to_value(
         c1r = np.float32(c1[0])
         c1g = np.float32(c1[1])
         c1b = np.float32(c1[2])
+
+        if i == 0 and skip_seg0_interp:
+            # Stop 0 is a discrete neutral-grey "absent data" swatch, NOT a
+            # continuous ramp endpoint into the lowest data class (e.g. Navy).
+            # Match Stop 0 as a point only so JPEG noise on Navy never projects
+            # onto a synthetic Gray->Navy segment and gets dropped as NoData,
+            # and unrelated mid-greys do not suppress off-legend warnings.
+            dist_sq = (rr - c1r) ** 2 + (gg - c1g) ** 2 + (bb - c1b) ** 2
+            mask = dist_sq < min_dist
+            if np.any(mask):
+                out[mask] = np.float32(v1)
+                min_dist[mask] = dist_sq[mask].astype(np.float32, copy=False)
+            continue
+
         vr = np.float32(c2[0] - c1[0])
         vg = np.float32(c2[1] - c1[1])
         vb = np.float32(c2[2] - c1[2])
@@ -141,22 +156,42 @@ def interp_rgb_to_value(
     return out
 
 
-def mask_black_lines(r: np.ndarray, g: np.ndarray, b: np.ndarray) -> np.ndarray:
+def mask_black_lines(
+    r: np.ndarray,
+    g: np.ndarray,
+    b: np.ndarray,
+    *,
+    palette=None,
+    stop_protect_distance: float = 10.0,
+) -> np.ndarray:
     """Detect neutral dark 'linework' (not intense red/brown) and return mask.
 
-    Two tests, OR-ed: the original strict one, plus a low-saturation dark test
-    that also catches the anti-alias halo around a black line (e.g. 85,80,78),
-    which the strict per-channel <75 bound missed. The saturation term keeps
-    dark but coloured ramp pixels (10,60,10; the maroon legend maximum) out.
+    When ``palette`` is provided, pixels within ``stop_protect_distance`` RGB
+    units of any active legend stop are protected so legitimately dark custom
+    legend stops are never masked as linework.
     """
     rr = r.astype(np.int16, copy=False)
     gg = g.astype(np.int16, copy=False)
     bb = b.astype(np.int16, copy=False)
-    strict = (rr < 75) & (gg < 75) & (bb < 75) & (np.abs(rr - gg) < 15) & (np.abs(gg - bb) < 15)
     mx = np.maximum(np.maximum(rr, gg), bb)
     mn = np.minimum(np.minimum(rr, gg), bb)
-    halo = (mx < 90) & ((mx - mn) < 30)
-    return strict | halo
+    mask = (mx < 90) & ((mx - mn) < 30)
+    if palette is not None and np.any(mask):
+        raw_stops = []
+        for item in palette:
+            rgb_item = getattr(item, "rgb", item)
+            if rgb_item is not None and len(rgb_item) >= 3:
+                raw_stops.append((float(rgb_item[0]), float(rgb_item[1]), float(rgb_item[2])))
+        if raw_stops:
+            ys, xs = np.nonzero(mask)
+            px = np.stack([rr[ys, xs], gg[ys, xs], bb[ys, xs]], axis=-1).astype(np.float64)
+            stops = np.asarray(raw_stops, dtype=np.float64)
+            diff = px[:, None, :] - stops[None, :, :]
+            min_sq = np.min(np.einsum("ijk,ijk->ij", diff, diff), axis=1)
+            protected = min_sq <= (float(stop_protect_distance) ** 2)
+            if np.any(protected):
+                mask[ys[protected], xs[protected]] = False
+    return mask
 
 
 def _neighbour_shift(a: np.ndarray, dy: int, dx: int, fill) -> np.ndarray:
@@ -309,14 +344,20 @@ def fill_nearest(
     else:
         have = valid & ~fill_mask
         src_valid = have.copy()
+    # Alternate 4-neighbour scan order per step so thin lines between two
+    # polygons do not systematically shift their boundary North/West.
+    _NEIGHBOUR_ORDERS = (
+        ((-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1)),
+        ((1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)),
+    )
     todo = fill_mask.copy()
-    for _step in range(max(1, int(max_dist_px))):
+    for step_idx in range(max(1, int(max_dist_px))):
         if not np.any(todo):
             break
         newly = np.zeros(out.shape, dtype=bool)
         new_vals = np.zeros(out.shape, dtype=out.dtype)
         new_valid = np.zeros(out.shape, dtype=bool)
-        for dy, dx in _NEIGHBOURS:
+        for dy, dx in _NEIGHBOUR_ORDERS[step_idx % 2]:
             src_have = _neighbour_shift(have, dy, dx, False)
             take = todo & ~newly & src_have
             if np.any(take):
@@ -432,14 +473,18 @@ def parse_legend_csv_rows(rows: Iterable[Sequence[str]]) -> LegendCsvResult:
                 continue
             # Allow "value,r,g,b" in a single cell (copied from spreadsheets)
             cells = [x.strip() for x in txt.split(",")]
-        cells = [x for x in cells if x]
-        if not cells:
+        # Drop only trailing empty cells (Excel trailing commas), never interior
+        # empty cells, so a missing channel in "value,,g,b" is skipped instead
+        # of silently shifting columns left.
+        while cells and not cells[-1]:
+            cells.pop()
+        if not cells or all(not c for c in cells):
             continue
         if cells[0].startswith("#"):
             continue
         if cells[0].lower() in ("value", "val"):
             continue
-        if len(cells) < 4:
+        if len(cells) < 4 or any(not c for c in cells[:4]):
             skipped.append(lineno)
             continue
         try:
@@ -502,7 +547,20 @@ def parse_legend_csv_rows(rows: Iterable[Sequence[str]]) -> LegendCsvResult:
 
 
 def legend_points_from_csv(csv_path: str) -> LegendCsvResult:
-    """Load legend points from a CSV file with columns value,r,g,b (header optional)."""
+    """Load legend points from a CSV file with columns value,r,g,b (header optional).
+
+    Tries UTF-8 (with optional BOM) first, then Korean CP949 / EUC-KR so CSVs
+    saved from Korean Excel open cleanly without UnicodeDecodeError.
+    """
+    last_err = None
+    for enc in ("utf-8-sig", "cp949", "euc-kr"):
+        try:
+            with open(csv_path, "r", encoding=enc, newline="") as f:
+                return parse_legend_csv_rows(csv.reader(f))
+        except UnicodeDecodeError as exc:
+            last_err = exc
+    if last_err is not None:
+        raise last_err
     with open(csv_path, "r", encoding="utf-8-sig", newline="") as f:
         return parse_legend_csv_rows(csv.reader(f))
 

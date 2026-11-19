@@ -484,6 +484,7 @@ class CovariateReportDialog(QtWidgets.QDialog):
             return
 
         categorical = []
+        categorical_indices = []
         circular = []
         circular_indices = []
         for idx_col, (name, lyr) in enumerate(zip(names, layers)):
@@ -491,6 +492,7 @@ class CovariateReportDialog(QtWidgets.QDialog):
                 meta0 = get_archtoolkit_layer_metadata(lyr) or {}
                 if is_categorical_raster_meta(meta0):
                     categorical.append(name)
+                    categorical_indices.append(idx_col)
                 if _is_aspect_covariate(meta0, name, lyr.name()):
                     circular.append(name)
                     circular_indices.append(idx_col)
@@ -511,14 +513,33 @@ class CovariateReportDialog(QtWidgets.QDialog):
         }
         self._last_scope = scope
 
-        corr = _stats_pearson_matrix(matrix)
-        vifs = _compute_vif(matrix)
-        spearman = _stats_spearman_matrix(matrix)
+        # Exclude nominal categorical and circular (Aspect) columns from linear
+        # Pearson/Spearman/VIF calculations so arbitrary class codes and 0/360
+        # wraparound angles never contaminate continuous predictors' VIFs.
+        k_all = len(names)
+        non_linear_set = set(categorical_indices) | set(circular_indices)
+        cont_indices = [i for i in range(k_all) if i not in non_linear_set]
+
+        corr = np.full((k_all, k_all), np.nan, dtype=float)
+        spearman = np.full((k_all, k_all), np.nan, dtype=float)
+        vifs = [float("nan")] * k_all
+        if cont_indices:
+            sub_mat = matrix[:, cont_indices]
+            sub_corr = _stats_pearson_matrix(sub_mat)
+            sub_spearman = _stats_spearman_matrix(sub_mat)
+            sub_vifs = _compute_vif(sub_mat)
+            for li, gi in enumerate(cont_indices):
+                vifs[gi] = float(sub_vifs[li])
+                for lj, gj in enumerate(cont_indices):
+                    corr[gi, gj] = float(sub_corr[li, lj])
+                    spearman[gi, gj] = float(sub_spearman[li, lj])
+
         circular_rows = []
         circ_set = set(circular_indices)
+        cat_set = set(categorical_indices)
         for ci in circular_indices:
             for oj in range(len(names)):
-                if oj in circ_set or oj == ci:
+                if oj in circ_set or oj in cat_set or oj == ci:
                     continue
                 res_cl = _stats_circular_linear_r2(matrix[:, ci], matrix[:, oj])
                 circular_rows.append({"circular": names[ci], "linear": names[oj], **res_cl})
@@ -651,9 +672,13 @@ class CovariateReportDialog(QtWidgets.QDialog):
                                 break
                             fv = float(val)
                             decl_nd, user_ranges = nodata_cfg[pi]
-                            if decl_nd is not None and math.isclose(fv, decl_nd, rel_tol=1e-5, abs_tol=1e-5):
-                                ok = False
-                                break
+                            if decl_nd is not None:
+                                # Avoid abs_tol=1e-5 dropping valid small curvatures
+                                # near 0 when declared NoData is 0.
+                                nd_tol = 1e-12 if decl_nd == 0.0 else 1e-6
+                                if math.isclose(fv, decl_nd, rel_tol=1e-6, abs_tol=nd_tol):
+                                    ok = False
+                                    break
                             if any(lo <= fv <= hi for lo, hi in user_ranges):
                                 ok = False
                                 break
@@ -717,10 +742,10 @@ class CovariateReportDialog(QtWidgets.QDialog):
             parts.append(f"<tr><th align='left'>{esc(names[i])}</th>")
             for j in range(k):
                 r = float(corr[i, j])
-                if i == j:
-                    cell = "<td align='center'>1</td>"
-                elif r != r:  # NaN (a constant/degenerate variable) — mirror the VIF path
+                if r != r:  # NaN (constant / excluded categorical / circular)
                     cell = "<td align='center' style='color:#999'>계산불가</td>"
+                elif i == j:
+                    cell = "<td align='center'>1</td>"
                 else:
                     hot = abs(r) >= _HIGH_CORR
                     style = "background:#fddbc7;font-weight:bold;" if hot else ""
@@ -741,10 +766,10 @@ class CovariateReportDialog(QtWidgets.QDialog):
                     parts.append(f"<tr><th align='left'>{esc(names[i])}</th>")
                     for j in range(k):
                         rho = float(sp_arr[i, j])
-                        if i == j:
-                            cell = "<td align='center'>1</td>"
-                        elif rho != rho:
+                        if rho != rho:
                             cell = "<td align='center' style='color:#999'>계산불가</td>"
+                        elif i == j:
+                            cell = "<td align='center'>1</td>"
                         else:
                             hot = abs(rho) >= _HIGH_CORR
                             style = "background:#fddbc7;font-weight:bold;" if hot else ""

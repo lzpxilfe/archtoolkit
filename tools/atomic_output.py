@@ -60,11 +60,20 @@ def _ensure_marker_owner_access(path: Path) -> None:
 
 
 def _shared_directory_mode(parent_mode: int) -> int:
-    return stat.S_IRWXU | (parent_mode & _SHARED_DIRECTORY_BITS)
+    # Never inherit world-write (S_IWOTH), and under sticky shared temp dirs
+    # such as /tmp (01777) also drop group-write so published bundles are not
+    # created world-writable (0777) while keeping group-shared dirs (02775) intact.
+    mask = _SHARED_DIRECTORY_BITS & ~stat.S_IWOTH
+    if parent_mode & stat.S_ISVTX:
+        mask &= ~stat.S_IWGRP
+    return stat.S_IRWXU | (parent_mode & mask)
 
 
 def _shared_file_mode(parent_mode: int) -> int:
-    return stat.S_IRUSR | stat.S_IWUSR | (parent_mode & _SHARED_FILE_BITS)
+    mask = _SHARED_FILE_BITS & ~stat.S_IWOTH
+    if parent_mode & stat.S_ISVTX:
+        mask &= ~stat.S_IWGRP
+    return stat.S_IRUSR | stat.S_IWUSR | (parent_mode & mask)
 
 
 def _chmod_without_following(path: Path, mode: int, *, directory: bool) -> None:
@@ -302,21 +311,61 @@ def atomic_publish_files(pairs) -> list:
     """Publish several completed files as close to together as a filesystem allows.
 
     Every staged file is validated and confirmed to share its destination's
-    parent directory *before* any rename runs; only then are the renames done
-    back to back.  This gives all-or-nothing semantics against the realistic
-    failure -- a long write that dies partway -- because either every staged
-    file finished (and the quick metadata-only renames all succeed) or nothing
-    is published.  ``pairs`` is an iterable of ``(source_path, final_path)``.
+    parent directory *before* any rename runs. When publishing multiple files,
+    existing destinations are first moved aside to sibling backup paths so that
+    if a later ``os.replace`` fails (for example ``PermissionError`` on Windows
+    when the second target is locked open in QGIS), already-replaced files are
+    rolled back instead of leaving a mismatched pair on disk.
     """
     prepared = []
     for source_path, final_path in pairs:
         source = _validate_completed_file(source_path)
         final = _prepare_file_publication(source, final_path)
         prepared.append((source, final))
+    if len(prepared) <= 1:
+        published = []
+        for source, final in prepared:
+            os.replace(source, final)
+            published.append(str(final))
+        return published
+
+    backups = []  # (source, final, backup_or_None)
+    replaced = []  # (source, final, backup_or_None)
     published = []
-    for source, final in prepared:
-        os.replace(source, final)
-        published.append(str(final))
+    try:
+        # Phase 1: move existing destinations to temporary sibling backups.
+        for idx, (source, final) in enumerate(prepared):
+            backup = None
+            if os.path.lexists(final):
+                backup = Path(reserve_staging_path(str(final), f"bak{idx}"))
+                os.replace(final, backup)
+            backups.append((source, final, backup))
+        # Phase 2: move staged files into place.
+        for source, final, backup in backups:
+            os.replace(source, final)
+            replaced.append((source, final, backup))
+            published.append(str(final))
+    except Exception:
+        # Roll back newly placed files back to their staged paths first.
+        for source, final, _backup in reversed(replaced):
+            try:
+                if os.path.lexists(final):
+                    os.replace(final, source)
+            except OSError as _exc:
+                log_swallowed("tools/atomic_output.py (rollback replace)", _exc)
+        # Restore every backed-up original destination.
+        for _source, final, backup in reversed(backups):
+            if backup is not None:
+                try:
+                    if os.path.lexists(backup):
+                        os.replace(backup, final)
+                except OSError as _exc:
+                    log_swallowed("tools/atomic_output.py (rollback backup)", _exc)
+        raise
+    else:
+        for _source, _final, backup in backups:
+            if backup is not None:
+                cleanup_staging_path(str(backup))
     return published
 
 

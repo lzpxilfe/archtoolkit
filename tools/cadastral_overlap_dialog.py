@@ -40,7 +40,15 @@ from .qtcompat import FT_DOUBLE
 from qgis.gui import QgsMapLayerComboBox
 
 from .live_log_dialog import ensure_live_log_dialog
-from .utils import log_swallowed, log_message, move_group_to_top, push_message, restore_ui_focus, transform_geometry
+from .utils import (
+    is_pseudo_mercator,
+    log_swallowed,
+    log_message,
+    move_group_to_top,
+    push_message,
+    restore_ui_focus,
+    transform_geometry,
+)
 from .utils import set_archtoolkit_layer_metadata
 from .help_dialog import show_help_dialog
 from . import dialog_memory
@@ -458,6 +466,19 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
 
         cad_crs = cad.crs()
         da = self._distance_area(cad_crs)
+        try:
+            if is_pseudo_mercator(cad_crs) and not _will_use_ellipsoid(da):
+                push_message(
+                    self.iface,
+                    "주의",
+                    "지적도 레이어가 웹 메르카토르(EPSG:3857)이고 프로젝트 타원체가 비활성 상태입니다. "
+                    "평면 면적이 한반도 위도에서 약 1.6배 과대 계산되므로, 국내 투영좌표계(EPSG:5186/5179) 또는 "
+                    "프로젝트 타원체(WGS84/GRS80)를 설정한 뒤 실행하세요.",
+                    level=1,
+                    duration=12,
+                )
+        except Exception as _exc:
+            log_swallowed("cadastral_overlap_dialog.run (pseudo_mercator)", _exc)
 
         # Transform survey CRS -> cadastral CRS if needed. A failed transform
         # must ABORT: silently keeping the untransformed geometry made every
@@ -503,14 +524,16 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
             attrs.extend([float(parcel_m2), float(in_m2), float(pct)])
             return attrs
 
-        def add_rows(pr, rows: List[Tuple[QgsFeature, float]]) -> Tuple[int, float, List[str]]:
+        def add_rows(pr, rows) -> Tuple[int, float, List[str], List[Tuple[int, QgsGeometry]]]:
             """Add rows one at a time and say which failed: a rejected feature
             used to stop the memory provider's batch, silently dropping every
             later row while the message still counted them."""
             added = 0
             added_m2 = 0.0
             failed: List[str] = []
-            for feat_out, in_m2 in rows:
+            accepted_pieces: List[Tuple[int, QgsGeometry]] = []
+            for row in rows:
+                feat_out, in_m2 = row[0], row[1]
                 ok = False
                 try:
                     ok = bool(pr.addFeature(feat_out))
@@ -519,6 +542,8 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
                 if ok:
                     added += 1
                     added_m2 += float(in_m2)
+                    if len(row) >= 4:
+                        accepted_pieces.append((row[2], row[3]))
                 else:
                     failed.append(str(feat_out.attributes()[:1]))
             if failed:
@@ -526,7 +551,7 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
                     f"CadastralOverlap: {len(failed)}개 행을 결과 레이어에 추가하지 못했습니다: {pr.lastError()}",
                     level=Qgis.MessageLevel.Warning,
                 )
-            return added, added_m2, failed
+            return added, added_m2, failed, accepted_pieces
 
         def create_output_layer(name: str) -> QgsVectorLayer:
             # CRS set on the layer, not through the URI: a CRS without an
@@ -648,6 +673,7 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
             empty_aois = 0
             total_in_m2 = 0.0
             failed_rows: List[str] = []
+            total_split_topo_errors = 0
             # parcel fid -> its overlap pieces over ALL AOIs. Overlapping survey
             # features cover the same ground twice, so the headline total is
             # the area of each parcel's union of pieces, not the per-AOI sum.
@@ -717,7 +743,8 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
                 except Exception as _exc:
                     log_swallowed("cadastral_overlap_dialog.run", _exc)
 
-                out_rows: List[Tuple[QgsFeature, float]] = []
+                out_rows = []
+                split_topo_errors = 0
 
                 for i, f in enumerate(feats):
                     if progress.wasCanceled():
@@ -747,7 +774,9 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
 
                     try:
                         inter = g.intersection(aoi_geom)
-                    except Exception:
+                    except Exception as _exc:
+                        log_swallowed("cadastral_overlap_dialog.run (split intersection)", _exc)
+                        split_topo_errors += 1
                         inter = None
                     if inter is None or inter.isEmpty():
                         continue
@@ -763,7 +792,7 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
 
                     parcel_m2 = self._area_m2(da, g, crs=cad_crs)
                     if parcel_m2 > 0.0 and math.isfinite(float(parcel_m2)):
-                        pct = float(in_m2) / float(parcel_m2) * 100.0
+                        pct = min(100.0, max(0.0, float(in_m2) / float(parcel_m2) * 100.0))
                     else:
                         pct = 0.0
 
@@ -774,24 +803,23 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
                         log_swallowed("cadastral_overlap_dialog.run", _exc)
 
                     feat_out.setGeometry(inter)
-                    out_rows.append((feat_out, float(in_m2)))
-                    try:
-                        pieces_by_parcel.setdefault(int(f.id()), []).append(QgsGeometry(inter))
-                    except Exception as _exc:
-                        log_swallowed("cadastral_overlap_dialog.run (pieces)", _exc)
+                    out_rows.append((feat_out, float(in_m2), int(f.id()), QgsGeometry(inter)))
 
                 if not out_rows:
                     empty_aois += 1
                     log_message(f"CadastralOverlap: AOI fid={aoi_fid} -> overlaps=0", level=Qgis.MessageLevel.Info)
                 else:
-                    kept, sum_in, failed = add_rows(pr, out_rows)
+                    kept, sum_in, failed, accepted_pieces = add_rows(pr, out_rows)
                     failed_rows.extend(failed)
+                    for pid, piece_geom in accepted_pieces:
+                        pieces_by_parcel.setdefault(pid, []).append(piece_geom)
                     out.updateExtents()
                     total_in_m2 += float(sum_in)
                     log_message(
                         f"CadastralOverlap: AOI fid={aoi_fid} done (parcels={kept}, in_m2={sum_in:.2f})",
                         level=Qgis.MessageLevel.Info,
                     )
+                total_split_topo_errors += split_topo_errors
 
                 # Add the output layer even when empty so users can open a per-AOI attribute table.
                 project.addMapLayer(out, False)
@@ -814,6 +842,9 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
             level = 0
             if failed_rows:
                 msg += f" / 결과 레이어에 추가하지 못한 행 {len(failed_rows)}개(로그 참고)"
+                level = 1
+            if total_split_topo_errors > 0:
+                msg += f" / 지오메트리 위상 오류로 건너뛴 필지 {total_split_topo_errors}개(로그 참고)"
                 level = 1
             push_message(self.iface, "지적도 중첩 면적표", msg, level=level, duration=10 if level else 7)
             log_message(f"CadastralOverlap: done split-by-feature ({msg})", level=Qgis.MessageLevel.Info)
@@ -900,7 +931,8 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
         except Exception as _exc:
             log_swallowed("cadastral_overlap_dialog.run", _exc)
 
-        out_rows: List[Tuple[QgsFeature, float]] = []
+        out_rows = []
+        topo_errors = 0
 
         for i, f in enumerate(feats):
             if progress.wasCanceled():
@@ -931,7 +963,9 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
 
             try:
                 inter = g.intersection(aoi)
-            except Exception:
+            except Exception as _exc:
+                log_swallowed("cadastral_overlap_dialog.run (union intersection)", _exc)
+                topo_errors += 1
                 inter = None
             if inter is None or inter.isEmpty():
                 continue
@@ -970,7 +1004,7 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
             return
 
         # The message counts what the layer actually holds.
-        kept, sum_in, failed_rows = add_rows(pr, out_rows)
+        kept, sum_in, failed_rows, _accepted = add_rows(pr, out_rows)
         out.updateExtents()
 
         project.addMapLayer(out, False)
@@ -982,6 +1016,9 @@ class CadastralOverlapDialog(QtWidgets.QDialog):
         level = 0
         if failed_rows:
             msg += f" / 결과 레이어에 추가하지 못한 행 {len(failed_rows)}개(로그 참고)"
+            level = 1
+        if topo_errors > 0:
+            msg += f" / 지오메트리 위상 오류로 건너뛴 필지 {topo_errors}개(로그 참고)"
             level = 1
         push_message(self.iface, "지적도 중첩 면적표", msg, level=level, duration=10 if level else 7)
         log_message(f"CadastralOverlap: done ({msg})", level=Qgis.MessageLevel.Info)

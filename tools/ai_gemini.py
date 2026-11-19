@@ -401,8 +401,16 @@ def _await_reply_text(reply, model: str, timeout_ms: int):
     try:
         timer.timeout.connect(_on_timeout)
         reply.finished.connect(_on_finished)
-        timer.start(int(timeout_ms))
-        loop.exec()
+        already_finished = False
+        try:
+            is_fin = getattr(reply, "isFinished", None)
+            if callable(is_fin):
+                already_finished = bool(is_fin())
+        except Exception as _exc:
+            log_swallowed("ai_gemini._await_reply_text (isFinished)", _exc)
+        if not already_finished:
+            timer.start(int(timeout_ms))
+            loop.exec()
     except Exception as _exc:
         log_swallowed("ai_gemini.generate_text", _exc)
 

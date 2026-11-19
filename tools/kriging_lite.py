@@ -385,7 +385,7 @@ def _write_geotiff(
     xmin = float(extent.xMinimum())
     ymax = float(extent.yMaximum())
     px = float(pixel_size)
-    write_single_band_geotiff(
+    if not write_single_band_geotiff(
         str(out_path),
         arr,
         geotransform=(xmin, px, 0.0, ymax, 0.0, -px),
@@ -393,7 +393,8 @@ def _write_geotiff(
         nodata=float(nodata),
         gdal_type=gdal.GDT_Float32,
         options=("TILED=YES", "COMPRESS=LZW"),
-    )
+    ):
+        raise RuntimeError(f"Kriging GeoTIFF 파일을 생성할 수 없습니다: {out_path}")
 
 
 def ordinary_kriging_lite_to_geotiff(

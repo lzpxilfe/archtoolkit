@@ -71,6 +71,7 @@ from .utils import (
     log_swallowed,
     cleanup_files,
     adopt_stamped_temp_outputs,
+    describe_non_metric_crs,
     is_metric_crs,
     log_message,
     new_run_id,
@@ -81,6 +82,8 @@ from .utils import (
     transform_geometry,
     transform_point,
 )
+from .raster_grid_contract import validate_north_up_geotransform
+from .raster_semantics import nodata_equals, undeclared_nodata_mask
 from .live_log_dialog import ensure_live_log_dialog
 from .help_dialog import show_help_dialog
 from . import dialog_memory
@@ -402,6 +405,10 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                           layout.addWidget(self.spinRefraction)
 
         self._update_curvature_refraction_help()
+        try:
+            self.on_mode_changed()
+        except Exception as _exc:
+            log_swallowed("viewshed_dialog.__init__ (on_mode_changed)", _exc)
 
     def _setup_help_button(self):
         try:
@@ -485,7 +492,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             if tol <= 0.0:
                 tol = 1.0
 
-            for layer in reversed(layers):  # top-most first
+            for layer in layers:  # mapSettings().layers() is already top-most first
                 if not isinstance(layer, QgsVectorLayer) or not layer.isValid():
                     continue
                 if layer.geometryType() != Qgis.GeometryType.Polygon:
@@ -667,14 +674,17 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         return pts
 
     def _dem_nodata_mask(self, dem_layer, gt, xsize, ysize):
-        """True where the DEM is NoData/NaN (or absent) on a grid aligned to the DEM lattice.
+        """True where the DEM is NoData/NaN (or absent) on the output grid ``(gt, xsize, ysize)``.
 
-        Fails closed: when the DEM cannot be read at all the whole window is
-        reported as NoData/absent. The old all-valid fallback turned those
-        cells into a computed "보이지 않음" instead of NoData.
+        Maps each output cell centre ``(x, y)`` back to the source DEM through
+        its inverse GeoTransform rather than assuming identical pixel sizes, so
+        non-square DEMs resampled to square pixels in multi-viewshed never shift
+        interior NoData or wipe valid bottom rows. Compares NoData on the raw
+        GDAL dtype before casting so Float32/Int32 sentinels never leak.
         """
         mask = np.ones((int(ysize), int(xsize)), dtype=bool)
         ds = None
+        band = None
         try:
             ds = gdal.Open(self._dem_source_path(dem_layer), gdal.GA_ReadOnly)
             if ds is None:
@@ -682,27 +692,52 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             dgt = ds.GetGeoTransform()
             band = ds.GetRasterBand(1)
             nd = band.GetNoDataValue()
-            xoff = int(round((gt[0] - dgt[0]) / dgt[1]))
-            yoff = int(round((gt[3] - dgt[3]) / dgt[5]))
-            c0 = max(0, xoff)
-            r0 = max(0, yoff)
-            c1 = min(ds.RasterXSize, xoff + int(xsize))
-            r1 = min(ds.RasterYSize, yoff + int(ysize))
-            if c1 <= c0 or r1 <= r0:
+            inv_dgt = self._inv_geotransform(dgt)
+
+            xs = float(gt[0]) + (np.arange(int(xsize), dtype=np.float64) + 0.5) * float(gt[1])
+            ys = float(gt[3]) + (np.arange(int(ysize), dtype=np.float64) + 0.5) * float(gt[5])
+            if abs(float(dgt[2])) <= 1e-12 and abs(float(dgt[4])) <= 1e-12:
+                src_cols = np.floor((xs - float(dgt[0])) / float(dgt[1])).astype(np.int64)
+                src_rows = np.floor((ys - float(dgt[3])) / float(dgt[5])).astype(np.int64)
+                in_c = (src_cols >= 0) & (src_cols < int(ds.RasterXSize))
+                in_r = (src_rows >= 0) & (src_rows < int(ds.RasterYSize))
+                if not (np.any(in_c) and np.any(in_r)):
+                    return mask
+                c0 = int(src_cols[in_c].min())
+                c1 = int(src_cols[in_c].max()) + 1
+                r0 = int(src_rows[in_r].min())
+                r1 = int(src_rows[in_r].max()) + 1
+                arr = band.ReadAsArray(c0, r0, c1 - c0, r1 - r0)
+                if arr is None:
+                    return mask
+                bad_src, _ = undeclared_nodata_mask(arr, nd)
+                rr_idx = np.nonzero(in_r)[0]
+                cc_idx = np.nonzero(in_c)[0]
+                mask[np.ix_(rr_idx, cc_idx)] = bad_src[
+                    np.ix_(src_rows[rr_idx] - r0, src_cols[cc_idx] - c0)
+                ]
                 return mask
+
+            # Rotated fallback using full affine inverse.
+            xx, yy = np.meshgrid(xs, ys)
+            sc = np.floor(inv_dgt[0] + inv_dgt[1] * xx + inv_dgt[2] * yy).astype(np.int64)
+            sr = np.floor(inv_dgt[3] + inv_dgt[4] * xx + inv_dgt[5] * yy).astype(np.int64)
+            inside = (sc >= 0) & (sc < int(ds.RasterXSize)) & (sr >= 0) & (sr < int(ds.RasterYSize))
+            if not np.any(inside):
+                return mask
+            c0, c1 = int(sc[inside].min()), int(sc[inside].max()) + 1
+            r0, r1 = int(sr[inside].min()), int(sr[inside].max()) + 1
             arr = band.ReadAsArray(c0, r0, c1 - c0, r1 - r0)
             if arr is None:
                 return mask
-            arr = arr.astype(np.float64, copy=False)
-            bad = ~np.isfinite(arr)
-            if nd is not None and math.isfinite(float(nd)):
-                bad |= arr == float(nd)
-            mask[r0 - yoff:r1 - yoff, c0 - xoff:c1 - xoff] = bad
+            bad_src, _ = undeclared_nodata_mask(arr, nd)
+            mask[inside] = bad_src[sr[inside] - r0, sc[inside] - c0]
             return mask
         except Exception as _exc:
             log_swallowed("viewshed_dialog._dem_nodata_mask", _exc)
             return mask
         finally:
+            band = None
             ds = None
 
     def _range_mask(self, dem_layer, gt, xsize, ysize, observer_xy, max_dist):
@@ -1467,13 +1502,13 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             self.canvas.setMapTool(self.map_tool)
 
             if self.radioReverseViewshed.isChecked():
-                self.iface.messageBar().pushMessage(
+                push_message(self.iface, 
                     "역방향 가시권",
                     "점=1회 클릭 후 우클릭/Enter로 완료, 폴리곤=여러 점(3점 이상) 찍고 우클릭/Enter로 완료. 기존 폴리곤 위 클릭=자동 선택, Shift+클릭=직접 그리기.",
                     level=0,
                 )
             else:
-                self.iface.messageBar().pushMessage(
+                push_message(self.iface, 
                     "선형 및 둘레 가시권",
                     "지도에서 라인을 그리세요. 클릭으로 점 추가, 시작점 클릭 시 자동 닫힘(Snap), 우클릭으로 완료",
                     level=0,
@@ -1494,7 +1529,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                 title = "다중점 가시권"
                 text = "지도에서 관측점을 여러 번 클릭하세요 (ESC로 완료)"
 
-            self.iface.messageBar().pushMessage(
+            push_message(self.iface, 
                 title, text, level=0
             )
         self.hide()
@@ -1521,7 +1556,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             self.lblSelectedPoint.setStyleSheet("color: #2196F3; font-weight: bold;")
             
             # Show message and continue adding
-            self.iface.messageBar().pushMessage(
+            push_message(self.iface, 
                 "다중점 가시권", 
                 f"점 {count} 추가됨. 계속 클릭하거나 ESC로 완료",
                 level=0
@@ -1535,7 +1570,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             
             if self.los_click_count == 1:
                 self.observer_point = point
-                self.iface.messageBar().pushMessage(
+                push_message(self.iface, 
                     "가시선 분석", 
                     "관측점 설정 완료. 이제 대상점을 클릭하세요", 
                     level=0
@@ -1669,17 +1704,16 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         """Run the selected viewshed analysis"""
         dem_layer = self.cmbDemLayer.currentLayer()
         if not dem_layer:
-            self.iface.messageBar().pushMessage("오류", "DEM 래스터를 선택해주세요", level=2)
+            push_message(self.iface, "오류", "DEM 래스터를 선택해주세요", level=2)
             return
 
         # Distance-based viewshed tools assume metric DEM CRS (meters).
         dem_crs = dem_layer.crs()
         if not is_metric_crs(dem_crs):
-            unit_name = QgsUnitTypes.toString(dem_crs.mapUnits())
             push_message(
                 self.iface,
                 "오류",
-                f"DEM CRS 단위가 미터가 아닙니다 (현재: {unit_name}). 가시권/히구치 분석은 미터 단위 투영 CRS가 필요합니다.",
+                describe_non_metric_crs(dem_crs),
                 level=2,
                 duration=8,
             )
@@ -1691,7 +1725,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         has_layer = self.radioFromLayer.isChecked() and self.cmbObserverLayer.currentLayer() is not None
 
         if not has_manual and not has_layer:
-            self.iface.messageBar().pushMessage("오류", "관측점을 선택하거나 레이어를 지정해주세요", level=2)
+            push_message(self.iface, "오류", "관측점을 선택하거나 레이어를 지정해주세요", level=2)
             return
 
         # Live log window (non-modal) so users can see progress in real time.
@@ -1717,7 +1751,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         if hasattr(self, 'spinRefraction'):
             refraction_coeff = self.spinRefraction.value()
         
-        self.iface.messageBar().pushMessage("처리 중", "가시권 분석 실행 중...", level=0)
+        push_message(self.iface, "처리 중", "가시권 분석 실행 중...", level=0)
         
         # REMOVED global self.hide() from here.
         # It is now moved into each specialized run_* method to avoid freezes during warnings.
@@ -1741,7 +1775,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                 )
             elif self.radioLineOfSight.isChecked():
                 if not self.observer_point or not self.target_point:
-                    self.iface.messageBar().pushMessage("오류", "관측점과 대상점을 모두 선택해주세요", level=2)
+                    push_message(self.iface, "오류", "관측점과 대상점을 모두 선택해주세요", level=2)
                     self.show()
                     return
                 self.run_line_of_sight(
@@ -1753,10 +1787,10 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                     max_distance, curvature, refraction, refraction_coeff
                 )
         except ProcessingCancelled:
-            self.iface.messageBar().pushMessage("취소", "가시권 분석이 취소되었습니다.", level=1)
+            push_message(self.iface, "취소", "가시권 분석이 취소되었습니다.", level=1)
             self.show()
         except Exception as e:
-            self.iface.messageBar().pushMessage("오류", f"분석 중 오류: {str(e)}", level=2)
+            push_message(self.iface, "오류", f"분석 중 오류: {str(e)}", level=2)
             self.show()
     
     def run_buffer_visibility(self, dem_layer, obs_height, tgt_height):
@@ -1913,7 +1947,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         
         # Summary message
         visibility_pct = (visible_count / len(perimeter_points) * 100) if perimeter_points else 0
-        self.iface.messageBar().pushMessage(
+        push_message(self.iface, 
             "가시권 링 분석 (Visibility Ring Analysis)",
             f"중심점 감시율: {visibility_pct:.1f}% ({visible_count}/{len(perimeter_points)}개 지점에서 보임)",
             level=0
@@ -2931,13 +2965,14 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             if added <= 0:
                 return
 
-            # Rasterize into the existing raster (burn NoData)
+            # Pixel-centre rasterization (not ALL_TOUCHED=TRUE) so boundary
+            # observer cells and an exterior 1-px halo are not erased.
             err = gdal.RasterizeLayer(
                 ds,
                 [1],
                 mem_lyr,
                 burn_values=[float(nodata_value)],
-                options=["ALL_TOUCHED=TRUE"],
+                options=[],
             )
             if err != 0:
                 raise Exception(f"RasterizeLayer failed (err={err})")
@@ -3027,7 +3062,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                     for i in range(max_points)
                 })
                 points = [points[i] for i in idxs]
-                self.iface.messageBar().pushMessage(
+                push_message(self.iface, 
                     "알림", f"대상점이 전 구간에서 균등하게 {len(points)}개로 샘플링되었습니다.", level=1
                 )
 
@@ -3233,7 +3268,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             done_msg = f"역방향 가시권 분석 완료 ({used_n}개 대상점, Union)"
             if skipped_n > 0:
                 done_msg += f" - DEM 범위 밖/NoData/계산 실패로 {skipped_n}개 제외"
-            self.iface.messageBar().pushMessage("완료", done_msg, level=1 if skipped_n > 0 else 0)
+            push_message(self.iface, "완료", done_msg, level=1 if skipped_n > 0 else 0)
             self.accept()
         except Exception as e:
             push_message(self.iface, "오류", f"역방향 가시권 처리 중 오류: {str(e)}", level=2)
@@ -3314,7 +3349,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         owned_by_layer = set()
         result_run_id = new_run_id("viewshed")
         try:
-            self.iface.messageBar().pushMessage("처리 중", "시각적 불균등: 1/3 (정방향 가시권)", level=0)
+            push_message(self.iface, "처리 중", "시각적 불균등: 1/3 (정방향 가시권)", level=0)
             forward_raster = self._compute_viewshed_raster_file(
                 dem_layer=dem_layer,
                 point=point,
@@ -3328,7 +3363,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                 prefix="fwd",
             )
 
-            self.iface.messageBar().pushMessage("처리 중", "시각적 불균등: 2/3 (역방향 가시권)", level=0)
+            push_message(self.iface, "처리 중", "시각적 불균등: 2/3 (역방향 가시권)", level=0)
             reverse_raster = self._compute_viewshed_raster_file(
                 dem_layer=dem_layer,
                 point=point,
@@ -3346,7 +3381,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                 tempfile.gettempdir(),
                 f"archt_rvs_imbalance_{uuid.uuid4().hex[:8]}.tif",
             )
-            self.iface.messageBar().pushMessage("처리 중", "시각적 불균등: 3/3 (불균등 분류)", level=0)
+            push_message(self.iface, "처리 중", "시각적 불균등: 3/3 (불균등 분류)", level=0)
             self._create_visual_imbalance_raster(forward_raster, reverse_raster, imbalance_raster)
 
             reverse_layer_name = f"역방향_가시권_{int(max_dist)}m"
@@ -3435,7 +3470,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             self.link_current_marker_to_layer(reverse_layer.id(), [(point, src_crs)])
             self.update_layer_order()
 
-            self.iface.messageBar().pushMessage("완료", "시각적 불균등 분석 완료", level=0)
+            push_message(self.iface, "완료", "시각적 불균등 분석 완료", level=0)
             self.accept()
         except Exception as e:
             push_message(self.iface, "오류", f"시각적 불균등 처리 중 오류: {str(e)}", level=2)
@@ -3740,17 +3775,16 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                 arr = band.ReadAsArray(wc0, wr0, wc1 - wc0 + 1, wr1 - wr0 + 1)
                 if arr is None:
                     continue
-                arr = arr.astype(np.float32, copy=False)
-                nd_mask = np.zeros(arr.shape, dtype=bool)
-                if nodata is not None:
-                    nd_mask |= arr == nodata
-                nd_mask |= ~np.isfinite(arr)
+                # Evaluate NoData on raw GDAL dtype BEFORE casting to float64 so
+                # Float32/Int32/Float64 sentinels are never corrupted.
+                nd_mask, _ = undeclared_nodata_mask(arr, nodata)
+                arr_f = arr.astype(np.float64, copy=False)
                 for k, (col, row) in enumerate(pts):
                     if not (0 <= col < xsize and 0 <= row < ysize):
                         continue
                     if nd_mask[row - wr0, col - wc0]:
                         continue
-                    out[i0 + k] = float(arr[row - wr0, col - wc0])
+                    out[i0 + k] = float(arr_f[row - wr0, col - wc0])
             return out
         finally:
             ds = None
@@ -3796,7 +3830,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         target = self.target_point
         
         if not observer or not target:
-            self.iface.messageBar().pushMessage("오류", "관측점과 대상점을 클릭하여 선택해주세요", level=2)
+            push_message(self.iface, "오류", "관측점과 대상점을 클릭하여 선택해주세요", level=2)
             self.show()
             return
 
@@ -3873,12 +3907,12 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         # with atmospheric refraction. ~7.8 m at 10 km — decisive at long range.
         cc = 0.0
         try:
-            if hasattr(self, "chkCurvature") and self.chkCurvature.isChecked():
-                cc = 1.0
-                if hasattr(self, "chkRefraction") and self.chkRefraction.isChecked():
-                    k = float(self.spinRefraction.value()) if hasattr(self, "spinRefraction") else 0.13
-                    cc = max(0.0, 1.0 - k)
-        except Exception:
+            use_curv = bool(hasattr(self, "chkCurvature") and self.chkCurvature.isChecked())
+            use_refr = bool(hasattr(self, "chkRefraction") and self.chkRefraction.isChecked())
+            k = float(self.spinRefraction.value()) if hasattr(self, "spinRefraction") else 0.13
+            cc = float(_math_calc_viewshed_cc(use_curv, use_refr, k))
+        except Exception as _exc:
+            log_swallowed("viewshed_dialog.run_line_of_sight (cc)", _exc)
             cc = 0.0
         earth_r = 6371000.0
 
@@ -4018,17 +4052,32 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
 
             for idx in range(1, len(profile_data)):
                 status = terrain_status[idx]
+                pt_cur = QgsPointXY(profile_data[idx]["x"], profile_data[idx]["y"])
+                # Do not bridge a visible/obstructed segment across a DEM NoData gap:
+                # emit the preceding segment, then emit an explicit "판정 불가" gap segment.
+                if profile_data[idx].get("gap_before"):
+                    prev_dist = float(profile_data[idx - 1]["distance"])
+                    cur_dist = float(profile_data[idx]["distance"])
+                    if len(current_pts) >= 2:
+                        segments.append((current_status, seg_from, prev_dist, current_pts))
+                    segments.append(("판정 불가", prev_dist, cur_dist, [current_pts[-1], pt_cur]))
+                    current_pts = [pt_cur]
+                    seg_from = cur_dist
+                    current_status = status
+                    continue
                 if status != current_status:
                     seg_to = float(profile_data[idx - 1]["distance"])
-                    segments.append((current_status, seg_from, seg_to, current_pts))
+                    if len(current_pts) >= 2:
+                        segments.append((current_status, seg_from, seg_to, current_pts))
                     current_pts = [current_pts[-1]]
                     seg_from = seg_to
                     current_status = status
 
-                current_pts.append(QgsPointXY(profile_data[idx]["x"], profile_data[idx]["y"]))
+                current_pts.append(pt_cur)
 
             seg_to = float(profile_data[-1]["distance"])
-            segments.append((current_status, seg_from, seg_to, current_pts))
+            if len(current_pts) >= 2:
+                segments.append((current_status, seg_from, seg_to, current_pts))
 
         # Add features for each segment
         for status, from_m, to_m, pts in segments:
@@ -4284,13 +4333,13 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                 duration=8,
             )
         if is_visible_overall is None:
-            self.iface.messageBar().pushMessage(
+            push_message(self.iface, 
                 "가시선 분석",
                 f"판정 불가 | 경로 중 DEM NoData 표본 {nodata_samples}개 (첫 NoData: {first_nodata_dist:.0f}m) | 거리: {total_dist:.0f}m",
                 level=1
             )
         elif is_visible_overall:
-            self.iface.messageBar().pushMessage(
+            push_message(self.iface, 
                 "가시선 분석", 
                 f"직시 가능 (보임) | 거리: {total_dist:.0f}m",
                 level=0
@@ -4302,13 +4351,13 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                 adj_txt = ""
                 if cc > 0.0 and first_obstruction.get('elev_calc') is not None:
                     adj_txt = f", 곡률·굴절 보정 후 {first_obstruction['elev_calc']:.1f}m"
-                self.iface.messageBar().pushMessage(
+                push_message(self.iface, 
                     "가시선 분석", 
                     f"직시 불가 (안보임) | 장애물: {first_obstruction['distance']:.0f}m (DEM 고도 {first_obstruction['elevation']:.1f}m{adj_txt})",
                     level=1
                 )
             else:
-                self.iface.messageBar().pushMessage(
+                push_message(self.iface, 
                     "가시선 분석", 
                     "직시 불가 (안보임)",
                     level=1
@@ -4791,11 +4840,11 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                 except Exception as _exc:
                     log_swallowed("tools/viewshed_dialog.py:3879 (run_multi_viewshed)", _exc)
                 points = sel_points
-                self.iface.messageBar().pushMessage(
+                push_message(self.iface, 
                     "알림", f"관측점이 전 구간에서 균등하게 {len(points)}개로 샘플링되었습니다.", level=1
                 )
             else:
-                self.iface.messageBar().pushMessage("경고", f"{total_needed}개 전체 점에 대해 분석을 시작합니다. 처리 중 QGIS가 응답하지 않을 수 있습니다.", level=1)
+                push_message(self.iface, "경고", f"{total_needed}개 전체 점에 대해 분석을 시작합니다. 처리 중 QGIS가 응답하지 않을 수 있습니다.", level=1)
 
         # Hide dialog ONLY after all warnings and user decisions
         self.hide()
@@ -4844,7 +4893,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         }
         
         # Diagnostic Log
-        self.iface.messageBar().pushMessage(
+        push_message(self.iface, 
             "분석 정보", 
             f"스마트 범위 적용: {final_ext.width():.1f}x{final_ext.height():.1f}m (전체 대비 { (final_ext.area()/dem_ext.area())*100:.1f}%)", 
             level=0
@@ -4914,7 +4963,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         try:
             if was_cancelled:
                 # Do not merge a partial set and present it as a complete result.
-                self.iface.messageBar().pushMessage(
+                push_message(self.iface, 
                     "취소",
                     f"누적 가시권 분석이 취소되었습니다 ({len(viewshed_results)}/{len(points)}개 지점 계산 후 중단, 결과 폐기).",
                     level=1,
@@ -4923,7 +4972,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                 return
 
             if not viewshed_results:
-                self.iface.messageBar().pushMessage("오류", "유효한 가시권 분석 결과를 생성하지 못했습니다. 보간 또는 범위 설정을 확인하세요.", level=2)
+                push_message(self.iface, "오류", "유효한 가시권 분석 결과를 생성하지 못했습니다. 보간 또는 범위 설정을 확인하세요.", level=2)
                 self.show()
                 return
 
@@ -4960,7 +5009,16 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
             )
             if weighted_mode:
                 is_count_mode = False
-            is_union_mode = (not is_count_mode) and (not weighted_mode) and (is_line_mode or len(points) > 20)
+            # For >20 observers in multi-point cumulative mode, bit-flag encoding
+            # (2^N) overflows; switch honestly to cumulative COUNT (0..N) instead
+            # of silently downgrading to a 0/1 binary union mislabelled "누적".
+            if (not is_line_mode) and (not is_count_mode) and (not weighted_mode) and len(points) > 20:
+                is_count_mode = True
+                log_message(
+                    f"Viewshed: 관측점 {len(points)}개(>20)로 비트마스크 조합 대신 누적 개수(Count, 0~{len(points)}) 모드로 전환합니다.",
+                    level=Qgis.MessageLevel.Info,
+                )
+            is_union_mode = (not is_count_mode) and (not weighted_mode) and is_line_mode
             
             if is_union_mode:
                 mode_str = "합집합(Union)"
@@ -4972,7 +5030,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                 mode_str = "누적 개수(Count)"
             else:
                 mode_str = "누적 조합(Bit-flag)"
-            self.iface.messageBar().pushMessage("분석 시작", f"모드: {mode_str}, 점 개수: {len(points)}", level=0)
+            push_message(self.iface, "분석 시작", f"모드: {mode_str}, 점 개수: {len(points)}", level=0)
             
             # viewshed_results is already [(idx, filepath), ...] as needed by combine_viewsheds_numpy
             success = self.combine_viewsheds_numpy(
@@ -5013,6 +5071,8 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                 layer_name = f"가시권_가중비율_{len(points)}개점"
             elif weighted_mode:
                 layer_name = f"가시권_가중누적_{len(points)}개점"
+            elif is_union_mode:
+                layer_name = f"가시권_합집합_{len(points)}개점"
             else:
                 layer_name = f"가시권_누적_{len(points)}개점"
             result_run_id = new_run_id("viewshed")
@@ -5119,7 +5179,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
                 done_msg = f"누적 가시권 분석 완료 ({len(points)}개 관측점)"
                 if dropped_total > 0:
                     done_msg += f" - DEM 범위 밖/NoData/계산 실패로 {dropped_total}개 관측점 제외"
-                self.iface.messageBar().pushMessage(
+                push_message(self.iface, 
                     "완료",
                     done_msg,
                     level=1 if dropped_total > 0 else 0,
@@ -6253,7 +6313,7 @@ class ViewshedLineTool(QgsMapToolEmitPoint):
                     self.cleanup()
                     self.dialog.show()
                     return
-                self.dialog.iface.messageBar().pushMessage(
+                push_message(self.dialog.iface, 
                     "알림",
                     "역방향 폴리곤은 최소 3개 점이 필요합니다 (또는 1개 점으로 대상점 선택).",
                     level=1,
@@ -6266,7 +6326,7 @@ class ViewshedLineTool(QgsMapToolEmitPoint):
             self.dialog.show()
             return
 
-        self.dialog.iface.messageBar().pushMessage("알림", "최소 2개 점이 필요합니다", level=1)
+        push_message(self.dialog.iface, "알림", "최소 2개 점이 필요합니다", level=1)
     
     def cleanup(self):
         self.rubber_band.reset(Qgis.GeometryType.Line)

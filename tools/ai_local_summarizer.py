@@ -129,9 +129,8 @@ def _layer_stats_lines(layer: Dict[str, Any]) -> List[str]:
                 "in_aoi_m2",
                 "parcel_m2",
             ]
-            show_fields = [f for f in preferred if f in num]
-            if not show_fields:
-                show_fields = list(num.keys())
+            pref_set = set(preferred)
+            show_fields = [f for f in preferred if f in num] + [f for f in num.keys() if f not in pref_set]
             shown = show_fields[:8]
             for f in shown:
                 d = num.get(f) or {}
@@ -186,6 +185,14 @@ def _layer_stats_lines(layer: Dict[str, Any]) -> List[str]:
                 more = 0
             if more > 0:
                 lines.append(f"- 외 {_fmt_int(more)}개 클래스 생략")
+        elif bool(stats.get("circular")):
+            c_deg = stats.get("circular_mean_deg")
+            r_len = stats.get("resultant_length_R")
+            f_pct = stats.get("flat_pct")
+            deg_txt = f"{_fmt_float(c_deg, digits=1)}°" if c_deg is not None else "미정(방향 상쇄)"
+            r_txt = _fmt_float(r_len, digits=3) if r_len is not None else "N/A"
+            extra = f", 평탄지({_fmt_float(f_pct, digits=1)}%)" if f_pct is not None and float(f_pct) > 0 else ""
+            lines.append(f"- 원형 방향 통계{sampled_txt}: 평균 방위={deg_txt}, 집중도 R={r_txt}{extra}")
         else:
             mn = _fmt_float(stats.get('min'), digits=3)
             me = _fmt_float(stats.get('mean'), digits=3)

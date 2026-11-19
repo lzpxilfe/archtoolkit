@@ -43,7 +43,10 @@ def _stub_module(name):
 
 
 def _import_dialog_module():
+    import tools as _tools_pkg
     saved = dict(sys.modules)
+    had_attr = hasattr(_tools_pkg, "trench_suggestion_dialog")
+    saved_attr = getattr(_tools_pkg, "trench_suggestion_dialog", None)
     try:
         for name in _STUB_MODULES:
             sys.modules[name] = _stub_module(name)
@@ -54,6 +57,10 @@ def _import_dialog_module():
             if name not in saved:
                 del sys.modules[name]
         sys.modules.update(saved)
+        if had_attr:
+            setattr(_tools_pkg, "trench_suggestion_dialog", saved_attr)
+        elif hasattr(_tools_pkg, "trench_suggestion_dialog"):
+            delattr(_tools_pkg, "trench_suggestion_dialog")
 
 
 try:

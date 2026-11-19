@@ -59,6 +59,7 @@ from .qtcompat import FT_INT, FT_DOUBLE, FT_STRING, SHADER_INTERPOLATED
 from qgis.gui import QgsMapLayerComboBox
 
 from .utils import (
+    is_pseudo_mercator,
     log_swallowed,
     log_exception,
     log_message,
@@ -1456,29 +1457,56 @@ value/class 래스터와 폴리곤을 생성합니다.
         # Transform survey-area extent to raster CRS for export.
         extent_export = QgsRectangle(extent_aoi)
         aoi_geom_raster = QgsGeometry(aoi_geom)
-        try:
-            if aoi.crs() != raster.crs():
+        if aoi.crs() != raster.crs():
+            if not aoi.crs().isValid() or not raster.crs().isValid():
+                push_message(
+                    self.iface,
+                    "오류",
+                    "조사지역 또는 RGB 래스터의 좌표계(CRS)가 유효하지 않아 좌표 변환을 수행할 수 없습니다.",
+                    level=2,
+                    duration=8,
+                )
+                restore_ui_focus(self)
+                return
+            try:
                 ct = QgsCoordinateTransform(aoi.crs(), raster.crs(), QgsProject.instance())
+                if not ct.isValid():
+                    raise RuntimeError("유효하지 않은 좌표 변환(QgsCoordinateTransform)")
                 extent_export = ct.transformBoundingBox(extent_export)
-                # QgsGeometry.transform reports failure via its RETURN CODE
-                # (0=success), not an exception. A failed reprojection left the
-                # AOI in the wrong CRS and the mask then blanked the whole
-                # output to NoData. Disable masking instead.
-                try:
-                    rc = aoi_geom_raster.transform(ct)
-                    if rc != 0:
-                        log_message(
-                            f"GeoChem: AOI reprojection failed (code {rc}) — AOI 마스킹을 건너뜁니다.",
-                            level=Qgis.MessageLevel.Warning,
-                        )
-                        aoi_geom_raster = None
-                except Exception:
+            except Exception as e:
+                log_message(f"GeoChem: extent transform failed: {e}", level=Qgis.MessageLevel.Critical)
+                push_message(
+                    self.iface,
+                    "오류",
+                    f"조사지역 경계를 래스터 좌표계({raster.crs().authid() or '?'})로 변환하지 못해 중단했습니다: {e}",
+                    level=2,
+                    duration=9,
+                )
+                restore_ui_focus(self)
+                return
+            # QgsGeometry.transform reports failure via its RETURN CODE
+            # (0=success), not an exception. A failed reprojection left the
+            # AOI in the wrong CRS and the mask then blanked the whole
+            # output to NoData. Disable masking and warn the user explicitly.
+            try:
+                rc = aoi_geom_raster.transform(ct)
+                if rc != 0:
+                    msg = f"AOI 폴리곤 좌표 변환 실패(code {rc}) — AOI 마스킹을 건너뛰고 경계 사각형 전체를 추출합니다."
+                    log_message(f"GeoChem: {msg}", level=Qgis.MessageLevel.Warning)
+                    if do_mask_aoi:
+                        push_message(self.iface, "경고", msg, level=1, duration=8)
                     aoi_geom_raster = None
-        except Exception as e:
-            # Transform failed outright: do NOT restore the untransformed AOI
-            # (it would mask in the wrong CRS and blank the output). Skip masking.
-            log_message(f"GeoChem: extent transform failed: {e} — AOI 마스킹을 건너뜁니다.", level=Qgis.MessageLevel.Warning)
-            aoi_geom_raster = None
+            except Exception as _exc:
+                log_swallowed("geochem_polygonize_dialog.run (aoi geom transform)", _exc)
+                if do_mask_aoi:
+                    push_message(
+                        self.iface,
+                        "경고",
+                        "AOI 폴리곤 좌표 변환 실패 — AOI 마스킹을 건너뛰고 경계 사각형 전체를 추출합니다.",
+                        level=1,
+                        duration=8,
+                    )
+                aoi_geom_raster = None
 
         if extent_export.isEmpty() or extent_export.width() <= 0 or extent_export.height() <= 0:
             push_message(self.iface, "오류", "조사지역 경계(사각형)가 비어있습니다.", level=2, duration=7)
@@ -1660,14 +1688,15 @@ value/class 래스터와 폴리곤을 생성합니다.
                 return_residual=True,
             )
             nodata_val = np.float32(-9999.0)
-            # Transparent pixels (if alpha band exists) are known first so the
-            # colour-mismatch count below is over OPAQUE pixels only: a WMS
-            # with transparent no-coverage areas used to blame the legend
-            # preset for them ("범례와 맞지 않는 색 16.7%" = the transparent share).
+            # Transparent and semi-transparent pixels (if alpha band exists) are
+            # known first so the colour-mismatch count below is over fully opaque
+            # pixels only: WMS PNG tiles with premultiplied/anti-aliased alpha
+            # (0 < alpha < 250) darken RGB near boundaries and falsely match dark
+            # high-concentration stops (e.g. dark red = extreme ppm).
             transparent = None
             if a is not None:
                 try:
-                    transparent = a.astype(np.int16, copy=False) <= 0
+                    transparent = a.astype(np.int16, copy=False) < 250
                 except Exception as _exc:
                     log_swallowed("geochem_polygonize_dialog.run (alpha)", _exc)
                     transparent = None
@@ -1790,14 +1819,14 @@ value/class 래스터와 폴리곤을 생성합니다.
                 log_message("GeoChem: masking dark linework…", level=Qgis.MessageLevel.Info)
                 line_mask = None
                 try:
-                    core = _mask_black_lines(r, g, b)
-                    if transparent is not None:
-                        core &= ~transparent
                     sorted_pts = sorted(preset.points, key=lambda p: float(p.value))
                     if _legend_first_stop_is_absent_grey(sorted_pts):
                         active_stop_rgbs = [p.rgb for p in sorted_pts[1:]]
                     else:
                         active_stop_rgbs = [p.rgb for p in sorted_pts]
+                    core = _mask_black_lines(r, g, b, palette=active_stop_rgbs)
+                    if transparent is not None:
+                        core &= ~transparent
                     halo = _mask_colour_halo(r, g, b, core=core, palette=active_stop_rgbs)
                     if transparent is not None:
                         halo &= ~transparent
@@ -1925,9 +1954,28 @@ value/class 래스터와 폴리곤을 생성합니다.
                     target_max = float(br[-1])
                     fix_max_meta["target_max"] = target_max
                     out = out.astype(np.float32, copy=False)
-                    valid = np.isfinite(out) & (out != nodata_val) & (out >= 0)
-                    if np.any(valid):
-                        cur_max = float(np.nanmax(out[valid]))
+                    all_valid = np.isfinite(out) & (out != nodata_val)
+                    if target_max <= 0:
+                        fix_max_meta["skipped_reason"] = "non_positive_target_max"
+                        log_message(
+                            f"GeoChem: max correction skipped (legend target_max={target_max:g} <= 0)",
+                            level=Qgis.MessageLevel.Warning,
+                        )
+                    elif np.any(all_valid) and np.any(out[all_valid] < 0):
+                        fix_max_meta["skipped_reason"] = "negative_values_present"
+                        log_message(
+                            "GeoChem: max correction skipped (negative values present; multiplicative scaling is invalid for signed scales)",
+                            level=Qgis.MessageLevel.Warning,
+                        )
+                        push_message(
+                            self.iface,
+                            "GeoChem",
+                            "음수 값이 포함된 범례/자료에서는 비율 기반 최댓값 보정을 적용할 수 없어 보정을 건너뛰었습니다.",
+                            level=1,
+                            duration=8,
+                        )
+                    elif np.any(all_valid):
+                        cur_max = float(np.nanmax(out[all_valid]))
                         fix_max_meta["cur_max"] = cur_max
                         if 0 < cur_max < target_max:
                             factor = target_max / cur_max
@@ -1946,7 +1994,7 @@ value/class 래스터와 폴리곤을 생성합니다.
                                 level=1,
                                 duration=9,
                             )
-                            out[valid] = (out[valid] / cur_max) * target_max
+                            out[all_valid] = (out[all_valid] / cur_max) * target_max
                         else:
                             log_message(f"GeoChem: max correction not needed (cur_max={cur_max:g}, legend max={target_max:g})", level=Qgis.MessageLevel.Info)
                 except Exception as _exc:
@@ -2278,6 +2326,25 @@ value/class 래스터와 폴리곤을 생성합니다.
                             poly_name = f"{preset.key}_polygons_{run_id}"
                         loaded = QgsVectorLayer(persisted_poly, poly_name, "ogr")
                         if loaded.isValid():
+                            # Preserve categorized styling and Korean field aliases
+                            # that were applied to the pre-save memory layer (GPKG
+                            # adds a leading fid column, so match aliases by name).
+                            try:
+                                if poly.renderer() is not None:
+                                    loaded.setRenderer(poly.renderer().clone())
+                            except Exception as _exc:
+                                log_swallowed("geochem_polygonize_dialog.run (preserve renderer)", _exc)
+                            try:
+                                src_fields = poly.fields()
+                                dst_fields = loaded.fields()
+                                for fi in range(src_fields.count()):
+                                    alias = poly.attributeAlias(fi)
+                                    if alias:
+                                        dst_idx = dst_fields.indexFromName(src_fields[fi].name())
+                                        if dst_idx >= 0:
+                                            loaded.setFieldAlias(dst_idx, alias)
+                            except Exception as _exc:
+                                log_swallowed("geochem_polygonize_dialog.run (preserve aliases)", _exc)
                             poly = loaded
                             log_message(
                                 f"GeoChem: saved polygons poly={persisted_poly}",
@@ -2579,7 +2646,7 @@ value/class 래스터와 폴리곤을 생성합니다.
             elif rule == "threshold":
                 t = float(weight_threshold)
                 sel = valid & (v >= np.float32(t))
-                w[sel] = v[sel].astype(np.float64, copy=False)
+                w[sel] = np.maximum(v[sel].astype(np.float64, copy=False), 0.0)
                 param = float(t)
             elif rule == "binary":
                 t = float(weight_threshold)
@@ -2593,7 +2660,7 @@ value/class 래스터와 폴리곤을 생성합니다.
                 thr = float(np.nanpercentile(vv, 100.0 - pct))
                 thr_used = thr
                 sel = valid & (v >= np.float32(thr))
-                w[sel] = v[sel].astype(np.float64, copy=False)
+                w[sel] = np.maximum(v[sel].astype(np.float64, copy=False), 0.0)
                 param = float(pct)
             else:
                 sel = valid
@@ -2607,8 +2674,9 @@ value/class 래스터와 폴리곤을 생성합니다.
         if not np.any(sel):
             log_message("GeoChem: center skipped (no pixels after selection)", level=Qgis.MessageLevel.Warning)
             return None
-        if rule in ("value", "power"):
-            # Label says w = max(value, 0): say how many pixels that clamp touched.
+        if rule in ("value", "power", "threshold", "top_pct"):
+            # Negative weights can make the weighted centroid diverge outside
+            # the study area (denominator -> 0); clamp to 0 and report it.
             try:
                 n_neg = int(np.count_nonzero(sel & (v < np.float32(0.0))))
             except Exception as _exc:
@@ -2827,6 +2895,19 @@ value/class 래스터와 폴리곤을 생성합니다.
                 log_message(
                     "GeoChem zonal: 래스터 CRS가 위경도라 px_area/c*_area는 제곱도(deg²)입니다. 면적으로 읽지 마세요.",
                     level=Qgis.MessageLevel.Warning,
+                )
+            elif rcrs is not None and rcrs.isValid() and is_pseudo_mercator(rcrs):
+                px_area_unit = f"{rcrs.authid() or 'EPSG:3857'} (Web Mercator distorted)"
+                log_message(
+                    "GeoChem zonal: 래스터 CRS가 웹 메르카토르(EPSG:3857)라 평면 픽셀 면적(c*_area)이 한반도 위도에서 약 1.6배 과대 계산됩니다. zone_area(타원체 면적) 또는 국내 투영좌표계(EPSG:5186/5179)를 사용하세요.",
+                    level=Qgis.MessageLevel.Warning,
+                )
+                push_message(
+                    self.iface,
+                    "경고",
+                    "래스터 CRS가 웹 메르카토르(EPSG:3857)입니다. 구역 통계의 c*_area(평면 픽셀 면적)는 위도 왜곡으로 약 1.6배 과대 계산되므로 타원체 면적(zone_area)이나 c*_pct 비율을 참고하세요.",
+                    level=1,
+                    duration=10,
                 )
             elif rcrs is not None and rcrs.isValid():
                 # Projected: label with the CRS authid so the unit is traceable

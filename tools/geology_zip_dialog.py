@@ -300,7 +300,7 @@ def _code_key(val) -> str:
         return str(val)
     if isinstance(val, float) and val.is_integer():
         return str(int(val))
-    return str(val)
+    return str(val).strip()
 
 
 def _is_blank(val) -> bool:
@@ -435,15 +435,41 @@ def _choose_dbf_encoding(shp_path: str) -> Tuple[Optional[str], str]:
     return ranked[0][3], "detected"
 
 
+def _classify_decoded_chars(text: str) -> Tuple[int, int, int, int]:
+    """Return ``(ctrl, hangul, cjk, other_non_ascii)`` character counts."""
+    ctrl = 0
+    hangul = 0
+    cjk = 0
+    other_non_ascii = 0
+    for ch in text:
+        cp = ord(ch)
+        if cp < 0x20 or (0x7F <= cp <= 0x9F) or ch == "\ufffd":
+            ctrl += 1
+        elif (0xAC00 <= cp <= 0xD7A3) or (0x3130 <= cp <= 0x318F):
+            hangul += 1
+        elif 0x4E00 <= cp <= 0x9FFF:
+            cjk += 1
+        elif cp > 0x7F:
+            other_non_ascii += 1
+    return ctrl, hangul, cjk, other_non_ascii
+
+
 def _decode_zip_member_names(infos) -> int:
     """Re-decode ZIP member names written without the UTF-8 flag.
 
     zipfile decodes such names as cp437, so a Korean folder or file name
-    zipped on Korean Windows (cp949) was extracted as mojibake. The raw bytes
-    are recovered and decoded as UTF-8 when valid, else with the candidate
-    encodings. Returns how many names were changed."""
+    zipped on Korean Windows (cp949) was extracted as mojibake. CP949 bytes
+    for common Korean sheet names (e.g. '화천', '홍천') are also accidentally
+    valid 2-byte UTF-8 sequences ('ȭõ', 'ȫõ'), whereas unflagged UTF-8 Hangul
+    ('춘천') decodes to clean Hangul/CJK under UTF-8 and to gibberish under
+    CP949. We therefore:
+      1. Accept strict UTF-8 immediately when it yields clean Hangul/CJK with
+         no Latin-Extended/control mojibake;
+      2. Otherwise prefer strict CP949/EUC-KR when it yields clean Hangul/CJK;
+      3. Otherwise fall back to strict UTF-8 or the first valid candidate.
+    Returns how many names were changed."""
     changed = 0
-    encs = ["utf-8"] + [str(e) for e in (GEOLOGY_CANDIDATE_ENCODINGS or []) if e]
+    oem_encs = [str(e) for e in (GEOLOGY_CANDIDATE_ENCODINGS or []) if e and str(e).lower() not in ("utf-8", "utf8")]
     for info in infos or []:
         try:
             if int(getattr(info, "flag_bits", 0) or 0) & 0x800:
@@ -457,16 +483,43 @@ def _decode_zip_member_names(infos) -> int:
             raw = None
         if raw is None:
             continue
-        for enc in encs:
-            try:
-                fixed = raw.decode(enc, errors="strict")
-            except (UnicodeDecodeError, LookupError):
-                fixed = None
-            if fixed:
-                if fixed != info.filename:
-                    info.filename = fixed
-                    changed += 1
-                break
+
+        utf8_text = None
+        try:
+            utf8_text = raw.decode("utf-8", errors="strict")
+        except UnicodeDecodeError:
+            utf8_text = None
+
+        chosen = None
+        # Tier 1: genuine unflagged UTF-8 containing Hangul/CJK without Latin-Extended mojibake
+        if utf8_text:
+            u_ctrl, u_hangul, u_cjk, u_other = _classify_decoded_chars(utf8_text)
+            if u_ctrl == 0 and (u_hangul + u_cjk) > 0 and u_other == 0:
+                chosen = utf8_text
+
+        # Tier 2: Korean Windows OEM encodings (cp949 / euc-kr) yielding clean Hangul/CJK
+        oem_fallback = None
+        if chosen is None:
+            for enc in oem_encs:
+                try:
+                    cand = raw.decode(enc, errors="strict")
+                except (UnicodeDecodeError, LookupError):
+                    cand = None
+                if cand:
+                    if oem_fallback is None:
+                        oem_fallback = cand
+                    c_ctrl, c_hangul, c_cjk, _c_other = _classify_decoded_chars(cand)
+                    if c_ctrl == 0 and (c_hangul + c_cjk) > 0:
+                        chosen = cand
+                        break
+
+        # Tier 3: non-Korean UTF-8 (e.g. accented Latin) or first decodable OEM candidate
+        if chosen is None:
+            chosen = utf8_text or oem_fallback
+
+        if chosen and chosen != info.filename:
+            info.filename = chosen
+            changed += 1
     return changed
 
 
@@ -660,7 +713,39 @@ class KigamZipProcessor:
                 n_fixed = _decode_zip_member_names(infos)
                 if n_fixed:
                     log_message(f"KIGAM ZIP: UTF-8 표시 없는 파일 이름 {n_fixed}개를 한글 인코딩으로 해석했습니다.", level=Qgis.MessageLevel.Info)
-                zip_ref.extractall(extract_dir, members=infos)
+                # Verify every member stays strictly inside extract_dir (guards
+                # path traversal, Windows drive-relative/UNC paths, and decoded
+                # separator anomalies).
+                root_real = os.path.realpath(extract_dir)
+                safe_infos = []
+                for info in infos:
+                    fname = str(info.filename or "")
+                    norm_parts = [p for p in re.split(r"[\\/]+", fname) if p]
+                    drive, _ = os.path.splitdrive(fname)
+                    if (
+                        not fname
+                        or drive
+                        or fname.startswith(("/", "\\"))
+                        or any(p == ".." for p in norm_parts)
+                    ):
+                        log_message(
+                            f"KIGAM ZIP: 안전하지 않은 경로 항목 제외: {fname!r}",
+                            level=Qgis.MessageLevel.Warning,
+                        )
+                        continue
+                    target_real = os.path.realpath(os.path.join(extract_dir, *norm_parts))
+                    try:
+                        in_root = os.path.commonpath([target_real, root_real]) == root_real
+                    except ValueError:
+                        in_root = False
+                    if not in_root:
+                        log_message(
+                            f"KIGAM ZIP: 추출 폴더 밖으로 벗어나는 항목 제외: {fname!r}",
+                            level=Qgis.MessageLevel.Warning,
+                        )
+                        continue
+                    safe_infos.append(info)
+                zip_ref.extractall(extract_dir, members=safe_infos)
             self._touch_extract_dir(extract_dir)
         except Exception as e:
             log_message(f"KIGAM ZIP 추출 실패: {e}", level=Qgis.MessageLevel.Warning)
@@ -1460,8 +1545,8 @@ class GeologyZipDialog(QtWidgets.QDialog):
         for lyr in layers:
             if lyr.fields().indexOf(field_name) < 0:
                 continue
-            lf = self._suggest_label_field(lyr, field_name) if numeric else None
-            if lf and lyr.fields().indexOf(lf) < 0:
+            lf = self._suggest_label_field(lyr, field_name)
+            if lf and (lf == field_name or lyr.fields().indexOf(lf) < 0):
                 lf = None
             for f in lyr.getFeatures():
                 try:
@@ -1479,23 +1564,23 @@ class GeologyZipDialog(QtWidgets.QDialog):
                         code = None
                     if code is None:
                         continue
-                    keys.add(code)
-                    has_lbl = False
-                    if lf:
-                        try:
-                            lbl = f[lf]
-                            if not _is_blank(lbl):
-                                lbl_s = str(lbl).strip()
-                                has_lbl = True
-                                seen = labels_all.setdefault(code, [])
-                                if lbl_s not in seen:
-                                    seen.append(lbl_s)
-                        except Exception as _exc:
-                            log_swallowed("geology_zip_dialog._build_shared_code_mapping", _exc)
-                    if not has_lbl:
-                        unlabelled.add(code)
                 else:
-                    keys.add(_code_key(val))
+                    code = _code_key(val)
+                keys.add(code)
+                has_lbl = False
+                if lf:
+                    try:
+                        lbl = f[lf]
+                        if not _is_blank(lbl):
+                            lbl_s = str(lbl).strip()
+                            has_lbl = True
+                            seen = labels_all.setdefault(code, [])
+                            if lbl_s not in seen:
+                                seen.append(lbl_s)
+                    except Exception as _exc:
+                        log_swallowed("geology_zip_dialog._build_shared_code_mapping", _exc)
+                if not has_lbl:
+                    unlabelled.add(code)
         if numeric:
             raw_ints = {int(c) for c in keys}
             used_ints = set(raw_ints)
@@ -1524,9 +1609,25 @@ class GeologyZipDialog(QtWidgets.QDialog):
                     if seen:
                         labels[code] = seen[0]
         else:
-            for i, key in enumerate(sorted(keys), start=1):
-                mapping[key] = i
-                labels[key] = key
+            next_alloc = 1
+            for key in sorted(keys):
+                seen = labels_all.get(key) or []
+                if len(seen) > 1:
+                    conflicts.append((key, list(seen)))
+                    for lbl_s in seen:
+                        comp_key = f"{key}::{lbl_s}"
+                        mapping[comp_key] = next_alloc
+                        next_alloc += 1
+                        labels[comp_key] = lbl_s
+                        labels_all[comp_key] = list(seen)
+                    if key in unlabelled:
+                        mapping[key] = next_alloc
+                        labels[key] = key
+                        next_alloc += 1
+                else:
+                    mapping[key] = next_alloc
+                    next_alloc += 1
+                    labels[key] = seen[0] if seen else key
         return mapping, labels, labels_all, conflicts
 
     def _build_numeric_merge_layer(
@@ -1605,8 +1706,8 @@ class GeologyZipDialog(QtWidgets.QDialog):
                 )
 
         for lyr in layers:
-            lf = self._suggest_label_field(lyr, field_name) if numeric else None
-            if lf and lyr.fields().indexOf(lf) < 0:
+            lf = self._suggest_label_field(lyr, field_name)
+            if lf and (lf == field_name or lyr.fields().indexOf(lf) < 0):
                 lf = None
             if lyr.geometryType() != layers[0].geometryType():
                 log_message(f"지오메트리 타입 불일치: {lyr.name()} (skip)", level=Qgis.MessageLevel.Warning)
@@ -1704,15 +1805,39 @@ class GeologyZipDialog(QtWidgets.QDialog):
                             out_val = float(mapped_int)
                     else:
                         key = _code_key(val)
-                        if key not in mapping:
+                        lbl_txt = ""
+                        if lf:
+                            try:
+                                lbl = f[lf]
+                                if not _is_blank(lbl):
+                                    lbl_txt = str(lbl).strip()
+                            except Exception as _exc:
+                                log_swallowed("geology_zip_dialog._build_numeric_merge_layer (str label)", _exc)
+                        comp_key = f"{key}::{lbl_txt}" if lbl_txt else ""
+                        if comp_key and comp_key in mapping:
+                            mapped_int = int(mapping[comp_key])
+                            if comp_key not in labels:
+                                labels[comp_key] = lbl_txt
+                            out_val = float(mapped_int)
+                        elif key in conflict_codes and lbl_txt:
                             while next_id in used_vals:
                                 next_id += 1
-                            mapping[key] = next_id
-                            used_vals.add(next_id)
+                            mapped_int = next_id
+                            used_vals.add(mapped_int)
                             next_id += 1
-                        if key not in labels:
-                            labels[key] = key
-                        out_val = float(mapping[key])
+                            mapping[comp_key] = mapped_int
+                            labels[comp_key] = lbl_txt
+                            out_val = float(mapped_int)
+                        else:
+                            if key not in mapping:
+                                while next_id in used_vals:
+                                    next_id += 1
+                                mapping[key] = next_id
+                                used_vals.add(next_id)
+                                next_id += 1
+                            if key not in labels:
+                                labels[key] = lbl_txt or key
+                            out_val = float(mapping[key])
 
                     nf = QgsFeature(out_layer.fields())
                     nf.setGeometry(geom)
@@ -1969,21 +2094,28 @@ class GeologyZipDialog(QtWidgets.QDialog):
 
         cell_w = float(pixel_size)
         cell_h = float(pixel_size)
+        crs = None
         try:
             crs = layer.crs()
+        except Exception as _exc:
+            log_swallowed("geology_zip_dialog._rasterize_layer (crs)", _exc)
+            crs = None
+        if crs is None or not crs.isValid():
+            # A CRS-less input rasterizes without complaint into a GeoTIFF
+            # that carries no projection and reports success. Refuse it outside
+            # the try/except so the error is never swallowed.
+            raise RuntimeError(
+                f"{layer.name()}: 좌표계가 없어 래스터를 만들 수 없습니다. 레이어 속성에서 CRS를 지정한 뒤 다시 실행하세요."
+            )
+        try:
             units = None
             try:
-                units = crs.mapUnits() if crs is not None and crs.isValid() else None
-            except Exception:
+                units = crs.mapUnits()
+            except Exception as _exc:
+                log_swallowed("geology_zip_dialog._rasterize_layer (units)", _exc)
                 units = None
 
-            if crs is None or not crs.isValid():
-                # A CRS-less input rasterizes without complaint into a GeoTIFF
-                # that carries no projection and reports success. Refuse it.
-                raise RuntimeError(
-                    f"{layer.name()}: 좌표계가 없어 래스터를 만들 수 없습니다. 레이어 속성에서 CRS를 지정한 뒤 다시 실행하세요."
-                )
-            if crs is not None and crs.isValid() and (crs.isGeographic() or units == Qgis.DistanceUnit.Degrees):
+            if crs.isGeographic() or units == Qgis.DistanceUnit.Degrees:
                 lat0 = 0.0
                 try:
                     if rect is not None:
@@ -2023,6 +2155,13 @@ class GeologyZipDialog(QtWidgets.QDialog):
                     raise RuntimeError(
                         "출력 래스터 크기가 0입니다. (CRS 단위/해상도 불일치) "
                         "투영 CRS(미터 단위)로 변환하거나 픽셀 크기를 조정하세요."
+                    )
+                max_cells = 250_000_000
+                total_cells = int(cols) * int(rows)
+                if total_cells > max_cells:
+                    raise RuntimeError(
+                        f"출력 래스터 크기({cols:,} x {rows:,} = {total_cells:,}셀)가 안전 한도({max_cells:,}셀)를 초과합니다. "
+                        "픽셀 크기를 키우거나 대상 영역/좌표계를 확인하세요."
                     )
         except Exception as e:
             log_message(f"KIGAM rasterize preflight 실패: {e}", level=Qgis.MessageLevel.Warning)

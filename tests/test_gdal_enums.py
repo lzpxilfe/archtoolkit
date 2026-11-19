@@ -59,7 +59,9 @@ class GdalEnumAuditTests(unittest.TestCase):
 
     def test_processing_gdal_numeric_enum_literals_in_valid_bounds(self):
         # Verify hardcoded Processing integer enum parameters stay in GDAL's published bounds:
-        # DATA_TYPE (0=Use Input Layer Data Type .. 11=CInt32) and RESAMPLING (0..12).
+        # - DATA_TYPE: 0..11 (gdal:proximity accepts 0..6, gdal:warpreproject/rasterize 0..11)
+        # - RTYPE (gdal:rastercalculator): 0..5 (Byte..Float64)
+        # - RESAMPLING: 0..12
         for path in _tool_files():
             with open(path, encoding="utf-8") as f:
                 tree = ast.parse(f.read(), filename=path)
@@ -74,9 +76,32 @@ class GdalEnumAuditTests(unittest.TestCase):
                     if k.value == "DATA_TYPE":
                         self.assertGreaterEqual(v.value, 0, msg=path)
                         self.assertLessEqual(v.value, 11, msg=path)
+                    elif k.value == "RTYPE":
+                        self.assertGreaterEqual(v.value, 0, msg=path)
+                        self.assertLessEqual(v.value, 5, msg=path)
                     elif k.value == "RESAMPLING":
                         self.assertGreaterEqual(v.value, 0, msg=path)
                         self.assertLessEqual(v.value, 12, msg=path)
+
+            # Algorithm-specific checks for calls like run_alg_blocking("gdal:proximity", {...})
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call) or len(node.args) < 2:
+                    continue
+                alg_arg, params_arg = node.args[0], node.args[1]
+                if not (isinstance(alg_arg, ast.Constant) and isinstance(alg_arg.value, str)):
+                    continue
+                if not isinstance(params_arg, ast.Dict):
+                    continue
+                alg_id = alg_arg.value.lower()
+                for k, v in zip(params_arg.keys, params_arg.values):
+                    if not (isinstance(k, ast.Constant) and isinstance(k.value, str)):
+                        continue
+                    if not (isinstance(v, ast.Constant) and isinstance(v.value, int) and not isinstance(v.value, bool)):
+                        continue
+                    if alg_id == "gdal:proximity" and k.value == "DATA_TYPE":
+                        self.assertLessEqual(v.value, 6, msg=f"{path}: gdal:proximity DATA_TYPE={v.value}")
+                    if alg_id == "gdal:rastercalculator" and k.value == "RTYPE":
+                        self.assertLessEqual(v.value, 5, msg=f"{path}: gdal:rastercalculator RTYPE={v.value}")
 
 
 if __name__ == "__main__":

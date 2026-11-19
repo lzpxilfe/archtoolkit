@@ -109,16 +109,17 @@ def dijkstra_weighted(*, start: int, adj: List[List[Tuple[int, float]]], strict:
         validate_positive_weights(adj)
     n = int(len(adj))
     dist = [math.inf] * n
+    settled = [False] * n
     s = int(start)
     if not (0 <= s < n):
         return dist
     dist[s] = 0.0
     heap: List[Tuple[float, int]] = [(0.0, s)]
-    eps = 1e-12
     while heap:
         dv, v = heapq.heappop(heap)
-        if dv > dist[v] + eps:
+        if settled[v]:
             continue
+        settled[v] = True
         for w, weight in adj[v]:
             _skip_33 = False
             try:
@@ -130,10 +131,14 @@ def dijkstra_weighted(*, start: int, adj: List[List[Tuple[int, float]]], strict:
                 continue
             if not math.isfinite(ww) or ww <= 0:
                 continue
+            wi = int(w)
+            if settled[wi]:
+                continue
             nd = dv + ww
-            if nd < dist[w] - eps:
-                dist[w] = nd
-                heapq.heappush(heap, (nd, int(w)))
+            tol = 1e-12 * max(1.0, abs(nd), abs(dist[wi]) if math.isfinite(dist[wi]) else 0.0)
+            if nd < dist[wi] - tol:
+                dist[wi] = nd
+                heapq.heappush(heap, (nd, wi))
     return dist
 
 
@@ -173,20 +178,22 @@ def betweenness_centrality_weighted(*, n: int, adj: List[List[Tuple[int, float]]
     validate_symmetric_adjacency(adj)
     adj = _dedupe_weighted_adj(adj)
     bc = [0.0] * int(n)
-    eps = 1e-12
-    for s in range(int(n)):
+    n_int = int(n)
+    for s in range(n_int):
         stack: List[int] = []
-        pred: List[List[int]] = [[] for _ in range(int(n))]
-        sigma = [0.0] * int(n)
+        pred: List[List[int]] = [[] for _ in range(n_int)]
+        sigma = [0.0] * n_int
         sigma[s] = 1.0
-        dist = [math.inf] * int(n)
+        dist = [math.inf] * n_int
         dist[s] = 0.0
+        settled = [False] * n_int
 
         heap: List[Tuple[float, int]] = [(0.0, int(s))]
         while heap:
             dv, v = heapq.heappop(heap)
-            if dv > dist[v] + eps:
+            if settled[v]:
                 continue
+            settled[v] = True
             stack.append(int(v))
             for w, weight in adj[v]:
                 _skip_87 = False
@@ -199,15 +206,20 @@ def betweenness_centrality_weighted(*, n: int, adj: List[List[Tuple[int, float]]
                     continue
                 if not math.isfinite(ww) or ww <= 0:
                     continue
+                wi = int(w)
+                if settled[wi]:
+                    continue
                 nd = dv + ww
-                if nd < dist[w] - eps:
-                    dist[w] = nd
-                    heapq.heappush(heap, (nd, int(w)))
-                    sigma[w] = sigma[v]
-                    pred[w] = [int(v)]
-                elif abs(nd - dist[w]) <= eps:
-                    sigma[w] += sigma[v]
-                    pred[w].append(int(v))
+                ref_scale = max(1.0, abs(nd), abs(dist[wi]) if math.isfinite(dist[wi]) else 0.0)
+                tol = 1e-12 * ref_scale
+                if nd < dist[wi] - tol:
+                    dist[wi] = nd
+                    heapq.heappush(heap, (nd, wi))
+                    sigma[wi] = sigma[v]
+                    pred[wi] = [int(v)]
+                elif abs(nd - dist[wi]) <= tol:
+                    sigma[wi] += sigma[v]
+                    pred[wi].append(int(v))
 
         delta = [0.0] * int(n)
         while stack:

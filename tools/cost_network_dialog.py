@@ -66,6 +66,7 @@ from .cost_surface_dialog import (
 )
 from .utils import (
     log_swallowed,
+    describe_non_metric_crs,
     is_metric_crs,
     is_null_value,
     log_message,
@@ -75,6 +76,7 @@ from .utils import (
     set_archtoolkit_layer_metadata,
     transform_point,
 )
+from .raster_grid_contract import validate_north_up_geotransform
 from . import cost_budget
 from .cost_models import edge_cost as _edge_cost
 from .raster_semantics import undeclared_nodata_mask
@@ -344,6 +346,9 @@ class CostNetworkWorker(QgsTask):
         ysize = ds.RasterYSize
         gt = ds.GetGeoTransform()
         nodata = band.GetNoDataValue()
+        gt_err = validate_north_up_geotransform(gt)
+        if gt_err:
+            return NetworkTaskResult(ok=False, message=gt_err)
 
         dx = abs(float(gt[1]))
         dy = abs(float(gt[5]))
@@ -422,10 +427,12 @@ class CostNetworkWorker(QgsTask):
                 level=Qgis.MessageLevel.Warning,
             )
 
+        base_pairs: List[Tuple[int, int]] = []
+        base_pair_set = set()
         if self.network_mode in (NETWORK_MST, NETWORK_KNN, NETWORK_ALL):
             for i in range(n_nodes):
                 if self._is_cancelled():
-                    return NetworkTaskResult(ok=False, message="취소됨")
+                    return NetworkTaskResult(ok=False, message="취소됨", cancelled=True)
                 dxs = coords[:, 0] - coords[i, 0]
                 dys = coords[:, 1] - coords[i, 1]
                 d2 = dxs * dxs + dys * dys
@@ -433,6 +440,10 @@ class CostNetworkWorker(QgsTask):
                 nn = np.argsort(d2)[: min(n_nodes - 1, k)]
                 for j in nn:
                     add_pair(i, int(j))
+                    a0, b0 = (i, int(j)) if i < int(j) else (int(j), i)
+                    if a0 != b0 and (a0, b0) not in base_pair_set:
+                        base_pair_set.add((a0, b0))
+                        base_pairs.append((a0, b0))
 
         if self.network_mode in (NETWORK_HUB, NETWORK_ALL):
             hubs = [idx for idx, n in enumerate(nodes) if bool(n.is_hub)]
@@ -447,7 +458,7 @@ class CostNetworkWorker(QgsTask):
             if hubs:
                 for i in range(n_nodes):
                     if self._is_cancelled():
-                        return NetworkTaskResult(ok=False, message="취소됨")
+                        return NetworkTaskResult(ok=False, message="취소됨", cancelled=True)
                     if i in hubs:
                         continue
                     dxs = hub_coords[:, 0] - coords[i, 0]
@@ -588,18 +599,20 @@ class CostNetworkWorker(QgsTask):
             c = float(_edge_cost(self.model_key, horiz, 0.0, self.model_params, cost_mode=solver_cost_mode))
             return c, [(ax_, ay_), (bx_, by_)]
 
+        guessed_nodata_windows = 0
         for (a, b), (xoff, yoff, win_xsize, win_ysize) in zip(candidate_pairs, windows):
             if self._is_cancelled():
                 return NetworkTaskResult(ok=False, message="작업이 취소되었습니다.", cancelled=True)
             ax, ay = coords[a, 0], coords[a, 1]
             bx, by = coords[b, 0], coords[b, 1]
 
-            dem = band.ReadAsArray(xoff, yoff, win_xsize, win_ysize)
-            if dem is None:
+            dem_raw = band.ReadAsArray(xoff, yoff, win_xsize, win_ysize)
+            if dem_raw is None:
                 continue
-            dem = dem.astype(np.float32, copy=False)
-
-            nodata_mask, _guessed = undeclared_nodata_mask(dem, nodata)
+            nodata_mask, _guessed = undeclared_nodata_mask(dem_raw, nodata)
+            if _guessed:
+                guessed_nodata_windows += 1
+            dem = dem_raw.astype(np.float32, copy=False)
 
             win_gt = _window_geotransform(gt, xoff, yoff)
             inv_win = _inv_geotransform(win_gt)
@@ -844,11 +857,11 @@ class CostNetworkWorker(QgsTask):
                     miny = min(ay, by) - self.pair_buffer_m
                     maxy = max(ay, by) + self.pair_buffer_m
                     xoff, yoff, win_xsize, win_ysize = _bbox_window(gt, xsize, ysize, minx, miny, maxx, maxy)
-                dem = band.ReadAsArray(xoff, yoff, win_xsize, win_ysize)
-                if dem is None:
+                dem_raw = band.ReadAsArray(xoff, yoff, win_xsize, win_ysize)
+                if dem_raw is None:
                     continue
-                dem = dem.astype(np.float32, copy=False)
-                nodata_mask, _guessed = undeclared_nodata_mask(dem, nodata)
+                nodata_mask, _guessed = undeclared_nodata_mask(dem_raw, nodata)
+                dem = dem_raw.astype(np.float32, copy=False)
                 win_gt = _window_geotransform(gt, xoff, yoff)
                 inv_win = _inv_geotransform(win_gt)
                 a_px, a_py = gdal.ApplyGeoTransform(inv_win, float(ax), float(ay))
@@ -864,15 +877,29 @@ class CostNetworkWorker(QgsTask):
                     continue
                 start_rc = (a_row, a_col)
                 end_rc = (b_row, b_col)
+                cab = cost_dir.get((a, b))
+                cba = cost_dir.get((b, a))
+                # Honour sym_method for MST detailed path orientation so standalone
+                # NETWORK_MST matches NETWORK_ALL on asymmetric terrain.
+                prefer_ba = False
+                if cab is None and cba is not None:
+                    prefer_ba = True
+                elif cab is not None and cba is not None:
+                    if self.sym_method == SYMMETRY_MIN and float(cba) < float(cab):
+                        prefer_ba = True
+                    elif self.sym_method == SYMMETRY_MAX and float(cba) > float(cab):
+                        prefer_ba = True
+                    elif self.sym_method == SYMMETRY_AVG and float(cba) < float(cab):
+                        prefer_ba = True
                 if start_rc == end_rc:
-                    # Same-cell pair: the straight 2-vertex line, as in the candidate pass.
                     _c_same, pts = _same_cell_edge(a, b)
                 else:
-                    prev, cost_ab = _astar_path(
+                    s_rc, e_rc = (end_rc, start_rc) if prefer_ba else (start_rc, end_rc)
+                    prev, cost_sel = _astar_path(
                         dem,
                         nodata_mask,
-                        start_rc,
-                        end_rc,
+                        s_rc,
+                        e_rc,
                         dx,
                         dy,
                         self.allow_diagonal,
@@ -881,17 +908,16 @@ class CostNetworkWorker(QgsTask):
                         cost_mode=solver_cost_mode,
                         cancel_check=self._is_cancelled,
                     )
-                    if prev is None or cost_ab is None:
+                    if prev is None or cost_sel is None:
                         continue
-                    idxs = _reconstruct_path(prev, start_rc, end_rc, cols, rows)
+                    idxs = _reconstruct_path(prev, s_rc, e_rc, cols, rows)
                     if not idxs:
                         continue
                     pts = [_cell_center(win_gt, (idx % cols), (idx // cols)) for idx in idxs]
+                    if prefer_ba:
+                        pts.reverse()
                     pts = _simplify_turn_points(pts) or pts
                 dist_m = float(_polyline_length(pts) or 0.0)
-
-                cab = cost_dir.get((a, b))
-                cba = cost_dir.get((b, a))
                 sym = sym_cost(a, b)
 
                 if solver_cost_mode == "time_s":
@@ -965,9 +991,11 @@ class CostNetworkWorker(QgsTask):
 
         # --- A+B+C (All) ---
         elif self.network_mode == NETWORK_ALL:
+            # Use base_pairs (without hub-only links) so MST and k-NN inside
+            # NETWORK_ALL match standalone NETWORK_MST / NETWORK_KNN exactly.
             # A) MST
             weighted = []
-            for a, b in candidate_pairs:
+            for a, b in base_pairs:
                 w = sym_cost(a, b)
                 if w is None:
                     continue
@@ -995,7 +1023,7 @@ class CostNetworkWorker(QgsTask):
             selected_dir = set()
             for i in range(n_nodes):
                 outs = []
-                for a, b in candidate_pairs:
+                for a, b in base_pairs:
                     if a == i:
                         outs.append(b)
                     elif b == i:
@@ -1930,14 +1958,9 @@ MST/k-NN/Hub 네트워크를 생성합니다.
             elif model_key == MODEL_PANDOLF:
                 self.groupPandolfParams.setVisible(True)
 
-            # Energy output is meaningful only for Pandolf
-            if model_key == MODEL_PANDOLF:
+            # Energy output is primary for energy-based models (Pandolf & Herzog metabolic).
+            if model_key in (MODEL_PANDOLF, MODEL_HERZOG_METABOLIC):
                 self.cmbCostMode.setEnabled(True)
-                # Pandolf's time cost is distance / CONSTANT speed (see
-                # cost_models.edge_cost), so leaving the combo on 시간(분) would
-                # silently solve the whole network on straight-line distance.
-                # Land on energy - the only mode this model resolves slope in.
-                # The user can still switch back, and run() warns if they do.
                 idx_energy = int(self.cmbCostMode.findData(COST_ENERGY))
                 if idx_energy >= 0 and self.cmbCostMode.currentData() != COST_ENERGY:
                     self.cmbCostMode.setCurrentIndex(idx_energy)
@@ -1960,14 +1983,14 @@ MST/k-NN/Hub 네트워크를 생성합니다.
                 "Naismith’s Rule\n"
                 "- 수평 이동 + 상승 고도 페널티로 시간을 근사합니다.\n"
                 "- 수평속도↑ → 전체 시간↓\n"
-                "- 상승 페널티↑ → 오르막 비용↑"
+                "- 상승 페널티(m/h)↓ → 오르막 비용↑ (값↑ → 오르막 비용↓)"
             )
         if model_key == MODEL_HERZOG_METABOLIC:
             return (
                 "Herzog metabolic (Minetti et al. 2002; Herzog 2013)\n"
-                "- 부호 있는 경사에 따른 6차 대사 다항식 비용 모델입니다(비등방).\n"
-                "- 약 -10.5% 완만한 내리막에서 최소 비용, 급경사 오르막·내리막에서 비용 증가.\n"
-                "- 기본속도↑ → 전체 시간↓"
+                "- 부호 있는 경사에 따른 6차 대사에너지 다항식 C(s) [J/(kg·m)] 비등방 모델입니다.\n"
+                "- 약 -10.5% 완만한 내리막에서 최소 에너지, 급경사 오르막·내리막에서 에너지 급증.\n"
+                "- 기본 출력은 대사에너지(kcal, 70 kg 기준)이며, 보행 시간(분)은 토블러/나이스미스를 권장합니다."
             )
         if model_key == MODEL_CONOLLY_LAKE:
             # The reference slope sets the ENTIRE magnitude of this penalty
@@ -2272,7 +2295,7 @@ MST/k-NN/Hub 네트워크를 생성합니다.
             restore_ui_focus(self)
             return
         if not is_metric_crs(dem_layer.crs()):
-            push_message(self.iface, "오류", "DEM CRS가 미터 단위가 아닙니다. (권장: 투영좌표계)", level=2)
+            push_message(self.iface, "오류", describe_non_metric_crs(dem_layer.crs()), level=2, duration=8)
             restore_ui_focus(self)
             return
 
@@ -2296,7 +2319,7 @@ MST/k-NN/Hub 네트워크를 생성합니다.
 
         model_key = self.cmbModel.currentData()
         model_label = self.cmbModel.currentText()
-        if model_key != MODEL_PANDOLF:
+        if model_key not in (MODEL_PANDOLF, MODEL_HERZOG_METABOLIC):
             cost_mode = COST_TIME
 
         name_field = str(self.cmbNameField.currentData() or "")

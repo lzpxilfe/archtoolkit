@@ -61,31 +61,43 @@ def write_single_band_geotiff(
         return False
 
     ok = False
+    band = None
     try:
+        gdal.ErrorReset()
         out_ds.SetGeoTransform(geotransform)
         if projection:
             out_ds.SetProjection(projection)
         band = out_ds.GetRasterBand(1)
+        if band is None:
+            raise RuntimeError(f"GDAL band 1 missing while writing {out_path}")
         if nodata is not None:
             band.SetNoDataValue(float(nodata))
-        gdal.ErrorReset()
-        band.WriteArray(array)
+        err_rc = band.WriteArray(array)
+        if err_rc not in (None, 0):
+            raise RuntimeError(
+                f"GDAL WriteArray returned error code {err_rc} ({gdal.GetLastErrorMsg()}) while writing {out_path}"
+            )
         band.FlushCache()
         out_ds.FlushCache()
-        # FlushCache() is a void call: a failed real write (disk full, quota)
-        # raises nothing and is only recorded in GDAL's error state, so setting
-        # ok = True unconditionally let a truncated .tif publish as success.
+        # Release the band BEFORE the dataset: in GDAL's Python bindings a band
+        # holds a reference to its parent dataset, so ``out_ds = None`` alone
+        # keeps the file open on Windows (blocking os.remove on failure and
+        # deferring TIFF directory finalization until function exit).
+        band = None
+        out_ds = None
+        # Check GDAL error state AFTER close (closing flushes compressed tiles
+        # and writes the TIFF IFD, which is where disk-full errors surface).
         if gdal.GetLastErrorType() >= gdal.CE_Failure:
             raise RuntimeError(
                 f"GDAL write failed ({gdal.GetLastErrorMsg()}) while writing {out_path}"
             )
-        out_ds = None  # close first: GDAL writes the TIFF directory on close
         if not _closed_file_is_complete(out_path, rows, cols):
             raise RuntimeError(f"GeoTIFF verification failed (truncated write?): {out_path}")
         ok = True
     finally:
-        # Close the dataset before any delete (required on Windows), then drop
+        # Release band first, then dataset (required on Windows), then drop
         # a truncated file left by a failed write.
+        band = None
         out_ds = None
         if not ok and os.path.exists(str(out_path)):
             try:

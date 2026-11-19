@@ -80,7 +80,7 @@ EXPECTED = {
     ("dem_generate", "dem", "m"): False,
     ("dem_generate", "kriging_variance", "m^2"): False,
     ("slope_aspect_drafting", "slope_grid", "deg"): False,
-    ("map_styling", "dem_hillshade", "m"): False,
+    ("map_styling", "dem_hillshade", "index"): False,
     ("map_styling", "dem_gray", "m"): False,
     ("map_styling", "dem_color", "m"): False,
     # --- vector outputs (never reach align/export; pinned for completeness) -

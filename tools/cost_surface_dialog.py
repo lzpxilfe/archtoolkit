@@ -63,6 +63,7 @@ from .utils import (
     log_swallowed,
     cleanup_files,
     adopt_stamped_temp_outputs,
+    describe_non_metric_crs,
     is_metric_crs,
     log_message,
     push_message,
@@ -72,6 +73,7 @@ from .utils import (
     stamp_layer_temp_outputs,
     transform_point,
 )
+from .raster_grid_contract import validate_north_up_geotransform
 from .raster_io import write_single_band_geotiff
 from . import cost_budget
 from .cost_models import (
@@ -416,7 +418,7 @@ def _straight_line_profile(
     sx, sy = start_xy
     ex, ey = end_xy
     straight_dist = math.hypot(ex - sx, ey - sy)
-    is_energy_model = model_key == MODEL_PANDOLF
+    is_energy_model = model_key in (MODEL_PANDOLF, MODEL_HERZOG_METABOLIC)
     inv_win_gt = _inv_geotransform(win_gt)
 
     def _friction_at(x0, y0):
@@ -469,9 +471,21 @@ def _straight_line_profile(
             horiz = math.hypot(x - x_prev, y - y_prev)
             dz = float(z) - float(z_prev)
             fr = _friction_at((x + x_prev) * 0.5, (y + y_prev) * 0.5)
-            cum_t += _edge_cost(model_key, horiz, dz, model_params, cost_mode="time_s") * fr
+            step_t = _edge_cost(model_key, horiz, dz, model_params, cost_mode="time_s") * fr
+            if not math.isfinite(step_t):
+                # Impassable segment (e.g. wheeled_max_slope_deg or cliff barrier):
+                # mark profile incomplete instead of injecting inf into charts/attributes.
+                complete = False
+                prev = (float(x), float(y), float(z))
+                continue
+            cum_t += step_t
             if is_energy_model:
-                cum_e += _edge_cost(model_key, horiz, dz, model_params, cost_mode="energy_j") * fr
+                step_e = _edge_cost(model_key, horiz, dz, model_params, cost_mode="energy_j") * fr
+                if not math.isfinite(step_e):
+                    complete = False
+                    prev = (float(x), float(y), float(z))
+                    continue
+                cum_e += step_e
             rows_out.append((math.hypot(x - sx, y - sy), float(x), float(y), float(z), float(cum_t),
                              float(cum_e) if is_energy_model else None))
             prev = (float(x), float(y), float(z))
@@ -520,7 +534,7 @@ def _graph_path_profile(path_idx, cols, dem, win_gt, dx, dy, model_key, model_pa
     """
     if not path_idx:
         return []
-    is_energy_model = model_key == MODEL_PANDOLF
+    is_energy_model = model_key in (MODEL_PANDOLF, MODEL_HERZOG_METABOLIC)
     out = []
     dist = 0.0
     cum_t = 0.0
@@ -940,6 +954,9 @@ class CostSurfaceWorker(QgsTask):
             except Exception as _exc:
                 log_swallowed("cost_surface_dialog._run_impl", _exc)
         nodata = band.GetNoDataValue()
+        gt_err = validate_north_up_geotransform(gt)
+        if gt_err:
+            return CostTaskResult(ok=False, message=gt_err)
 
         dx = abs(float(gt[1]))
         dy = abs(float(gt[5]))
@@ -995,15 +1012,14 @@ class CostSurfaceWorker(QgsTask):
             f"CostSurface: DEM window {win_xsize}x{win_ysize} ({cell_count:,} cells)",
             level=Qgis.MessageLevel.Info,
         )
-        dem = band.ReadAsArray(xoff, yoff, win_xsize, win_ysize)
-        if dem is None:
+        dem_raw = band.ReadAsArray(xoff, yoff, win_xsize, win_ysize)
+        if dem_raw is None:
             return CostTaskResult(ok=False, message="DEM 값을 읽을 수 없습니다.")
-        dem = dem.astype(np.float32, copy=False)
-
-        # Also guesses undeclared sentinels: a DEM that uses -9999 without
-        # declaring NoData otherwise reads as a valid -9999 m elevation and
-        # turns every neighbouring slope into a cliff.
-        nodata_mask, guessed_nodata_n = undeclared_nodata_mask(dem, nodata)
+        # Build NoData mask on the raw GDAL dtype BEFORE casting to float32 so
+        # Float64/Int32/Float32 sentinels (e.g. -9999.9, -3.4e38, -2147483647)
+        # never slip through as valid elevations.
+        nodata_mask, guessed_nodata_n = undeclared_nodata_mask(dem_raw, nodata)
+        dem = dem_raw.astype(np.float32, copy=False)
 
         inv = _inv_geotransform(gt)
         s_px, s_py = gdal.ApplyGeoTransform(inv, sx, sy)
@@ -1048,7 +1064,7 @@ class CostSurfaceWorker(QgsTask):
 
             return _cb
 
-        is_energy_model = self.model_key == MODEL_PANDOLF
+        is_energy_model = self.model_key in (MODEL_PANDOLF, MODEL_HERZOG_METABOLIC)
         path_cost_mode = "energy_j" if is_energy_model else "time_s"
 
         create_time_raster = bool(self.create_cost_raster)
@@ -1096,15 +1112,17 @@ class CostSurfaceWorker(QgsTask):
                     scale = 1.0
 
                 mult = fr.astype(np.float32, copy=True)
+                # Preserve explicit +inf impassable barriers before scaling/clipping
+                # so standard GIS barrier rasters are never turned into 1.0 flat terrain.
+                posinf_barriers = np.isposinf(mult)
                 mult = mult * float(scale)
-                # Neutralize (1.0) both NoData/NaN AND non-positive values.
-                # gdal.Warp fills the window area not covered by a smaller
-                # friction raster with 0 (no dstNodata set), and a 0/negative
-                # multiplier is degenerate — without this those cells clip to
-                # 0.0001 and become ~10,000x cheaper than everything else.
-                mult[~np.isfinite(mult)] = 1.0
-                mult[mult <= 0.0] = 1.0
-                mult = np.clip(mult, 0.0001, 1.0e6).astype(np.float32, copy=False)
+                # Neutralize (1.0) NaN, -inf, and non-positive values (e.g. Warp 0 padding),
+                # while keeping +inf barriers as impassable (+inf).
+                mult[(~np.isfinite(mult)) & (~posinf_barriers)] = 1.0
+                mult[(~posinf_barriers) & (mult <= 0.0)] = 1.0
+                finite_mask = ~posinf_barriers
+                mult[finite_mask] = np.clip(mult[finite_mask], 0.0001, 1.0e6).astype(np.float32, copy=False)
+                mult[posinf_barriers] = np.inf
                 friction *= mult
 
             if self.friction_vector_source:
@@ -1371,7 +1389,9 @@ class CostSurfaceWorker(QgsTask):
                     best_cost = None
 
                 if best_cost is not None and math.isfinite(best_cost):
-                    thr = float(best_cost) * (1.0 + float(corridor_percent) / 100.0)
+                    # Include 1e-12 relative tolerance so corridor_percent=0
+                    # does not drop LCP cells due to forward/reverse summation roundoff.
+                    thr = float(best_cost) * (1.0 + float(corridor_percent) / 100.0 + 1e-12)
                     try:
                         start2d = dist_start.reshape((rows, cols))
                         end2d = dist_end_for_corridor.reshape((rows, cols))
@@ -1406,6 +1426,7 @@ class CostSurfaceWorker(QgsTask):
 
         path_coords = None
         lcp_profile = None
+        lcp_hit_buffer_border = False
         if create_path and prev_for_path is not None:
             path_idx = _reconstruct_path(prev_for_path, start_rc, end_rc, cols, rows)
             if path_idx:
@@ -1414,6 +1435,11 @@ class CostSurfaceWorker(QgsTask):
                     r = idx // cols
                     c = idx % cols
                     coords.append(_cell_center(win_gt, c, r))
+                    if self.buffer_m > 0:
+                        if (r == 0 and yoff > 0) or (r == rows - 1 and (yoff + rows) < ysize) or (
+                            c == 0 and xoff > 0
+                        ) or (c == cols - 1 and (xoff + cols) < xsize):
+                            lcp_hit_buffer_border = True
                 path_coords = coords
                 # Same edges and friction as the solver, so milestone/profile
                 # figures agree with the path layer and the cost raster.
@@ -1469,6 +1495,15 @@ class CostSurfaceWorker(QgsTask):
             total_energy_kcal = float(end_energy_j) / 4184.0
 
         msg_parts = []
+        if lcp_hit_buffer_border:
+            msg_parts.append(
+                f"주의: 최소비용경로가 분석 버퍼({self.buffer_m:g} m) 경계에 닿았습니다. "
+                "더 저렴한 우회로가 잘렸을 수 있으므로 버퍼를 늘리거나 0(DEM 전체)으로 재실행하세요."
+            )
+            log_message(
+                f"CostSurface: LCP touched artificial buffer boundary (buffer_m={self.buffer_m:g})",
+                level=Qgis.MessageLevel.Warning,
+            )
         if guessed_nodata_n:
             msg_parts.append(
                 f"DEM에 NoData 선언이 없어 극단값 {guessed_nodata_n:,}셀을 NoData로 처리했습니다"
@@ -2131,9 +2166,9 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
             self.groupHerzogWheeledParams.setVisible(False)
             self.groupPandolfParams.setVisible(False)
 
-            # Energy raster output is only meaningful for energy-based models (Pandolf).
+            # Energy raster output is meaningful for energy-based models (Pandolf, Herzog metabolic).
             try:
-                if model_key == MODEL_PANDOLF:
+                if model_key in (MODEL_PANDOLF, MODEL_HERZOG_METABOLIC):
                     self.chkCreateEnergyRaster.setEnabled(True)
                     if not self.chkCreateEnergyRaster.isChecked():
                         self.chkCreateEnergyRaster.setChecked(True)
@@ -2171,12 +2206,12 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
             elif model_key == MODEL_HERZOG_METABOLIC:
                 self.groupHerzogMetabolicParams.setVisible(True)
                 self.lblModelHelp.setText(
-                    "<b>허조그 메타볼릭(부호 경사) (Herzog 2013; Minetti et al. 2002)</b><br>"
-                    "부호 있는 경사(tan θ)에 따른 6차 대사 다항식으로 이동 비용을 계산하는 <b>비등방</b> 모델입니다.<br>"
-                    "(약 -10.5% 완만한 내리막에서 최소 비용, 급경사 오르막·내리막에서 비용 급증)<br>"
-                    "<br><b>변수 해석</b><br>"
-                    "• 기본속도: 평지 기준 속도. 값↑ → 전체 시간이↓<br>"
-                    "<br><b>누적 비용</b>: 출발점→각 셀 최소 이동시간(분)"
+                    "<b>허조그 메타볼릭 대사에너지 (Herzog 2013; Minetti et al. 2002)</b><br>"
+                    "부호 있는 경사(tan θ)에 따른 6차 대사 다항식 C(s) [J/(kg·m)]으로 <b>대사에너지(kcal)</b>를 최소화하는 비등방 모델입니다.<br>"
+                    "(약 -10.5% 완만한 내리막에서 최소 에너지, 급경사 오르막·내리막에서 에너지 급증)<br>"
+                    "<br><b>정직한 단위 안내</b>: Minetti/Herzog 다항식은 속도가 아니라 에너지 소비율(J/kg/m)이므로, "
+                    "이 도구는 경로·회랑·등에너지선을 <b>누적 에너지(kcal, 체중 70 kg 기준)</b>로 계산합니다.<br>"
+                    "(보행 시간 '분'이 필요하면 토블러 또는 나이스미스 모델을 사용하세요.)"
                 )
             elif model_key == MODEL_CONOLLY_LAKE:
                 self.groupConollyLakeParams.setVisible(True)
@@ -2248,9 +2283,9 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
             push_message(
                 self.iface,
                 "주의",
-                "DEM CRS가 미터 단위가 아닙니다. (권장: 투영좌표계/미터)",
+                describe_non_metric_crs(dem_layer.crs()),
                 level=1,
-                duration=5,
+                duration=7,
             )
 
     def pick_points_on_map(self):

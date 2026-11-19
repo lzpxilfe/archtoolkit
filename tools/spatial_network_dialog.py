@@ -125,22 +125,35 @@ class _CentralityTask(QgsTask):
     watchdog can tell a slow run from a hung one.
     """
 
-    def __init__(self, description, n, adj, *, want_closeness, want_betweenness):
+    def __init__(self, description, n, adj, *, want_closeness, want_betweenness, want_harmonic=False):
         super().__init__(description, QgsTask.Flag.CanCancel)
         self._n = int(n)
         self._adj = adj
         self._want_closeness = bool(want_closeness)
         self._want_betweenness = bool(want_betweenness)
+        self._want_harmonic = bool(want_harmonic)
         self.closeness = None
         self.betweenness = None
+        self.harmonic = None
 
     def run(self):
+        if self.isCanceled():
+            return False
         self.setProgress(5)
         if self._want_closeness:
             self.closeness = closeness_centrality_unweighted(n=self._n, adj=self._adj)
-            self.setProgress(55)
+            if self.isCanceled():
+                return False
+            self.setProgress(40)
+        if self._want_harmonic:
+            self.harmonic = harmonic_centrality_unweighted(n=self._n, adj=self._adj)
+            if self.isCanceled():
+                return False
+            self.setProgress(70)
         if self._want_betweenness:
             self.betweenness = betweenness_centrality_unweighted(n=self._n, adj=self._adj)
+            if self.isCanceled():
+                return False
         self.setProgress(100)
         return True
 
@@ -1533,6 +1546,7 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
         # ignores the disabled spinbox; 0 means no limit).
         max_dist_applied = method == PPA_THRESHOLD
         degenerate: Optional[str] = None
+        k_eff = int(k)
 
         if method == PPA_KNN:
             k_eff = max(1, min(int(k), max(1, n - 1)))
@@ -1625,7 +1639,8 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
         ppa_params: Dict[str, Any] = {
             "network": "ppa",
             "method": str(method),
-            "k": (int(k) if method == PPA_KNN else None),
+            "k": (int(k_eff) if method == PPA_KNN else None),
+            "k_requested": (int(k) if method == PPA_KNN else None),
             "mutual_only": (bool(mutual_only) if method == PPA_KNN else None),
             "max_dist_m": (float(max_dist_m) if max_dist_applied else None),
             "n_nodes": int(n),
@@ -2050,22 +2065,23 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
 
         closeness = None
         betweenness = None
+        harmonic = None
         clustering = local_clustering_coefficients(n=n, adj=adj)
         summary = graph_summary(n=n, adj=adj)
-        harmonic = harmonic_centrality_unweighted(n=n, adj=adj) if n <= 500 else None
-        if compute_closeness or compute_betweenness:
-            # Worker thread (see _CentralityTask): Brandes on up to 500 nodes
-            # used to freeze the GUI for the whole computation.
+        want_harmonic = bool(n <= 500)
+        if compute_closeness or compute_betweenness or want_harmonic:
             task = _CentralityTask(
                 f"네트워크 중심성 계산 (노드 {n:,}개)",
                 n,
                 adj,
                 want_closeness=compute_closeness,
                 want_betweenness=compute_betweenness,
+                want_harmonic=want_harmonic,
             )
             run_task_blocking(task)
             closeness = task.closeness
             betweenness = task.betweenness
+            harmonic = task.harmonic
 
         layer = self._memory_layer("Point", title, crs)
         pr = layer.dataProvider()
@@ -2267,6 +2283,22 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
         dy = by - ay
         total_dist = math.hypot(dx, dy)
         if total_dist <= 0:
+            # Co-located points are mutually visible only when the DEM has a
+            # valid elevation at that location (never treat NoData/outside as visible).
+            prov0 = provider if provider is not None else dem_layer.dataProvider()
+            try:
+                val0, ok0 = prov0.sample(QgsPointXY(float(ax), float(ay)), 1)
+                if (not ok0) or val0 is None or (not math.isfinite(float(val0))):
+                    return None
+                has_nd0 = bool(hasattr(prov0, "sourceHasNoDataValue") and prov0.sourceHasNoDataValue(1))
+                decl0 = float(prov0.sourceNoDataValue(1)) if has_nd0 else None
+                if decl0 is not None and math.isfinite(decl0) and math.isclose(float(val0), decl0, rel_tol=1e-6, abs_tol=1e-6):
+                    return None
+                if decl0 is None and (abs(float(val0)) >= 1e30 or float(val0) in (-9999.0, -9999.9, -32768.0, -2147483648.0)):
+                    return None
+            except Exception as _exc:
+                log_swallowed("spatial_network_dialog._los_visible (colocated)", _exc)
+                return None
             return True
 
         px = abs(float(dem_layer.rasterUnitsPerPixelX() or 0.0))
@@ -2601,7 +2633,9 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
                     visible += 1
             if valid <= 0:
                 return None
-            return float(visible) / float(total_samples)
+            # Divide by valid (tested) samples, not total_samples: DEM NoData
+            # sample failures are unmeasured, NOT "not visible".
+            return float(visible) / float(valid)
 
         def _status_from_vis(vis: Optional[bool]) -> str:
             if vis is None:

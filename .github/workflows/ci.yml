@@ -49,7 +49,28 @@ jobs:
         run: flake8 .
 
       - name: Static smoke test
-        run: python tests/check_static.py
+        run: python tests/check_static.py --strict
+
+  windows-unit-tests:
+    # Catches Windows-specific regressions (os.fchmod absence, path separators,
+    # CP949 filename decoding, atomic replace semantics).
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install numpy and pyflakes
+        run: python -m pip install --upgrade numpy pyflakes
+
+      - name: Unit tests (Windows, QGIS-free)
+        run: python -m unittest discover -s tests -p "test_*.py" -v
+
+      - name: Static smoke test (strict)
+        run: python tests/check_static.py --strict
 
   qgis-tests:
     # The QGIS-gated tests (align/export warps, dialog memory, layer tree, the

@@ -37,20 +37,27 @@ def _crs_label(crs) -> str:
 def transform_point(point, src_crs, dest_crs):
     """Transform point from source CRS to destination CRS.
 
-    Fails closed: a transform error raises :class:`CRSTransformError` instead of
-    returning the untransformed point. The old best-effort fallback let analyses
-    run at raw coordinates interpreted as the destination CRS - silently wrong
-    results with no way for the caller to detect the fallback. Callers decide
-    whether to skip the geometry, abort the run, or surface the error to the
-    user (every dialog run path is already wrapped in a try that reports it).
+    Fails closed: a transform error (including an invalid source/destination CRS
+    or an invalid QgsCoordinateTransform) raises :class:`CRSTransformError`
+    instead of returning the untransformed point.
     """
     if point is None:
         return None
     try:
+        if src_crs is None or dest_crs is None:
+            raise CRSTransformError("CRS is missing")
+        if hasattr(src_crs, "isValid") and not src_crs.isValid():
+            raise CRSTransformError(f"Source CRS is invalid ({_crs_label(src_crs)})")
+        if hasattr(dest_crs, "isValid") and not dest_crs.isValid():
+            raise CRSTransformError(f"Destination CRS is invalid ({_crs_label(dest_crs)})")
         if src_crs == dest_crs:
             return point
         transform = QgsCoordinateTransform(src_crs, dest_crs, QgsProject.instance())
+        if hasattr(transform, "isValid") and not transform.isValid():
+            raise CRSTransformError("QgsCoordinateTransform is invalid")
         return transform.transform(point)
+    except CRSTransformError:
+        raise
     except Exception as e:
         msg = f"CRS transform failed ({_crs_label(src_crs)} -> {_crs_label(dest_crs)}): {e}"
         try:
@@ -64,15 +71,24 @@ def transform_geometry(geom, ct):
     """Return a copy of ``geom`` transformed by ``ct`` (``ct`` None = copy only).
 
     ``QgsGeometry.transform()`` swallows ``QgsCsException`` and reports failure
-    only through a non-zero return code, so a bare ``try/except`` around it
-    never sees a genuine CRS failure - the untransformed geometry kept being
-    used. This helper turns that return code into a :class:`CRSTransformError`.
+    only through a non-zero return code, and an invalid ``QgsCoordinateTransform``
+    returns 0 with untransformed coordinates. Fail closed in both cases.
     """
     out = QgsGeometry(geom)
     if ct is None:
         return out
     try:
+        if hasattr(ct, "isValid") and not ct.isValid():
+            raise CRSTransformError("QgsCoordinateTransform is invalid")
+        for attr in ("sourceCrs", "destinationCrs"):
+            getter = getattr(ct, attr, None)
+            if callable(getter):
+                c = getter()
+                if c is not None and hasattr(c, "isValid") and not c.isValid():
+                    raise CRSTransformError(f"Coordinate transform has invalid {attr}")
         rc = out.transform(ct)
+    except CRSTransformError:
+        raise
     except Exception as e:
         msg = f"CRS transform failed (geometry): {e}"
         try:
@@ -425,10 +441,70 @@ def log_exception(context: str, exc: Exception = None, level=Qgis.MessageLevel.C
     except Exception as _exc:
         log_swallowed("tools/utils.py:321 (log_exception)", _exc)
 
-def is_metric_crs(crs):
-    """Return True if CRS map units are meters (recommended for distance-based tools)."""
+_WEB_MERCATOR_AUTHIDS = frozenset({"EPSG:3857", "EPSG:900913", "EPSG:3785", "EPSG:54004"})
+
+
+def is_pseudo_mercator(crs) -> bool:
+    """Return True if ``crs`` is Web Mercator / Spherical Pseudo-Mercator.
+
+    EPSG:3857 reports ``isGeographic() == False`` and ``mapUnits() == Meters``,
+    yet inflates horizontal lengths by ``sec(lat)`` (+26% at 37.5 N in Korea),
+    inflates planar areas by ``sec(lat)^2`` (+59%), and flattens DEM slopes by
+    ~21%. Distance, slope, area, viewshed, and cost tools must not treat it as
+    an equal-scale metric projection.
+    """
+    if crs is None:
+        return False
     try:
-        return (not crs.isGeographic()) and crs.mapUnits() == Qgis.DistanceUnit.Meters
+        if hasattr(crs, "isValid") and not crs.isValid():
+            return False
+        auth = str(crs.authid() or "").strip().upper()
+        if auth in _WEB_MERCATOR_AUTHIDS:
+            return True
+        desc = str(crs.description() or "").lower()
+        if "pseudo-mercator" in desc or "web mercator" in desc or "popular visualisation" in desc:
+            return True
+        proj = str(crs.toProj() if hasattr(crs, "toProj") else "").lower()
+        if "+proj=merc" in proj and (
+            "+nadgrids=@null" in proj
+            or "+wktext" in proj
+            or ("+a=6378137" in proj and "+b=6378137" in proj)
+            or "+r=6378137" in proj
+        ):
+            return True
+    except Exception:
+        return False
+    return False
+
+
+def describe_non_metric_crs(crs) -> str:
+    """Short Korean guidance explaining why ``crs`` is unsuitable for metric analysis."""
+    if crs is None or (hasattr(crs, "isValid") and not crs.isValid()):
+        return "좌표계(CRS)가 없거나 유효하지 않습니다. 투영 좌표계(예: EPSG:5186, EPSG:5179)를 지정하세요."
+    if is_pseudo_mercator(crs):
+        auth = _crs_label(crs)
+        return (
+            f"웹 메르카토르({auth})는 한반도 위도(37.5°N)에서 거리 +26%, 면적 +59%, 경사 −21%의 "
+            "투영 왜곡이 발생해 미터 분석에 사용할 수 없습니다. EPSG:5186 또는 EPSG:5179 등 "
+            "국내 투영 좌표계로 재투영한 뒤 실행하세요."
+        )
+    auth = _crs_label(crs)
+    return (
+        f"현재 좌표계({auth})는 미터(m) 단위의 투영 좌표계가 아닙니다. "
+        "EPSG:5186 또는 EPSG:5179 등 투영 좌표계로 변환한 뒤 실행하세요."
+    )
+
+
+def is_metric_crs(crs, *, allow_web_mercator: bool = False):
+    """Return True if CRS is a valid projected metric CRS (rejects Web Mercator by default)."""
+    try:
+        if crs is None or (hasattr(crs, "isValid") and not crs.isValid()):
+            return False
+        if crs.isGeographic() or crs.mapUnits() != Qgis.DistanceUnit.Meters:
+            return False
+        if (not allow_web_mercator) and is_pseudo_mercator(crs):
+            return False
+        return True
     except Exception:
         return False
 

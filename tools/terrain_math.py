@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from .raster_semantics import nodata_equals
+
 
 def zt_curvature(z, cell, cell_y=None):
     """Zevenbergen & Thorne (1987) profile/plan curvature of an elevation grid.
@@ -150,29 +152,15 @@ def tri_radius(z, radius, *, nodata_mask=None, progress_cb=None, cancel_check=No
     return result
 
 
-def focal_tpi(z, radius, *, nodata_mask=None):
+def focal_tpi(z, radius, *, nodata_mask=None, min_valid_fraction: float = 0.0):
     """Topographic Position Index over an exact (2r+1)x(2r+1) focal window.
 
     ``tpi(c) = z_c - mean{ z_n : n in W(c), n != c, n valid }``
 
-    The centre cell is excluded from the mean, exactly as gdaldem's 3x3 TPI
-    (the radius-1 path of the dialog) excludes it, so radius 1 here equals
-    ``gdaldem TPI`` and every radius shares one definition (Weiss 2001: the
-    cell's elevation minus the mean elevation of its neighbourhood).
-
-    This replaces a block-average + bilinear-resample approximation that was
-    exact only at block centres: on a paraboloid it averaged 3x the true TPI
-    with a (2r+1)-cell periodic artefact.  The window sums come from cumulative
-    sums (a separable summed-area table), so the cost is O(n) for any radius.
-
-    ``nodata_mask`` marks cells to exclude (True = NoData); NaN/inf are always
-    excluded.  NoData cells are left out of both the sum and the count, so a
-    cell next to a hole or a clipped collar is averaged over its valid
-    neighbours only, and receives NaN itself only when it is NoData or has no
-    valid neighbour.  The outermost ``radius`` rows and columns are NaN: their
-    window leaves the grid, and a one-sided window on a slope would read as a
-    false ridge or valley along the DEM border (same rule as ``tri_radius``
-    and gdaldem without -compute_edges).
+    ``min_valid_fraction`` (in ``[0.0, 1.0]``): cells whose window has fewer
+    valid neighbours than ``min_valid_fraction * ((2r+1)^2 - 1)`` receive NaN.
+    Setting e.g. ``0.75`` or ``1.0`` suppresses one-sided window artefacts along
+    AOI-clipped collars on sloped terrain.
     """
     array = np.asarray(z, dtype="float64")
     if array.ndim != 2:
@@ -188,18 +176,15 @@ def focal_tpi(z, radius, *, nodata_mask=None):
     if nodata_mask is not None:
         valid &= ~np.asarray(nodata_mask, dtype=bool)
 
-    # TPI is invariant to an additive constant; working relative to the mean
-    # keeps the cumulative sums at relief scale (no cancellation on a 1000 m
-    # base).
     ref = float(array[valid].mean()) if np.any(valid) else 0.0
     values = np.where(valid, array - ref, 0.0)
     counts = valid.astype("float64")
 
     window = 2 * radius + 1
+    max_neighbors = float(window * window - 1)
+    min_neighbors = max(0.0, min(1.0, float(min_valid_fraction))) * max_neighbors
 
     def _box_sum(a):
-        # Sum over every full (2r+1)x(2r+1) window; result is (rows-2r, cols-2r)
-        # and element [i, j] belongs to the centre cell [i+r, j+r].
         c = np.cumsum(a, axis=0)
         c = np.concatenate([np.zeros((1, a.shape[1])), c], axis=0)
         s = c[window:, :] - c[:-window, :]
@@ -210,30 +195,26 @@ def focal_tpi(z, radius, *, nodata_mask=None):
     inner = (slice(radius, rows - radius), slice(radius, cols - radius))
     sums = _box_sum(values) - values[inner]
     n = _box_sum(counts) - counts[inner]
-    # Counts are sums of 0/1 and exact in float64; round away any residue.
     n = np.rint(n)
 
     result = np.full(array.shape, np.nan, dtype="float64")
     with np.errstate(invalid="ignore", divide="ignore"):
         result[inner] = values[inner] - sums / np.where(n > 0, n, 1.0)
     inner_result = result[inner]
-    inner_result[n <= 0] = np.nan
+    if min_neighbors > 0.0:
+        inner_result[(n <= 0) | (n + 1e-9 < min_neighbors)] = np.nan
+    else:
+        inner_result[n <= 0] = np.nan
     result[~valid] = np.nan
     return result
 
 
 def focal_tpi_strips(rows, cols, radius, read_rows, write_rows, *, nodata=None,
-                     block_rows=512, progress_cb=None):
+                     block_rows=512, progress_cb=None, cancel_check=None,
+                     min_valid_fraction: float = 0.0):
     """Run :func:`focal_tpi` over horizontal strips so memory stays bounded.
 
-    ``read_rows(first, stop)`` returns rows ``first..stop-1`` (all columns) of
-    the elevation grid; ``write_rows(first, block)`` receives the finished TPI
-    rows starting at ``first`` (float64, NaN where there is no value).  Each
-    strip is read with a ``radius``-row halo above and below, so the output is
-    identical to running :func:`focal_tpi` on the whole grid (the halo rows are
-    discarded; only the true grid border stays NaN).  ``nodata`` is compared
-    against the raw values before any cast.  ``progress_cb(done_rows, rows)``
-    is called after each strip.
+    Returns True on completion, or False if ``cancel_check()`` became True.
     """
     rows = int(rows)
     cols = int(cols)
@@ -242,22 +223,24 @@ def focal_tpi_strips(rows, cols, radius, read_rows, write_rows, *, nodata=None,
     if rows <= 2 * radius or cols <= 2 * radius:
         raise ValueError("grid is too small for the requested radius")
     for first in range(0, rows, block_rows):
+        if cancel_check is not None and cancel_check():
+            return False
         stop = min(rows, first + block_rows)
         lo = max(0, first - radius)
         hi = min(rows, stop + radius)
         if hi - lo <= 2 * radius:
-            # Only border rows remain in this strip: no full window fits.
             block = np.full((stop - first, cols), np.nan, dtype="float64")
         else:
             raw = np.asarray(read_rows(lo, hi))
-            mask = None
-            if nodata is not None:
-                mask = raw == nodata
-            tpi = focal_tpi(raw, radius, nodata_mask=mask)
+            mask = nodata_equals(raw, nodata) if nodata is not None else None
+            tpi = focal_tpi(
+                raw, radius, nodata_mask=mask, min_valid_fraction=min_valid_fraction
+            )
             block = tpi[first - lo:stop - lo, :]
         write_rows(first, block)
         if progress_cb is not None:
             progress_cb(stop, rows)
+    return True
 
 
 # Value written for flat cells (no downslope direction) in the aspect raster.
@@ -269,22 +252,15 @@ ASPECT_FLAT_VALUE = -1.0
 
 def mark_flat_aspect(aspect, dem_valid, aspect_nodata, *, flat_value=ASPECT_FLAT_VALUE,
                      out_nodata=-9999.0):
-    """Tell gdaldem's flat cells apart from NoData in an aspect grid.
-
-    gdaldem aspect (without -zero_for_flat and without -compute_edges) writes
-    its NoData value both for flat cells and for cells it could not compute:
-    the one-cell border and every cell whose 3x3 window touches DEM NoData.
-    A cell whose full 3x3 window is valid DEM and which still came back as
-    NoData is therefore flat. Those get ``flat_value``; the rest of the NoData
-    cells get ``out_nodata``; real directions are returned unchanged.
-    """
-    a = np.asarray(aspect, dtype="float64")
+    """Tell gdaldem's flat cells apart from NoData in an aspect grid."""
+    raw_a = np.asarray(aspect)
+    a = np.asarray(raw_a, dtype="float64")
     valid = np.asarray(dem_valid, dtype=bool)
     if a.shape != valid.shape or a.ndim != 2:
         raise ValueError("aspect and dem_valid must be 2D arrays of one shape")
     missing = ~np.isfinite(a)
     if aspect_nodata is not None:
-        missing |= a == aspect_nodata
+        missing |= nodata_equals(raw_a, aspect_nodata)
     computable = np.zeros(a.shape, dtype=bool)
     rows, cols = a.shape
     if rows >= 3 and cols >= 3:

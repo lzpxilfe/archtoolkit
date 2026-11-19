@@ -18,7 +18,9 @@ Exit code is non-zero if any file fails, so it doubles as a CI gate.
 from __future__ import annotations
 
 import ast
+import builtins
 import os
+import symtable
 import sys
 from typing import List, Tuple
 
@@ -46,6 +48,38 @@ def _compile_all(paths: List[str]) -> List[Tuple[str, str]]:
         except (SyntaxError, ValueError) as exc:
             errors.append((path, f"compile: {exc}"))
     return errors
+
+
+def _symtable_undefined_names(paths: List[str]) -> List[str]:
+    """Stdlib fallback undefined-global detector when pyflakes is unavailable."""
+    known_builtins = set(dir(builtins)) | {
+        "__file__", "__name__", "__doc__", "__package__", "__spec__", "__annotations__", "__class__",
+    }
+    issues: List[str] = []
+    for path in paths:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                src = f.read()
+            st = symtable.symtable(src, path, "exec")
+        except Exception:
+            continue
+        top_defs = {
+            s.get_name()
+            for s in st.get_symbols()
+            if s.is_assigned() or s.is_imported() or s.is_parameter() or s.is_namespace()
+        }
+
+        def _walk(tbl):
+            for sym in tbl.get_symbols():
+                if sym.is_global() and sym.is_referenced() and not sym.is_assigned() and not sym.is_imported():
+                    nm = sym.get_name()
+                    if nm not in top_defs and nm not in known_builtins:
+                        issues.append(f"{os.path.relpath(path, REPO_ROOT)} ({tbl.get_name()}): undefined name {nm!r}")
+            for child in tbl.get_children():
+                _walk(child)
+
+        _walk(st)
+    return issues
 
 
 def _pyflakes_all(paths: List[str]) -> Tuple[List[str], bool]:
@@ -117,7 +151,8 @@ def _relative_import_errors(paths: List[str]) -> List[Tuple[str, str]]:
     return errors
 
 
-def main() -> int:
+def main(argv=None) -> int:
+    strict = "--strict" in (argv if argv is not None else sys.argv[1:])
     paths = _iter_py_files()
     print(f"[check_static] scanning {len(paths)} Python files under {REPO_ROOT}")
 
@@ -126,18 +161,27 @@ def main() -> int:
         print(f"  COMPILE FAIL {os.path.relpath(path, REPO_ROOT)}: {msg}")
 
     flake_msgs, ran = _pyflakes_all(paths)
+    pyflakes_missing_fail = False
     if ran:
         for msg in flake_msgs:
             print(f"  UNDEFINED/SYNTAX {msg}")
     else:
-        print("  [warn] pyflakes not installed; ran compile-only checks "
-              "(install pyflakes/flake8 for undefined-name detection)")
+        level_tag = "FAIL (--strict)" if strict else "WARN"
+        print(
+            f"  [{level_tag}] pyflakes not installed; running stdlib symtable undefined-name fallback "
+            "(install pyflakes/flake8 for full static verification)"
+        )
+        flake_msgs = _symtable_undefined_names(paths)
+        for msg in flake_msgs:
+            print(f"  UNDEFINED(symtable) {msg}")
+        if strict:
+            pyflakes_missing_fail = True
 
     import_errors = _relative_import_errors(paths)
     for path, msg in import_errors:
         print(f"  IMPORT FAIL {os.path.relpath(path, REPO_ROOT)}: {msg}")
 
-    failed = bool(compile_errors) or bool(flake_msgs) or bool(import_errors)
+    failed = bool(compile_errors) or bool(flake_msgs) or bool(import_errors) or pyflakes_missing_fail
     if failed:
         print("[check_static] FAILED")
         return 1

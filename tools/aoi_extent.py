@@ -25,6 +25,7 @@ from __future__ import annotations
 from qgis.core import (
     Qgis,
     QgsCoordinateTransform,
+    QgsGeometry,
     QgsProject,
 )
 from .utils import log_swallowed, transform_geometry
@@ -122,13 +123,12 @@ def resolve_aoi_extent(aoi_layer, *, selected_only: bool, dst_crs) -> AoiExtentR
             return AoiExtentResult(status=STATUS_NOTHING_SELECTED)
         features = aoi_layer.selectedFeatures() if selected_only else aoi_layer.getFeatures()
     except Exception:
-        try:
-            features = aoi_layer.getFeatures()
-        except Exception:
-            return AoiExtentResult(status=STATUS_NO_FEATURES)
+        # Never silently widen selected_only=True to all features on failure.
+        if selected_only:
+            return AoiExtentResult(status=STATUS_NOTHING_SELECTED)
+        return AoiExtentResult(status=STATUS_NO_FEATURES)
 
-    geom = None
-    used = 0
+    valid_geoms = []
     skipped = 0
     for feature in features:
         _skip_133 = False
@@ -143,21 +143,43 @@ def resolve_aoi_extent(aoi_layer, *, selected_only: bool, dst_crs) -> AoiExtentR
         if not _is_usable(candidate):
             skipped += 1
             continue
-        if geom is None:
-            geom = candidate
-            used += 1
-            continue
         try:
-            combined = geom.combine(candidate)
-        except Exception:
-            combined = None
-        if _is_usable(combined):
-            geom = combined
-            used += 1
-        else:
-            # Keep the union built so far rather than letting one bad polygon
-            # empty it; the count is reported so the caller can say so.
-            skipped += 1
+            if hasattr(candidate, "isGeosValid") and not candidate.isGeosValid():
+                repaired = candidate.makeValid()
+                if _is_usable(repaired):
+                    candidate = repaired
+        except Exception as _exc:
+            log_swallowed("tools/aoi_extent.py (makeValid)", _exc)
+        valid_geoms.append(candidate)
+
+    used = len(valid_geoms)
+    geom = None
+    if used == 1:
+        geom = valid_geoms[0]
+    elif used > 1:
+        try:
+            geom = QgsGeometry.unaryUnion(valid_geoms)
+        except Exception as _exc:
+            log_swallowed("tools/aoi_extent.py (unaryUnion)", _exc)
+            geom = None
+        if not _is_usable(geom):
+            # Fallback to pairwise combine while skipping any broken polygon.
+            geom = None
+            used = 0
+            for candidate in valid_geoms:
+                if geom is None:
+                    geom = candidate
+                    used = 1
+                    continue
+                try:
+                    combined = geom.combine(candidate)
+                except Exception:
+                    combined = None
+                if _is_usable(combined):
+                    geom = combined
+                    used += 1
+                else:
+                    skipped += 1
 
     if geom is None or not _is_usable(geom):
         return AoiExtentResult(
@@ -166,8 +188,23 @@ def resolve_aoi_extent(aoi_layer, *, selected_only: bool, dst_crs) -> AoiExtentR
         )
 
     try:
-        if aoi_layer.crs() != dst_crs:
-            transform = QgsCoordinateTransform(aoi_layer.crs(), dst_crs, QgsProject.instance())
+        src_crs = aoi_layer.crs()
+        if src_crs != dst_crs:
+            # Densify polygon edges before reprojection so curved projected
+            # borders (e.g. EPSG:4326 -> EPSG:5186, up to 457 m bow on 3 deg
+            # sheets) do not clip off the southern/northern survey edge.
+            try:
+                src_bb = geom.boundingBox()
+                diag = ((float(src_bb.width()) ** 2) + (float(src_bb.height()) ** 2)) ** 0.5
+                if diag > 0.0:
+                    step = min(0.01, diag / 100.0) if src_crs.isGeographic() else (diag / 100.0)
+                    if step > 0.0 and hasattr(geom, "densifyByDistance"):
+                        densified = geom.densifyByDistance(step)
+                        if _is_usable(densified):
+                            geom = densified
+            except Exception as _exc:
+                log_swallowed("tools/aoi_extent.py (densify)", _exc)
+            transform = QgsCoordinateTransform(src_crs, dst_crs, QgsProject.instance())
             reprojected = transform_geometry(geom, transform)
             if not _is_usable(reprojected):
                 return AoiExtentResult(status=STATUS_TRANSFORM_FAILED, used=used, skipped=skipped)

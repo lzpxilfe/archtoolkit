@@ -52,7 +52,13 @@ from .utils import (
     is_categorical_raster_meta,
     transform_geometry,
 )
-from .raster_semantics import CLASS_CODE_TYPES, looks_like_class_codes, undeclared_nodata_mask
+from .raster_semantics import (
+    CLASS_CODE_TYPES,
+    is_circular_meta,
+    looks_like_class_codes,
+    nodata_equals,
+    undeclared_nodata_mask,
+)
 
 # Every per-layer figure in `layers[].stats` is computed over the AOI + radius
 # buffer, not the AOI polygon; the string travels in context.json, the CSV and
@@ -565,9 +571,17 @@ def _vector_layer_stats_in_geom(
     if da_origin is not None:
         try:
             if layer.crs() != origin_crs:
-                ct_to_origin = QgsCoordinateTransform(layer.crs(), origin_crs, QgsProject.instance())
-        except Exception:
+                if (not layer.crs().isValid()) or (not origin_crs.isValid()):
+                    da_origin = None
+                else:
+                    ct_to_origin = QgsCoordinateTransform(layer.crs(), origin_crs, QgsProject.instance())
+                    if not ct_to_origin.isValid():
+                        ct_to_origin = None
+                        da_origin = None
+        except Exception as _exc:
+            log_swallowed("ai_aoi_summary._vector_layer_stats_in_geom (ct_to_origin)", _exc)
             ct_to_origin = None
+            da_origin = None
 
     bbox: QgsRectangle = geom.boundingBox()
     req = QgsFeatureRequest().setFilterRect(bbox)
@@ -984,6 +998,7 @@ def _reference_sites_summary(
             continue
         if g0 is None or g0.isEmpty():
             continue
+        g0, _g0_invalid = _repaired_geometry(g0)
 
         if not selected_only:
             try:
@@ -996,6 +1011,7 @@ def _reference_sites_summary(
         g = _transform_geom(g0, layer.crs(), aoi_crs)
         if g is None or g.isEmpty():
             continue
+        g, _g_invalid = _repaired_geometry(g)
 
         try:
             intersects_aoi = bool(g.intersects(aoi_geom))
@@ -1328,7 +1344,7 @@ def _class_value(v) -> Any:
     return x
 
 
-def _categorical_raster_stats(out: Dict[str, Any], vals) -> Dict[str, Any]:
+def _categorical_raster_stats(out: Dict[str, Any], vals, *, keep_binary_hint: bool = False) -> Dict[str, Any]:
     """Swap min/mean/max for a class histogram (mean of class codes is noise)."""
     try:
         uniq, cnt = np.unique(vals, return_counts=True)
@@ -1343,10 +1359,46 @@ def _categorical_raster_stats(out: Dict[str, Any], vals) -> Dict[str, Any]:
         return out
     for k in ("min", "max", "mean"):
         out.pop(k, None)
+    if not keep_binary_hint:
+        for k in ("high_value_pct", "high_value", "low_value", "high_value_threshold", "gt_0_5_pct"):
+            out.pop(k, None)
     out["categorical"] = True
     out["class_count"] = int(uniq.size)
     out["classes"] = classes
     out["classes_truncated"] = int(max(0, int(uniq.size) - len(classes)))
+    return out
+
+
+def _circular_raster_stats(out: Dict[str, Any], vals) -> Dict[str, Any]:
+    """Replace linear min/mean/max on angular (Aspect/Bearing) rasters with circular statistics.
+
+    Excludes flat markers (< 0, e.g. GDAL/ArchToolkit -1) from the directional
+    vector mean while reporting their count/percentage separately.
+    """
+    try:
+        vals_f = np.asarray(vals, dtype=np.float64)
+        flat_mask = vals_f < 0.0
+        n_flat = int(np.count_nonzero(flat_mask))
+        ang = vals_f[~flat_mask]
+        circ_mean = None
+        r_len = None
+        if ang.size > 0:
+            rad = np.deg2rad(ang)
+            s_mean = float(np.mean(np.sin(rad)))
+            c_mean = float(np.mean(np.cos(rad)))
+            r_len = float(math.hypot(s_mean, c_mean))
+            if r_len > 1e-12:
+                circ_mean = float(math.degrees(math.atan2(s_mean, c_mean)) % 360.0)
+    except Exception as _exc:
+        log_swallowed("ai_aoi_summary._circular_raster_stats", _exc)
+        return out
+    for k in ("min", "max", "mean", "high_value_pct", "high_value", "low_value", "high_value_threshold", "gt_0_5_pct"):
+        out.pop(k, None)
+    out["circular"] = True
+    out["circular_mean_deg"] = circ_mean
+    out["resultant_length_R"] = r_len
+    out["flat_count"] = int(n_flat)
+    out["flat_pct"] = float(n_flat) / float(max(1, int(vals.size))) * 100.0
     return out
 
 
@@ -1356,6 +1408,8 @@ def _raster_stats_in_geom(
     *,
     max_pixels: int = 4_000_000,  # cap for memory safety
     categorical: bool = False,
+    circular: bool = False,
+    binary_mask: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """Statistics of band 1 inside `geom`.
 
@@ -1444,9 +1498,10 @@ def _raster_stats_in_geom(
     ds = None
     if arr is None:
         return None
+    arr_raw = arr
 
     try:
-        arr = arr.astype(np.float32, copy=False)
+        arr = arr_raw.astype(np.float32, copy=False)
     except Exception as _exc:
         log_swallowed("ai_aoi_summary._raster_stats_in_geom", _exc)
 
@@ -1519,18 +1574,12 @@ def _raster_stats_in_geom(
     valid = mask & np.isfinite(arr)
     if nodata is not None:
         try:
-            nd_f = float(nodata)
-            if math.isfinite(nd_f):
-                arr_f64 = arr.astype(np.float64, copy=False)
-                if abs(nd_f) < 1.0:
-                    valid &= np.abs(arr_f64 - nd_f) > 1e-6
-                else:
-                    valid &= ~np.isclose(arr_f64, nd_f, rtol=1e-5, atol=0.0)
+            valid &= ~nodata_equals(arr_raw, nodata)
         except Exception as _exc:
             log_swallowed("ai_aoi_summary._raster_stats_in_geom", _exc)
     else:
         try:
-            nd_mask, guessed_nd = undeclared_nodata_mask(arr, None)
+            nd_mask, guessed_nd = undeclared_nodata_mask(arr_raw, None)
             if guessed_nd > 0:
                 log_message(
                     f"AI 요약: NoData 미선언 래스터({os.path.basename(str(raster_path))})에서 센티널 값 {guessed_nd:,}셀을 NoData로 제외했습니다.",
@@ -1554,49 +1603,62 @@ def _raster_stats_in_geom(
             "sample_step": float(sample_step),
             "window_px": int(window_px),
         }
-        # Binary mask hint (e.g. viewshed/corridor): only when the sample holds
-        # EXACTLY two distinct valid values. The old ">= 98 % of cells are 0 or
-        # max" gate also admitted three-class rasters (the viewshed asymmetry
-        # coding 0/1/2) and zero-padded continuous rasters.
         sample = vals
         if int(sample.size) > 200_000:
             step0 = int(max(1, sample.size // 200_000))
             sample = sample[::step0]
-        try:
-            vmin = float(out.get("min"))
-            vmax = float(out.get("max"))
-            if math.isfinite(vmin) and math.isfinite(vmax) and vmax > 0 and vmin >= -1e-6 and sample.size > 0:
-                uniq = np.unique(sample)
-                if int(uniq.size) == 2:
-                    lo = float(uniq[0])
-                    hi = float(uniq[1])
-                    # Threshold relative to the detected values (their midpoint,
-                    # i.e. vmax/2 for a 0/high mask) rather than an absolute 0.5:
-                    # a weighted viewshed coded {0, 0.35} used to report 0 %.
-                    thr = (lo + hi) / 2.0
-                    pct = float(np.count_nonzero(vals > thr)) / float(vals.size) * 100.0
-                    out["high_value_pct"] = float(pct)
-                    out["high_value"] = float(hi)
-                    out["low_value"] = float(lo)
-                    out["high_value_threshold"] = float(thr)
-                    # Legacy key kept for readers of older context.json/CSV (same
-                    # number; the keys above describe what it now measures).
-                    out["gt_0_5_pct"] = float(pct)
-        except Exception as _exc:
-            log_swallowed("ai_aoi_summary._raster_stats_in_geom", _exc)
-        # Integer GeoTIFFs without ArchToolkit metadata that hold <=32 distinct
-        # integral values (e.g. reloaded geology or external landcover codes) are
-        # auto-promoted to categorical so their min/mean/max is replaced with a
-        # class histogram; Float32 layers without metadata stay continuous.
-        if (not categorical) and (dtype_name in CLASS_CODE_TYPES) and sample.size > 0:
+        # Auto-promote unannotated integer class rasters BEFORE binary-mask
+        # heuristics so a 2-class geology/landcover raster (e.g. classes 1 & 5)
+        # is never mislabelled as a 0/1 visibility mask.
+        if (not categorical) and (not circular) and (not binary_mask) and (dtype_name in CLASS_CODE_TYPES) and sample.size > 0:
             try:
                 if looks_like_class_codes(dtype_name, sample):
                     categorical = True
                     out["auto_categorical"] = True
             except Exception as _exc:
                 log_swallowed("ai_aoi_summary._raster_stats_in_geom (looks_like_class_codes)", _exc)
-        if categorical:
-            out = _categorical_raster_stats(out, vals)
+
+        # Binary mask hint (e.g. viewshed/corridor):
+        # - For known binary masks (`binary_mask=True`), report honest 0% / 100%
+        #   even when every valid cell in the buffer is 0 or 1.
+        # - For unannotated non-categorical, non-circular rasters, require
+        #   exactly two distinct values anchored at 0 (lo ~ 0, hi > 0) so
+        #   arbitrary two-class codes like {1, 5} are not treated as masks.
+        if (not circular) and (binary_mask or not categorical):
+            try:
+                vmin = float(out.get("min"))
+                vmax = float(out.get("max"))
+                if math.isfinite(vmin) and math.isfinite(vmax) and vmin >= -1e-6 and sample.size > 0:
+                    uniq = np.unique(sample)
+                    if int(uniq.size) == 2 and abs(float(uniq[0])) <= 1e-6 and float(uniq[1]) > 0:
+                        lo = float(uniq[0])
+                        hi = float(uniq[1])
+                        thr = (lo + hi) / 2.0
+                        pct = float(np.count_nonzero(vals > thr)) / float(vals.size) * 100.0
+                        out["high_value_pct"] = float(pct)
+                        out["high_value"] = float(hi)
+                        out["low_value"] = float(lo)
+                        out["high_value_threshold"] = float(thr)
+                        out["gt_0_5_pct"] = float(pct)
+                    elif binary_mask and int(uniq.size) == 1:
+                        only_v = float(uniq[0])
+                        if abs(only_v) <= 1e-6:
+                            out["high_value_pct"] = 0.0
+                            out["low_value"] = 0.0
+                            out["high_value_threshold"] = 0.5
+                            out["gt_0_5_pct"] = 0.0
+                        elif only_v > 0:
+                            out["high_value_pct"] = 100.0
+                            out["high_value"] = float(only_v)
+                            out["high_value_threshold"] = 0.5
+                            out["gt_0_5_pct"] = 100.0
+            except Exception as _exc:
+                log_swallowed("ai_aoi_summary._raster_stats_in_geom", _exc)
+
+        if circular and not categorical:
+            out = _circular_raster_stats(out, vals)
+        elif categorical:
+            out = _categorical_raster_stats(out, vals, keep_binary_hint=bool(binary_mask))
         return out
     except Exception:
         return None
@@ -1860,9 +1922,25 @@ def build_aoi_context(
             except Exception as _exc:
                 log_swallowed("ai_aoi_summary.build_aoi_context", _exc)
                 raster_categorical = False
+            try:
+                raster_circular = (not raster_categorical) and bool(is_circular_meta(meta or {}))
+            except Exception as _exc:
+                log_swallowed("ai_aoi_summary.build_aoi_context (circular)", _exc)
+                raster_circular = False
+            meta_units = str((meta or {}).get("units") or "").strip().lower()
+            meta_kind = str((meta or {}).get("kind") or "").strip().lower()
+            raster_binary_mask = (meta_units == "mask") or (
+                meta_kind in ("viewshed", "viewshed_binary", "binary_viewshed", "corridor_mask")
+            )
             if src_path and os.path.exists(src_path):
                 try:
-                    item["stats"] = _raster_stats_in_geom(src_path, g_layer, categorical=raster_categorical)
+                    item["stats"] = _raster_stats_in_geom(
+                        src_path,
+                        g_layer,
+                        categorical=raster_categorical,
+                        circular=raster_circular,
+                        binary_mask=raster_binary_mask,
+                    )
                 except Exception:
                     item["stats"] = None
             else:
@@ -2072,7 +2150,7 @@ def export_aoi_context_csv(
             # Raw JSON
             "stats_json",
         ]
-        with open(str(layers_csv_path), "w", encoding="utf-8", newline="") as f:
+        with open(str(layers_csv_path), "w", encoding="utf-8-sig", newline="") as f:
             w = csv.DictWriter(f, fieldnames=fieldnames)
             w.writeheader()
             for lyr in layers:
@@ -2182,7 +2260,7 @@ def export_aoi_context_csv(
             "stats_scope",
             "buffer_radius_m",
         ]
-        with open(str(numeric_fields_csv_path), "w", encoding="utf-8", newline="") as f:
+        with open(str(numeric_fields_csv_path), "w", encoding="utf-8-sig", newline="") as f:
             w = csv.DictWriter(f, fieldnames=fieldnames)
             w.writeheader()
             for lyr in layers:

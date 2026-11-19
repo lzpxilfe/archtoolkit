@@ -251,6 +251,36 @@ def validate_grid(
         raise GridMismatchError(mismatches)
 
 
+def validate_north_up_geotransform(gt, *, tol: float = 1e-12) -> Optional[str]:
+    """Return an error reason string if GDAL geotransform ``gt`` is rotated/sheared/south-up, else None.
+
+    Most array-based raster tools index cells as ``col = (x - gt[0]) / gt[1]``
+    and ``row = (gt[3] - y) / (-gt[5])``, which requires an unrotated north-up
+    grid (``gt[2] == 0``, ``gt[4] == 0``, ``gt[1] > 0``, ``gt[5] < 0``).
+    """
+    if gt is None or len(gt) < 6:
+        return "래스터 GeoTransform 정보가 없습니다."
+    try:
+        vals = [float(gt[i]) for i in range(6)]
+    except (TypeError, ValueError):
+        return "래스터 GeoTransform 값이 숫자가 아닙니다."
+    if not all(math.isfinite(v) for v in vals):
+        return "래스터 GeoTransform에 유한하지 않은 값이 있습니다."
+    scale = max(1.0, abs(vals[1]), abs(vals[5]))
+    eps = max(float(tol), scale * 1e-9)
+    if abs(vals[2]) > eps or abs(vals[4]) > eps:
+        return (
+            "회전되거나 기울어진(rotated/sheared) 래스터는 직접 계산할 수 없습니다. "
+            "먼저 북향 정립(Warp/Reproject) 후 다시 실행하세요."
+        )
+    if vals[1] <= 0.0 or vals[5] >= 0.0:
+        return (
+            "남향 상단(south-up) 또는 반전된 축의 래스터는 직접 계산할 수 없습니다. "
+            "먼저 북향 정립(Warp/Reproject) 후 다시 실행하세요."
+        )
+    return None
+
+
 __all__ = [
     "Extent",
     "GridContractError",
@@ -261,4 +291,5 @@ __all__ = [
     "grid_mismatches",
     "suggested_grid_tolerances",
     "validate_grid",
+    "validate_north_up_geotransform",
 ]

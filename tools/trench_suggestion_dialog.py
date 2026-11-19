@@ -43,6 +43,7 @@ from .utils import (
     is_null_value,
     log_swallowed,
     cleanup_files,
+    describe_non_metric_crs,
     get_archtoolkit_layer_metadata,
     is_metric_crs,
     log_exception,
@@ -53,6 +54,7 @@ from .utils import (
     set_archtoolkit_layer_metadata,
     transform_geometry,
 )
+from .raster_semantics import undeclared_nodata_mask
 
 # Korean grave/tomb terms. Bare "묘" (1 char) is deliberately excluded: it is a
 # frequent substring of unrelated words (묘목=seedling, 묘사=description,
@@ -1073,26 +1075,53 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
                 log_swallowed("trench_suggestion_dialog._build_grave_avoid_union", _exc)
             if g is None or g.isNull() or g.isEmpty():
                 continue
+            try:
+                if hasattr(g, "isGeosValid") and not g.isGeosValid():
+                    gv = g.makeValid()
+                    if gv is not None and not gv.isNull() and not gv.isEmpty():
+                        g = gv
+            except Exception as _exc:
+                log_swallowed("trench_suggestion_dialog._build_grave_avoid_union (makeValid)", _exc)
             geoms.append(g)
 
         count = len(geoms)
         if not geoms:
             return None, 0
+        union = None
         try:
             union = geoms[0] if count == 1 else QgsGeometry.unaryUnion(geoms)
-        except Exception:
-            try:
-                union = geoms[0]
-                for g in geoms[1:]:
-                    union = union.combine(g)
-            except Exception:
-                union = None
-        # unaryUnion() reports a GEOS failure as a null geometry, not an
-        # exception, and intersects() against a null is always False - so the
-        # avoidance silently did nothing while the UI counted N graves avoided.
+        except Exception as _exc:
+            log_swallowed("trench_suggestion_dialog._build_grave_avoid_union (unaryUnion)", _exc)
+            union = None
         if union is None or union.isNull() or union.isEmpty():
-            log_message("무덤 회피: 회피 마스크(union) 생성 실패 — 이번 실행에는 회피가 적용되지 않습니다.", level=Qgis.MessageLevel.Warning)
-            return None, 0
+            # Fallback 1: pairwise combine skipping any broken member.
+            try:
+                acc = None
+                for g in geoms:
+                    if acc is None:
+                        acc = g
+                    else:
+                        cand = acc.combine(g)
+                        if cand is not None and not cand.isNull() and not cand.isEmpty():
+                            acc = cand
+                union = acc
+            except Exception as _exc:
+                log_swallowed("trench_suggestion_dialog._build_grave_avoid_union (combine)", _exc)
+                union = None
+        if union is None or union.isNull() or union.isEmpty():
+            # Fallback 2: GeometryCollection so intersects() still protects EVERY
+            # grave buffer instead of silently disabling grave avoidance!
+            try:
+                coll = QgsGeometry.collectGeometry(geoms)
+                if coll is not None and not coll.isNull() and not coll.isEmpty():
+                    union = coll
+            except Exception as _exc:
+                log_swallowed("trench_suggestion_dialog._build_grave_avoid_union (collect)", _exc)
+        if union is None or union.isNull() or union.isEmpty():
+            raise RuntimeError(
+                f"분묘 회피 마스크(피처 {count}건) 생성에 실패했습니다. "
+                "분묘 침범 방지를 위해 시굴트렌치 배치를 중단합니다. 벡터 지오메트리 유효성을 확인하세요."
+            )
         return union, count
 
     def _dem_pixel_size(self, dem_layer: QgsRasterLayer) -> float:
@@ -1169,6 +1198,8 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
 
         sum_e = 0.0
         sum_n = 0.0
+        sum_e2 = 0.0
+        sum_n2 = 0.0
         w_total = 0.0
         slope_max_seen: Optional[float] = None
         cx = float(pt.x())
@@ -1193,12 +1224,22 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
             # Aspect: degrees clockwise from north. East=sin, North=cos.
             sum_e += w * math.sin(ar)
             sum_n += w * math.cos(ar)
+            # Axial (2*theta) components stay coherent across symmetric ridges
+            # and valley floors whose opposing flanks (e.g. 90 deg & 270 deg)
+            # cancel in directed vector averaging.
+            sum_e2 += w * math.sin(2.0 * ar)
+            sum_n2 += w * math.cos(2.0 * ar)
             w_total += w
 
         if w_total <= 0.0:
             return None, 0.0, slope_max_seen
         mag = math.hypot(sum_e, sum_n)
         coherence = mag / w_total if w_total > 0 else 0.0
+        mag2 = math.hypot(sum_e2, sum_n2)
+        coherence2 = mag2 / w_total if w_total > 0 else 0.0
+        if coherence < 0.25 and coherence2 >= 0.25 and mag2 > 1e-9:
+            axial_bearing = (0.5 * math.degrees(math.atan2(sum_e2, sum_n2))) % 180.0
+            return float(axial_bearing), float(coherence2), slope_max_seen
         if mag <= 1e-9:
             return None, float(coherence), slope_max_seen
         bearing = math.degrees(math.atan2(sum_e, sum_n)) % 360.0
@@ -1271,9 +1312,12 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
             except Exception as _exc:
                 log_swallowed("trench_suggestion_dialog._read_raster_window (block)", _exc)
                 return None
+        # Build NoData mask on the raw GDAL dtype BEFORE casting to float64 so
+        # Float32 sentinels (-9999.9, -3.402823e+38) are never missed.
+        nd_mask, _ = undeclared_nodata_mask(arr, nodata)
         arr = np.asarray(arr, dtype=float)
-        if nodata is not None:
-            arr = np.where(arr == float(nodata), float("nan"), arr)
+        if np.any(nd_mask):
+            arr = np.where(nd_mask, float("nan"), arr)
         if valid_range is not None:
             lo, hi = float(valid_range[0]), float(valid_range[1])
             arr = np.where((arr < lo) | (arr > hi), float("nan"), arr)
@@ -1357,18 +1401,31 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
         cols, rows_ = np.meshgrid(np.arange(c0, c1 + 1), np.arange(r0, r1 + 1))
         xs = gt[0] + (cols + 0.5) * px
         ys = gt[3] - (rows_ + 0.5) * py
-        # Convex-quad test: a cell centre is inside when it lies on the inner side
-        # of all four edges (orientation taken from the ring's signed area).
+        # Exact 2D Separating-Axis-Theorem (SAT) overlap test between each
+        # raster cell rectangle [xs-hx, xs+hx] x [ys-hy, ys+hy] and the convex
+        # trench quad. Testing cell centres alone missed ~72-73% of overlapped
+        # cells for a 2 m x 20 m trench on 5 m / 10 m DEMs.
+        hx = 0.5 * px
+        hy = 0.5 * py
         area2 = 0.0
         for i in range(4):
             area2 += ring[i].x() * ring[i + 1].y() - ring[i + 1].x() * ring[i].y()
         sgn = 1.0 if area2 >= 0.0 else -1.0
-        inside = np.ones(xs.shape, dtype=bool)
-        tol = -1e-9 * px * px
+        inside = (
+            (xs + hx >= float(bb.xMinimum()) - 1e-9)
+            & (xs - hx <= float(bb.xMaximum()) + 1e-9)
+            & (ys + hy >= float(bb.yMinimum()) - 1e-9)
+            & (ys - hy <= float(bb.yMaximum()) + 1e-9)
+        )
+        tol = -1e-9 * px * py
         for i in range(4):
             p, q = ring[i], ring[i + 1]
-            cross = (q.x() - p.x()) * (ys - p.y()) - (q.y() - p.y()) * (xs - p.x())
-            inside &= (sgn * cross) >= tol
+            ex = q.x() - p.x()
+            ey = q.y() - p.y()
+            cross = ex * (ys - p.y()) - ey * (xs - p.x())
+            # Support function of the axis-aligned cell box along inward edge normal.
+            support = abs(ex) * hy + abs(ey) * hx
+            inside &= (sgn * cross + support) >= tol
         in_rng = (cols >= 0) & (cols < ncols) & (rows_ >= 0) & (rows_ < nrows)
         missing = bool((inside & (~in_rng)).any())
         sel = inside & in_rng
@@ -1778,10 +1835,12 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
                 )
             hard_cap = int(max(bbox_points * 2, max_eval * 4))
 
-            x0 = float(bbox.xMinimum()) + grid_step * 0.5
-            y0 = float(bbox.yMinimum()) + grid_step * 0.5
             xmax = float(bbox.xMaximum())
             ymax = float(bbox.yMaximum())
+            # Narrow corridor AOIs (width or height < grid_step) would otherwise
+            # start at x0 > xmax and generate 0 candidates; clamp to centreline.
+            x0 = min(float(bbox.xMinimum()) + grid_step * 0.5, 0.5 * (float(bbox.xMinimum()) + xmax))
+            y0 = min(float(bbox.yMinimum()) + grid_step * 0.5, 0.5 * (float(bbox.yMinimum()) + ymax))
 
             candidates = []
             scanned = 0

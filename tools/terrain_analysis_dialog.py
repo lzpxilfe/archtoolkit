@@ -48,9 +48,18 @@ from .qtcompat import SHADER_INTERPOLATED, SHADER_DISCRETE
 from .processing_task import ProcessingCancelled, run_alg_blocking, run_compute_blocking
 from .utils import (
     log_swallowed,
-    cleanup_files, log_message, push_message, restore_ui_focus, set_archtoolkit_layer_metadata,
+    cleanup_files,
+    describe_non_metric_crs,
+    is_metric_crs,
+    log_message,
+    push_message,
+    restore_ui_focus,
+    set_archtoolkit_layer_metadata,
+    stamp_layer_temp_outputs,
 )
+from .raster_grid_contract import validate_north_up_geotransform
 from .raster_io import write_single_band_geotiff
+from .raster_semantics import undeclared_nodata_mask
 from .terrain_math import (
     ASPECT_FLAT_VALUE, focal_tpi_strips, mark_flat_aspect, tri_radius, zt_curvature,
 )
@@ -434,15 +443,14 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
             return
 
         # gdal:slope/aspect run with SCALE=1 and the curvature kernel takes cell
-        # size from the geotransform: on a geographic (degree) DEM every output
-        # would be silently, plausibly wrong (slope ~89.9° everywhere).
+        # size from the geotransform: on a geographic (degree) or Web Mercator
+        # (EPSG:3857) DEM every slope/curvature/TPI value is distorted.
         try:
-            if dem_layer.crs().isGeographic():
+            if not is_metric_crs(dem_layer.crs()):
                 push_message(
                     self.iface,
                     "오류",
-                    "DEM이 지리좌표계(위경도)입니다. 미터 단위 투영 좌표계로 재투영 후 사용하세요. "
-                    "(위경도 DEM에서는 경사/곡률 값이 전부 왜곡됩니다)",
+                    describe_non_metric_crs(dem_layer.crs()),
                     level=2,
                     duration=9,
                 )
@@ -504,6 +512,7 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                         )
                     except Exception as _exc:
                         log_swallowed("terrain_analysis_dialog.run_analysis", _exc)
+                    stamp_layer_temp_outputs(layer, [output])
                     QgsProject.instance().addMapLayer(layer)
                     self.apply_style(layer, cls_info['classes'], 90)
                     results.append("경사도")
@@ -551,6 +560,7 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                         )
                     except Exception as _exc:
                         log_swallowed("terrain_analysis_dialog.run_analysis", _exc)
+                    stamp_layer_temp_outputs(layer, [output])
                     QgsProject.instance().addMapLayer(layer)
                     self.apply_style(layer, self.ASPECT_CLASSES, 360)
                     results.append("사면방향")
@@ -598,6 +608,7 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                             )
                         except Exception as _exc:
                             log_swallowed("terrain_analysis_dialog.run_analysis", _exc)
+                        stamp_layer_temp_outputs(layer, [output])
                         QgsProject.instance().addMapLayer(layer)
                         self.apply_style(layer, tri_classes, tri_max * 2.5)
                         results.append("TRI")
@@ -634,6 +645,7 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                         )
                     except Exception as _exc:
                         log_swallowed("terrain_analysis_dialog.run_analysis", _exc)
+                    stamp_layer_temp_outputs(layer, [output])
                     QgsProject.instance().addMapLayer(layer)
                     self.apply_style(layer, self.ROUGHNESS_CLASSES, 20)
                     results.append("Roughness")
@@ -772,13 +784,19 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                 f" ({cols}x{rows}셀, {block_rows}행 단위)"
             )
             gdal.ErrorReset()
-            focal_tpi_strips(rows, cols, int(radius), _read, _write, nodata=nodata,
-                             block_rows=block_rows, progress_cb=_progress)
+            # Require at least 75% valid neighbours inside the focal window so
+            # AOI-clipped sloped collars do not create false one-sided valleys/ridges
+            # and inflate Auto-SD thresholds.
+            focal_tpi_strips(
+                rows, cols, int(radius), _read, _write, nodata=nodata,
+                block_rows=block_rows, progress_cb=_progress, min_valid_fraction=0.75,
+            )
             out_band.FlushCache()
             out_ds.FlushCache()
+            out_band = None
+            out_ds = None
             if int(gdal.GetLastErrorType() or 0) != 0:
                 raise RuntimeError(f"TPI 래스터 쓰기 오류: {gdal.GetLastErrorMsg()}")
-            out_ds = None
             chk_ds = gdal.Open(output, gdal.GA_ReadOnly)
             if chk_ds is None or int(chk_ds.RasterXSize) != int(cols) or int(chk_ds.RasterYSize) != int(rows):
                 chk_ds = None
@@ -786,6 +804,7 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
             chk_ds = None
             ok = True
         finally:
+            out_band = None
             out_ds = None
             ds = None
             if not ok and os.path.exists(output):
@@ -885,6 +904,7 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                     )
                 except Exception as _exc:
                     log_swallowed("terrain_analysis_dialog.run_tpi_analysis", _exc)
+                stamp_layer_temp_outputs(layer, [output])
                 QgsProject.instance().addMapLayer(layer)
                 self.apply_style(layer, tpi_classes, 10)
                 results.append("TPI")
@@ -892,7 +912,7 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
         except ProcessingCancelled:
             raise
         except Exception as e:
-            self.iface.messageBar().pushMessage("경고", f"TPI 분석 오류: {str(e)}", level=1)
+            push_message(self.iface, "경고", f"TPI 분석 오류: {str(e)}", level=1)
         finally:
             cleanup_files([p for s in scratch for p in (s, f"{s}.aux.xml")])
     
@@ -936,7 +956,7 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
             
             # 3. Check if files exist
             if not os.path.exists(tpi_path) or not os.path.exists(slope_path):
-                self.iface.messageBar().pushMessage("경고", "TPI/Slope 생성 실패", level=1)
+                push_message(self.iface, "경고", "TPI/Slope 생성 실패", level=1)
                 return
             
             # 3.5 AUTO-SD CALCULATION (Weiss 2001 standard approach)
@@ -951,7 +971,7 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                     # Weiss (2001): use 1 SD as threshold
                     tpi_low = -tpi_sd
                     tpi_high = tpi_sd
-                    self.iface.messageBar().pushMessage(
+                    push_message(self.iface, 
                         "자동 SD",
                         f"TPI 통계: 평균={tpi_mean:.2f}, 표준편차={tpi_sd:.2f} → 임계값 ±{tpi_sd:.2f} 적용",
                         level=0
@@ -1050,18 +1070,19 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                         layer.dataProvider().setNoDataValue(1, 0)
                     except Exception as _exc:
                         log_swallowed("terrain_analysis_dialog.run_slope_position_analysis", _exc)
+                    stamp_layer_temp_outputs(layer, [output_path])
                     QgsProject.instance().addMapLayer(layer)
                     self.apply_style(layer, self.SLOPE_POSITION_CLASSES, 6)
                     results.append("지형분류")
                 else:
-                    self.iface.messageBar().pushMessage("경고", "지형분류 레이어 생성 실패", level=1)
+                    push_message(self.iface, "경고", "지형분류 레이어 생성 실패", level=1)
             else:
-                self.iface.messageBar().pushMessage("경고", "지형분류 래스터 생성 실패", level=1)
+                push_message(self.iface, "경고", "지형분류 래스터 생성 실패", level=1)
                 
         except ProcessingCancelled:
             raise
         except Exception as e:
-            self.iface.messageBar().pushMessage("경고", f"지형분류 분석 오류: {str(e)}", level=1)
+            push_message(self.iface, "경고", f"지형분류 분석 오류: {str(e)}", level=1)
         finally:
             to_clean = [p for s in ([tpi_path, slope_path] + list(tpi_scratch)) if s for p in (s, f"{s}.aux.xml")]
             cleanup_files(to_clean)
@@ -1142,10 +1163,10 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                 )
                 return
 
+            # Compute NoData mask on the raw GDAL dtype BEFORE casting to float64
+            # so Float32 sentinels (e.g. -3.402823e+38, -9999.9) never leak into TRI.
+            nodata_mask, _guessed = undeclared_nodata_mask(z, nodata)
             z = z.astype("float64")
-            nodata_mask = None
-            if nodata is not None:
-                nodata_mask = (z == nodata)
 
             cell = (abs(float(gt[1])) + abs(float(gt[5]))) / 2.0
             log_message(
@@ -1204,6 +1225,7 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                 )
             except Exception as _exc:
                 log_swallowed("terrain_analysis_dialog.run_tri_radius_analysis", _exc)
+            stamp_layer_temp_outputs(layer, [path])
             QgsProject.instance().addMapLayer(layer)
             valid_vals = result[np.isfinite(result)]
             if valid_vals.size:
@@ -1285,11 +1307,10 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                 if z is None or z.ndim != 2:
                     raise RuntimeError("DEM 배열을 읽을 수 없습니다(곡률).")
                 set_progress(15)
+                # Build NoData mask BEFORE casting so Float32/Int32 sentinels do not leak.
+                nd_mask, _guessed = undeclared_nodata_mask(z, nodata)
+                valid = ~nd_mask
                 z = z.astype("float32")
-
-                valid = np.isfinite(z)
-                if nodata is not None:
-                    valid &= (z != nodata)
 
                 # Curvature is invariant to an additive constant. Subtracting the
                 # mean valid elevation drops working magnitudes from ~1000 m (a
@@ -1363,6 +1384,7 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                     )
                 except Exception as _exc:
                     log_swallowed("terrain_analysis_dialog.run_curvature_analysis", _exc)
+                stamp_layer_temp_outputs(layer, [path])
                 QgsProject.instance().addMapLayer(layer)
                 self._apply_diverging_style(layer, arr[good], neg_lab, pos_lab)
 
@@ -1418,9 +1440,8 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
             dds = None
             if zarr is None or zarr.shape != aspect.shape:
                 return False
-            dem_valid = np.isfinite(zarr)
-            if d_nd is not None:
-                dem_valid &= (zarr != d_nd)
+            dem_nd_mask, _ = undeclared_nodata_mask(zarr, d_nd)
+            dem_valid = ~dem_nd_mask
             del zarr
             marked = mark_flat_aspect(aspect, dem_valid, a_nd, out_nodata=ASPECT_NODATA)
             self._write_geotiff(out_path, marked.astype("float32"), gt, proj, ASPECT_NODATA)
@@ -1579,9 +1600,8 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                     dds = None
                 if zarr is None or zarr.shape != aspect.shape:
                     raise RuntimeError("원본 DEM 배열을 읽을 수 없습니다(사면 파생).")
-                dem_valid = np.isfinite(zarr)
-                if d_nd is not None:
-                    dem_valid &= (zarr != d_nd)
+                dem_nd_mask, _ = undeclared_nodata_mask(zarr, d_nd)
+                dem_valid = ~dem_nd_mask
                 del zarr
 
                 nd = -9999.0
@@ -1643,6 +1663,7 @@ class TerrainAnalysisDialog(QtWidgets.QDialog, FORM_CLASS):
                     )
                 except Exception as _exc:
                     log_swallowed("tools/terrain_analysis_dialog.py:1238 (run_aspect_derivatives)", _exc)
+                stamp_layer_temp_outputs(layer, [path])
                 QgsProject.instance().addMapLayer(layer)
                 valid_vals = arr[arr != nd]
                 if style == "diverging":

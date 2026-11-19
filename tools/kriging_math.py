@@ -149,35 +149,53 @@ def invert_ok_system(
     nugget: float = 0.0,
     cond_limit: float = 1e10,
 ):
-    """Invert an Ordinary Kriging matrix with Tikhonov ridge stabilization fallback."""
+    """Invert an Ordinary Kriging saddle-point matrix with exact diagonal equilibration.
+
+    Unscaled ``[C 1; 1^T 0]`` has ``cond(A) ~ sill^2`` (``relief^4``), which
+    falsely exceeds ``cond_limit`` on mountainous DEMs (e.g. 1,500 m relief)
+    even when the covariance block ``C`` is well-conditioned. Similarity
+    scaling ``S A S`` with ``S = diag(1/sqrt(s), ..., 1/sqrt(s), sqrt(s))``
+    equilibrates the block to ``[C/s 1; 1^T 0]`` and recovers ``A^-1 = S A_tilde^-1 S``
+    exactly.
+    """
     _require_numpy()
     mat = np.asarray(A, dtype=float)
     n = int(mat.shape[0]) - 1
     if n <= 0:
         return None
+    diag_scale = float(np.max(np.abs(np.diag(mat[:n, :n])))) if n > 0 else 0.0
     sill = float(max(0.0, partial_sill) + max(0.0, nugget))
-    inv = None
-    try:
-        cond = float(np.linalg.cond(mat))
-        if math.isfinite(cond) and cond <= float(cond_limit):
-            cand = np.linalg.inv(mat)
+    scale = max(sill, diag_scale, 1e-12)
+    inv_sqrt = 1.0 / math.sqrt(scale)
+    sqrt_s = math.sqrt(scale)
+    s_vec = np.empty(n + 1, dtype=float)
+    s_vec[:n] = inv_sqrt
+    s_vec[n] = sqrt_s
+
+    def _try_invert(raw_mat, limit: float):
+        scaled = (s_vec[:, None] * raw_mat) * s_vec[None, :]
+        cond = float(np.linalg.cond(scaled))
+        if math.isfinite(cond) and cond <= float(limit):
+            cand_scaled = np.linalg.inv(scaled)
+            cand = (s_vec[:, None] * cand_scaled) * s_vec[None, :]
             if np.isfinite(cand).all():
                 return cand
-    except np.linalg.LinAlgError:
-        inv = None
+        return None
 
-    eps = float(max(1e-8 * max(sill, 1e-12), 1e-10))
+    try:
+        cand = _try_invert(mat, float(cond_limit))
+        if cand is not None:
+            return cand
+    except np.linalg.LinAlgError:
+        cand = None
+
+    eps = float(max(1e-8 * max(scale, 1e-12), 1e-10))
     mat_reg = mat.copy()
     mat_reg[:n, :n] += np.eye(n, dtype=float) * eps
     try:
-        cond_reg = float(np.linalg.cond(mat_reg))
-        if math.isfinite(cond_reg) and cond_reg <= 1e12:
-            cand = np.linalg.inv(mat_reg)
-            if np.isfinite(cand).all():
-                inv = cand
+        return _try_invert(mat_reg, 1e12)
     except np.linalg.LinAlgError:
         return None
-    return inv
 
 
 def solve_ok(
@@ -192,8 +210,19 @@ def solve_ok(
     model: str = "exponential",
     exact_tol: float = 1e-9,
     roundoff_tol: Optional[float] = None,
+    include_nugget_at_zero: Optional[bool] = None,
 ) -> Tuple[float, float]:
-    """Solve Ordinary Kriging prediction and variance at one target location."""
+    """Solve Ordinary Kriging prediction and variance at one target location.
+
+    When ``target_xy`` coincides with a single unique sample point (and
+    ``include_nugget_at_zero`` is not False), ``C(0) = c0 + c1`` is used so
+    Ordinary Kriging acts as an exact interpolator at isolated observations.
+    When multiple collocated observations coincide with ``target_xy`` (or in
+    LOOCV where the held-out observation has an independent nugget error),
+    the nugget is excluded from the target covariance vector ``cvec``
+    (Cressie 1993, Section 3.2.1), keeping the kriging variance strictly
+    positive instead of turning negative/NaN.
+    """
     _require_numpy()
     pts = np.asarray(coords, dtype=float)
     vals = np.asarray(values, dtype=float)
@@ -206,14 +235,27 @@ def solve_ok(
     c0 = max(0.0, float(nugget))
     c1 = max(0.0, float(partial_sill))
     total_sill = c0 + c1
-    cvec = covariance_value(
-        dist0,
-        model=model,
-        nugget=c0,
-        partial_sill=c1,
-        rng=rng,
-        zero_tol=max(0.0, float(exact_tol)),
-    )
+    tol_exact = max(0.0, float(exact_tol))
+    n_exact = int(np.count_nonzero(dist0 <= tol_exact))
+
+    if include_nugget_at_zero is None:
+        use_nugget_at_zero = (n_exact == 1)
+    else:
+        use_nugget_at_zero = bool(include_nugget_at_zero) and (n_exact <= 1)
+
+    if use_nugget_at_zero:
+        cvec = covariance_value(
+            dist0,
+            model=model,
+            nugget=c0,
+            partial_sill=c1,
+            rng=rng,
+            zero_tol=tol_exact,
+        )
+    else:
+        # Target covariance with independent measurement error (no nugget jump at h=0).
+        phi = _unit_variogram_shape(dist0, model=model, rng=rng)
+        cvec = c1 * (1.0 - phi)
 
     rhs = np.empty(n + 1, dtype=float)
     rhs[:n] = cvec
@@ -415,7 +457,49 @@ def fit_variogram_wls(
     r_high = max(r_low * 10.0, 2.5 * h_max)
     coarse_ranges = np.geomspace(r_low, r_high, 40)
 
-    def fit_at_range(mod: str, rng_val: float) -> Tuple[float, float, float]:
+    def _refine_cressie_direct(phi, c0_init: float, c1_init: float) -> Tuple[float, float, float]:
+        """Directly minimize Cressie (1985) WLS loss over c0 >= 0, c1 >= 0.
+
+        IRLS ignores the derivative of the 1/gamma(h)^2 denominator and
+        systematically biases the fitted sill downward (up to ~9%). Starting
+        from the IRLS point, adaptive coordinate + multiplicative search on
+        the true objective guarantees <= IRLS loss and unbiased sills.
+        """
+        best_c0 = max(0.0, float(c0_init))
+        best_c1 = max(0.0, float(c1_init))
+        best_loss = _cressie_loss(g_hat, best_c0 + best_c1 * phi, cnts, floor_var)
+        # First optimize overall scale factor s > 0 (since loss(s*c0, s*c1) is
+        # often strictly lower at a slightly larger sill than IRLS returns).
+        for step_scale in (0.25, 0.10, 0.04, 0.015, 0.005, 0.0015):
+            improved = True
+            iters = 0
+            while improved and iters < 12:
+                improved = False
+                iters += 1
+                # Joint scale move
+                for mult in (1.0 + step_scale, max(0.0, 1.0 - step_scale)):
+                    cand_c0 = best_c0 * mult
+                    cand_c1 = best_c1 * mult
+                    cand_loss = _cressie_loss(g_hat, cand_c0 + cand_c1 * phi, cnts, floor_var)
+                    if cand_loss < best_loss - 1e-12:
+                        best_c0, best_c1, best_loss = cand_c0, cand_c1, cand_loss
+                        improved = True
+                # Individual c0, c1 moves
+                dc0 = max(best_c0, sample_var * 0.05) * step_scale
+                for cand_c0 in (best_c0 + dc0, max(0.0, best_c0 - dc0)):
+                    cand_loss = _cressie_loss(g_hat, cand_c0 + best_c1 * phi, cnts, floor_var)
+                    if cand_loss < best_loss - 1e-12:
+                        best_c0, best_loss = cand_c0, cand_loss
+                        improved = True
+                dc1 = max(best_c1, sample_var * 0.05) * step_scale
+                for cand_c1 in (best_c1 + dc1, max(0.0, best_c1 - dc1)):
+                    cand_loss = _cressie_loss(g_hat, best_c0 + cand_c1 * phi, cnts, floor_var)
+                    if cand_loss < best_loss - 1e-12:
+                        best_c1, best_loss = cand_c1, cand_loss
+                        improved = True
+        return best_loss, best_c0, best_c1
+
+    def fit_at_range(mod: str, rng_val: float, *, refine: bool = False) -> Tuple[float, float, float]:
         phi = _unit_variogram_shape(h, model=mod, rng=rng_val)
         w = cnts / (np.maximum(g_hat, floor_var) ** 2)
         c0, c1 = _solve_2var_nnls_wls(phi, g_hat, w)
@@ -423,6 +507,8 @@ def fit_variogram_wls(
             g_pred = c0 + c1 * phi
             w = cnts / (np.maximum(g_pred, floor_var) ** 2)
             c0, c1 = _solve_2var_nnls_wls(phi, g_hat, w)
+        if refine:
+            return _refine_cressie_direct(phi, c0, c1)
         g_pred = c0 + c1 * phi
         loss = _cressie_loss(g_hat, g_pred, cnts, floor_var)
         return loss, c0, c1
@@ -433,16 +519,18 @@ def fit_variogram_wls(
         best_r = float(coarse_ranges[0])
         best_tuple = (math.inf, 0.0, sample_var)
         for r_cand in coarse_ranges:
-            res = fit_at_range(mod, float(r_cand))
+            res = fit_at_range(mod, float(r_cand), refine=False)
             if res[0] < best_tuple[0]:
                 best_tuple = res
                 best_r = float(r_cand)
 
-        # Local multiplicative refinement around coarse optimum.
-        lo = max(1e-6, best_r * 0.65)
-        hi = best_r * 1.45
+        # Local multiplicative refinement around coarse optimum with direct
+        # minimization of the true Cressie (1985) objective.
+        lo = max(1e-6, best_r * 0.55)
+        hi = best_r * 1.65
+        best_tuple = fit_at_range(mod, best_r, refine=True)
         for r_cand in np.geomspace(lo, hi, 20):
-            res = fit_at_range(mod, float(r_cand))
+            res = fit_at_range(mod, float(r_cand), refine=True)
             if res[0] < best_tuple[0]:
                 best_tuple = res
                 best_r = float(r_cand)
@@ -531,6 +619,11 @@ def loocv_ordinary_kriging(
             rng=rng,
             nugget=nugget,
             model=model,
+            # The held-out observation has an independent measurement error
+            # (nugget), so even if a collocated neighbor sits at distance 0,
+            # its cross-covariance is partial_sill (not partial_sill + nugget),
+            # yielding true LOOCV variance 2*nugget > 0 instead of 0.0.
+            include_nugget_at_zero=False,
         )
         if not (math.isfinite(zhat) and math.isfinite(vv)):
             continue

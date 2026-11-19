@@ -61,6 +61,7 @@ from .utils import (
     set_archtoolkit_layer_metadata,
 )
 from .aoi_extent import resolve_aoi_extent
+from .raster_semantics import is_categorical_meta as _is_categorical_meta, is_circular_meta as _is_circular_meta
 from .ahp_core import (
     RI_TABLE as _RI_TABLE,
     ahp_weights_from_matrix as _ahp_weights_from_matrix,
@@ -925,17 +926,24 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
                     weights_source = "hierarchy_global"
 
         hier_meta = self._hierarchy_metadata_params() if hasattr(self, "_hierarchy_metadata_params") else None
+        hier_payload = None
+        if isinstance(hier_meta, dict) and isinstance(hier_meta.get("hierarchy"), dict):
+            hier_payload = dict(hier_meta["hierarchy"])
+            h_crs = self._hierarchy_consistency_ratios() if hasattr(self, "_hierarchy_consistency_ratios") else None
+            if h_crs is not None:
+                hier_payload["consistency_ratio_group"] = h_crs[0]
+                hier_payload["consistency_ratio_local_max"] = h_crs[1]
         sens = _oat_weight_sensitivity(weights, delta=0.10) if n >= 2 else []
         report_md = _format_ahp_methodology_report(
             criteria=names,
             weights=weights,
-            matrix=mat,
-            cr=cr,
-            ci=ci,
-            ri=ri,
-            lambda_max=lam,
+            matrix=(None if weights_source == "hierarchy_global" else mat),
+            cr=(None if weights_source == "hierarchy_global" else cr),
+            ci=(None if weights_source == "hierarchy_global" else ci),
+            ri=(None if weights_source == "hierarchy_global" else ri),
+            lambda_max=(None if weights_source == "hierarchy_global" else lam),
             weights_source=weights_source,
-            hierarchy=hier_meta,
+            hierarchy=hier_payload,
             sensitivity=sens,
         )
         path, _flt = QtWidgets.QFileDialog.getSaveFileName(
@@ -2702,8 +2710,10 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
             def _grid_signature(lyr0):
                 try:
                     e = lyr0.extent()
+                    crs0 = lyr0.crs()
+                    crs_key = str(crs0.authid() or crs0.toWkt() or "") if crs0 is not None else ""
                     return (
-                        str(lyr0.crs().authid() or ""),
+                        crs_key,
                         int(lyr0.width()), int(lyr0.height()),
                         round(float(e.xMinimum()), 6), round(float(e.yMinimum()), 6),
                         round(float(e.xMaximum()), 6), round(float(e.yMaximum()), 6),
@@ -2746,6 +2756,14 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
                     raise Exception("래스터 소스 경로를 읽을 수 없습니다.")
 
                 is_reclass = str(c.direction or "") == "reclass"
+                meta_c = get_archtoolkit_layer_metadata(lyr) or {}
+                lname_low = str(lyr.name() or "").lower()
+                is_cat_or_circ = (
+                    _is_categorical_meta(meta_c)
+                    or _is_circular_meta(meta_c)
+                    or any(tok in lname_low for tok in ("aspect", "사면방향", "향(", "경사향"))
+                )
+                use_nearest = bool(is_reclass or is_cat_or_circ)
                 in_path = src0
                 if align:
                     warped = _tmp(f"warp_{idx}")
@@ -2756,9 +2774,10 @@ Saaty의 무작위지수 표가 15까지만 있어서 그렇습니다. 그럴 �
                         extent_str=extent_str,
                         extent_crs_authid=(QgsCoordinateReferenceSystem(ref_layer.crs()) if not extent_crs and ref_layer.crs().isValid() else extent_crs),
                         source_crs=lyr.crs(),
-                        # Reclass criteria are categorical: bilinear would blend
-                        # class codes into values between the score intervals.
-                        resampling=0 if is_reclass else 1,
+                        # Categorical (reclass/class) and circular (Aspect 0..360)
+                        # rasters MUST use nearest neighbour: bilinear averages
+                        # 355 deg & 5 deg (North) into 180 deg (South, score 1.0!).
+                        resampling=0 if use_nearest else 1,
                         nodata=nodata_sentinel,
                     )
 

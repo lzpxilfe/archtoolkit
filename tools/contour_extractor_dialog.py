@@ -188,26 +188,34 @@ class ContourExtractorDialog(QtWidgets.QDialog, FORM_CLASS):
             return
         
         try:
-            # Build query
-            query = '"Layer" IN (' + ','.join([f"'{c}'" for c in codes]) + ')'
+            codes_sql = ','.join([f"'{c}'" for c in codes])
             
             filtered_count = 0
             failed_names = []
             empty_names = []
             for layer in layers:
-                # Store original filter for undo. Persist it on the LAYER
-                # (custom property), not this dialog instance — the dialog is
-                # recreated per open and accept()s right after, so an
-                # instance-only map made 필터 초기화 a guaranteed no-op.
+                # Case-insensitive lookup for the DXF Layer column (some exports use 'LAYER' or 'layer').
+                layer_field_name = "Layer"
+                try:
+                    for fld in layer.fields():
+                        if str(fld.name() or "").lower() == "layer":
+                            layer_field_name = str(fld.name())
+                            break
+                except Exception as _exc:
+                    log_swallowed("contour_extractor_dialog.extract_from_dxf (field lookup)", _exc)
+
                 prop_key = "archtoolkit/contour_orig_filter"
                 had_orig = layer.customProperty(prop_key, None) is not None
                 if not had_orig:
                     layer.setCustomProperty(prop_key, layer.subsetString())
-                orig_sub = layer.customProperty(prop_key, "")
+                orig_sub = str(layer.customProperty(prop_key, "") or "").strip()
                 self.original_filters.setdefault(layer.id(), orig_sub)
 
-                # setSubsetString returns False when the provider rejects the
-                # query (e.g. the layer has no "Layer" field) — count honestly.
+                code_clause = f'"{layer_field_name}" IN ({codes_sql})'
+                # Combine with any pre-existing user filter using AND rather than
+                # silently overwriting it.
+                query = f"({orig_sub}) AND ({code_clause})" if orig_sub else code_clause
+
                 if layer.setSubsetString(query):
                     if int(layer.featureCount()) > 0:
                         filtered_count += 1
@@ -246,7 +254,7 @@ class ContourExtractorDialog(QtWidgets.QDialog, FORM_CLASS):
                 self.accept()
             
         except Exception as e:
-            self.iface.messageBar().pushMessage("오류", f"처리 중 오류: {str(e)}", level=2)
+            push_message(self.iface, "오류", f"처리 중 오류: {str(e)}", level=2)
     
     def reset_filters(self):
         """Reset filters on selected layers (undo). Reads the original filter
@@ -272,7 +280,7 @@ class ContourExtractorDialog(QtWidgets.QDialog, FORM_CLASS):
                     _skip_221 = True
                 if _skip_221:
                     continue
-            self.iface.messageBar().pushMessage("완료", f"{reset_count}개 레이어 필터 초기화 완료", level=0)
+            push_message(self.iface, "완료", f"{reset_count}개 레이어 필터 초기화 완료", level=0)
         else:
             # Reset only selected layers — but never blank out a filter this
             # tool didn't set (the user may have their own subset applied).
@@ -290,21 +298,21 @@ class ContourExtractorDialog(QtWidgets.QDialog, FORM_CLASS):
             msg = f"{reset_count}개 레이어 필터 초기화 완료"
             if skipped:
                 msg += f" (이 도구가 설정하지 않은 {skipped}개 레이어는 건드리지 않음)"
-            self.iface.messageBar().pushMessage("완료", msg, level=0)
+            push_message(self.iface, "완료", msg, level=0)
     
     def extract_from_dem(self):
         """Generate contours from DEM raster"""
         
         layer = self.cmbDemLayer.currentLayer()
         if not layer:
-            self.iface.messageBar().pushMessage("오류", "DEM 래스터를 선택해주세요", level=2)
+            push_message(self.iface, "오류", "DEM 래스터를 선택해주세요", level=2)
             return
         
         interval = self.spinInterval.value()
         temp_output = None
 
         try:
-            self.iface.messageBar().pushMessage("처리 중", "등고선 생성 중...", level=0)
+            push_message(self.iface, "처리 중", "등고선 생성 중...", level=0)
             self.hide()
             QtWidgets.QApplication.processEvents()
 
@@ -346,7 +354,7 @@ class ContourExtractorDialog(QtWidgets.QDialog, FORM_CLASS):
                     if int(output_layer.featureCount()) <= 0:
                         output_layer = None
                         cleanup_files([temp_output])
-                        self.iface.messageBar().pushMessage(
+                        push_message(self.iface, 
                             "경고", "생성된 등고선이 없습니다 (고도 범위와 등고선 간격을 확인하세요).", level=1
                         )
                         self.show()
@@ -364,22 +372,22 @@ class ContourExtractorDialog(QtWidgets.QDialog, FORM_CLASS):
                         log_swallowed("contour_extractor_dialog.extract_from_dem", _exc)
                     stamp_layer_temp_outputs(output_layer, [temp_output])
                     QgsProject.instance().addMapLayer(output_layer)
-                    self.iface.messageBar().pushMessage("완료", f"등고선 생성 완료 (간격: {interval}m)", level=0)
+                    push_message(self.iface, "완료", f"등고선 생성 완료 (간격: {interval}m)", level=0)
                     self.accept()
                 else:
                     cleanup_files([temp_output])
-                    self.iface.messageBar().pushMessage("오류", "등고선 레이어를 로드할 수 없습니다.", level=2)
+                    push_message(self.iface, "오류", "등고선 레이어를 로드할 수 없습니다.", level=2)
                     self.show()
             else:
                 cleanup_files([temp_output])
-                self.iface.messageBar().pushMessage("오류", "등고선 생성에 실패했습니다.", level=2)
+                push_message(self.iface, "오류", "등고선 생성에 실패했습니다.", level=2)
                 self.show()
 
         except ProcessingCancelled:
             cleanup_files([temp_output])
-            self.iface.messageBar().pushMessage("취소", "등고선 추출이 취소되었습니다.", level=1)
+            push_message(self.iface, "취소", "등고선 추출이 취소되었습니다.", level=1)
             self.show()
         except Exception as e:
             cleanup_files([temp_output])
-            self.iface.messageBar().pushMessage("오류", f"처리 중 오류: {str(e)}", level=2)
+            push_message(self.iface, "오류", f"처리 중 오류: {str(e)}", level=2)
             self.show()

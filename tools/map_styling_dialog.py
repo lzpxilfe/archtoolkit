@@ -684,7 +684,7 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
                 tool_id="map_styling",
                 run_id=run_id,
                 kind="dem_hillshade",
-                units="m",
+                units="index",
                 params={"source": str(source_raster.name() or "")},
             )
         except Exception as _exc:
@@ -860,7 +860,15 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
         is_building = dest_geom == "polygon"
         dest_crs = source_layers[0].crs()
 
-        dest_geom_type = "MultiPolygon" if is_building else "LineString"
+        if is_building:
+            dest_geom_type = "MultiPolygon"
+            expected_gtype = None  # _BuildingPassTask handles lines/polygons and counts skipped points
+        elif dest_geom == "point":
+            dest_geom_type = "MultiPoint"
+            expected_gtype = Qgis.GeometryType.Point
+        else:
+            dest_geom_type = "MultiLineString"
+            expected_gtype = Qgis.GeometryType.Line
         # setCrs rather than "?crs=<authid>": a custom CRS (no authid) would
         # otherwise leave the output without any CRS.
         dest_layer = QgsVectorLayer(dest_geom_type, name, "memory")
@@ -870,21 +878,38 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
         dest_layer.updateFields()
 
         collected = []
+        skipped_geom_mismatch = 0
+        skipped_crs_invalid = 0
 
         for sl in source_layers:
             field_name = self.detect_code_field(sl)
             if not field_name: continue
 
             # The destination layer uses source_layers[0]'s CRS; any other
-            # layer's raw coordinates would land in the wrong place. Reproject.
+            # layer's raw coordinates would land in the wrong place. Reproject
+            # and fail-closed if either CRS or the transform is invalid.
             layer_ct = None
-            try:
-                if sl.crs() != dest_crs:
+            if sl.crs() != dest_crs:
+                if (not sl.crs().isValid()) or (not dest_crs.isValid()):
+                    skipped_crs_invalid += 1
+                    log_message(
+                        f"MapStyling: 좌표계가 불일치/무효하여 레이어 '{sl.name()}'를 건너뜁니다.",
+                        level=Qgis.MessageLevel.Warning,
+                    )
+                    continue
+                _skip_crs = False
+                try:
                     layer_ct = QgsCoordinateTransform(
                         sl.crs(), dest_crs, QgsProject.instance()
                     )
-            except Exception:
-                layer_ct = None
+                    if not layer_ct.isValid():
+                        raise RuntimeError("invalid QgsCoordinateTransform")
+                except Exception as _exc:
+                    log_swallowed("map_styling_dialog.aggregate_features (crs)", _exc)
+                    skipped_crs_invalid += 1
+                    _skip_crs = True
+                if _skip_crs:
+                    continue
 
             quoted_codes = ", ".join(["'{}'".format(c) for c in codes])
             query = '"{}" IN ({})'.format(field_name, quoted_codes)
@@ -894,6 +919,11 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
                 code_val = feat.attribute(field_name)
 
                 geom = feat.geometry()
+                if geom is None or geom.isEmpty():
+                    continue
+                if expected_gtype is not None and geom.type() != expected_gtype:
+                    skipped_geom_mismatch += 1
+                    continue
                 if layer_ct is not None:
                     _skip_592 = False
                     try:
@@ -909,6 +939,12 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
                     if _skip_592:
                         continue
                 collected.append((code_val, geom))
+
+        if skipped_geom_mismatch > 0:
+            log_message(
+                f"MapStyling ({name}): 대상 지오메트리({dest_geom})와 타입이 다른 피처 {skipped_geom_mismatch}개를 제외했습니다.",
+                level=Qgis.MessageLevel.Warning,
+            )
 
         if not collected:
             return None
@@ -938,8 +974,33 @@ class MapStylingDialog(QtWidgets.QDialog, FORM_CLASS):
         if not all_features:
             return None
 
-        pr.addFeatures(all_features)
-        params = {"name": str(name or ""), "dest_geom": str(dest_geom or "")}
+        res = pr.addFeatures(all_features)
+        batch_ok = bool(res[0]) if isinstance(res, (tuple, list)) else bool(res)
+        rejected_count = 0
+        if not batch_ok:
+            # One incompatible feature can abort the memory provider batch;
+            # retry individually so valid features are preserved and report drops.
+            for nf in all_features:
+                ok_one = False
+                try:
+                    ok_one = bool(pr.addFeature(nf))
+                except Exception as _exc:
+                    log_swallowed("map_styling_dialog.aggregate_features (addFeature)", _exc)
+                if not ok_one:
+                    rejected_count += 1
+            if rejected_count > 0:
+                log_message(
+                    f"MapStyling ({name}): {rejected_count}개 피처를 메모리 레이어에 추가하지 못했습니다.",
+                    level=Qgis.MessageLevel.Warning,
+                )
+        dest_layer.updateExtents()
+        params = {
+            "name": str(name or ""),
+            "dest_geom": str(dest_geom or ""),
+            "skipped_geom_mismatch": int(skipped_geom_mismatch),
+            "skipped_crs_invalid": int(skipped_crs_invalid),
+            "rejected_features": int(rejected_count),
+        }
         if is_building:
             params.update(building_stats)
             params["degenerate_buffer_m"] = BUILDING_LINE_BUFFER_M

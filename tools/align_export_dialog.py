@@ -424,8 +424,17 @@ def _effective_source_nodata(layer: QgsRasterLayer, source_path: str):
         index for index, value in enumerate(effective)
         if value is not None and not _nodata_equal(value, file_values[index])
     ]
-    if not missing_from_file:
+    disabled_from_file = [
+        index for index, value in enumerate(effective)
+        if value is None and file_values[index] is not None
+    ]
+    if not missing_from_file and not disabled_from_file:
         return None
+    if disabled_from_file and all(value is None for value in effective):
+        # The user explicitly unchecked "use source NoData value" in Layer
+        # Properties (e.g. to treat 0 as valid). Tell gdalwarp ``-srcnodata None``
+        # so it does not read back the file's embedded NoData tag.
+        return ("None",)
     if any(value is None for value in effective):
         raise RuntimeError(
             f"일부 밴드에만 레이어 NoData가 지정되어 있습니다: {layer.name()}. "
@@ -439,6 +448,8 @@ def _srcnodata_argument(values) -> str:
     """gdalwarp ``-srcnodata`` text for one value per band, or "" when there is none."""
     if not values:
         return ""
+    if len(values) == 1 and str(values[0]).strip().lower() == "none":
+        return "-srcnodata None"
     text = " ".join(repr(float(value)) for value in values)
     return f'-srcnodata "{text}"' if len(values) > 1 else f"-srcnodata {text}"
 
@@ -518,6 +529,10 @@ def _crs_label(crs) -> str:
 
 
 def _ensure_supported_reference_grid(layer: QgsRasterLayer, px: float, *, pixel_override: bool) -> None:
+    if not layer.crs().isValid():
+        raise RuntimeError(
+            "기준 래스터에 유효한 좌표계(CRS)가 없습니다. 레이어 속성에서 CRS를 지정한 뒤 다시 실행하세요."
+        )
     provider = layer.dataProvider()
     if provider is None:
         raise RuntimeError("기준 래스터 데이터 공급자를 열 수 없습니다.")
@@ -552,6 +567,11 @@ def _ensure_supported_reference_grid(layer: QgsRasterLayer, px: float, *, pixel_
     ):
         raise RuntimeError(
             "회전되거나 기울어진 기준 래스터는 현재 정렬/내보내기에서 지원하지 않습니다."
+        )
+    if (float(x_step.x()) - float(origin.x())) <= 0.0 or (float(y_step.y()) - float(origin.y())) >= 0.0:
+        raise RuntimeError(
+            "남향 상단(south-up) 또는 반전된 축의 기준 래스터는 현재 정렬/내보내기에서 지원하지 않습니다. "
+            "먼저 북향 정립(Warp/Reproject) 후 다시 실행하세요."
         )
 
     if not pixel_override:
@@ -1077,16 +1097,32 @@ class AlignExportDialog(QtWidgets.QDialog):
                 # by a tool, never reaches the file that gdalwarp reads. Hand
                 # it over, or refuse when it cannot be expressed.
                 source_nodata = _effective_source_nodata(src_layer, src)
+                source_nodata_cleared = (
+                    source_nodata is not None
+                    and len(source_nodata) == 1
+                    and str(source_nodata[0]).strip().lower() == "none"
+                )
                 if source_nodata is not None:
-                    log_message(
-                        f"레이어에 지정된 NoData가 파일에 없어 원본 NoData로 전달합니다 ({item.name}): "
-                        + ", ".join(f"band {index + 1}={value:g}" for index, value in enumerate(source_nodata)),
-                        level=Qgis.MessageLevel.Info,
-                    )
-                if item.categorical:
+                    if source_nodata_cleared:
+                        log_message(
+                            f"레이어 속성에서 원본 NoData 사용이 꺼져 있어 -srcnodata None으로 전달합니다 ({item.name}).",
+                            level=Qgis.MessageLevel.Info,
+                        )
+                    else:
+                        log_message(
+                            f"레이어에 지정된 NoData가 파일에 없어 원본 NoData로 전달합니다 ({item.name}): "
+                            + ", ".join(f"band {index + 1}={value:g}" for index, value in enumerate(source_nodata)),
+                            level=Qgis.MessageLevel.Info,
+                        )
+                keep_class_dtype = bool(item.categorical or item.nearest_by_sample)
+                if keep_class_dtype:
                     item.nodata, item.nodata_reason = _categorical_output_nodata(src_layer)
-                    if (item.nodata is None and source_nodata is not None
-                            and all(_nodata_equal(v, source_nodata[0]) for v in source_nodata)):
+                    if (
+                        item.nodata is None
+                        and source_nodata is not None
+                        and (not source_nodata_cleared)
+                        and all(_nodata_equal(v, source_nodata[0]) for v in source_nodata)
+                    ):
                         # With -srcnodata and no -dstnodata gdalwarp copies the
                         # source value to the output anyway; record it as such.
                         item.nodata, item.nodata_reason = source_nodata[0], "layer"
@@ -1105,25 +1141,34 @@ class AlignExportDialog(QtWidgets.QDialog):
                     grid=target_grid,
                     band_count=int(src_layer.bandCount()),
                     nodata_values=(
-                        source_nodata if item.nodata is None and source_nodata is not None
-                        else _expected_nodata_values(src_layer, item.nodata)
+                        tuple([None] * max(1, int(src_layer.bandCount())))
+                        if item.nodata is None and source_nodata_cleared
+                        else (
+                            source_nodata
+                            if item.nodata is None and source_nodata is not None and not source_nodata_cleared
+                            else _expected_nodata_values(src_layer, item.nodata)
+                        )
                     ),
-                    categorical=item.categorical,
+                    categorical=keep_class_dtype,
+                )
+                canonical_extent_str = (
+                    f"{target_grid.extent.xmin},{target_grid.extent.xmax},"
+                    f"{target_grid.extent.ymin},{target_grid.extent.ymax}"
                 )
                 out_path = os.path.join(staging_dir, f"{item.key}.tif")
                 self._warp(
                     src,
                     out_path,
                     px,
-                    extent_str,
+                    canonical_extent_str,
                     ref_crs,
                     nearest=item.nearest,
                     nodata=item.nodata,
                     progress=progress,
-                    # Only a true categorical raster keeps its band type. A
-                    # circular or heuristic-nearest raster still carries the
-                    # continuous -9999 NoData, which needs Float32.
-                    force_float32=not item.categorical,
+                    # Keep the integer band type for both known categoricals and
+                    # heuristic integer class rasters so class codes are never
+                    # silently laundered into Float32 with -9999 NoData.
+                    force_float32=not keep_class_dtype,
                     source_crs=src_crs,
                     source_nodata=source_nodata,
                 )
@@ -1344,11 +1389,13 @@ class AlignExportDialog(QtWidgets.QDialog):
             raise RuntimeError(f"정렬 결과 격자가 비어 있습니다: {source_name}")
 
         actual_crs = layer.crs()
-        if expected.crs and actual_crs and actual_crs != expected.crs:
-            actual_label = str(actual_crs.authid() or actual_crs.description() or "")
+        if expected.crs and expected.crs.isValid() and (
+            actual_crs is None or (not actual_crs.isValid()) or actual_crs != expected.crs
+        ):
+            actual_label = str(actual_crs.authid() or actual_crs.description() or "") if actual_crs else ""
             expected_label = str(expected.crs.authid() or expected.crs.description() or "")
             raise RuntimeError(
-                f"정렬 결과 CRS가 기준과 다릅니다: {source_name} ({actual_label} != {expected_label})"
+                f"정렬 결과 CRS가 기준과 다릅니다: {source_name} ({actual_label or 'invalid/empty'} != {expected_label})"
             )
 
         try:

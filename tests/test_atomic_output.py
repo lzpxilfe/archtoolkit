@@ -303,6 +303,7 @@ class AtomicOutputTests(unittest.TestCase):
             mock.patch(
                 "tools.atomic_output.os.fchmod",
                 side_effect=PermissionError("fchmod denied"),
+                create=True,
             ),
         ):
             final_dir = Path(publish_staging_dir(
@@ -320,7 +321,7 @@ class AtomicOutputTests(unittest.TestCase):
         with (
             mock.patch("tools.atomic_output.os.name", "nt"),
             mock.patch("tools.atomic_output.os.chmod") as chmod,
-            mock.patch("tools.atomic_output.os.fchmod") as fchmod,
+            mock.patch("tools.atomic_output.os.fchmod", create=True) as fchmod,
         ):
             atomic_output._ensure_private_owner_access(staging)
             atomic_output._prepare_children_for_publication(staging, 0o2775)

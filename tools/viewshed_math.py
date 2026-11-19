@@ -4,7 +4,8 @@
 References:
 - GDAL gdal_viewshed documentation (`-cc` curvature/refraction coefficient:
   0 when curvature disabled, 1 - k when enabled with terrestrial refraction k).
-- Higuchi, T. (1975). The visual and spatial structure of landscapes.
+- Higuchi, T. (1983). The Visual and Spatial Structure of Landscapes
+  (trans. C. Terry; original Japanese edition 1975). MIT Press.
 """
 
 from __future__ import annotations

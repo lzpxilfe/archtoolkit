@@ -89,25 +89,58 @@ def wheeled_critical_slope_percent(model_params):
     return max(0.1, float(pct))
 
 
+PEDESTRIAN_MAX_SLOPE_DEG_DEFAULT = 70.0
+
+
+def _pedestrian_cliff_exceeded(horiz_m: float, dz_m: float, model_params: dict) -> bool:
+    """Return True if slope exceeds the walkable pedestrian cliff barrier.
+
+    Without a cliff barrier and/or 3D vertical penalty, models clamped to a
+    ``0.05 m/s`` floor charge the same flat 200 s per 10 m horizontal cell
+    whether ``dz`` is 15 m or a 500 m sheer vertical cliff.
+    """
+    raw = (model_params or {}).get("max_walkable_slope_deg", PEDESTRIAN_MAX_SLOPE_DEG_DEFAULT)
+    if raw is None:
+        return False
+    try:
+        max_deg = float(raw)
+    except (TypeError, ValueError):
+        return False
+    if (not math.isfinite(max_deg)) or max_deg >= 90.0:
+        return False
+    max_deg = max(1.0, max_deg)
+    slope_deg = math.degrees(math.atan2(abs(float(dz_m)), float(horiz_m)))
+    return slope_deg > max_deg + 1e-9
+
+
 def edge_cost(model_key, horiz_m, dz_m, model_params, *, cost_mode="time_s"):
     if horiz_m <= 0:
         return 0.0
+    params = model_params or {}
 
     if model_key == MODEL_TOBLER:
+        if _pedestrian_cliff_exceeded(horiz_m, dz_m, params):
+            return math.inf
         slope = dz_m / horiz_m if horiz_m > 0 else 0.0
-        return horiz_m / tobler_speed_mps(
-            slope,
-            model_params.get("tobler_base_kmh", 6.0),
-            model_params.get("tobler_slope_factor", 3.5),
-            model_params.get("tobler_slope_offset", 0.05),
-            model_params.get("tobler_min_speed_mps", 0.05),
+        min_v = float(params.get("tobler_min_speed_mps", 0.05))
+        raw_kmh = float(params.get("tobler_base_kmh", 6.0)) * math.exp(
+            -float(params.get("tobler_slope_factor", 3.5))
+            * abs(float(slope) + float(params.get("tobler_slope_offset", 0.05)))
         )
+        raw_mps = raw_kmh * 1000.0 / 3600.0
+        if raw_mps < min_v:
+            # Beyond the speed floor, charge 3D surface length so taller cliffs
+            # always cost strictly more than lower slopes instead of saturating.
+            return math.hypot(float(horiz_m), float(dz_m)) / max(1e-6, min_v)
+        return float(horiz_m) / raw_mps
     if model_key == MODEL_NAISMITH:
+        if _pedestrian_cliff_exceeded(horiz_m, dz_m, params):
+            return math.inf
         return naismith_time_s(
             horiz_m,
             dz_m,
-            model_params.get("naismith_horizontal_kmh", 5.0),
-            model_params.get("naismith_ascent_m_per_h", 600.0),
+            params.get("naismith_horizontal_kmh", 5.0),
+            params.get("naismith_ascent_m_per_h", 600.0),
         )
 
     if model_key == MODEL_PANDOLF:
@@ -125,41 +158,43 @@ def edge_cost(model_key, horiz_m, dz_m, model_params, *, cost_mode="time_s"):
         # Edge time (s)   = distance / V
         #
         # WARNING - Pandolf is an ENERGY model; its TIME output ignores slope.
-        # V is a constant parameter, so cost_mode="time_s" below returns
-        # distance / V: an isotropic surface with no slope response at all,
-        # whose least-cost path is effectively the straight-line shortest path.
-        # Only the energy mode reacts to grade, through the 0.35*V*G term.
-        # A slope-responsive TIME surface needs Tobler or Naismith instead.
-        W = max(1.0, float(model_params.get("pandolf_body_kg", 70.0)))
-        L = max(0.0, float(model_params.get("pandolf_load_kg", 0.0)))
-        eta = max(0.1, float(model_params.get("pandolf_terrain_factor", 1.0)))
-        V = max(0.05, float(model_params.get("pandolf_speed_mps", 5.0 * 1000.0 / 3600.0)))
+        W = max(1.0, float(params.get("pandolf_body_kg", 70.0)))
+        L = max(0.0, float(params.get("pandolf_load_kg", 0.0)))
+        eta = max(0.1, float(params.get("pandolf_terrain_factor", 1.0)))
+        V = max(0.05, float(params.get("pandolf_speed_mps", 5.0 * 1000.0 / 3600.0)))
 
         if cost_mode == "time_s":
-            # Isotropic by design (see the WARNING above): distance / constant speed.
+            # Isotropic by design: distance / constant speed.
             return float(horiz_m) / V
+
+        if _pedestrian_cliff_exceeded(horiz_m, dz_m, params):
+            return math.inf
 
         grade_percent = (float(dz_m) / float(horiz_m)) * 100.0
         load_ratio = (L / W) if W > 0 else 0.0
-        M = (1.5 * W) + (2.0 * (W + L) * (load_ratio**2)) + (
+        standing_loaded_w = (1.5 * W) + (2.0 * (W + L) * (load_ratio**2))
+        M = standing_loaded_w + (
             eta * (W + L) * (1.5 * V * V + 0.35 * V * grade_percent)
         )
-        # The Pandolf equation has no downhill validity: on grades below about
-        # -9% the grade term drives M toward (and past) zero, which would make
-        # steep descents ~300x cheaper than flat ground and glue "energy-optimal"
-        # paths to cliffs. Clamp to the standing metabolic term 1.5·W (a
-        # conservative floor: walking downhill still costs at least standing
-        # metabolism; a full Santee-style descent correction would need
-        # validated coefficients).
-        M = max(1.5 * W, float(M))
-        return (float(M) * float(horiz_m)) / V
+        # Pandolf (1977) was calibrated for level and uphill walking only.
+        # Floor at the LOADED standing metabolic rate (1.5*W + 2.0*(W+L)*(L/W)^2),
+        # never merely 1.5*W, so descending with a pack never costs less than
+        # standing still holding that same pack.
+        M = max(standing_loaded_w, float(M))
+        dist_m = math.hypot(float(horiz_m), float(dz_m)) if bool(params.get("pandolf_3d_distance", False)) else float(horiz_m)
+        return (float(M) * dist_m) / V
 
-    min_speed_mps = float(model_params.get("min_speed_mps", 0.05))
+    min_speed_mps = float(params.get("min_speed_mps", 0.05))
 
     if model_key == MODEL_HERZOG_METABOLIC:
-        # Signed-slope 6th-degree metabolic cost polynomial (Herzog 2013 fit to Minetti et al. 2002).
-        # Must receive signed dz_m / horiz_m because odd-power terms (19.825*s, -78.199*s^3, 278.19*s^5)
-        # encode downhill braking vs gentle descent optimum (~ -10.5% grade). Normalized so slope=0 -> base_mps.
+        if _pedestrian_cliff_exceeded(horiz_m, dz_m, params):
+            return math.inf
+        # Signed-slope 6th-degree metabolic cost polynomial (Herzog 2013 fit to Minetti et al. 2002):
+        #   C(s) [J / (kg * m)] = 1337.8 s^6 + 278.19 s^5 - 517.39 s^4 - 78.199 s^3
+        #                         + 93.419 s^2 + 19.825 s + 1.64
+        # In energy mode ("energy_j"), return true metabolic energy in Joules:
+        #   E(J) = W_kg * C(s) * horiz_m
+        # (no artificial speed conversion or 13.35 km/h downhill sprint artifact).
         slope_s = float(dz_m) / float(horiz_m) if horiz_m > 0 else 0.0
         den = (
             1337.8 * slope_s**6
@@ -170,53 +205,45 @@ def edge_cost(model_key, horiz_m, dz_m, model_params, *, cost_mode="time_s"):
             + 19.825 * slope_s
             + 1.64
         )
-        rel = 1.0 / max(1e-9, float(den))
+        den_safe = max(1e-9, float(den))
+        if cost_mode == "energy_j":
+            body_kg = max(1.0, float(params.get("herzog_body_kg", 70.0)))
+            return body_kg * den_safe * float(horiz_m)
+
+        # Legacy relative-time proxy (when callers explicitly request cost_mode="time_s").
+        rel = 1.0 / den_safe
         rel0 = 1.0 / 1.64
         rel_norm = rel / rel0
-        base_mps = max(min_speed_mps, float(model_params.get("herzog_base_kmh", 5.0)) * 1000.0 / 3600.0)
-        speed_mps = max(min_speed_mps, base_mps * rel_norm)
-        return float(horiz_m) / speed_mps
+        base_mps = max(min_speed_mps, float(params.get("herzog_base_kmh", 5.0)) * 1000.0 / 3600.0)
+        raw_speed = base_mps * rel_norm
+        if raw_speed < min_speed_mps:
+            return math.hypot(float(horiz_m), float(dz_m)) / max(1e-6, min_speed_mps)
+        return float(horiz_m) / raw_speed
 
     # Isotropic slope-based models (use absolute slope magnitude)
     slope_abs = abs(float(dz_m)) / float(horiz_m) if horiz_m > 0 else 0.0  # tan(theta)
 
     if model_key == MODEL_CONOLLY_LAKE:
-        # PLUGIN-DEFINED relative-slope penalty anchored at a reference slope.
-        # This is NOT an equation published by Conolly & Lake (2006): they
-        # discuss relative slope cost, and this formulation is informed by that
-        # discussion, but the equation below is ours. Cost scales with
-        # tan(theta) / tan(ref), so the whole penalty scales INVERSELY with the
-        # reference slope - halving the reference doubles every slope cost.
-        # The reference slope is therefore part of the result and must be
-        # reported alongside it.
-        #
-        # Calibration note - cost relative to flat ground over the same distance,
-        # with the 5 deg default, next to Tobler for the same slopes:
-        #   10 deg -> 2.02x flat  (Tobler 1.85x)
-        #   30 deg -> 6.60x flat  (Tobler 7.54x)
-        # The former 1 deg default gave 10.1x / 33.1x, i.e. 4-6x more punitive
-        # than Tobler, which is why the default reference is 5 deg.
-        #
-        # We clamp the factor to >=1 so gentle slopes do not become "faster than flat".
-        ref_deg = max(0.1, float(model_params.get("conolly_ref_slope_deg", 5.0)))
+        if _pedestrian_cliff_exceeded(horiz_m, dz_m, params):
+            return math.inf
+        ref_deg = max(0.1, float(params.get("conolly_ref_slope_deg", 5.0)))
         ref_tan = math.tan(math.radians(ref_deg))
         factor = max(1.0, slope_abs / max(1e-9, ref_tan))
-        base_mps = max(min_speed_mps, float(model_params.get("conolly_base_kmh", 5.0)) * 1000.0 / 3600.0)
+        base_mps = max(min_speed_mps, float(params.get("conolly_base_kmh", 5.0)) * 1000.0 / 3600.0)
         return (float(horiz_m) / base_mps) * factor
 
     if model_key == MODEL_HERZOG_WHEELED:
         # Optional "hard" slope limit for wheeled traffic (beyond this, effectively impassable).
-        max_deg = float(model_params.get("wheeled_max_slope_deg", 45.0))
+        max_deg = float(params.get("wheeled_max_slope_deg", 45.0))
         max_deg = max(1.0, min(89.0, max_deg))
         slope_deg = math.degrees(math.atan(slope_abs))
         if slope_deg > max_deg + 1e-9:
-            # Treat as unreachable instead of producing extreme finite costs (keeps raster ranges readable).
             return math.inf
 
-        critical_percent = wheeled_critical_slope_percent(model_params)
+        critical_percent = wheeled_critical_slope_percent(params)
         slope_percent = slope_abs * 100.0
         speed_factor = 1.0 / (1.0 + (slope_percent / max(1e-9, critical_percent)) ** 2)
-        base_mps = max(min_speed_mps, float(model_params.get("wheeled_base_kmh", 4.0)) * 1000.0 / 3600.0)
+        base_mps = max(min_speed_mps, float(params.get("wheeled_base_kmh", 4.0)) * 1000.0 / 3600.0)
         speed_mps = max(min_speed_mps, base_mps * speed_factor)
         return float(horiz_m) / speed_mps
 
@@ -224,8 +251,8 @@ def edge_cost(model_key, horiz_m, dz_m, model_params, *, cost_mode="time_s"):
     return naismith_time_s(
         horiz_m,
         dz_m,
-        model_params.get("naismith_horizontal_kmh", 5.0),
-        model_params.get("naismith_ascent_m_per_h", 600.0),
+        params.get("naismith_horizontal_kmh", 5.0),
+        params.get("naismith_ascent_m_per_h", 600.0),
     )
 
 

@@ -85,25 +85,30 @@ def ppa_filter_rng(
     edges: Iterable[Tuple[int, int]],
     *,
     eps: float = 1e-9,
+    rel_tol: float = 1e-9,
     coloc_sq_tol: float = _COLOC_SQ_TOL,
 ) -> List[Tuple[int, int]]:
     """Filter candidate edges to the Relative Neighborhood Graph (empty open lune).
 
     Edge (a, b) is rejected if any third point c (not co-located with a or b) is
-    strictly closer to both endpoints: max(d^2(a, c), d^2(b, c)) < d^2(a, b) - eps.
+    strictly closer to both endpoints:
+    ``max(d^2(a, c), d^2(b, c)) < d^2(a, b) - max(eps, rel_tol * d^2(a, b))``.
+    Using a relative tolerance prevents metric-scale equilateral triangles
+    (e.g. 5 km sides where ``ulp(d^2) > 1e-9``) from failing rotational invariance.
     """
     n = int(len(pts))
     coords = [(float(p[0]), float(p[1])) for p in pts]
     cand = _dedupe_edges(n, edges)
     kept: List[Tuple[int, int]] = []
     eps_v = max(0.0, float(eps))
+    rel_v = max(0.0, float(rel_tol))
     coloc2 = max(0.0, float(coloc_sq_tol))
 
     for a, b in cand:
         ax, ay = coords[a]
         bx, by = coords[b]
         dij2 = (ax - bx) ** 2 + (ay - by) ** 2
-        thresh = dij2 - eps_v
+        thresh = dij2 - max(eps_v, rel_v * dij2)
         blocked = False
         for c in range(n):
             if c == a or c == b:

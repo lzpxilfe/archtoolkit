@@ -147,6 +147,10 @@ def astar_path(
                 continue
             if nodata_mask[nr, nc]:
                 continue
+            # Prevent 1-pixel diagonal barrier tunneling across a continuous
+            # 8-connected NoData wall separating (r, c) from (nr, nc).
+            if dr != 0 and dc != 0 and nodata_mask[nr, c] and nodata_mask[r, nc]:
+                continue
             dz = float(dem[nr, nc]) - z0
             w = _edge_cost(model_key, horiz, dz, model_params, cost_mode=cost_mode)
             if (not math.isfinite(w)) or w < 0.0:
@@ -161,7 +165,17 @@ def astar_path(
                     _skip_friction = True
                 if _skip_friction or not (math.isfinite(f0) and math.isfinite(f1) and f0 > 0.0 and f1 > 0.0):
                     continue
-                w *= 0.5 * (f0 + f1)
+                f_mult = 0.5 * (f0 + f1)
+                if dr != 0 and dc != 0:
+                    fa = float(friction[nr, c])
+                    fb = float(friction[r, nc])
+                    fa_ok = math.isfinite(fa) and fa > 0.0
+                    fb_ok = math.isfinite(fb) and fb > 0.0
+                    if (not fa_ok) and (not fb_ok):
+                        continue
+                    if fa_ok and fb_ok:
+                        f_mult = max(f_mult, min(fa, fb))
+                w *= f_mult
                 if (not math.isfinite(w)) or w < 0.0:
                     continue
 
@@ -233,6 +247,8 @@ def dijkstra_full(
                 continue
             if nodata_mask[nr, nc]:
                 continue
+            if dr != 0 and dc != 0 and nodata_mask[nr, c] and nodata_mask[r, nc]:
+                continue
 
             dz = float(dem[nr, nc]) - z0
             edge_dz = -dz if reverse else dz
@@ -249,7 +265,17 @@ def dijkstra_full(
                     _skip_friction = True
                 if _skip_friction or not (math.isfinite(f0) and math.isfinite(f1) and f0 > 0.0 and f1 > 0.0):
                     continue
-                w *= 0.5 * (f0 + f1)
+                f_mult = 0.5 * (f0 + f1)
+                if dr != 0 and dc != 0:
+                    fa = float(friction[nr, c])
+                    fb = float(friction[r, nc])
+                    fa_ok = math.isfinite(fa) and fa > 0.0
+                    fb_ok = math.isfinite(fb) and fb > 0.0
+                    if (not fa_ok) and (not fb_ok):
+                        continue
+                    if fa_ok and fb_ok:
+                        f_mult = max(f_mult, min(fa, fb))
+                w *= f_mult
                 if (not math.isfinite(w)) or w < 0.0:
                     continue
             nidx = nr * cols + nc

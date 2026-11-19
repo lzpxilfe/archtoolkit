@@ -2339,12 +2339,30 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
                         try:
                             fv = float(value)
                             if math.isfinite(fv):
-                                nd = dem_layer.dataProvider().sourceNoDataValue(1)
-                                if nd is None or not math.isfinite(float(nd)):
-                                    ok_val = True
-                                else:
-                                    ndf = float(nd)
-                                    ok_val = not math.isclose(fv, ndf, rel_tol=1e-6, abs_tol=1e-6)
+                                prov_d = dem_layer.dataProvider()
+                                is_nd = False
+                                has_decl_nd = bool(
+                                    hasattr(prov_d, "sourceHasNoDataValue") and prov_d.sourceHasNoDataValue(1)
+                                )
+                                use_decl_nd = (
+                                    bool(prov_d.useSourceNoDataValue(1))
+                                    if hasattr(prov_d, "useSourceNoDataValue")
+                                    else True
+                                )
+                                if has_decl_nd and use_decl_nd:
+                                    nd = prov_d.sourceNoDataValue(1)
+                                    if nd is not None and math.isfinite(float(nd)):
+                                        if math.isclose(fv, float(nd), rel_tol=1e-6, abs_tol=1e-6):
+                                            is_nd = True
+                                if (not is_nd) and hasattr(prov_d, "userNoDataValues"):
+                                    for rng_nd in prov_d.userNoDataValues(1) or []:
+                                        if float(rng_nd.min()) <= fv <= float(rng_nd.max()):
+                                            is_nd = True
+                                            break
+                                if (not is_nd) and (not has_decl_nd):
+                                    if abs(fv) >= 1e30 or fv in (-9999.0, -9999.9, -32768.0, -2147483648.0):
+                                        is_nd = True
+                                ok_val = not is_nd
                         except (TypeError, ValueError):
                             ok_val = False
                     if ok_val:
@@ -2432,7 +2450,7 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
             log_swallowed("tools/terrain_profile_dialog.py:1898 (_connect_profile_layer)", _exc)
 
     def _on_current_layer_changed(self, layer):
-        if self._ignore_current_layer_changed:
+        if self._ignore_current_layer_changed or not self.isVisible():
             return
         if layer is None:
             return
@@ -2662,10 +2680,31 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
             if not math.isfinite(elev):
                 continue
             try:
-                nd = dem_layer.dataProvider().sourceNoDataValue(1)
-                if nd is not None and math.isfinite(float(nd)) and math.isclose(
-                    elev, float(nd), rel_tol=1e-6, abs_tol=1e-6
-                ):
+                prov_d = dem_layer.dataProvider()
+                is_nd = False
+                has_decl_nd = bool(
+                    hasattr(prov_d, "sourceHasNoDataValue") and prov_d.sourceHasNoDataValue(1)
+                )
+                use_decl_nd = (
+                    bool(prov_d.useSourceNoDataValue(1))
+                    if hasattr(prov_d, "useSourceNoDataValue")
+                    else True
+                )
+                if has_decl_nd and use_decl_nd:
+                    nd = prov_d.sourceNoDataValue(1)
+                    if nd is not None and math.isfinite(float(nd)) and math.isclose(
+                        elev, float(nd), rel_tol=1e-6, abs_tol=1e-6
+                    ):
+                        is_nd = True
+                if (not is_nd) and hasattr(prov_d, "userNoDataValues"):
+                    for rng_nd in prov_d.userNoDataValues(1) or []:
+                        if float(rng_nd.min()) <= elev <= float(rng_nd.max()):
+                            is_nd = True
+                            break
+                if (not is_nd) and (not has_decl_nd):
+                    if abs(elev) >= 1e30 or elev in (-9999.0, -9999.9, -32768.0, -2147483648.0):
+                        is_nd = True
+                if is_nd:
                     continue
             except Exception as _exc:
                 log_swallowed("terrain_profile_dialog._compute_profile_for_points", _exc)
@@ -3217,6 +3256,13 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
                 writer.writerow(["valid_samples", len(self.profile_data)])
                 writer.writerow(["nodata_gaps", int(st["n_gaps"])])
                 writer.writerow(["nodata_gap_length_m", round(float(st["gap_len_m"]), 3)])
+                if dists:
+                    lead_gap = max(0.0, float(dists[0]))
+                    trail_gap = max(0.0, float(total_d) - float(dists[-1]))
+                    if lead_gap > 1e-3:
+                        writer.writerow(["leading_nodata_m", round(lead_gap, 3)])
+                    if trail_gap > 1e-3:
+                        writer.writerow(["trailing_nodata_m", round(trail_gap, 3)])
                 writer.writerow(["sampling", "nearest_cell_identify"])
                 if seg_len > 0:
                     writer.writerow(["segment_length_m", round(seg_len, 3)])
@@ -3294,7 +3340,7 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
                                 round(seg_dn, 3),
                             ]
                         )
-            self.iface.messageBar().pushMessage("저장 완료", f"파일: {path}", level=0)
+            push_message(self.iface, "저장 완료", f"파일: {path}", level=0)
         except Exception as e:
             QMessageBox.critical(self, "오류", f"파일 저장 실패: {str(e)}")
 
@@ -3320,7 +3366,7 @@ class TerrainProfileDialog(QtWidgets.QDialog, FORM_CLASS):
         try:
             success = self.chart.save_to_image(path)
             if success:
-                self.iface.messageBar().pushMessage("저장 완료", f"이미지: {path}", level=0)
+                push_message(self.iface, "저장 완료", f"이미지: {path}", level=0)
             else:
                 QMessageBox.critical(self, "오류", "이미지 저장에 실패했습니다.")
         except Exception as e:
@@ -3439,6 +3485,11 @@ class ProfileLineTool(QgsMapToolEmitPoint):
         self.dialog = dialog
     
     def canvasReleaseEvent(self, event):
+        try:
+            if hasattr(event, "button") and event.button() != Qt.MouseButton.LeftButton:
+                return
+        except Exception as _exc:
+            log_swallowed("terrain_profile_dialog.ProfileLineTool.canvasReleaseEvent", _exc)
         point = self.toMapCoordinates(event.pos())
         self.dialog.add_point(point)
 

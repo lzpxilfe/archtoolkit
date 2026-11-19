@@ -217,7 +217,7 @@ def compute_hierarchy_summary(
     local_weights: Dict[str, Dict[str, float]] = {}
     local_cr: Dict[str, Optional[float]] = {}
     for g in groups:
-        member_ids = [layer_id for layer_id in ids if str(criterion_groups.get(layer_id) or "") == g]
+        member_ids = [layer_id for layer_id in ids if str(criterion_groups.get(layer_id) or "").strip() == g]
         if not member_ids:
             continue
         mat_l = matrix_from_pairs(member_ids, (local_pairs or {}).get(g) or {})
@@ -294,18 +294,16 @@ def clamp01(expr):
     return f"minimum(maximum(({expr}), 0.0), 1.0)"
 
 
-def validated_score_ranges(score_ranges):
+def validated_score_ranges(score_ranges, *, allow_sparse_codes: bool = False):
     """Clean, clamp, sort, and overlap-check a reclass score table.
 
     Non-numeric or non-finite rows are dropped, scores clamped to [0, 1], and
-    min/max swapped if reversed.  Raises on overlapping intervals and on gaps
-    wider than one unit between consecutive rows.
-
-    A gap wider than one unit means class codes between the rows are simply
-    absent from the table, and those cells then score exactly 0.0 -
-    indistinguishable from the worst listed interval in the weighted sum.
-    Adjacent integer codes ([1,1] then [2,4]) stay valid: for the class-code
-    rasters reclass exists for, they cover the domain with no missing code.
+    min/max swapped if reversed. Raises on overlapping intervals and on
+    unintended gaps between consecutive rows:
+    - Continuous (non-integer) bounds must abut with zero gap.
+    - Integer bounds may step by 1 (adjacent class codes such as [1,1] then [2,4]).
+    - Larger gaps raise unless ``allow_sparse_codes=True`` is passed explicitly
+      for non-contiguous categorical code systems (e.g. Korean LandCover 100/200/300).
     """
     rows_in = score_ranges or []
     rows = []
@@ -336,7 +334,22 @@ def validated_score_ranges(score_ranges):
                 "\uad6c\uac04 \uc810\uc218\ud45c\uc5d0 \uc11c\ub85c \uacb9\uce58\ub294 \uad6c\uac04\uc774 \uc788\uc2b5\ub2c8\ub2e4. "
                 "\ubc94\uc704\ub97c \ub2e4\uc2dc \uc870\uc815\ud558\uc138\uc694."
             )
-        if float(cur["min"]) - float(prev["max"]) > 1.0 + 1e-12:
+        gap = float(cur["min"]) - float(prev["max"])
+        both_int = (
+            abs(float(prev["max"]) - round(float(prev["max"]))) <= 1e-9
+            and abs(float(cur["min"]) - round(float(cur["min"]))) <= 1e-9
+        )
+        # Reject fractional continuous gaps (e.g. [0.0, 0.3] -> [0.5, 1.0])
+        # unconditionally; for integer codes, allow adjacent steps (gap <= 1) or
+        # sparse discrete codes when explicitly enabled.
+        if (not both_int) and gap > 1e-9:
+            raise Exception(
+                f"\uc5f0\uc18d \uad6c\uac04 \uc810\uc218\ud45c\uc5d0 \ube48 \uad6c\uac04\uc774 \uc788\uc2b5\ub2c8\ub2e4"
+                f"({float(prev['max']):g} \u2192 {float(cur['min']):g}). "
+                "\ube48 \uad6c\uac04 \uac12\uc740 0\uc810\uc73c\ub85c \uacc4\uc0b0\ub418\ubbc0\ub85c "
+                "\uad6c\uac04 \uacbd\uacc4\ub97c \ub9de\ub2db\uac8c \uc870\uc815\ud558\uc138\uc694."
+            )
+        if both_int and (not allow_sparse_codes) and gap > 1.0 + 1e-12:
             raise Exception(
                 f"\uad6c\uac04 \uc810\uc218\ud45c\uc5d0 \ube48 \uad6c\uac04\uc774 \uc788\uc2b5\ub2c8\ub2e4"
                 f"({float(prev['max']):g} \uc55e \u2192 {float(cur['min']):g} \ub4a4). "
@@ -456,12 +469,19 @@ def oat_weight_sensitivity(
     *,
     delta: float = 0.10,
 ) -> List[Dict[str, Any]]:
-    """One-at-a-Time (OAT) multiplicative criterion weight sensitivity (Chen et al. 2010).
+    """One-at-a-Time (OAT) multiplicative 1D criterion-weight perturbation (after Chen et al. 2010).
 
     Perturbs each criterion weight by ``(1 +/- delta)`` and rescales remaining
-    weights proportionally so ``sum(w) == 1.0`` is conserved.
+    weights proportionally so ``sum(w) == 1.0`` is conserved. Note that this
+    evaluates weight-vector rank stability only (not full spatial raster pixel
+    shifts). Raises ``ValueError`` if any input weight is non-finite or negative.
     """
-    raw = [max(0.0, float(x)) for x in (weights or [])]
+    raw: List[float] = []
+    for x in (weights or []):
+        v = float(x)
+        if not math.isfinite(v) or v < 0.0:
+            raise ValueError(f"AHP weights must be finite and non-negative; got {x!r}")
+        raw.append(v)
     n = len(raw)
     if n == 0:
         return []
@@ -469,8 +489,12 @@ def oat_weight_sensitivity(
     base = [x / total for x in raw] if total > 0.0 else [1.0 / float(n)] * n
     d = max(0.0, min(0.95, float(delta)))
 
-    def _rescale(idx: int, new_wi: float) -> List[float]:
-        wi = max(0.0, min(1.0, float(new_wi)))
+    def _rescale(idx: int, new_wi: float) -> Tuple[List[float], bool]:
+        clamped = float(new_wi) >= 1.0
+        # Cap strictly below 1.0 when n > 1 and other weights are positive so
+        # multiplicative rescaling does not collapse all other weights to 0.
+        upper = (1.0 - 1e-6) if (n > 1 and sum(base[j] for j in range(n) if j != idx) > 0.0) else 1.0
+        wi = max(0.0, min(upper, float(new_wi)))
         rem_target = max(0.0, 1.0 - wi)
         rem_base = sum(base[j] for j in range(n) if j != idx)
         out = [0.0] * n
@@ -485,12 +509,12 @@ def oat_weight_sensitivity(
             for j in range(n):
                 if j != idx:
                     out[j] = each
-        return out
+        return out, clamped
 
     results: List[Dict[str, Any]] = []
     for i in range(n):
-        plus_w = _rescale(i, base[i] * (1.0 + d))
-        minus_w = _rescale(i, base[i] * (1.0 - d))
+        plus_w, plus_clamped = _rescale(i, base[i] * (1.0 + d))
+        minus_w, _ = _rescale(i, base[i] * (1.0 - d))
         shifts = [
             abs(cand[j] - base[j])
             for cand in (plus_w, minus_w)
@@ -508,6 +532,7 @@ def oat_weight_sensitivity(
                 "minus_weights": [float(x) for x in minus_w],
                 "max_other_shift": float(max_other),
                 "rank_changed": bool(rank_changed),
+                "plus_clamped": bool(plus_clamped),
             }
         )
     return results
@@ -532,6 +557,11 @@ def format_ahp_methodology_report(
     w_list = [float(w) for w in (weights or [])]
     sens = sensitivity if sensitivity is not None else (oat_weight_sensitivity(w_list, delta=0.10) if len(w_list) >= 2 else [])
     sens_by_idx = {int(row["index"]): row for row in sens if isinstance(row, dict) and "index" in row}
+    delta_vals = [float(row["delta"]) for row in sens if isinstance(row, dict) and "delta" in row]
+    delta_pct = (delta_vals[0] * 100.0) if delta_vals else 10.0
+    delta_label = f"{delta_pct:g}%"
+
+    is_hierarchy_source = str(weights_source or "") == "hierarchy_global" and bool(hierarchy)
 
     lines = [
         "# AHP 다기준 적합도 분석 방법론 보고서",
@@ -539,9 +569,11 @@ def format_ahp_methodology_report(
         f"- 가중치 산출 경로 (`weights_source`): `{weights_source}`",
         f"- 기준 수 (`n`): {len(names)}",
         "",
-        "## 1. 기준 가중치 및 OAT ±10% 민감도 분석",
+        f"## 1. 기준 가중치 및 1D OAT ±{delta_label} 가중치 민감도 분석",
         "",
-        "| # | 기준 (Criterion) | 가중치 | 비율 (%) | OAT -10% 본인 가중치 | OAT +10% 본인 가중치 | 최대 타 기준 변동폭 | 순위 역전 |",
+        f"> 참고: 아래 표는 가중치 벡터 자체의 ±{delta_label} 교란에 따른 가중치 순위 안정성(1D)을 평가하며, 개별 래스터 픽셀의 공간적 순위 이동까지 계산한 것은 아닙니다.",
+        "",
+        f"| # | 기준 (Criterion) | 가중치 | 비율 (%) | OAT -{delta_label} 본인 가중치 | OAT +{delta_label} 본인 가중치 | 최대 타 기준 변동폭 | 순위 역전 |",
         "|---:|---|---:|---:|---:|---:|---:|:---:|",
     ]
     for i, name in enumerate(names):
@@ -560,29 +592,67 @@ def format_ahp_methodology_report(
             lines.append(f"| {i + 1} | {name} | {wi:.4f} | {100.0 * wi:.2f}% | - | - | - | - |")
 
     lines.extend(["", "## 2. 일관성 검증 (Saaty 1980; Alonso & Lamata 2006)", ""])
-    lam_txt = f"{float(lambda_max):.6f}" if lambda_max is not None and math.isfinite(float(lambda_max)) else "N/A"
-    ci_txt = f"{float(ci):.6f}" if ci is not None and math.isfinite(float(ci)) else "N/A"
-    ri_txt = f"{float(ri):.4f}" if ri is not None and math.isfinite(float(ri)) else "N/A"
-    cr_txt = f"{float(cr):.4f}" if cr is not None and math.isfinite(float(cr)) else "N/A"
-    lines.extend(
-        [
-            f"- 최대 고유값 (lambda_max): `{lam_txt}`",
-            f"- 일관성지수 (CI = (lambda_max - n)/(n - 1)): `{ci_txt}`",
-            f"- 무작위지수 (RI): `{ri_txt}`",
-            f"- 일관성비율 (CR = CI / RI): `{cr_txt}` (권장 ≤ 0.10)",
-        ]
-    )
+    if is_hierarchy_source:
+        # In hierarchical mode, the flat pairwise matrix is only an approximate
+        # Saaty-clamped seed (1/9..9) and its CR is NOT the consistency of the
+        # user's hierarchical judgments. Report the true hierarchical CRs here.
+        lines.append(
+            "- 계층형 AHP 모드에서는 전역 가중치를 1/9~9로 절삭한 평면 시드 행렬이 아닌, "
+            "실제 입력된 **그룹 간 행렬 및 각 그룹 내부 행렬의 일관성비율(CR)**이 유효한 검증 지표입니다(아래 3절 참조)."
+        )
+    else:
+        lam_txt = f"{float(lambda_max):.6f}" if lambda_max is not None and math.isfinite(float(lambda_max)) else "N/A"
+        ci_txt = f"{float(ci):.6f}" if ci is not None and math.isfinite(float(ci)) else "N/A"
+        ri_txt = f"{float(ri):.4f}" if ri is not None and math.isfinite(float(ri)) else "N/A"
+        cr_txt = f"{float(cr):.4f}" if cr is not None and math.isfinite(float(cr)) else "N/A"
+        lines.extend(
+            [
+                f"- 최대 고유값 (lambda_max): `{lam_txt}`",
+                f"- 일관성지수 (CI = (lambda_max - n)/(n - 1)): `{ci_txt}`",
+                f"- 무작위지수 (RI): `{ri_txt}`",
+                f"- 일관성비율 (CR = CI / RI): `{cr_txt}` (권장 ≤ 0.10)",
+            ]
+        )
 
     if hierarchy:
         lines.extend(["", "## 3. 계층형 AHP 요약", ""])
+        # Support both the metadata schema (group_consistency_ratio / local_consistency_ratio)
+        # and the summary schema (consistency_ratio_group / consistency_ratio_local_max).
         cr_g = hierarchy.get("consistency_ratio_group")
-        cr_l = hierarchy.get("consistency_ratio_local_max")
-        if cr_g is not None:
-            lines.append(f"- 그룹 간 CR: `{float(cr_g):.4f}`")
-        if cr_l is not None:
-            lines.append(f"- 그룹 내 최대 CR: `{float(cr_l):.4f}`")
+        if cr_g is None:
+            cr_g = hierarchy.get("group_consistency_ratio")
+        cr_l_max = hierarchy.get("consistency_ratio_local_max")
+        local_crs = hierarchy.get("local_consistency_ratio")
+        if cr_l_max is None and isinstance(local_crs, dict):
+            finite_locals = [
+                float(v) for v in local_crs.values()
+                if v is not None and math.isfinite(float(v))
+            ]
+            if finite_locals:
+                cr_l_max = max(finite_locals)
 
-    if matrix is not None and np is not None:
+        if cr_g is not None and math.isfinite(float(cr_g)):
+            lines.append(f"- 그룹 간 CR: `{float(cr_g):.4f}` (권장 ≤ 0.10)")
+        else:
+            lines.append("- 그룹 간 CR: `N/A` (그룹 수 ≤ 2 또는 > 15)")
+        if cr_l_max is not None and math.isfinite(float(cr_l_max)):
+            lines.append(f"- 그룹 내 최대 CR: `{float(cr_l_max):.4f}` (권장 ≤ 0.10)")
+        elif isinstance(local_crs, dict) and local_crs:
+            lines.append("- 그룹 내 최대 CR: `N/A` (일부 그룹 n > 15 또는 미정의)")
+
+        gw_map = hierarchy.get("group_weights")
+        if isinstance(gw_map, dict) and gw_map:
+            lines.extend(["", "| 그룹 (Group) | 그룹 가중치 | 그룹 내 CR |", "|---|---:|---:|"])
+            for gname, gw in gw_map.items():
+                lcr_val = local_crs.get(gname) if isinstance(local_crs, dict) else None
+                lcr_txt = (
+                    f"{float(lcr_val):.4f}"
+                    if lcr_val is not None and math.isfinite(float(lcr_val))
+                    else "N/A"
+                )
+                lines.append(f"| {gname} | {100.0 * float(gw):.2f}% | {lcr_txt} |")
+
+    if (not is_hierarchy_source) and matrix is not None and np is not None:
         mat = np.asarray(matrix, dtype=float)
         if mat.ndim == 2 and mat.shape == (len(names), len(names)) and len(names) > 0:
             lines.extend(["", "## 쌍대비교 행렬", ""])
