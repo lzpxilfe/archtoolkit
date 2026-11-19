@@ -14,6 +14,7 @@
   <img alt="Version 0.1.7" src="https://img.shields.io/badge/version-0.1.7-2d7ff9">
   <img alt="Status stable" src="https://img.shields.io/badge/status-stable-2ea44f">
   <a href="https://github.com/lzpxilfe/archtoolkit/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/lzpxilfe/archtoolkit/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="https://doi.org/10.5281/zenodo.24363819"><img alt="Zenodo DOI" src="https://zenodo.org/badge/DOI/10.5281/zenodo.24363819.svg"></a>
   <img alt="License GPL-3.0-or-later" src="https://img.shields.io/badge/license-GPL--3.0--or--later-1f6feb">
 </p>
 
@@ -245,14 +246,17 @@ $qgis = "C:\Program Files\QGIS 3.40.5"
 학술 논문이나 조사보고서에서 사용했다면 [CITATION.cff](CITATION.cff) 및 [Zenodo 메타데이터](.zenodo.json)로 소프트웨어를 인용하고, 개별 분석 방법의 1차 문헌은 [REFERENCES.md](REFERENCES.md)에서 함께 인용해 주세요.
 
 - 저자: Jinseo Hwang ([ORCID: 0009-0000-8228-4083](https://orcid.org/0009-0000-8228-4083))
+- Zenodo DOI: [10.5281/zenodo.24363819](https://doi.org/10.5281/zenodo.24363819) (전체 버전) · [10.5281/zenodo.24363820](https://doi.org/10.5281/zenodo.24363820) (`v0.1.7`)
 
 ```bibtex
 @software{ArchToolkit_Hwang_2026,
-  author  = {Hwang, Jinseo},
-  title   = {ArchToolkit: Archaeology Toolkit for QGIS},
-  year    = {2026},
-  version = {0.1.7},
-  url     = {https://github.com/lzpxilfe/archtoolkit}
+  author    = {Hwang, Jinseo},
+  title     = {ArchToolkit: Archaeology Toolkit for QGIS},
+  year      = {2026},
+  publisher = {Zenodo},
+  version   = {0.1.7},
+  doi       = {10.5281/zenodo.24363820},
+  url       = {https://doi.org/10.5281/zenodo.24363820}
 }
 ```
 

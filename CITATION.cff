@@ -3,6 +3,14 @@ message: "If you use this repository in research, teaching, or applied work, ple
 type: software
 title: "ArchToolkit: Archaeology Toolkit for QGIS"
 version: "0.1.7"
+doi: "10.5281/zenodo.24363820"
+identifiers:
+  - type: doi
+    value: "10.5281/zenodo.24363819"
+    description: "Zenodo concept DOI (resolves to the latest archived version)"
+  - type: doi
+    value: "10.5281/zenodo.24363820"
+    description: "Zenodo version DOI for v0.1.7"
 authors:
   - family-names: Hwang
     given-names: Jinseo
