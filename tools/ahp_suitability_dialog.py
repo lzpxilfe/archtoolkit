@@ -45,7 +45,7 @@ from .qtcompat import RBS_MIN, RBS_MAX, SHADER_INTERPOLATED
 from qgis.gui import QgsMapLayerComboBox
 
 from .live_log_dialog import ensure_live_log_dialog
-from .help_dialog import show_help_dialog
+from .help_dialog import make_research_notice_banner, show_help_dialog
 from . import dialog_memory
 from .icons import icon as plugin_icon
 from .i18n import is_english_ui
@@ -717,6 +717,9 @@ class AhpSuitabilityDialog(QtWidgets.QDialog):
         header.setWordWrap(True)
         header.setStyleSheet("background:#f1f8e9; padding:10px; border:1px solid #dcedc8; border-radius:4px;")
         layout.addWidget(header)
+        _banner = make_research_notice_banner("ahp", self)
+        if _banner is not None:
+            layout.addWidget(_banner)
 
         grp_in = QtWidgets.QGroupBox("1. 입력")
         form = QtWidgets.QFormLayout(grp_in)

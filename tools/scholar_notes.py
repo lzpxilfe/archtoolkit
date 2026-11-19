@@ -53,6 +53,8 @@ _R = {
     "dijkstra1959": "Dijkstra, E.W. (1959). A note on two problems in connexion with graphs. Numerische Mathematik, 1(1), 269-271. DOI: 10.1007/BF01386390",
     "hart1968": "Hart, P.E., Nilsson, N.J., & Raphael, B. (1968). A formal basis for the heuristic determination of minimum cost paths. IEEE Transactions on Systems Science and Cybernetics, 4(2), 100-107. DOI: 10.1109/TSSC.1968.300136",
     "goodchild1977": "Goodchild, M.F. (1977). An evaluation of lattice solutions to the problem of corridor location. Environment and Planning A, 9(7), 727-738. DOI: 10.1068/a090727",
+    "huber1985": "Huber, D.L., & Church, R.L. (1985). Transmission Corridor Location Modeling. Journal of Transportation Engineering, 111(2), 114-130. DOI: 10.1061/(ASCE)0733-947X(1985)111:2(114)",
+    "etherington2012": "Etherington, T.R. (2012). Least-cost modelling on irregular landscape graphs. Landscape Ecology, 27(7), 957-968. DOI: 10.1007/s10980-012-9747-y",
     "douglas1994": "Douglas, D.H. (1994). Least-cost Path in GIS Using an Accumulated Cost Surface and Slopelines. Cartographica, 31(3), 37-51. DOI: 10.3138/D327-0323-2JUT-016M",
     "white2012": "White, D.A., & Surface-Evans, S.L. (eds.) (2012). Least Cost Analysis of Social Landscapes: Archaeological Case Studies. University of Utah Press.",
     "kruskal1956": "Kruskal, J.B. (1956). On the shortest spanning subtree of a graph and the traveling salesman problem. Proceedings of the American Mathematical Society, 7(1), 48-50. DOI: 10.1090/S0002-9939-1956-0078686-7",
@@ -217,10 +219,10 @@ NOTES: Dict[str, dict] = {
              "origin": "수식은 플러그인 정의입니다. 기준 경사 대비 tan 비율로 패널티를 주며, 두 저자의 상대 경사 비용 논의만 참고했습니다.",
              "intent": "결과 크기가 기준 경사에 전적으로 좌우되므로(기본 5°), 사용한 기준 경사를 반드시 함께 보고합니다.",
              "refs": ["conolly2006"]},
-            {"label": "B", "name": "최단 경로·누적 비용 회랑·격자 신장 오차 (Dijkstra 1959; Hart et al. 1968; Goodchild 1977; Douglas 1994)",
-             "origin": "누적 비용은 Dijkstra, 두 점 사이 경로는 A* 휴리스틱으로 계산하며 1픽셀 대각선 NoData·고마찰 장벽 관통을 차단합니다. 8방향 격자 이동의 신장 오차(최대 약 8%, 4방향은 약 41%)는 Goodchild(1977)와 Douglas(1994)가 정식화했습니다.",
-             "intent": "해상도를 너무 거칠게 잡으면 경로가 격자 방향에 끌립니다. 회랑과 LCP는 모델 가정을 그대로 물려받는 가설입니다(White & Surface-Evans 2012).",
-             "refs": ["dijkstra1959", "hart1968", "goodchild1977", "douglas1994", "white2012"]},
+            {"label": "B", "name": "최단 경로·16방향 나이트 이동·격자 신장 오차 (Dijkstra 1959; Hart et al. 1968; Goodchild 1977; Huber & Church 1985; Douglas 1994; Etherington 2012)",
+             "origin": "누적 비용은 Dijkstra, 두 점 사이 경로는 A* 휴리스틱으로 계산하며 1픽셀 대각선·나이트 이동의 NoData·절벽·고마찰 장벽 관통을 차단합니다. 격자 신장 오차는 4방향 최대 41.4%, 8방향 최대 8.24%이며(Goodchild 1977; Douglas 1994), 16방향 나이트 이동 옵션(Huber & Church 1985; Etherington 2012)을 켜면 최대 2.75%까지 줄어듭니다.",
+             "intent": "정밀 연구 비교에는 16방향 나이트 이동을 권장합니다. 회랑과 LCP는 모델 가정을 그대로 물려받는 가설이므로 절대 수치보다 상대 비교로 해석하십시오(White & Surface-Evans 2012).",
+             "refs": ["dijkstra1959", "hart1968", "goodchild1977", "huber1985", "douglas1994", "etherington2012", "white2012"]},
         ],
         "workflow": [
             "질문을 정합니다. 시간이면 Tobler/Naismith, 에너지이면 Pandolf/Herzog.",
@@ -291,9 +293,9 @@ NOTES: Dict[str, dict] = {
              "origin": "주변 점을 거리의 거듭제곱 역수로 가중 평균합니다. Shepard는 불규칙 관측점의 2차원 보간을 위해 제안했습니다.",
              "intent": "가중 평균이라 입력 범위를 벗어난 값은 만들지 않고, 점 주변에 '황소눈' 무늬가 생기기 쉽습니다. 밀도 높은 점 자료에 적합합니다.",
              "refs": ["shepard1968"]},
-            {"label": "B", "name": "Ordinary Kriging · WLS 변동함수 적합 · LOOCV (Matheron 1963; Cressie 1985; Chilès & Delfiner 2012; Golub & Van Loan 2013)",
-             "origin": "공간 자기상관을 변동함수로 모형화해 최량선형불편 추정을 하는 지오통계 보간입니다. 선택 시 Cressie(1985) WLS 목적함수를 직접 최소화해 모델을 적합하고, 대각 유사 스케일링(Golub & Van Loan 2013)으로 고기복 행렬 조건수를 안정화하며, 너겟 중복점 분산(Chilès & Delfiner 2012)과 LOOCV(RMSE, MSDR)를 산출합니다.",
-             "intent": "기본 Lite 모드는 지수형 고정(너깃 5%, 레인지 최근린 중앙값 3배)을 쓰며, WLS 옵션을 켜고 LOOCV MSDR(1.0 부근)로 분산 보정 여부를 점검할 수 있습니다.",
+            {"label": "B", "name": "Ordinary Kriging · WLS 변동함수 적합 · LOOCV · 이방성/추세 진단 (Matheron 1963; Cressie 1985; Chilès & Delfiner 2012; Golub & Van Loan 2013)",
+             "origin": "공간 자기상관을 변동함수로 모형화해 최량선형불편 추정을 하는 등방성 국소 Ordinary Kriging입니다. 선택 시 Cressie(1985) WLS 목적함수를 직접 최소화해 모델을 적합하고, 대각 유사 스케일링(Golub & Van Loan 2013)으로 고기복 행렬 조건수를 안정화하며, 너겟 중복점 분산(Chilès & Delfiner 2012), LOOCV(RMSE, MSDR), 4방위 이방성 비·1차 평면 추세 R² 가정 진단을 산출합니다.",
+             "intent": "강한 방향성 이방성(비 2.0 이상)이나 광역 추세(R² 0.30 이상) 경고가 뜨면 정상성·등방성 가정이 약해지므로 R(gstat) Universal/이방성 Kriging으로 교차 검증하십시오.",
              "refs": ["matheron1963", "cressie1985", "cressie1993", "webster2007", "chiles2012", "golub2013"]},
         ],
         "workflow": [
@@ -488,6 +490,132 @@ NOTES: Dict[str, dict] = {
 
 _LABEL_KO = {"A": "(A) QGIS/GDAL 알고리즘", "B": "(B) 플러그인 직접 구현", "C": "(C) 맥락·표준·후속 참고"}
 
+# Per-tool research usage tier, concise metadata caveat (stamped onto output
+# layers automatically by set_archtoolkit_layer_metadata), and optional UI
+# banner shown directly inside dialogs where methodological overclaiming is
+# most likely in academic manuscripts.
+RESEARCH_DISCLOSURES: Dict[str, Dict[str, str]] = {
+    "dem_generator": {
+        "tier": "tier2_conditional",
+        "scope_ko": "연구 모형 유의",
+        "caveat": "보간 DEM은 측정이 아닌 추정치입니다. Kriging(Lite)는 등방성 국소 Ordinary Kriging이므로 강한 이방성·추세 경고 시 R(gstat) 교차 검증을 권장합니다.",
+        "banner": "보간면은 추정치입니다. Kriging(Lite)는 등방성 국소 Ordinary Kriging이며, 강한 이방성·광역 추세가 감지되면 경고를 표시합니다(엄밀한 지오통계 추론은 R gstat 교차 검증 권장).",
+    },
+    "contour_extractor": {
+        "tier": "tier1_standard",
+        "scope_ko": "표준 알고리즘",
+        "caveat": "등고선 간격은 원본 DEM의 수직 정확도 이상으로 설정하고 DEM 출처와 해상도를 함께 보고하십시오.",
+        "banner": "",
+    },
+    "terrain_analysis": {
+        "tier": "tier1_standard",
+        "scope_ko": "표준 알고리즘",
+        "caveat": "곡률 부호는 ESRI 규약(GRASS/SAGA와 반대)이며, 화면 5등급 중 한국표준 경사 외에는 플러그인 표시 관례입니다.",
+        "banner": "",
+    },
+    "slope_aspect_drafting": {
+        "tier": "tier1_standard",
+        "scope_ko": "표준 도면화",
+        "caveat": "경사 등급 구간은 도면 관례이므로 범례에 구간값과 화살표 블록 간격을 명시하십시오.",
+        "banner": "",
+    },
+    "viewshed": {
+        "tier": "tier2_conditional",
+        "scope_ko": "연구 모형 유의",
+        "caveat": "DEM(지형) 단독 가시권이며 고식생·당대 건축물·기상 조건·지형 개변을 반영하지 않습니다('지형 차폐 없음'으로 서술 권장).",
+        "banner": "이 결과는 입력 DEM(지형)만 고려합니다. 식생·건물·기상·당시 지형 개변은 반영되지 않으므로 논문에는 '실제로 보였음'이 아니라 '지형 차폐 없음'으로 서술하고, 필요 시 DSM을 사용하십시오.",
+    },
+    "cost_surface": {
+        "tier": "tier2_conditional",
+        "scope_ko": "연구 모형 유의",
+        "caveat": "격자 누적 비용 모형(4방향 최대 41.4%·8방향 8.2%·16방향 2.75% 신장 오차)이며 최소비용경로는 실제 옛길의 증거가 아닌 가설입니다.",
+        "banner": "격자 기반 이동비용 모형입니다(최대 신장오차: 8방향 8.2% / 16방향 나이트 이동 2.75%). 절대 시간·칼로리 주장보다 상대 비교와 가설로 해석하십시오.",
+    },
+    "cost_network": {
+        "tier": "tier2_conditional",
+        "scope_ko": "연구 모형 유의",
+        "caveat": "유클리드 후보 k-NN 위 격자 LCP 근사 네트워크이며, 실제 교통망 증명이 아니라 입력 유적 집합과 비용 가정의 함수입니다.",
+        "banner": "유클리드 후보(k) 위 격자 LCP 근사 연결망입니다(16방향 나이트 이동으로 격자 오차를 2.75% 이하로 줄일 수 있음). 유적 표본 누락과 모형 민감도를 함께 보고하십시오.",
+    },
+    "spatial_network": {
+        "tier": "tier2_conditional",
+        "scope_ko": "연구 모형 유의",
+        "caveat": "근접·가시성 연결망은 실제 상호작용의 증명이 아닌 가능성 모형이며, 가시성은 입력 DEM(지형) 단독 시선 기준입니다.",
+        "banner": "연결선은 실제 교류의 증명이 아닌 가능성 모형입니다. 유적 목록 누락에 민감하며, 가시성 모드는 DEM(지형) 단독 시선(식생·건물 미반영) 기준입니다.",
+    },
+    "distance_raster": {
+        "tier": "tier1_standard",
+        "scope_ko": "표준 알고리즘",
+        "caveat": "직선 유클리드 거리이며 지형 경사·하천 등 이동 장벽을 반영하지 않습니다.",
+        "banner": "",
+    },
+    "align_export": {
+        "tier": "tier1_standard",
+        "scope_ko": "표준 전처리",
+        "caveat": "manifest의 categorical·resampling·valid_pct 열을 확인해 범주·방향 변수의 리샘플링과 결측 비율을 보고하십시오.",
+        "banner": "",
+    },
+    "covariate_report": {
+        "tier": "tier1_standard",
+        "scope_ko": "표준 통계 진단",
+        "caveat": "VIF 임계값(5·10)은 절대 규칙이 아닌 참고선(O'Brien 2007)이며, 원형 변수는 순환-선형 R²로 별도 해석합니다.",
+        "banner": "",
+    },
+    "ahp": {
+        "tier": "tier2_conditional",
+        "scope_ko": "연구 모형 유의",
+        "caveat": "AHP 적합도는 전문가 판단의 구조화(상대 지수)이지 유적 존재 확률이 아닙니다. CR과 OAT 민감도 보고서를 함께 제시하십시오.",
+        "banner": "AHP 적합도는 전문가 판단을 구조화한 상대 지수이며 유적 존재 확률이 아닙니다. 논문에는 일관성비율(CR)과 OAT 가중치 민감도 보고서를 함께 제시하십시오.",
+    },
+    "geology_zip": {
+        "tier": "tier1_standard",
+        "scope_ko": "표준 전처리",
+        "caveat": "래스터 정수 코드는 해당 실행의 mapping CSV에서만 유효하며, 픽셀 크기보다 좁은 암체는 소실될 수 있습니다.",
+        "banner": "",
+    },
+    "geochem": {
+        "tier": "tier3_exploratory_aid",
+        "scope_ko": "예비 탐색·시각화용",
+        "caveat": "KIGAM WMS 렌더링 색상에서 역추정한 근사값이며 원시 지구화학 분석치가 아닙니다. 정량 학술 논문에는 기관 원시 분석치를 사용하십시오.",
+        "banner": "이 도구의 출력은 WMS 렌더링 색상에서 역추정한 근사값(원시 분석치 아님)입니다. 예비 탐색·시각화 용도로만 쓰고, 정량 지구화학 논문에는 KIGAM 원시 분석치를 사용하십시오.",
+    },
+    "trench_suggestion": {
+        "tier": "tier3_exploratory_aid",
+        "scope_ko": "현장 시굴 보조 (휴리스틱)",
+        "caveat": "발자국 경사(2D SAT)·방위(2θ) 계산은 정확하나 배치 점수식은 플러그인 휴리스틱이며 확률 표본이론 공식이나 유구 존재 보장이 아닙니다.",
+        "banner": "배치 점수식은 학술 확률 표본설계가 아닌 현장 시굴 보조 휴리스틱입니다(유구 존재 보장 아님, 무덤 회피 0건 = 무덤 없음 아님). 최종 배치는 현장 조사자가 판단하십시오.",
+    },
+    "cadastral_overlap": {
+        "tier": "tier3_exploratory_aid",
+        "scope_ko": "행정·조사 참고용",
+        "caveat": "GIS 중첩 계산 면적은 좌표계·경계 정밀도 차이로 지적 공부 면적과 다를 수 있으며 법적 효력이 없습니다.",
+        "banner": "계산된 면적·비율은 GIS 중첩 참고값이며 법정 지적 공부 면적을 대체하지 않습니다. 행정·인허가·법적 보고에는 지적 공부 면적을 우선하십시오.",
+    },
+    "terrain_profile": {
+        "tier": "tier1_standard",
+        "scope_ko": "표준 도화",
+        "caveat": "단면 보고 시 수직 과장 배율, NoData 구간 길이, 이동평균 평활화 적용 여부를 함께 표기하십시오.",
+        "banner": "",
+    },
+    "map_styling": {
+        "tier": "tier1_standard",
+        "scope_ko": "도면 시각화 보조",
+        "caveat": "도면화 보조 산출물이며 법정·측량 원도를 대체하지 않습니다. 미스타일 코드 개수를 확인하십시오.",
+        "banner": "",
+    },
+    "ai_report": {
+        "tier": "tier3_exploratory_aid",
+        "scope_ko": "조사요약 보조·초안",
+        "caveat": "AI 초안은 검증된 고고학 해석이 아니며 최종 검토 책임은 연구자에게 있습니다. 외부 AI 전송 시 매장유산 위치정보 보호에 유의하십시오.",
+        "banner": "AI 초안은 검증된 고고학 해석이 아닌 참고 초안입니다(로컬 모드는 외부 전송 없음). Gemini 모드 사용 시 매장유산 위치정보 보호 규정을 먼저 확인하십시오.",
+    },
+}
+
+
+def research_disclosure_for(tool_id: str) -> Dict[str, str]:
+    """Return research scope tier, metadata caveat, and UI banner for a tool."""
+    return dict(RESEARCH_DISCLOSURES.get(str(tool_id or "").strip(), {}))
+
 
 def available_tools() -> List[str]:
     return sorted(NOTES.keys())
@@ -530,4 +658,4 @@ def html_for(tool_id: str) -> str:
     return "\n".join(parts)
 
 
-__all__ = ["NOTES", "available_tools", "html_for"]
+__all__ = ["NOTES", "RESEARCH_DISCLOSURES", "available_tools", "html_for", "research_disclosure_for"]

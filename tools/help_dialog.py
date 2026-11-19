@@ -139,6 +139,54 @@ class ArchToolkitHelpDialog(QtWidgets.QDialog):
         self.browser.setTextCursor(cursor)
 
 
+def make_research_notice_banner(tool_id: str, parent=None) -> Optional[QtWidgets.QLabel]:
+    """Build a compact, non-intrusive research scope & caveat banner widget."""
+    try:
+        from .scholar_notes import research_disclosure_for
+        disc = research_disclosure_for(tool_id)
+    except Exception as _exc:
+        log_swallowed("help_dialog.make_research_notice_banner", _exc)
+        return None
+    banner_text = str(disc.get("banner") or "").strip()
+    if not banner_text:
+        return None
+    tier = str(disc.get("tier") or "")
+    scope_ko = str(disc.get("scope_ko") or "").strip()
+    lbl = QtWidgets.QLabel(parent)
+    lbl.setWordWrap(True)
+    if tier == "tier3_exploratory_aid":
+        prefix = f"[{scope_ko or '예비 탐색·현장 보조'}] "
+        style = (
+            "background:#fff8e1; border:1px solid #f5c26b; color:#6d4c00; "
+            "padding:6px 8px; border-radius:4px; font-size:8.5pt;"
+        )
+    else:
+        prefix = f"[{scope_ko or '연구 해석 유의'}] "
+        style = (
+            "background:#eef5fb; border:1px solid #b6d4ee; color:#1f4363; "
+            "padding:6px 8px; border-radius:4px; font-size:8.5pt;"
+        )
+    lbl.setText(prefix + banner_text)
+    lbl.setStyleSheet(style)
+    return lbl
+
+
+def insert_research_notice_banner(dialog, tool_id: str) -> Optional[QtWidgets.QLabel]:
+    """Insert a research scope & caveat banner at the top of ``dialog``'s layout."""
+    try:
+        layout = dialog.layout() if dialog is not None else None
+        if layout is None or not isinstance(layout, QtWidgets.QBoxLayout):
+            return None
+        banner = make_research_notice_banner(tool_id, parent=dialog)
+        if banner is None:
+            return None
+        layout.insertWidget(0, banner)
+        return banner
+    except Exception as _exc:
+        log_swallowed("help_dialog.insert_research_notice_banner", _exc)
+        return None
+
+
 def show_help_dialog(*, parent, title: str, html: str, plugin_dir: Optional[str] = None, tool_id: Optional[str] = None) -> None:
     # plugin_dir is currently unused (kept for compatibility with callers).
     # tool_id appends the tool's "학술 근거와 권장 절차" block (tools/scholar_notes.py)

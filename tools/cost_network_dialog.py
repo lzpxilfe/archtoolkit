@@ -78,10 +78,11 @@ from .utils import (
 )
 from .raster_grid_contract import validate_north_up_geotransform
 from . import cost_budget
+from .cost_engine import grid_connectivity_info as _grid_connectivity_info
 from .cost_models import edge_cost as _edge_cost
 from .raster_semantics import undeclared_nodata_mask
 from .live_log_dialog import ensure_live_log_dialog
-from .help_dialog import show_help_dialog
+from .help_dialog import insert_research_notice_banner, show_help_dialog
 from . import dialog_memory
 from .icons import icon as plugin_icon
 from .i18n import get_output_group_name
@@ -223,6 +224,7 @@ class NetworkTaskResult:
     # are built, because the user can toggle the box while the task runs and
     # the recorded caveat must describe the run, not the dialog.
     allow_diagonal: bool = True
+    allow_knight: bool = False
     nodes: Optional[List[NetworkNode]] = None
     edges: Optional[List[NetworkEdge]] = None
     # The DEM CRS object itself: a CRS without an authid (custom WKT) cannot be
@@ -270,6 +272,7 @@ class CostNetworkWorker(QgsTask):
         on_done,
         dem_crs=None,
         skipped_features: int = 0,
+        allow_knight: bool = False,
     ):
         super().__init__("최소비용 네트워크 (Least-cost Network)", QgsTask.Flag.CanCancel)
         self._cancel_event = threading.Event()
@@ -277,6 +280,7 @@ class CostNetworkWorker(QgsTask):
         self.dem_authid = dem_authid
         self.nodes = list(nodes)
         self.allow_diagonal = bool(allow_diagonal)
+        self.allow_knight = bool(allow_diagonal and allow_knight)
         self.pair_buffer_m = float(pair_buffer_m)
         self.candidate_k = int(candidate_k)
         self.network_mode = str(network_mode)
@@ -664,6 +668,7 @@ class CostNetworkWorker(QgsTask):
                 self.model_params,
                 cost_mode=solver_cost_mode,
                 cancel_check=cancel_check,
+                allow_knight=self.allow_knight,
             )
             if self._is_cancelled():
                 return NetworkTaskResult(ok=False, message="작업이 취소되었습니다.", cancelled=True)
@@ -692,6 +697,7 @@ class CostNetworkWorker(QgsTask):
                 self.model_params,
                 cost_mode=solver_cost_mode,
                 cancel_check=cancel_check,
+                allow_knight=self.allow_knight,
             )
             if self._is_cancelled():
                 return NetworkTaskResult(ok=False, message="작업이 취소되었습니다.", cancelled=True)
@@ -907,6 +913,7 @@ class CostNetworkWorker(QgsTask):
                         self.model_params,
                         cost_mode=solver_cost_mode,
                         cancel_check=self._is_cancelled,
+                        allow_knight=self.allow_knight,
                     )
                     if prev is None or cost_sel is None:
                         continue
@@ -1194,6 +1201,7 @@ class CostNetworkWorker(QgsTask):
             cost_mode=self.cost_mode,
             network_mode=self.network_mode,
             allow_diagonal=self.allow_diagonal,
+            allow_knight=self.allow_knight,
             nodes=nodes,
             edges=edges_out,
             dem_crs=self.dem_crs,
@@ -1244,6 +1252,8 @@ class CostNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
             log_swallowed("cost_network_dialog.__init__", _exc)
 
         self._setup_help_button()
+        insert_research_notice_banner(self, "cost_network")
+        self._setup_knight_move_option()
 
         self._task = None
         self._task_running = False
@@ -1385,6 +1395,39 @@ class CostNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
             self._apply_help_texts()
         except Exception as _exc:
             log_swallowed("tools/cost_network_dialog.py:1247 (__init__)", _exc)
+
+    def _setup_knight_move_option(self):
+        """Add the 16-neighbour knight's-move checkbox beside chkDiagonal."""
+        try:
+            self.chkKnightMove = QtWidgets.QCheckBox("나이트 이동(16방향, 오차 <=2.75%)", self)
+            self.chkKnightMove.setObjectName("chkKnightMove")
+            self.chkKnightMove.setChecked(False)
+            self.chkKnightMove.setToolTip(
+                "16방향 나이트 이동 (Huber & Church 1985; GRASS r.walk -k 대응)\n"
+                "- 8방향 격자 최대 신장오차(~8.24%)를 약 2.75%로 줄여 더 정밀한 LCP 네트워크를 계산합니다.\n"
+                "- 2개 중간 셀의 NoData·절벽을 함께 검사하며, 대각 이동(8방향)이 켜져 있어야 활성화됩니다."
+            )
+            parent = self.chkDiagonal.parentWidget()
+            layout = parent.layout() if parent is not None else None
+            if isinstance(layout, QtWidgets.QGridLayout):
+                idx = layout.indexOf(self.chkDiagonal)
+                if idx >= 0:
+                    row, col, rspan, cspan = layout.getItemPosition(idx)
+                    layout.removeWidget(self.chkDiagonal)
+                    row_box = QtWidgets.QWidget(parent)
+                    hbox = QtWidgets.QHBoxLayout(row_box)
+                    hbox.setContentsMargins(0, 0, 0, 0)
+                    hbox.setSpacing(12)
+                    hbox.addWidget(self.chkDiagonal)
+                    hbox.addWidget(self.chkKnightMove)
+                    hbox.addStretch(1)
+                    layout.addWidget(row_box, row, col, rspan, cspan)
+            self.chkKnightMove.setEnabled(bool(self.chkDiagonal.isChecked()))
+            self.chkDiagonal.toggled.connect(
+                lambda checked: self.chkKnightMove.setEnabled(bool(checked))
+            )
+        except Exception as _exc:
+            log_swallowed("cost_network_dialog._setup_knight_move_option", _exc)
 
     def _setup_help_button(self):
         try:
@@ -2313,6 +2356,11 @@ MST/k-NN/Hub 네트워크를 생성합니다.
         candidate_k = int(self.spinCandidateK.value())
         pair_buffer = float(self.spinPairBuffer.value())
         allow_diagonal = bool(self.chkDiagonal.isChecked())
+        allow_knight = bool(
+            allow_diagonal
+            and hasattr(self, "chkKnightMove")
+            and self.chkKnightMove.isChecked()
+        )
         sym_method = self.cmbSymmetrize.currentData()
         knn_k = int(self.spinKnnK.value())
         hub_connect_mst = bool(self.chkHubConnectMst.isChecked())
@@ -2517,6 +2565,7 @@ MST/k-NN/Hub 네트워크를 생성합니다.
             dem_authid=dem_layer.crs().authid(),
             nodes=nodes,
             allow_diagonal=allow_diagonal,
+            allow_knight=allow_knight,
             pair_buffer_m=pair_buffer,
             candidate_k=candidate_k,
             network_mode=mode,
@@ -2968,13 +3017,12 @@ MST/k-NN/Hub 네트워크를 생성합니다.
         # Euclidean k nearest neighbours, so any spanning tree is the minimum
         # over that candidate set rather than the true MST in cost space, and
         # (2) the accumulation is a grid, so headings are quantised.
+        cinfo = _grid_connectivity_info(bool(res.allow_diagonal), bool(getattr(res, "allow_knight", False)))
         approx_params = {
             "candidate_selection": "euclidean_knn",
-            "connectivity": (
-                "8-neighbour grid (45-degree quantised, cost overestimated by up to ~8%)"
-                if res.allow_diagonal
-                else "4-neighbour grid (90-degree quantised, cost overestimated by up to ~41%)"
-            ),
+            "connectivity": str(cinfo["connectivity"]),
+            "grid_directions": int(cinfo["n_directions"]),
+            "max_grid_elongation_pct": float(cinfo["max_grid_elongation_pct"]),
         }
         if any(str(e.kind) in ("mst", "hub_mst") for e in edges):
             approx_params["mst"] = "approximate_over_candidates"

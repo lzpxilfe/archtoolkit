@@ -35,7 +35,7 @@ from qgis.gui import QgsMapLayerComboBox
 
 from .processing_task import ProcessingCancelled, ProcessingTaskError, run_alg_blocking
 
-from .help_dialog import show_help_dialog
+from .help_dialog import make_research_notice_banner, show_help_dialog
 from . import dialog_memory
 from .icons import icon as plugin_icon
 from .live_log_dialog import ensure_live_log_dialog
@@ -433,6 +433,9 @@ class TrenchSuggestionDialog(QtWidgets.QDialog):
         header.setWordWrap(True)
         header.setStyleSheet("background:#e8f5e9; padding:10px; border:1px solid #c8e6c9; border-radius:4px;")
         layout.addWidget(header)
+        _banner = make_research_notice_banner("trench_suggestion", self)
+        if _banner is not None:
+            layout.addWidget(_banner)
 
         grp_in = QtWidgets.QGroupBox("1. 기본 입력")
         form_in = QtWidgets.QFormLayout(grp_in)

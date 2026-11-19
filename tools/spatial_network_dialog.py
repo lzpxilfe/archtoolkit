@@ -62,7 +62,7 @@ from .utils import (
     transform_geometry,
 )
 from .live_log_dialog import ensure_live_log_dialog
-from .help_dialog import show_help_dialog
+from .help_dialog import insert_research_notice_banner, show_help_dialog
 from .processing_task import ProcessingCancelled, ProcessingTaskError, run_alg_blocking, run_task_blocking
 from . import dialog_memory
 from .icons import icon as plugin_icon
@@ -193,6 +193,7 @@ class SpatialNetworkDialog(QtWidgets.QDialog, FORM_CLASS):
         # Extra widgets (created dynamically to avoid .ui editing regressions)
         self._ensure_extra_widgets()
         self._setup_help_button()
+        insert_research_notice_banner(self, "spatial_network")
 
         # PPA graph selector
         try:

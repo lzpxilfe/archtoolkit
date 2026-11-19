@@ -76,7 +76,7 @@ from .atomic_output import (
     reserve_staging_path,
 )
 from .live_log_dialog import ensure_live_log_dialog
-from .help_dialog import show_help_dialog
+from .help_dialog import make_research_notice_banner, show_help_dialog
 from . import dialog_memory
 from .icons import icon as plugin_icon
 from .i18n import get_output_group_name
@@ -511,6 +511,9 @@ class GeoChemPolygonizeDialog(QtWidgets.QDialog):
             "- 픽셀 크기를 작게 할수록 디테일은 좋아지지만 느려질 수 있습니다."
         )
         layout.addWidget(desc)
+        _banner = make_research_notice_banner("geochem", self)
+        if _banner is not None:
+            layout.addWidget(_banner)
 
         grp_in = QtWidgets.QGroupBox("1. 입력")
         grid = QtWidgets.QGridLayout(grp_in)

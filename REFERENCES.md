@@ -236,7 +236,12 @@
 >
 > Hart, P.E., Nilsson, N.J., & Raphael, B. (1968). "A Formal Basis for the Heuristic Determination of Minimum Cost Paths." *IEEE Transactions on Systems Science and Cybernetics*, 4(2), pp. 100–107. DOI: 10.1109/TSSC.1968.300136
 
-**(C) 격자 연결성 신장 오차(8방향 약 8% vs. 4방향 약 41%)·누적 비용 회랑·고고학 적용:**
+**(B) 16방향 나이트 이동(Knight's Move) 격자 연결성 — 최대 신장 오차 8.24% → 2.75% 저감** — `tools/cost_engine.py` (`allow_knight=True`, 2개 중간 셀 NoData·절벽·마찰 관통 차단 포함):
+> Huber, D.L., & Church, R.L. (1985). "Transmission Corridor Location Modeling." *Journal of Transportation Engineering*, 111(2), pp. 114–130. DOI: 10.1061/(ASCE)0733-947X(1985)111:2(114)
+>
+> Etherington, T.R. (2012). "Least-cost modelling on irregular landscape graphs." *Landscape Ecology*, 27(7), pp. 957–968. DOI: 10.1007/s10980-012-9747-y
+
+**(C) 격자 연결성 신장 오차(4방향 41.4% · 8방향 8.2% · 16방향 2.75%)·누적 비용 회랑·고고학 적용:**
 > Goodchild, M.F. (1977). "An evaluation of lattice solutions to the problem of corridor location." *Environment and Planning A*, 9(7), pp. 727–738. DOI: 10.1068/a090727
 >
 > Douglas, D.H. (1994). "Least-cost Path in GIS Using an Accumulated Cost Surface and Slopelines." *Cartographica*, 31(3), pp. 37–51. DOI: 10.3138/D327-0323-2JUT-016M

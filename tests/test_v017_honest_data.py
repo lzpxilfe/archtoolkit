@@ -869,5 +869,160 @@ class V15V22V23QgisHonestDataTests(unittest.TestCase):
         self.assertAlmostEqual(float(st["flat_pct"]), 10.0, places=3)
 
 
+class TestV25KnightMoveConnectivity(unittest.TestCase):
+    """V25: 16-neighbour knight's-move grid accuracy, anti-tunneling, and transpose symmetry."""
+
+    def test_knight_move_cuts_grid_elongation_below_2_75_pct(self):
+        dem = np.full((60, 120), 100.0, dtype=np.float64)
+        nodata = np.zeros_like(dem, dtype=bool)
+        start = (5, 5)
+        # Direction atan(20/40) = 26.565 deg: exact knight's-move ray!
+        end = (25, 45)
+        dx = dy = 10.0
+        euclid = math.hypot((end[1] - start[1]) * dx, (end[0] - start[0]) * dy)
+        params = {"naismith_horizontal_kmh": 5.0, "naismith_ascent_m_per_h": 600.0}
+        euclid_time = euclid / (5.0 * 1000.0 / 3600.0)
+
+        _, cost8 = cost_engine.astar_path(
+            dem, nodata, start, end, dx, dy, True,
+            cost_models.MODEL_NAISMITH, params, cost_mode="time_s", allow_knight=False,
+        )
+        _, cost16 = cost_engine.astar_path(
+            dem, nodata, start, end, dx, dy, True,
+            cost_models.MODEL_NAISMITH, params, cost_mode="time_s", allow_knight=True,
+        )
+        self.assertIsNotNone(cost8)
+        self.assertIsNotNone(cost16)
+        elong8 = (cost8 / euclid_time - 1.0) * 100.0
+        elong16 = (cost16 / euclid_time - 1.0) * 100.0
+        # At 26.565 deg, 8-neighbour overestimates by ~7.95%, while 16-neighbour is exact (0.00%).
+        self.assertGreater(elong8, 7.5)
+        self.assertLess(elong16, 0.01)
+
+        # Also test worst-case 16-neighbour angle (~13.28 deg, e.g. dr=10, dc=42).
+        end_worst = (15, 47)
+        euclid_w = math.hypot((end_worst[1] - start[1]) * dx, (end_worst[0] - start[0]) * dy)
+        euclid_w_time = euclid_w / (5.0 * 1000.0 / 3600.0)
+        _, cost16_w = cost_engine.astar_path(
+            dem, nodata, start, end_worst, dx, dy, True,
+            cost_models.MODEL_NAISMITH, params, cost_mode="time_s", allow_knight=True,
+        )
+        elong16_w = (cost16_w / euclid_w_time - 1.0) * 100.0
+        self.assertLessEqual(elong16_w, 2.76)
+
+    def test_knight_move_cannot_tunnel_nodata_wall_cliff_or_friction_barrier(self):
+        # 1-pixel vertical NoData wall at col 5 separates start (3, 4) and end (4, 6)
+        dem = np.full((11, 11), 100.0, dtype=np.float64)
+        nodata = np.zeros_like(dem, dtype=bool)
+        nodata[:, 5] = True
+        _, cost = cost_engine.astar_path(
+            dem, nodata, (3, 4), (4, 6), 10.0, 10.0, True,
+            cost_models.MODEL_TOBLER, {}, cost_mode="time_s", allow_knight=True,
+        )
+        self.assertIsNone(cost, "Knight move tunneled through a 1-pixel NoData wall!")
+
+        # 1-pixel vertical cliff (>70 deg) at col 5 (100 m -> 500 m in 10 m)
+        dem_cliff = np.full((11, 11), 100.0, dtype=np.float64)
+        dem_cliff[:, 5] = 500.0
+        nodata_clean = np.zeros_like(dem, dtype=bool)
+        _, cost_cliff = cost_engine.astar_path(
+            dem_cliff, nodata_clean, (3, 4), (4, 6), 10.0, 10.0, True,
+            cost_models.MODEL_TOBLER, {}, cost_mode="time_s", allow_knight=True,
+        )
+        self.assertIsNone(cost_cliff, "Knight move jumped over a 1-pixel impassable cliff!")
+
+        # 1-pixel impassable friction wall (inf) at col 5
+        fric = np.ones_like(dem, dtype=np.float64)
+        fric[:, 5] = np.inf
+        _, cost_fric = cost_engine.astar_path(
+            dem, nodata_clean, (3, 4), (4, 6), 10.0, 10.0, True,
+            cost_models.MODEL_TOBLER, {}, cost_mode="time_s", friction=fric, allow_knight=True,
+        )
+        self.assertIsNone(cost_fric, "Knight move jumped over an infinite-friction barrier!")
+
+    def test_knight_move_forward_reverse_exact_transpose_with_anisotropic_slope_and_friction(self):
+        rng = np.random.default_rng(42)
+        rows, cols = 15, 18
+        yy, xx = np.mgrid[0:rows, 0:cols]
+        dem = 100.0 + 1.8 * xx + 0.9 * yy + 3.0 * np.sin(xx * 0.4) * np.cos(yy * 0.3)
+        fric = 1.0 + 0.5 * rng.random((rows, cols))
+        nodata = np.zeros((rows, cols), dtype=bool)
+        start, end = (2, 2), (12, 15)
+
+        _, astar_fwd = cost_engine.astar_path(
+            dem, nodata, start, end, 10.0, 10.0, True,
+            cost_models.MODEL_TOBLER, {}, cost_mode="time_s", friction=fric, allow_knight=True,
+        )
+        dist_fwd, _ = cost_engine.dijkstra_full(
+            dem, nodata, start, 10.0, 10.0, True,
+            cost_models.MODEL_TOBLER, {}, cost_mode="time_s", friction=fric, reverse=False, allow_knight=True,
+        )
+        dist_rev, _ = cost_engine.dijkstra_full(
+            dem, nodata, end, 10.0, 10.0, True,
+            cost_models.MODEL_TOBLER, {}, cost_mode="time_s", friction=fric, reverse=True, allow_knight=True,
+        )
+        dijk_fwd = float(dist_fwd[end[0] * cols + end[1]])
+        dijk_rev = float(dist_rev[start[0] * cols + start[1]])
+        self.assertAlmostEqual(astar_fwd, dijk_fwd, places=8)
+        self.assertAlmostEqual(dijk_fwd, dijk_rev, places=8)
+
+
+class TestV26KrigingAssumptionDiagnostics(unittest.TestCase):
+    """V26: 4-azimuth directional anisotropy & planar trend diagnostics for Kriging."""
+
+    def test_detects_strong_planar_trend(self):
+        rng = np.random.default_rng(123)
+        pts = rng.uniform(0.0, 1000.0, size=(80, 2))
+        vals = 100.0 + 0.25 * pts[:, 0] - 0.15 * pts[:, 1] + rng.normal(0.0, 3.0, size=80)
+        diag = kriging_math.diagnose_kriging_assumptions(pts, vals)
+        self.assertIsNotNone(diag["trend_r2"])
+        self.assertGreater(diag["trend_r2"], 0.90)
+        self.assertTrue(diag["trend_warning"])
+        self.assertTrue(any("추세" in w for w in diag["warnings"]))
+
+    def test_detects_directional_anisotropy(self):
+        # Regular grid with strong E-W variation (sin along x) and zero N-S variation -> major continuity N-S (0 deg)
+        xs = np.linspace(0.0, 1000.0, 12)
+        ys = np.linspace(0.0, 1000.0, 12)
+        xx, yy = np.meshgrid(xs, ys)
+        pts = np.column_stack([xx.ravel(), yy.ravel()])
+        vals = 50.0 + 20.0 * np.sin(2.0 * np.pi * pts[:, 0] / 350.0) + 0.5 * np.cos(2.0 * np.pi * pts[:, 1] / 900.0)
+        diag = kriging_math.diagnose_kriging_assumptions(pts, vals)
+        self.assertIsNotNone(diag["anisotropy_ratio"])
+        self.assertGreater(diag["anisotropy_ratio"], 2.0)
+        self.assertTrue(diag["anisotropy_warning"])
+        self.assertEqual(diag["major_azimuth_deg"], 0)
+
+    def test_stationary_isotropic_field_has_no_false_warnings(self):
+        rng = np.random.default_rng(77)
+        xs = np.linspace(0.0, 1000.0, 12)
+        ys = np.linspace(0.0, 1000.0, 12)
+        xx, yy = np.meshgrid(xs, ys)
+        pts = np.column_stack([xx.ravel(), yy.ravel()])
+        # Radially symmetric bumps + modest isotropic noise
+        r1 = np.hypot(pts[:, 0] - 500.0, pts[:, 1] - 500.0)
+        vals = 100.0 + 10.0 * np.exp(-((r1 / 250.0) ** 2)) + rng.normal(0.0, 2.0, size=pts.shape[0])
+        diag = kriging_math.diagnose_kriging_assumptions(pts, vals)
+        self.assertLess(diag["trend_r2"], 0.15)
+        self.assertFalse(diag["trend_warning"])
+        if diag["anisotropy_ratio"] is not None:
+            self.assertLess(diag["anisotropy_ratio"], 2.0)
+        self.assertFalse(diag["anisotropy_warning"])
+
+
+class TestV27ResearchDisclosures(unittest.TestCase):
+    """V27: Every tool has a research scope tier & caveat, and metadata stamps them."""
+
+    def test_all_19_tools_have_research_disclosures(self):
+        from tools import scholar_notes
+        self.assertEqual(set(scholar_notes.RESEARCH_DISCLOSURES.keys()), set(scholar_notes.NOTES.keys()))
+        for tid, disc in scholar_notes.RESEARCH_DISCLOSURES.items():
+            self.assertIn(disc["tier"], ("tier1_standard", "tier2_conditional", "tier3_exploratory_aid"), tid)
+            self.assertTrue(disc["scope_ko"].strip(), tid)
+            self.assertTrue(disc["caveat"].strip(), tid)
+            if disc["tier"] in ("tier2_conditional", "tier3_exploratory_aid"):
+                self.assertTrue(disc["banner"].strip(), f"{tid}: tier2/3 must provide a UI notice banner")
+
+
 if __name__ == "__main__":
     unittest.main()

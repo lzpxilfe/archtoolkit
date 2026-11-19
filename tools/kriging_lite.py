@@ -35,6 +35,7 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 from .kriging_math import (
     build_ok_system,
+    diagnose_kriging_assumptions,
     exponential_cov,
     fit_variogram_wls,
     invert_ok_system,
@@ -619,6 +620,15 @@ def ordinary_kriging_lite_to_geotiff(
             log_swallowed("kriging_lite.loocv", _exc)
             loocv = None
 
+    assumptions: Optional[Dict[str, object]] = None
+    try:
+        assumptions = diagnose_kriging_assumptions(pts, zs)
+        for _warn in (assumptions.get("warnings") or []):
+            log_message(f"[kriging] 가정 점검 경고: {_warn}", level=Qgis.MessageLevel.Warning)
+    except Exception as _exc:
+        log_swallowed("kriging_lite.diagnose_kriging_assumptions", _exc)
+        assumptions = None
+
     return {
         "out_path": out_path,
         "variance_path": variance_path,
@@ -630,8 +640,10 @@ def ordinary_kriging_lite_to_geotiff(
             "neighbors": neighbor_n,
             "value_field": resolved_field,
             "variogram_source": variogram_source,
+            "assumptions": assumptions,
         },
         "loocv": loocv,
+        "assumptions": assumptions,
         "ncols": ncols,
         "nrows": nrows,
         "n_points": len(points_xy),

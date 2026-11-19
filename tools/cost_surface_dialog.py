@@ -93,9 +93,11 @@ from .cost_engine import (
     _dijkstra_full,
     _neighbors,
     _reconstruct_path,
+    _step_edge_cost,
+    grid_connectivity_info as _grid_connectivity_info,
 )
 from .live_log_dialog import ensure_live_log_dialog
-from .help_dialog import show_help_dialog
+from .help_dialog import insert_research_notice_banner, show_help_dialog
 from . import dialog_memory
 from .icons import icon as plugin_icon
 from .i18n import is_english_ui
@@ -143,6 +145,7 @@ class CostTaskResult:
     # result layer can be stamped with its own caveat instead of relying on the
     # reader having the help text open (see _tag_cost_surface_layer).
     allow_diagonal: Optional[bool] = None
+    allow_knight: Optional[bool] = None
     cost_mode: Optional[str] = None
     create_path: bool = False
     # The DEM layer's CRS object. Result memory layers are built from it, not
@@ -524,13 +527,25 @@ def _estimate_straight_line_cost(
     return rows_out[-1][5], straight_dist
 
 
-def _graph_path_profile(path_idx, cols, dem, win_gt, dx, dy, model_key, model_params, friction=None):
+def _graph_path_profile(
+    path_idx,
+    cols,
+    dem,
+    win_gt,
+    dx,
+    dy,
+    model_key,
+    model_params,
+    friction=None,
+    nodata_mask=None,
+):
     """Cumulative time/energy along a solver path, using the solver's own edges.
 
     Each step repeats exactly what _dijkstra_full/_astar_path add for that
-    edge (same horizontal length, same cell-centre dz, same two-cell friction
-    average), so the last row's time equals the accumulated cost at the end
-    cell. Rows: ``(dist_m, x, y, z, cum_time_s, cum_energy_j|None)``.
+    edge via ``_step_edge_cost`` (including 16-neighbour knight intermediate
+    cells and friction averaging), so the last row's time/energy equals the
+    accumulated cost at the end cell. Rows: ``(dist_m, x, y, z, cum_time_s,
+    cum_energy_j|None)``.
     """
     if not path_idx:
         return []
@@ -548,19 +563,27 @@ def _graph_path_profile(path_idx, cols, dem, win_gt, dx, dy, model_key, model_pa
         if prev is not None:
             pr, pc = prev
             horiz = math.hypot((c - pc) * dx, (r - pr) * dy)
-            dz = z - float(dem[pr, pc])
-            fr = 1.0
-            if friction is not None:
-                fr = 0.5 * (float(friction[pr, pc]) + float(friction[r, c]))
-            w_t = _edge_cost(model_key, horiz, dz, model_params, cost_mode="time_s")
-            if math.isfinite(w_t):
-                w_t *= fr
-            cum_t += w_t
+            w_t = _step_edge_cost(
+                dem, nodata_mask, friction, pr, pc, r, c, horiz,
+                model_key, model_params, cost_mode="time_s", reverse=False,
+            )
+            if w_t is None:
+                dz = z - float(dem[pr, pc])
+                w_t = _edge_cost(model_key, horiz, dz, model_params, cost_mode="time_s")
+                if math.isfinite(w_t) and friction is not None:
+                    w_t *= 0.5 * (float(friction[pr, pc]) + float(friction[r, c]))
+            cum_t += float(w_t)
             if is_energy_model:
-                w_e = _edge_cost(model_key, horiz, dz, model_params, cost_mode="energy_j")
-                if math.isfinite(w_e):
-                    w_e *= fr
-                cum_e += w_e
+                w_e = _step_edge_cost(
+                    dem, nodata_mask, friction, pr, pc, r, c, horiz,
+                    model_key, model_params, cost_mode="energy_j", reverse=False,
+                )
+                if w_e is None:
+                    dz = z - float(dem[pr, pc])
+                    w_e = _edge_cost(model_key, horiz, dz, model_params, cost_mode="energy_j")
+                    if math.isfinite(w_e) and friction is not None:
+                        w_e *= 0.5 * (float(friction[pr, pc]) + float(friction[r, c]))
+                cum_e += float(w_e)
             dist += horiz
         out.append((float(dist), float(x), float(y), z, float(cum_t), float(cum_e) if is_energy_model else None))
         prev = (r, c)
@@ -861,6 +884,7 @@ class CostSurfaceWorker(QgsTask):
         on_done,
         dem_crs=None,
         run_params=None,
+        allow_knight=False,
     ):
         super().__init__("비용표면/최소비용경로 (Cost Surface / LCP)", QgsTask.Flag.CanCancel)
         self._cancel_event = threading.Event()
@@ -870,6 +894,7 @@ class CostSurfaceWorker(QgsTask):
         self.end_xy = end_xy
         self.buffer_m = float(buffer_m)
         self.allow_diagonal = bool(allow_diagonal)
+        self.allow_knight = bool(allow_diagonal and allow_knight)
         self.model_key = model_key
         self.model_params = dict(model_params or {})
         self.model_label = model_label
@@ -935,7 +960,8 @@ class CostSurfaceWorker(QgsTask):
 
     def _run_impl(self):
         log_message(
-            f"CostSurface: start (model={self.model_label or self.model_key}, diagonal={self.allow_diagonal}, buffer_m={self.buffer_m})",
+            f"CostSurface: start (model={self.model_label or self.model_key}, "
+            f"diagonal={self.allow_diagonal}, knight={self.allow_knight}, buffer_m={self.buffer_m})",
             level=Qgis.MessageLevel.Info,
         )
         ds = gdal.Open(self.dem_source, gdal.GA_ReadOnly)
@@ -1201,6 +1227,7 @@ class CostSurfaceWorker(QgsTask):
                     cancel_check=cancel_check,
                     progress_cb=cb,
                     friction=friction,
+                    allow_knight=self.allow_knight,
                 )
                 if dist is None or prev is None:
                     return CostTaskResult(ok=False, message="작업이 취소되었습니다.", cancelled=True)
@@ -1230,6 +1257,7 @@ class CostSurfaceWorker(QgsTask):
                     progress_cb=cb,
                     friction=friction,
                     reverse=True,
+                    allow_knight=self.allow_knight,
                 )
                 if dist is None or prev is None:
                     return CostTaskResult(ok=False, message="작업이 취소되었습니다.", cancelled=True)
@@ -1256,6 +1284,7 @@ class CostSurfaceWorker(QgsTask):
                         cancel_check=cancel_check,
                         friction=friction,
                         friction_min=friction_min,
+                        allow_knight=self.allow_knight,
                     )
                 prev_for_path = prev_energy
                 end_cost_for_path = end_energy_j
@@ -1275,6 +1304,7 @@ class CostSurfaceWorker(QgsTask):
                         cancel_check=cancel_check,
                         friction=friction,
                         friction_min=friction_min,
+                        allow_knight=self.allow_knight,
                     )
                 prev_for_path = prev_time
                 end_cost_for_path = end_time_s
@@ -1444,7 +1474,8 @@ class CostSurfaceWorker(QgsTask):
                 # Same edges and friction as the solver, so milestone/profile
                 # figures agree with the path layer and the cost raster.
                 lcp_profile = _graph_path_profile(
-                    path_idx, cols, dem, win_gt, dx, dy, self.model_key, self.model_params, friction=friction
+                    path_idx, cols, dem, win_gt, dx, dy, self.model_key, self.model_params,
+                    friction=friction, nodata_mask=nodata_mask,
                 )
         lcp_dist_m = _polyline_length(path_coords) if path_coords else None
 
@@ -1566,6 +1597,7 @@ class CostSurfaceWorker(QgsTask):
             corridor_vector_path=corridor_vector_path,
             corridor_percent=(float(corridor_percent) if create_corridor else None),
             allow_diagonal=bool(self.allow_diagonal),
+            allow_knight=bool(self.allow_knight),
             cost_mode=path_cost_mode,
             create_path=bool(create_path),
             dem_crs=self.dem_crs,
@@ -1934,6 +1966,8 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
             log_swallowed("tools/cost_surface_dialog.py:1809 (__init__)", _exc)
 
         self._setup_help_button()
+        insert_research_notice_banner(self, "cost_surface")
+        self._setup_knight_move_option()
 
         self.original_tool = None
         self.map_tool = None
@@ -2015,6 +2049,40 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
                 self._on_friction_vector_toggled(bool(self.chkUseFrictionVector.isChecked()))
         except Exception as _exc:
             log_swallowed("cost_surface_dialog.__init__", _exc)
+
+    def _setup_knight_move_option(self):
+        """Add the 16-neighbour knight's-move checkbox beside chkDiagonal."""
+        try:
+            self.chkKnightMove = QtWidgets.QCheckBox("나이트 이동(16방향, 오차 <=2.75%)", self)
+            self.chkKnightMove.setObjectName("chkKnightMove")
+            self.chkKnightMove.setChecked(False)
+            self.chkKnightMove.setToolTip(
+                "16방향 나이트 이동 (Huber & Church 1985; GRASS r.walk -k 대응)\n"
+                "- 8방향 격자 최대 신장오차(~8.24%)를 약 2.75%로 줄여 더 자연스럽고 정확한 경로를 계산합니다.\n"
+                "- 2개 중간 셀의 NoData·절벽·마찰을 함께 검사해 1픽셀 장벽 관통을 차단합니다.\n"
+                "- 계산량은 8방향 대비 약 2배 늘어나며, 대각 이동(8방향)이 켜져 있어야 활성화됩니다."
+            )
+            parent = self.chkDiagonal.parentWidget()
+            layout = parent.layout() if parent is not None else None
+            if isinstance(layout, QtWidgets.QGridLayout):
+                idx = layout.indexOf(self.chkDiagonal)
+                if idx >= 0:
+                    row, col, rspan, cspan = layout.getItemPosition(idx)
+                    layout.removeWidget(self.chkDiagonal)
+                    row_box = QtWidgets.QWidget(parent)
+                    hbox = QtWidgets.QHBoxLayout(row_box)
+                    hbox.setContentsMargins(0, 0, 0, 0)
+                    hbox.setSpacing(12)
+                    hbox.addWidget(self.chkDiagonal)
+                    hbox.addWidget(self.chkKnightMove)
+                    hbox.addStretch(1)
+                    layout.addWidget(row_box, row, col, rspan, cspan)
+            self.chkKnightMove.setEnabled(bool(self.chkDiagonal.isChecked()))
+            self.chkDiagonal.toggled.connect(
+                lambda checked: self.chkKnightMove.setEnabled(bool(checked))
+            )
+        except Exception as _exc:
+            log_swallowed("cost_surface_dialog._setup_knight_move_option", _exc)
 
     def _setup_help_button(self):
         try:
@@ -2455,6 +2523,11 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
 
         buffer_m = float(self.spinBuffer.value())
         allow_diagonal = bool(self.chkDiagonal.isChecked())
+        allow_knight = bool(
+            allow_diagonal
+            and hasattr(self, "chkKnightMove")
+            and self.chkKnightMove.isChecked()
+        )
         model_label = self.cmbModel.currentText()
 
         canvas_crs = self.canvas.mapSettings().destinationCrs()
@@ -2531,9 +2604,13 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
                 restore_ui_focus(self)
                 return
 
+        conn_meta = _grid_connectivity_info(allow_diagonal, allow_knight)
         run_params = {
             "model_params": _model_params_for_metadata(model_key, model_params),
             "allow_diagonal": bool(allow_diagonal),
+            "allow_knight": bool(allow_knight),
+            "grid_directions": int(conn_meta["n_directions"]),
+            "max_grid_elongation_pct": float(conn_meta["max_grid_elongation_pct"]),
             "buffer_m": float(buffer_m),
         }
         if use_friction_raster and friction_raster_layer:
@@ -2579,6 +2656,7 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
             end_xy=(float(end_dem.x()), float(end_dem.y())) if end_dem else None,
             buffer_m=buffer_m,
             allow_diagonal=allow_diagonal,
+            allow_knight=allow_knight,
             model_key=model_key,
             model_params=model_params,
             model_label=model_label,
@@ -3060,14 +3138,14 @@ class CostSurfaceDialog(QtWidgets.QDialog, FORM_CLASS):
                 approx_params["model"] = str(getattr(res, "model_key", "") or "")
                 approx_params["cost_mode"] = str(getattr(res, "cost_mode", "") or "")
                 diagonal = getattr(res, "allow_diagonal", None)
+                knight = bool(getattr(res, "allow_knight", False))
                 # Left out rather than guessed when unknown: labelling a run
                 # 4-neighbour when it was not would be worse than silence.
                 if diagonal is not None:
-                    approx_params["connectivity"] = (
-                        "8-neighbour grid (45-degree quantised, cost overestimated by up to ~8%)"
-                        if diagonal
-                        else "4-neighbour grid (90-degree quantised, cost overestimated by up to ~41%)"
-                    )
+                    cinfo = _grid_connectivity_info(bool(diagonal), knight)
+                    approx_params["connectivity"] = str(cinfo["connectivity"])
+                    approx_params["grid_directions"] = int(cinfo["n_directions"])
+                    approx_params["max_grid_elongation_pct"] = float(cinfo["max_grid_elongation_pct"])
                 # Every parameter the run used (model constants such as the
                 # reference slope or the wheeled critical slope in %, friction
                 # layers/scales, window): the help asks users to report them.

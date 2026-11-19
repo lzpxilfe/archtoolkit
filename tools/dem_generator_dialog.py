@@ -56,7 +56,7 @@ from .atomic_output import (
     reserve_staging_path,
 )
 from .live_log_dialog import ensure_live_log_dialog
-from .help_dialog import show_help_dialog
+from .help_dialog import insert_research_notice_banner, show_help_dialog
 from . import dialog_memory
 from .icons import icon as plugin_icon
 from .kriging_lite import GEOM_Z_SENTINEL, auto_elevation_field
@@ -243,6 +243,7 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
             log_swallowed("dem_generator_dialog.__init__ (pixel minimum)", _exc)
         self._setup_kriging_controls()
         self._setup_help_button()
+        insert_research_notice_banner(self, "dem_generator")
         
         # Initialize UI
         self.populate_layers()
@@ -2055,6 +2056,8 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
                             msdr_val = loocv.get("msdr")
                             msdr_part = f", MSDR={float(msdr_val):.2f}" if msdr_val is not None else ""
                             loocv_note = f", LOOCV RMSE={float(loocv['rmse']):.3f}m{msdr_part}"
+                        assumptions = info.get("assumptions") or {}
+                        assumption_warns = list(assumptions.get("warnings") or [])
                         push_message(
                             self.iface,
                             "완료",
@@ -2062,6 +2065,14 @@ class DemGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
                             level=0,
                             duration=6,
                         )
+                        if assumption_warns:
+                            push_message(
+                                self.iface,
+                                "Kriging 가정 점검 경고",
+                                " / ".join(assumption_warns),
+                                level=1,
+                                duration=12,
+                            )
                         self.accept()
                     else:
                         push_message(self.iface, "오류", "Kriging 출력이 생성되지 않았습니다.", level=2)

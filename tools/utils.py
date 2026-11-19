@@ -593,11 +593,15 @@ def set_archtoolkit_layer_metadata(
     kind: str = "",
     units: str = "",
     params: dict = None,
+    research_scope: str = "",
+    caveat: str = "",
 ) -> None:
     """Attach stable metadata to a QGIS layer (best-effort).
 
     Stored as layer custom properties so it persists in the project and can be
-    read by AI 조사요약 / 리포트 번들 내보내기.
+    read by AI 조사요약 / 리포트 번들 내보내기. Also stamps the tool's
+    research scope tier and methodological caveat automatically from
+    ``tools.scholar_notes.research_disclosure_for`` unless explicitly overridden.
     """
     if layer is None:
         return
@@ -614,6 +618,22 @@ def set_archtoolkit_layer_metadata(
         if units:
             layer.setCustomProperty("archtoolkit/units", str(units or "").strip())
         layer.setCustomProperty("archtoolkit/created_at", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        scope0 = str(research_scope or "").strip()
+        caveat0 = str(caveat or "").strip()
+        if (not scope0) or (not caveat0):
+            try:
+                from .scholar_notes import research_disclosure_for
+                disc = research_disclosure_for(tool_id0)
+                if not scope0:
+                    scope0 = str(disc.get("tier") or "").strip()
+                if not caveat0:
+                    caveat0 = str(disc.get("caveat") or "").strip()
+            except Exception as _exc:
+                log_swallowed("tools/utils.py (set_archtoolkit_layer_metadata disclosure)", _exc)
+        if scope0:
+            layer.setCustomProperty("archtoolkit/research_scope", scope0)
+        if caveat0:
+            layer.setCustomProperty("archtoolkit/caveat", caveat0)
         if params:
             try:
                 layer.setCustomProperty(
@@ -641,6 +661,8 @@ def get_archtoolkit_layer_metadata(layer) -> dict:
         kind = str(layer.customProperty("archtoolkit/kind", "") or "").strip()
         units = str(layer.customProperty("archtoolkit/units", "") or "").strip()
         created_at = str(layer.customProperty("archtoolkit/created_at", "") or "").strip()
+        research_scope = str(layer.customProperty("archtoolkit/research_scope", "") or "").strip()
+        caveat = str(layer.customProperty("archtoolkit/caveat", "") or "").strip()
         params_json = str(layer.customProperty("archtoolkit/params_json", "") or "").strip()
 
         if kind:
@@ -649,6 +671,10 @@ def get_archtoolkit_layer_metadata(layer) -> dict:
             out["units"] = units
         if created_at:
             out["created_at"] = created_at
+        if research_scope:
+            out["research_scope"] = research_scope
+        if caveat:
+            out["caveat"] = caveat
         if params_json:
             try:
                 out["params"] = json.loads(params_json)

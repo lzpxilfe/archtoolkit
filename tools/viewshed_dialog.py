@@ -85,7 +85,7 @@ from .utils import (
 from .raster_grid_contract import validate_north_up_geotransform
 from .raster_semantics import nodata_equals, undeclared_nodata_mask
 from .live_log_dialog import ensure_live_log_dialog
-from .help_dialog import show_help_dialog
+from .help_dialog import insert_research_notice_banner, show_help_dialog
 from . import dialog_memory
 from .icons import icon as plugin_icon
 from .i18n import is_english_ui
@@ -152,6 +152,7 @@ class ViewshedDialog(QtWidgets.QDialog, FORM_CLASS):
         self.iface = iface
         self.canvas = iface.mapCanvas()
         self._setup_help_button()
+        insert_research_notice_banner(self, "viewshed")
         
         # Selected observer point(s)
         self.observer_point = None

@@ -425,6 +425,7 @@ def fit_variogram_wls(
     n_lags: int = 12,
     min_pairs: int = 5,
     max_lag: Optional[float] = None,
+    gaussian_min_nugget_ratio: float = 0.005,
 ) -> Dict[str, Any]:
     """Fit parametric variogram via Cressie (1985) WLS with model selection."""
     _require_numpy()
@@ -538,6 +539,19 @@ def fit_variogram_wls(
         loss, c0, c1 = best_tuple
         if c0 + c1 <= 0.0:
             continue
+        # A zero-nugget Gaussian variogram is analytically C^inf at h=0 and
+        # produces severely ill-conditioned kriging matrices with erratic
+        # weights/Runge oscillations on noisy observations (Chiles & Delfiner
+        # 2012, Section 2.5.1). Enforce a small practical nugget floor for the
+        # Gaussian family and re-score its WLS loss honestly.
+        gauss_stabilized = False
+        if mod == "gaussian" and c1 > 0.0 and float(gaussian_min_nugget_ratio) > 0.0:
+            c0_floor = float(gaussian_min_nugget_ratio) * float(c1)
+            if c0 < c0_floor:
+                c0 = c0_floor
+                phi_best = _unit_variogram_shape(h, model=mod, rng=best_r)
+                loss = _cressie_loss(g_hat, c0 + c1 * phi_best, cnts, floor_var)
+                gauss_stabilized = True
         if best is None or loss < best["wls_loss"]:
             best = {
                 "fitted": True,
@@ -547,6 +561,7 @@ def fit_variogram_wls(
                 "range": float(best_r),
                 "wls_loss": float(loss),
                 "variogram_source": "empirical_wls",
+                "gaussian_nugget_stabilized": bool(gauss_stabilized),
                 "empirical": emp,
             }
 
@@ -649,3 +664,156 @@ def loocv_ordinary_kriging(
         "me": float(np.mean(err_arr)),
         "msdr": float(np.mean(std_sq_errors)) if std_sq_errors else None,
     }
+
+
+def diagnose_kriging_assumptions(
+    coords,
+    values,
+    *,
+    max_samples: int = 1200,
+    min_sector_pairs: int = 8,
+    trend_r2_threshold: float = 0.30,
+    anisotropy_ratio_threshold: float = 2.0,
+) -> Dict[str, Any]:
+    """Diagnose planar linear drift and 4-azimuth directional anisotropy.
+
+    Ordinary Kriging (Lite) assumes local stationarity and isotropy. Rather
+    than silently producing smoothed predictions when those assumptions break,
+    this diagnostic checks:
+    1. First-order planar trend OLS R^2 (z ~ 1 + x + y) on centred/scaled XY.
+    2. Four-azimuth directional empirical semivariance (0/45/90/135 deg,
+       +/-22.5 deg sectors) evaluated over matched lag bins up to half the
+       maximum pair distance so rectangular study areas do not produce false
+       anisotropy.
+    """
+    _require_numpy()
+    pts = np.asarray(coords, dtype=float)
+    vals = np.asarray(values, dtype=float)
+    n = int(pts.shape[0])
+    out: Dict[str, Any] = {
+        "trend_r2": None,
+        "trend_warning": False,
+        "directional_semivariance": {},
+        "anisotropy_ratio": None,
+        "major_azimuth_deg": None,
+        "anisotropy_warning": False,
+        "warnings": [],
+    }
+    if n < 6 or vals.shape[0] != n:
+        return out
+
+    if n > int(max_samples):
+        idx = np.linspace(0, n - 1, int(max_samples), dtype=int)
+        pts = pts[idx]
+        vals = vals[idx]
+        n = int(pts.shape[0])
+
+    # 1. Planar linear drift diagnostic (OLS on centred, unit-scaled XY)
+    ss_tot = float(np.sum((vals - float(np.mean(vals))) ** 2))
+    if ss_tot > 1e-12:
+        xc = pts[:, 0] - float(np.mean(pts[:, 0]))
+        yc = pts[:, 1] - float(np.mean(pts[:, 1]))
+        sx = float(np.std(xc))
+        sy = float(np.std(yc))
+        cols = [np.ones(n, dtype=float)]
+        if sx > 1e-12:
+            cols.append(xc / sx)
+        if sy > 1e-12:
+            cols.append(yc / sy)
+        if len(cols) >= 2:
+            X = np.column_stack(cols)
+            beta, _, _, _ = np.linalg.lstsq(X, vals, rcond=None)
+            pred_lin = X @ beta
+            ss_res = float(np.sum((vals - pred_lin) ** 2))
+            r2 = max(0.0, min(1.0, 1.0 - (ss_res / ss_tot)))
+            out["trend_r2"] = float(r2)
+            if r2 >= float(trend_r2_threshold):
+                out["trend_warning"] = True
+                out["warnings"].append(
+                    f"강한 광역 선형 추세 감지(평면 R^2={r2:.2f}): 정상성 가정이 약할 수 있어 "
+                    "R(gstat) Universal Kriging 교차 검증을 권장합니다."
+                )
+    else:
+        out["trend_r2"] = 0.0
+
+    # 2. Directional semivariance across 4 azimuth sectors (matched lag bins)
+    i_idx, j_idx = np.triu_indices(n, k=1)
+    dx = pts[i_idx, 0] - pts[j_idx, 0]
+    dy = pts[i_idx, 1] - pts[j_idx, 1]
+    h = np.sqrt(dx * dx + dy * dy)
+    max_h = float(np.max(h)) if h.size else 0.0
+    half_h = 0.5 * max_h
+    if not (half_h > 0.0):
+        return out
+
+    keep = (h > 0.0) & (h <= half_h)
+    if int(np.count_nonzero(keep)) < int(min_sector_pairs) * 2:
+        return out
+
+    hk = h[keep]
+    dxk = dx[keep]
+    dyk = dy[keep]
+    sq_half = 0.5 * ((vals[i_idx[keep]] - vals[j_idx[keep]]) ** 2)
+    # Azimuth clockwise from North in [0, 180) deg (semivariogram is symmetric).
+    az = (np.degrees(np.arctan2(dxk, dyk)) % 180.0)
+    # Bin into 4 sectors: 0 (N-S), 45 (NE-SW), 90 (E-W), 135 (NW-SE), +/-22.5 deg
+    # with a standard GSLIB perpendicular bandwidth cap (0.20 * half_h) so wide
+    # cones at large lags do not smear cross-axis variance into the axis sector.
+    sector = (((az + 22.5) // 45.0).astype(int) % 4) * 45
+    ang_diff_rad = np.radians(np.minimum(np.abs(az - sector), 180.0 - np.abs(az - sector)))
+    perp_dist = hk * np.sin(ang_diff_rad)
+    bw_cap = 0.20 * half_h
+    in_bw = perp_dist <= bw_cap
+
+    n_bins = 4
+    edges = np.linspace(0.0, half_h, n_bins + 1)
+    # Compute per-sector, per-lag-bin means, then compare on shared valid bins
+    # so rectangular extents with unequal directional spans remain unbiased.
+    bin_vals: Dict[int, List[Optional[float]]] = {s: [None] * n_bins for s in (0, 45, 90, 135)}
+    for b in range(n_bins):
+        lo, hi = float(edges[b]), float(edges[b + 1])
+        bmask = (hk > lo) & (hk <= hi) if b > 0 else (hk >= lo) & (hk <= hi)
+        if not np.any(bmask):
+            continue
+        for s in (0, 45, 90, 135):
+            smask = bmask & (sector == s) & in_bw
+            if int(np.count_nonzero(smask)) < int(min_sector_pairs):
+                smask = bmask & (sector == s)
+            if int(np.count_nonzero(smask)) >= int(min_sector_pairs):
+                bin_vals[s][b] = float(np.mean(sq_half[smask]))
+
+    # Prefer bins where all 4 sectors have data; fallback to bins with >=2 sectors
+    valid_bins_4 = [b for b in range(n_bins) if all(bin_vals[s][b] is not None for s in (0, 45, 90, 135))]
+    if valid_bins_4:
+        use_bins = valid_bins_4
+    else:
+        use_bins = [
+            b for b in range(n_bins)
+            if sum(1 for s in (0, 45, 90, 135) if bin_vals[s][b] is not None) >= 2
+        ]
+
+    dir_means: Dict[str, float] = {}
+    if use_bins:
+        for s in (0, 45, 90, 135):
+            vals_s = [bin_vals[s][b] for b in use_bins if bin_vals[s][b] is not None]
+            if len(vals_s) == len(use_bins):
+                dir_means[str(s)] = float(np.mean(vals_s))
+
+    out["directional_semivariance"] = dir_means
+    if len(dir_means) >= 2:
+        g_min_key = min(dir_means, key=lambda k: dir_means[k])
+        g_max_key = max(dir_means, key=lambda k: dir_means[k])
+        g_min = float(dir_means[g_min_key])
+        g_max = float(dir_means[g_max_key])
+        if g_min > 1e-12:
+            ratio = float(g_max / g_min)
+            out["anisotropy_ratio"] = ratio
+            # Direction with lowest semivariance has longest spatial continuity.
+            out["major_azimuth_deg"] = int(g_min_key)
+            if ratio >= float(anisotropy_ratio_threshold):
+                out["anisotropy_warning"] = True
+                out["warnings"].append(
+                    f"강한 방향성 이방성 감지(4방위 변동함수 비={ratio:.2f}, 주연속 방위≈{int(g_min_key)}°): "
+                    "Lite 모드는 등방성(isotropic)만 지원하므로 R(gstat) 이방성 Kriging 교차 검증을 권장합니다."
+                )
+    return out

@@ -24,7 +24,7 @@ from . import ai_aoi_summary
 from . import ai_gemini
 from . import ai_local_summarizer
 from .live_log_dialog import ensure_live_log_dialog
-from .help_dialog import show_help_dialog
+from .help_dialog import make_research_notice_banner, show_help_dialog
 from . import dialog_memory
 from .icons import icon as plugin_icon
 from .utils import log_swallowed, log_message, push_message, restore_ui_focus, split_qgis_source_path
@@ -345,6 +345,9 @@ class AiAoiReportDialog(QtWidgets.QDialog):
         header.setWordWrap(True)
         header.setStyleSheet("background:#e3f2fd; padding:10px; border:1px solid #bbdefb; border-radius:4px;")
         layout.addWidget(header)
+        _banner = make_research_notice_banner("ai_report", self)
+        if _banner is not None:
+            layout.addWidget(_banner)
 
         help_row = QtWidgets.QHBoxLayout()
         help_row.addStretch(1)

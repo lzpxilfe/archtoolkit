@@ -1,17 +1,23 @@
 # -*- coding: utf-8 -*-
 """QGIS-free grid pathfinding kernels for least-cost surfaces and networks.
 
-Moving :func:`neighbors`, :func:`astar_path`, :func:`dijkstra_full` and
-:func:`reconstruct_path` out of the PyQGIS dialog keeps the Dijkstra/A*
-accumulation, reverse-graph relaxation, midpoint friction averaging and NoData
-handling directly testable without QGIS.
+Moving :func:`neighbors`, :func:`step_edge_cost`, :func:`astar_path`,
+:func:`dijkstra_full` and :func:`reconstruct_path` out of the PyQGIS dialog
+keeps the Dijkstra/A* accumulation, reverse-graph relaxation, midpoint friction
+averaging, 16-neighbour knight's-move anti-tunneling and NoData handling
+directly testable without QGIS.
+
+Grid elongation bounds (Huber & Church 1985; Goodchild 1977; Douglas 1994):
+- 4-neighbour (orthogonal): up to ~41.42% over Euclidean geodesic.
+- 8-neighbour (queen):      up to ~8.24% over Euclidean geodesic.
+- 16-neighbour (knight):    up to ~2.75% over Euclidean geodesic.
 """
 
 from __future__ import annotations
 
 import heapq
 import math
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -26,19 +32,191 @@ from .cost_models import (
 )
 from .swallow_log import log_swallowed
 
+# Exact worst-case flat-plane grid elongation percentages over [0, 45 deg].
+MAX_ELONGATION_PCT = {
+    4: 41.42,
+    8: 8.24,
+    16: 2.75,
+}
 
-def neighbors(allow_diagonal: bool, dx: float, dy: float) -> List[Tuple[int, int, float]]:
+
+def grid_connectivity_info(allow_diagonal: bool, allow_knight: bool = False) -> Dict[str, object]:
+    """Return structured connectivity metadata for a pathfinding run."""
+    if not allow_diagonal:
+        n_dir = 4
+        label = "4-neighbour grid (90-degree quantised, cost overestimated by up to ~41.4%)"
+    elif allow_knight:
+        n_dir = 16
+        label = "16-neighbour knight's-move grid (Huber & Church 1985, cost overestimated by up to ~2.75%)"
+    else:
+        n_dir = 8
+        label = "8-neighbour grid (45-degree quantised, cost overestimated by up to ~8.2%)"
+    return {
+        "n_directions": n_dir,
+        "allow_diagonal": bool(allow_diagonal),
+        "allow_knight": bool(allow_diagonal and allow_knight),
+        "max_grid_elongation_pct": float(MAX_ELONGATION_PCT[n_dir]),
+        "connectivity": label,
+    }
+
+
+def neighbors(
+    allow_diagonal: bool,
+    dx: float,
+    dy: float,
+    allow_knight: bool = False,
+) -> List[Tuple[int, int, float]]:
     """Return the ``(d_row, d_col, step_length)`` moves available from one cell.
 
-    Known limitation, disclosed rather than fixed: this is an 8-neighbour (or,
-    with ``allow_diagonal=False``, 4-neighbour) grid walk, so every path is
-    quantised to 45-degree (or 90-degree) increments.
+    Supports 4-neighbour (``allow_diagonal=False``), 8-neighbour (default when
+    ``allow_diagonal=True``), and 16-neighbour knight's-move connectivity
+    (``allow_diagonal=True, allow_knight=True``, reducing maximum grid
+    elongation from ~8.24% to ~2.75%; Huber & Church 1985).
     """
     moves = [(-1, 0, float(dy)), (1, 0, float(dy)), (0, -1, float(dx)), (0, 1, float(dx))]
     if allow_diagonal:
         dxy = math.hypot(dx, dy)
         moves.extend([(-1, -1, dxy), (-1, 1, dxy), (1, -1, dxy), (1, 1, dxy)])
+        if allow_knight:
+            d2r = math.hypot(dx, 2.0 * dy)
+            d2c = math.hypot(2.0 * dx, dy)
+            moves.extend([
+                (-2, -1, d2r), (-2, 1, d2r), (2, -1, d2r), (2, 1, d2r),
+                (-1, -2, d2c), (1, -2, d2c), (-1, 2, d2c), (1, 2, d2c),
+            ])
     return moves
+
+
+def _knight_intermediates(r: int, c: int, dr: int, dc: int) -> Tuple[Tuple[int, int], Tuple[int, int]]:
+    """Return the two intermediate grid cells crossed by a knight's move.
+
+    A segment from ``(r, c)`` to ``(r+2, c+1)`` traverses ``(r, c)`` [0, 0.25],
+    ``m1 = (r+1, c)`` [0.25, 0.5], ``m2 = (r+1, c+1)`` [0.5, 0.75], and
+    ``(r+2, c+1)`` [0.75, 1.0]. Returning ``(m1, m2)`` in forward traversal
+    order keeps forward and reverse edge costs exact transposes.
+    """
+    if abs(dr) == 2:
+        sr = 1 if dr > 0 else -1
+        return (r + sr, c), (r + sr, c + dc)
+    sc = 1 if dc > 0 else -1
+    return (r, c + sc), (r + dr, c + sc)
+
+
+def step_edge_cost(
+    dem,
+    nodata_mask,
+    friction,
+    r: int,
+    c: int,
+    nr: int,
+    nc: int,
+    horiz: float,
+    model_key: str,
+    model_params: dict,
+    cost_mode: str = "time_s",
+    reverse: bool = False,
+) -> Optional[float]:
+    """Compute a single grid step cost from ``(r, c)`` to ``(nr, nc)``.
+
+    Returns ``None`` if the step is blocked by NoData, non-finite/non-positive
+    friction, steep cliff cutoff, or 1-pixel barrier tunneling.
+
+    For 16-neighbour knight's moves (``|dr|+|dc| == 3``), the step is split
+    into two equal half-segments through the midpoint elevation of the two
+    traversed intermediate cells ``(m1, m2)``, with exact quarter-segment
+    friction weighting (``0.5*(f0+fm1)`` on the first half and
+    ``0.5*(fm2+f1)`` on the second half). This prevents tunneling across
+    1-pixel cliffs, NoData walls, or high-friction rivers while remaining
+    exact on planar slopes and strictly transpose-symmetric under ``reverse``.
+    """
+    dr = nr - r
+    dc = nc - c
+    z0 = float(dem[r, c])
+    z1 = float(dem[nr, nc])
+
+    # 16-neighbour knight's move: |dr| + |dc| == 3
+    if (abs(dr) + abs(dc)) == 3:
+        (m1r, m1c), (m2r, m2c) = _knight_intermediates(r, c, dr, dc)
+        if nodata_mask is not None and (nodata_mask[m1r, m1c] or nodata_mask[m2r, m2c]):
+            return None
+        zm1 = float(dem[m1r, m1c])
+        zm2 = float(dem[m2r, m2c])
+        if (not math.isfinite(zm1)) or (not math.isfinite(zm2)):
+            return None
+        z_mid = 0.5 * (zm1 + zm2)
+        half_h = 0.5 * float(horiz)
+        if reverse:
+            # Reversed edge: (nr, nc) -> m2 -> m1 -> (r, c)
+            dz_first = z_mid - z1
+            dz_second = z0 - z_mid
+        else:
+            # Forward edge: (r, c) -> m1 -> m2 -> (nr, nc)
+            dz_first = z_mid - z0
+            dz_second = z1 - z_mid
+        w_first = _edge_cost(model_key, half_h, dz_first, model_params, cost_mode=cost_mode)
+        w_second = _edge_cost(model_key, half_h, dz_second, model_params, cost_mode=cost_mode)
+        if (not math.isfinite(w_first)) or w_first < 0.0 or (not math.isfinite(w_second)) or w_second < 0.0:
+            return None
+        if friction is not None:
+            try:
+                f0 = float(friction[r, c])
+                f1 = float(friction[nr, nc])
+                fm1 = float(friction[m1r, m1c])
+                fm2 = float(friction[m2r, m2c])
+            except Exception as _exc:
+                log_swallowed("cost_engine.step_edge_cost.knight_friction", _exc)
+                return None
+            if not (
+                math.isfinite(f0) and f0 > 0.0
+                and math.isfinite(f1) and f1 > 0.0
+                and math.isfinite(fm1) and fm1 > 0.0
+                and math.isfinite(fm2) and fm2 > 0.0
+            ):
+                return None
+            f_start_half = 0.5 * (f0 + fm1)
+            f_end_half = 0.5 * (fm2 + f1)
+            if reverse:
+                w = w_first * f_end_half + w_second * f_start_half
+            else:
+                w = w_first * f_start_half + w_second * f_end_half
+        else:
+            w = w_first + w_second
+        if (not math.isfinite(w)) or w < 0.0:
+            return None
+        return float(w)
+
+    # 4- or 8-neighbour move: prevent 1-pixel diagonal NoData barrier tunneling.
+    if dr != 0 and dc != 0 and nodata_mask is not None and nodata_mask[nr, c] and nodata_mask[r, nc]:
+        return None
+
+    dz = z1 - z0
+    edge_dz = -dz if reverse else dz
+    w = _edge_cost(model_key, horiz, edge_dz, model_params, cost_mode=cost_mode)
+    if (not math.isfinite(w)) or w < 0.0:
+        return None
+    if friction is not None:
+        try:
+            f0 = float(friction[r, c])
+            f1 = float(friction[nr, nc])
+        except Exception as _exc:
+            log_swallowed("cost_engine.step_edge_cost.friction", _exc)
+            return None
+        if not (math.isfinite(f0) and math.isfinite(f1) and f0 > 0.0 and f1 > 0.0):
+            return None
+        f_mult = 0.5 * (f0 + f1)
+        if dr != 0 and dc != 0:
+            fa = float(friction[nr, c])
+            fb = float(friction[r, nc])
+            fa_ok = math.isfinite(fa) and fa > 0.0
+            fb_ok = math.isfinite(fb) and fb > 0.0
+            if (not fa_ok) and (not fb_ok):
+                return None
+            if fa_ok and fb_ok:
+                f_mult = max(f_mult, min(fa, fb))
+        w *= f_mult
+        if (not math.isfinite(w)) or w < 0.0:
+            return None
+    return float(w)
 
 
 def _admissible_vmax_mps(model_key: str, model_params: dict) -> Optional[float]:
@@ -81,6 +259,7 @@ def astar_path(
     cancel_check: Optional[Callable[[], bool]] = None,
     friction=None,
     friction_min: Optional[float] = None,
+    allow_knight: bool = False,
 ):
     """Run A* between ``start_rc`` and ``end_rc`` on ``dem``.
 
@@ -123,7 +302,7 @@ def astar_path(
             return (math.hypot((ec - c) * dx, (er - r) * dy) / vmax) * fmin
 
     heap = [(hfun(sr, sc), 0.0, start_idx)]
-    moves = neighbors(allow_diagonal, dx, dy)
+    moves = neighbors(allow_diagonal, dx, dy, allow_knight=allow_knight)
 
     while heap:
         if cancel_check and cancel_check():
@@ -139,7 +318,6 @@ def astar_path(
         if nodata_mask[r, c]:
             continue
 
-        z0 = float(dem[r, c])
         for dr, dc, horiz in moves:
             nr = r + dr
             nc = c + dc
@@ -147,37 +325,22 @@ def astar_path(
                 continue
             if nodata_mask[nr, nc]:
                 continue
-            # Prevent 1-pixel diagonal barrier tunneling across a continuous
-            # 8-connected NoData wall separating (r, c) from (nr, nc).
-            if dr != 0 and dc != 0 and nodata_mask[nr, c] and nodata_mask[r, nc]:
+            w = step_edge_cost(
+                dem,
+                nodata_mask,
+                friction,
+                r,
+                c,
+                nr,
+                nc,
+                horiz,
+                model_key,
+                model_params,
+                cost_mode=cost_mode,
+                reverse=False,
+            )
+            if w is None:
                 continue
-            dz = float(dem[nr, nc]) - z0
-            w = _edge_cost(model_key, horiz, dz, model_params, cost_mode=cost_mode)
-            if (not math.isfinite(w)) or w < 0.0:
-                continue
-            if friction is not None:
-                _skip_friction = False
-                try:
-                    f0 = float(friction[r, c])
-                    f1 = float(friction[nr, nc])
-                except Exception as _exc:
-                    log_swallowed("cost_engine.astar_path", _exc)
-                    _skip_friction = True
-                if _skip_friction or not (math.isfinite(f0) and math.isfinite(f1) and f0 > 0.0 and f1 > 0.0):
-                    continue
-                f_mult = 0.5 * (f0 + f1)
-                if dr != 0 and dc != 0:
-                    fa = float(friction[nr, c])
-                    fb = float(friction[r, nc])
-                    fa_ok = math.isfinite(fa) and fa > 0.0
-                    fb_ok = math.isfinite(fb) and fb > 0.0
-                    if (not fa_ok) and (not fb_ok):
-                        continue
-                    if fa_ok and fb_ok:
-                        f_mult = max(f_mult, min(fa, fb))
-                w *= f_mult
-                if (not math.isfinite(w)) or w < 0.0:
-                    continue
 
             nidx = nr * cols + nc
             ng = g + w
@@ -203,6 +366,7 @@ def dijkstra_full(
     progress_cb: Optional[Callable[[float], None]] = None,
     friction=None,
     reverse: bool = False,
+    allow_knight: bool = False,
 ):
     """Single-source shortest costs over the DEM grid.
 
@@ -219,7 +383,7 @@ def dijkstra_full(
     dist[start_idx] = 0.0
 
     heap = [(0.0, start_idx)]
-    moves = neighbors(allow_diagonal, dx, dy)
+    moves = neighbors(allow_diagonal, dx, dy, allow_knight=allow_knight)
     total = rows * cols
     popped = 0
 
@@ -239,7 +403,6 @@ def dijkstra_full(
         if nodata_mask[r, c]:
             continue
 
-        z0 = float(dem[r, c])
         for dr, dc, horiz in moves:
             nr = r + dr
             nc = c + dc
@@ -247,37 +410,22 @@ def dijkstra_full(
                 continue
             if nodata_mask[nr, nc]:
                 continue
-            if dr != 0 and dc != 0 and nodata_mask[nr, c] and nodata_mask[r, nc]:
+            w = step_edge_cost(
+                dem,
+                nodata_mask,
+                friction,
+                r,
+                c,
+                nr,
+                nc,
+                horiz,
+                model_key,
+                model_params,
+                cost_mode=cost_mode,
+                reverse=reverse,
+            )
+            if w is None:
                 continue
-
-            dz = float(dem[nr, nc]) - z0
-            edge_dz = -dz if reverse else dz
-            w = _edge_cost(model_key, horiz, edge_dz, model_params, cost_mode=cost_mode)
-            if (not math.isfinite(w)) or w < 0.0:
-                continue
-            if friction is not None:
-                _skip_friction = False
-                try:
-                    f0 = float(friction[r, c])
-                    f1 = float(friction[nr, nc])
-                except Exception as _exc:
-                    log_swallowed("cost_engine.dijkstra_full", _exc)
-                    _skip_friction = True
-                if _skip_friction or not (math.isfinite(f0) and math.isfinite(f1) and f0 > 0.0 and f1 > 0.0):
-                    continue
-                f_mult = 0.5 * (f0 + f1)
-                if dr != 0 and dc != 0:
-                    fa = float(friction[nr, c])
-                    fb = float(friction[r, nc])
-                    fa_ok = math.isfinite(fa) and fa > 0.0
-                    fb_ok = math.isfinite(fb) and fb > 0.0
-                    if (not fa_ok) and (not fb_ok):
-                        continue
-                    if fa_ok and fb_ok:
-                        f_mult = max(f_mult, min(fa, fb))
-                w *= f_mult
-                if (not math.isfinite(w)) or w < 0.0:
-                    continue
             nidx = nr * cols + nc
             nd = d + w
             if nd < dist[nidx]:
@@ -316,16 +464,22 @@ def reconstruct_path(prev, start_rc: Tuple[int, int], end_rc: Tuple[int, int], c
 
 
 _neighbors = neighbors
+_step_edge_cost = step_edge_cost
 _astar_path = astar_path
 _dijkstra_full = dijkstra_full
 _reconstruct_path = reconstruct_path
 
+
 __all__ = [
+    "MAX_ELONGATION_PCT",
+    "grid_connectivity_info",
     "neighbors",
+    "step_edge_cost",
     "astar_path",
     "dijkstra_full",
     "reconstruct_path",
     "_neighbors",
+    "_step_edge_cost",
     "_astar_path",
     "_dijkstra_full",
     "_reconstruct_path",
